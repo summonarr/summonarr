@@ -86,3 +86,11 @@ test("bulk: an INT4-overflowing tmdbId is a 400 before any keyed read (no per-it
   assert.ok(range > 0 && firstKeyedRead > range, "the range check precedes the first tmdbId-keyed query");
   assert.match(CODE, /tmdbIdOutOfRange"\) \}, \{ status: 400 \}/);
 });
+
+test("bulk: the *arr-available cache short-circuits only for an auto-approver, like request-create.ts and Discord", () => {
+  // Bulk used to answer "already-available" from the arr cache for EVERY
+  // requester, so a non-auto-approver could not file (or be notified for) a
+  // title the single route and Discord both let them request.
+  assert.match(CODE, /const arrCounts = arrAvailSet\.has\(k\) && canAutoApproveInstance\(targetPerms, inst, grants, it\.mediaType\)/);
+  assert.doesNotMatch(CODE, /\|\| arrAvailSet\.has\(k\)\)/, "a bare arrAvailSet verdict is the old ungated shape");
+});

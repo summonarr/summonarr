@@ -926,6 +926,23 @@ test("SESSION_ABSENCE_GRACE_MS: a plex row absent past the 60s grace is finalize
   assert.ok(activeStore.has("plex:abs-fresh"), "the within-grace row is left in place for the next poll");
 });
 
+test("absence finalize credits NO phantom tail: playDuration stays at the accumulated playtime and stoppedAt is lastSeenAt, not now", async () => {
+  const lastSeen = agoReal(SESSION_ABSENCE_GRACE_MS + 5_000);
+  seed(makeRow("abs-tail", {
+    state: "playing", lastSeenAt: lastSeen, progressMs: 10_000n, playtimeMs: 300_000n,
+  }));
+  plexSnapshot = []; // gone from /status/sessions
+
+  await POST(phReq({ headers: AS_CRON }));
+  await settle();
+
+  const rows = historyRows();
+  assert.equal(rows.length, 1);
+  // Old behavior: applyFinalTick(session, now) added the ~65s since lastSeenAt as playtime.
+  assert.equal(rows[0].playDuration, 300, "the interval the session was absent is not watch time");
+  assert.equal((rows[0].stoppedAt as Date).getTime(), lastSeen.getTime(), "stoppedAt is the last observation");
+});
+
 // ═══ Guardrail 27 — ledger mark AFTER the DB write, never before ═════════════
 
 test("GUARDRAIL 27: a failed finalize write leaves the session UN-ledgered (no phantom lock) so a later poll can retry", async () => {

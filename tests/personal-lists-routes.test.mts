@@ -512,6 +512,26 @@ test("hidden POST rejects a tmdbId past INT4 with 400 instead of a Prisma 500", 
   assert.equal(opsOf("hiddenItem.create").length, 0);
 });
 
+for (const [name, mod] of [["hidden", hidden], ["watchlist", watchlist]] as const) {
+  test(`${name} DELETE rejects a tmdbId past INT4 with 400 instead of a Prisma 500`, async () => {
+    const me = await mintSession();
+    const res = await inScope(() =>
+      mod.DELETE(mk(`/api/${name}`, me.token, { method: "DELETE", query: "?tmdbId=2147483648&mediaType=MOVIE" }), undefined),
+    );
+    assert.equal(res.status, 400);
+    assert.equal(opsOf(`${name}Item.delete`).length + opsOf(`${name}Item.deleteMany`).length, 0);
+  });
+}
+
+test("watchlist POST rejects a tmdbId past INT4 with 400 before TMDB or the DB", async () => {
+  const me = await mintSession();
+  const res = await inScope(() =>
+    watchlist.POST(mk("/api/watchlist", me.token, { method: "POST", body: JSON.stringify({ tmdbId: 2147483648, mediaType: "MOVIE" }) }), undefined),
+  );
+  assert.equal(res.status, 400);
+  assert.equal(opsOf("watchlistItem.create").length, 0);
+});
+
 test("hidden POST bounds the caller-supplied title and posterPath", async () => {
   const me = await mintSession();
   await inScope(() =>

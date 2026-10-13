@@ -3,7 +3,7 @@
 // parsing the target and ids, and ONE mapping from the data layers' errors to
 // responses. Route files may only export handlers, so it lives here.
 import { NextResponse } from "next/server";
-import { ArrResponseError, arrErrorKind, arrErrorMessage } from "./arr";
+import { ArrItemNotFoundError, ArrResponseError, arrErrorKind, arrErrorMessage } from "./arr";
 import { ArrInstanceError, ARR_SERVICE_LABEL, parseArrService, type ArrService } from "./arr-admin";
 import { TitleEditError } from "./arr-title";
 import { AlreadyFailedError, MarkInProgressError, NotAGrabError, NotOnTitleError, TitleNotFoundError } from "./arr-title-data";
@@ -68,6 +68,11 @@ export async function arrTitleGate(rawService: unknown, rawInstance: unknown, ra
   return { ...target, arrId };
 }
 
+/** The warnOnChange key of a polled/snapshot-refreshed read: one per route and instance (guardrail 7b). */
+export function readWarnKey(route: string, target: ArrTarget): string {
+  return `arr-read:${route}:${target.service}:${target.instance}`;
+}
+
 /**
  * Every data-layer error → its response. The arr's own refusal reason (a 400's
  * validation messages) is relayed masked; anything unexpected is logged with
@@ -83,6 +88,10 @@ export function arrFailure(err: unknown, target: ArrTarget, t: Translator, what:
   }
   if (err instanceof TitleNotFoundError) {
     return NextResponse.json({ error: t("apiAdmin.arr.titleNotFound", { service }) }, { status: 404 });
+  }
+  // The arr's library no longer holds the title (same answer as the request releases route).
+  if (err instanceof ArrItemNotFoundError) {
+    return NextResponse.json({ error: t("apiUser.requests.releases.notInArr", { service }) }, { status: 409 });
   }
   if (err instanceof NotOnTitleError) {
     return NextResponse.json({ error: t(`apiAdmin.arr.notOnTitle.${err.what}`) }, { status: 409 });

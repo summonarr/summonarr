@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
-import { arrFailure, arrGate, arrTitleGate, parseArrId } from "@/lib/arr-admin-http";
+import { arrFailure, arrGate, arrTitleGate, parseArrId, readWarnKey } from "@/lib/arr-admin-http";
 import { editedFields, parseTitleEdit } from "@/lib/arr-title";
 import { editTitle, findTitle, loadTitle } from "@/lib/arr-title-data";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
+import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin title manager (ADMIN) — one movie or series on one Radarr/Sonarr
@@ -37,14 +38,17 @@ export const GET = withAdmin(snapshotted(async (req) => {
   const id = parseArrId(q.get("id"));
   const tmdbId = parseArrId(q.get("tmdbId"));
   if ((id === null) === (tmdbId === null)) return NextResponse.json({ error: t("apiAdmin.arr.idInvalid") }, { status: 400 });
+  const warnKey = readWarnKey("title", target);
   try {
     const found = id !== null ? { arrId: id, raw: null } : await findTitle(target.service, target.instance, tmdbId as number);
     if (found === null) {
       return NextResponse.json({ error: t("apiAdmin.arr.titleNotFound", { service: ARR_SERVICE_LABEL[target.service] }) }, { status: 404 });
     }
-    return NextResponse.json(await loadTitle(target.service, target.instance, found.arrId, found.raw));
+    const loaded = await loadTitle(target.service, target.instance, found.arrId, found.raw);
+    forgetWarnOnChange(warnKey);
+    return NextResponse.json(loaded);
   } catch (err) {
-    return arrFailure(err, target, t, "title read");
+    return arrFailure(err, target, t, "title read", { warnKey });
   }
 }));
 

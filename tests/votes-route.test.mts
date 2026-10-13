@@ -516,6 +516,20 @@ test("field validation 400s: missing ids, non-integer tmdbId, junk mediaType, ov
   assert.equal(opsOf("deletionVote.create").length, 0);
 });
 
+test("an INT4-overflowing tmdbId is a 400 on POST /api/votes and DELETE /api/votes/[tmdbId]", async () => {
+  const { userId, token } = await mintSession();
+  const big = await post(token, { ...voteBody(userId), tmdbId: 2_147_483_648 });
+  assert.equal(big.status, 400);
+  assert.equal(opsOf("deletionVote.create").length, 0);
+  const del400 = await del(token, "2147483648", "MOVIE");
+  assert.equal(del400.status, 400);
+  assert.equal(opsOf("deletionVote.deleteMany").length, 0);
+  const admin = await mintSession({ role: "ADMIN" });
+  const dismissed = await dismiss(admin.token, "2147483648", "MOVIE");
+  assert.equal(dismissed.status, 400);
+  assert.equal(opsOf("deletionVote.deleteMany").length, 0);
+});
+
 test("the request token is required and scoped to the caller: garbage, non-string and another user's token all 403", async () => {
   const { token } = await mintSession();
   const garbage = await post(token, { tmdbId: 603, mediaType: "MOVIE", _token: "deadbeef" });

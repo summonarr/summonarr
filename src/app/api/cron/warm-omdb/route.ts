@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prewarmOmdbCache } from "@/lib/omdb-prewarm";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, WARM_OMDB_LOCK_ID } from "@/lib/advisory-lock";
-import { getCronActor, recordCronRun } from "@/lib/cron-auth";
+import { cronSkippedResponse, getCronActor, recordCronRun } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 
 export async function POST(request: NextRequest) {
@@ -62,6 +62,6 @@ export async function POST(request: NextRequest) {
         timestamp: new Date().toISOString(),
       }, failed > 0 ? { headers: { "X-Cron-Degraded": String(failed) } } : undefined);
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    () => cronSkippedResponse(),
   );
 }

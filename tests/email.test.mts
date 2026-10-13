@@ -110,6 +110,7 @@ const {
   notifyUserRequestAvailableEmail,
   sendTestEmail,
   sendNotificationEmailVerification,
+  notifyUserSecurityEventEmail,
 } = await import("../src/lib/email.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -611,6 +612,20 @@ test("verification email: the AUTH_URL fallback carries BASE_PATH so the confirm
     if (prevAuth === undefined) delete process.env.AUTH_URL; else process.env.AUTH_URL = prevAuth;
     if (prevBase === undefined) delete process.env.BASE_PATH; else process.env.BASE_PATH = prevBase;
   }
+});
+
+test("security notice: the heading is escaped exactly once (no &amp;amp;)", async () => {
+  configureResend();
+  await notifyUserSecurityEventEmail({
+    toEmail: "u@example.com",
+    subject: "s",
+    heading: "Security & sign-in <alert>",
+    message: "m",
+  });
+  const html = sentEmails()[0].html;
+  assert.ok(html.includes("Security &amp; sign-in &lt;alert&gt;"), "heading is HTML-escaped once");
+  assert.equal(html.includes("&amp;amp;"), false, "heading must not be double-escaped");
+  assert.equal(html.includes("&amp;lt;"), false);
 });
 
 // ── SMTP path: pre-socket gates ─────────────────────────────────────────────

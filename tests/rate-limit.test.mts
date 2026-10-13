@@ -11,6 +11,7 @@ import {
   peekRateLimit,
   recordFailure,
   refundHit,
+  reserveRateLimit,
   getClientIp,
   getClientIpKey,
   ipBucketKey,
@@ -371,4 +372,21 @@ test("getClientIpKey buckets the trusted forwarded IPv6 by /64", () => {
     const k2 = getClientIpKey(new Headers({ "x-forwarded-for": "2001:db8:abcd:1234::99" }));
     assert.equal(k1, k2, "rotating the low 64 bits cannot mint a fresh limiter bucket");
   });
+});
+
+test("refundHit(key, hitAt) removes the caller's OWN hit, not a newer attacker failure", async () => {
+  const key = `refund-own:${Math.random()}`;
+  const mine = reserveRateLimit(key, 3, 60_000);
+  assert.ok(mine);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.ok(reserveRateLimit(key, 3, 60_000)); // someone else's failed attempt, newer
+  assert.ok(reserveRateLimit(key, 3, 60_000));
+  assert.equal(checkRateLimit(key, 3, 60_000), false);
+  refundHit(key, mine);
+  // Exactly one slot freed (the caller's), and the two later hits remain.
+  assert.equal(checkRateLimit(key, 3, 60_000), true);
+  assert.equal(checkRateLimit(key, 3, 60_000), false);
+  // A stale/unknown timestamp removes nothing.
+  refundHit(key, 12345);
+  assert.equal(checkRateLimit(key, 3, 60_000), false);
 });

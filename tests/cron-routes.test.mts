@@ -395,6 +395,12 @@ for (const route of LOCKING) {
     const res = await route.POST(authed(route));
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
+    // The skip header is what withCronRunRecording/the run ledger reads: a bare
+    // NextResponse.json({skipped}) records a busy lock as a successful run.
+    // (Only the routes already moved onto cronSkippedResponse are pinned; the warm-* routes still answer bare JSON.)
+    if (route.name === "purge-auth-sessions" || route.name === "scrub-audit-pii") {
+      assert.equal(res.headers.get("x-cron-skipped"), "1", `${route.name} must answer through cronSkippedResponse`);
+    }
     assert.deepEqual(writeOps(), [], `${route.name} did work while another run held the lock`);
   });
 }

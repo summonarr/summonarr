@@ -19,6 +19,23 @@ test("public IPv4 literals pass; the URL is normalized (bare trailing slash stri
   assert.deepEqual(r?.addrs, ["8.8.8.8"]);
 });
 
+test("every spelling of IPv6 loopback is blocked (user policy), not just ::1", async () => {
+  for (const url of [
+    "http://[0:0:0:0:0:0:0:1]/",
+    "http://[0000:0000:0000:0000:0000:0000:0000:0001]/",
+    "http://[0::1]/",
+    "http://[::0001]/",
+  ]) {
+    assert.equal(await resolveToSafeUrl(url), null, `${url} must be blocked`);
+  }
+  // WHATWG URL canonicalizes bracketed hosts to "::1" before isSafeAddr sees them,
+  // so the raw literal (what a DNS answer or verifyResolvedHost caller hands over)
+  // is the path that actually exercises the non-canonical spellings.
+  for (const host of ["0:0:0:0:0:0:0:1", "0000:0000:0000:0000:0000:0000:0000:0001", "0::1", "::0001", "[0:0:0:0:0:0:0:1]"]) {
+    assert.equal(await verifyResolvedHost(host), false, `${host} must be blocked`);
+  }
+});
+
 test("loopback, RFC1918, link-local, CGNAT, multicast, reserved → blocked (user policy)", async () => {
   for (const url of [
     "http://127.0.0.1/",

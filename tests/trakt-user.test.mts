@@ -205,7 +205,7 @@ const queryRawInTx = async () => {
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   rec("$transaction");
   if (Array.isArray(arg)) return Promise.all(arg);
-  return (arg as (tx: unknown) => Promise<unknown>)({ account: accountModel, traktConnection: connModel, traktWatchedItem: watchedModel, $queryRaw: queryRawInTx });
+  return (arg as (tx: unknown) => Promise<unknown>)({ account: accountModel, traktConnection: connModel, traktWatchedItem: watchedModel, $queryRaw: queryRawInTx, $executeRaw: async (strings: TemplateStringsArray) => { rec(`lock:${strings.join("?")}`); return 1; } });
 });
 
 const trakt = await import("../src/lib/trakt-user.ts");

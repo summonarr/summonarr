@@ -288,6 +288,30 @@ test("two different titles coalescing widens to a full-queue count (no per-title
   assert.equal(refreshCalls("/library/sections/8/refresh").length, 0, "…and never movie sections");
 });
 
+test("a hint-less schedule widens a pending single-title hint to a full-queue check", async (t) => {
+  arm(t);
+  settings.set("sonarrUrl", "http://sonarr.t5b.example:8989");
+  settings.set("sonarrApiKey", "sonarr-key-5b");
+  settings.set("plexServerUrl", "http://plex.t5b.example:32400");
+  settings.set("plexAdminToken", "plex-token-5b");
+  respond = (url) => {
+    if (url.includes("/api/v3/queue")) return okJson({ records: [], totalRecords: 0 });
+    if (url.endsWith("/library/sections")) return okJson({ MediaContainer: { Directory: [{ key: "9", title: "Shows", type: "show" }] } });
+    if (url.includes("/library/sections/9/refresh")) return new Response("", { status: 200 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const p1 = scheduleLibraryScan("tv", 100);
+  const p2 = scheduleLibraryScan("tv"); // hint-less caller: its download may be any title
+  assert.equal(p2, p1);
+  t.mock.timers.tick(DEBOUNCE);
+  await p1;
+
+  assert.equal(sent.filter((s) => s.url.includes("/series/lookup")).length, 0,
+    "a hint-less call must not leave the scan gated on the earlier single title");
+  assert.equal(sent.filter((s) => s.url.includes("/api/v3/queue")).length, 1);
+});
+
 test("variant routing: a '4k' hint gates on the radarr4k instance's queue, not the default's", async (t) => {
   arm(t);
   // ONLY the 4K instance is configured — if the scheduler consulted the default

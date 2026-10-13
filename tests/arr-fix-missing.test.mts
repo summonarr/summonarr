@@ -314,6 +314,8 @@ let calls: Call[] = [];
 let radarrMovies: unknown[] = [];
 // /api/v3/wanted/cutoff: how many records the arr says it has (served 500 a page).
 let cutoffTotal = 0;
+// When set, every page after the first starts one record early (a list that shifted between reads).
+let cutoffOverlap = false;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
@@ -325,7 +327,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (method === "GET" && url.pathname === "/api/v3/wanted/cutoff") {
     const page = Number(url.searchParams.get("page"));
     const size = Number(url.searchParams.get("pageSize"));
-    const from = (page - 1) * size;
+    const from = (page - 1) * size - (cutoffOverlap && page > 1 ? 1 : 0);
     const records = Array.from({ length: Math.max(0, Math.min(size, cutoffTotal - from)) }, (_, i) => (
       { id: from + i + 1, title: `Movie ${from + i + 1}`, hasFile: true, movieFile: { qualityCutoffNotMet: true } }
     ));
@@ -438,6 +440,7 @@ beforeEach(() => {
   settings.set("radarrApiKey", "radarr-key");
   invalidateFeatureFlagCache();
   cutoffTotal = 0;
+  cutoffOverlap = false;
   radarrMovies = [
     { id: 1, tmdbId: 101, title: "Released, no file", monitored: true, hasFile: false, digitalRelease: ago(5) },
     { id: 3, tmdbId: 103, title: "Has file", monitored: true, hasFile: true, physicalRelease: ago(100) },
@@ -604,6 +607,18 @@ test("cutoff: a listing past the page ceiling is reported as truncated (read of 
 
   cutoffTotal = 3;
   assert.equal("truncated" in (await missingData.loadCutoffMovies()), false);
+});
+
+test("a cutoff movie repeated across two pages is listed once", async () => {
+  cutoffTotal = 600;
+  cutoffOverlap = true;
+  try {
+    const report = await missingData.loadCutoffMovies();
+    assert.equal(report.items.length, 600);
+    assert.equal(new Set(report.items.map((m) => m.arrId)).size, report.items.length);
+  } finally {
+    cutoffOverlap = false;
+  }
 });
 
 test("page: a truncated cutoff listing is named per instance, with Arr System's library-wide search as the way past it", () => {

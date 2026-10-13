@@ -614,6 +614,12 @@ test("movie details cold: append_to_response wire, certification kept, official 
   assert.deepEqual(suggestions.map((s) => s.id), [604, 606, 607]);
 });
 
+test("movie details: a `videos` block with no `results` array yields a null trailer instead of throwing", async () => {
+  respond = () => jsonResponse({ ...rawMovie(777, "No Videos Results", { release_date: "2001-01-01" }), videos: {} });
+  const result = await getMovieDetails(777);
+  assert.equal(result.trailerKey, null);
+});
+
 test("getMovieSuggestions: /recommendations outranks /similar and the result caches under :suggestions:v3", async () => {
   // The standalone two-fetch path (detail rails + the For You engine) must
   // starve /similar, not /recommendations, when the cap bites — and must never

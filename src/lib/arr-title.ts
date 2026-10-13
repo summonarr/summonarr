@@ -370,7 +370,9 @@ export function editorBody(service: ArrService, arrId: number, edit: TitleEdit, 
     set("seasonFolder", edit.seasonFolder);
     set("monitorNewItems", edit.monitorNewItems);
   }
-  const moving = edit.rootFolderPath !== undefined && edit.rootFolderPath !== current.rootFolderPath;
+  // "/tv" and "/tv/" name one folder: a trailing separator must not queue a pointless move.
+  const bare = (p: string | null | undefined) => (p ?? "").replace(/[\\/]+$/, "");
+  const moving = edit.rootFolderPath !== undefined && edit.rootFolderPath !== current.rootFolderPath && bare(edit.rootFolderPath) !== bare(current.rootFolderPath);
   if (moving) set("rootFolderPath", edit.rootFolderPath);
   body.moveFiles = moving && edit.moveFiles === true;
   if (edit.tags !== undefined) {

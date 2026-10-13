@@ -18,3 +18,13 @@ test("play-history.ts never groups by an unquoted name that is also a PlayHistor
   const bad = [...src.matchAll(/GROUP BY\s+([a-zA-Z_]+)\b/g)].filter((m) => COLUMNS.includes(m[1]));
   assert.deepEqual(bad.map((m) => m[0]), []);
 });
+
+// A zero-runtime play has no completion percentage; counting it as 0% drags the
+// title's average down. The AVG must skip it (NULL), not fold it in as 0.
+test("the per-title average completion treats a zero-duration play as NULL, not 0%", () => {
+  const src = readFileSync(resolve(ROOT, "src/lib/play-history.ts"), "utf8");
+  const m = src.match(/SELECT AVG\(\s*CASE WHEN "duration" > 0 THEN [^]*?END\s*\)::float8 AS avg_pct/);
+  assert.ok(m, "avg_pct query not found");
+  assert.match(m[0], /ELSE NULL END/);
+  assert.doesNotMatch(m[0], /ELSE 0 END/);
+});

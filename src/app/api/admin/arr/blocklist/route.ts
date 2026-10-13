@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
-import { arrFailure, arrGate, type ArrTarget } from "@/lib/arr-admin-http";
+import { arrFailure, arrGate, type ArrTarget, readWarnKey } from "@/lib/arr-admin-http";
 import { parseIdList, parsePaging } from "@/lib/arr-history";
 import { BlocklistUnsupportedError, loadBlocklistPage, removeFromBlocklist } from "@/lib/arr-history-data";
 import { auditContext, logAudit } from "@/lib/audit";
+import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -31,11 +32,11 @@ const TOO_OLD_KEYS = {
 // The audit names at most this many releases; `removed` still lists every id.
 const MAX_AUDITED_RELEASES = 100;
 
-function failure(err: unknown, target: ArrTarget, t: Translator, what: string): NextResponse {
+function failure(err: unknown, target: ArrTarget, t: Translator, what: string, opts: { warnKey?: string } = {}): NextResponse {
   if (err instanceof BlocklistUnsupportedError) {
     return NextResponse.json({ error: t(TOO_OLD_KEYS[target.service]) }, { status: 404 });
   }
-  return arrFailure(err, target, t, what);
+  return arrFailure(err, target, t, what, opts);
 }
 
 // GET with `cached=1` → the last answer kept for this exact read, for display only
@@ -47,10 +48,13 @@ export const GET = withAdmin(snapshotted(async (req) => {
   if (target instanceof NextResponse) return target;
   const paging = parsePaging(q.get("page"), q.get("pageSize"));
   if (!paging) return NextResponse.json({ error: t("apiAdmin.arr.pagingInvalid") }, { status: 400 });
+  const warnKey = readWarnKey("blocklist", target);
   try {
-    return NextResponse.json(await loadBlocklistPage(target.service, target.instance, paging));
+    const page = await loadBlocklistPage(target.service, target.instance, paging);
+    forgetWarnOnChange(warnKey);
+    return NextResponse.json(page);
   } catch (err) {
-    return failure(err, target, t, "blocklist read");
+    return failure(err, target, t, "blocklist read", { warnKey });
   }
 }));
 

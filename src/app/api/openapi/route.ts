@@ -309,7 +309,7 @@ const spec = {
         tags: ["Discovery"],
         summary: "Discover/browse movies or TV with filters and availability enrichment",
         parameters: [
-          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"], default: "movie" }, description: "Anything but `tv` is read as `movie`" },
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
           { name: "sortBy", in: "query", schema: { type: "string" } },
           { name: "genreId", in: "query", schema: { type: "string" } },
@@ -321,16 +321,27 @@ const spec = {
           { name: "ratingFilter", in: "query", schema: { type: "string" } },
           { name: "watchProvider", in: "query", schema: { type: "string" } },
           { name: "watchRegion", in: "query", schema: { type: "string" } },
-          { name: "hideAvailable", in: "query", schema: { type: "boolean" } },
+          { name: "hideAvailable", in: "query", schema: { type: "string", enum: ["1"] }, description: "`1` hides titles available on a server the user can see; any other value is off" },
         ],
-        responses: { "200": { description: "Enriched discovery results" } },
+        responses: {
+          "200": { description: "{ items, totalPages, page } — discovery results with availability enrichment" },
+          "429": { description: "Rate limited (30 req/min per user)" },
+          "500": { description: "{ error } — the TMDB query failed" },
+        },
       },
     },
     "/home": {
       get: {
         tags: ["Discovery"],
         summary: "Home discovery rails (trending / popular / etc.)",
-        responses: { "200": { description: "Grouped discovery rails with availability enrichment" } },
+        parameters: [
+          { name: "hideAvailable", in: "query", schema: { type: "string", enum: ["1"] }, description: "`1` hides titles available on a server the user can see" },
+        ],
+        responses: {
+          "200": { description: "{ featured, carousels } — grouped discovery rails with availability enrichment" },
+          "429": { description: "Rate limited (30 req/min per user)" },
+          "500": { description: "{ error }" },
+        },
       },
     },
     "/recommendations": {
@@ -345,6 +356,8 @@ const spec = {
         responses: {
           "200": { description: "Ranked recommendation items ({ items, total, available }); each item carries recommendedBecause naming the strongest seed, plus recommendedBecause.seeds listing every seed (strongest first, capped at 25; seedCount is the true total)" },
           "404": { description: "feature.page.forYou is disabled" },
+          "429": { description: "Rate limited (30 req/min per user)" },
+          "500": { description: "{ error }" },
         },
       },
     },
@@ -369,9 +382,14 @@ const spec = {
         tags: ["Discovery"],
         summary: "Upcoming releases",
         parameters: [
-          { name: "hideAvailable", in: "query", schema: { type: "boolean" } },
+          { name: "hideAvailable", in: "query", schema: { type: "string", enum: ["1"] }, description: "`1` hides titles available on a server the user can see" },
         ],
-        responses: { "200": { description: "Upcoming releases with availability enrichment" } },
+        responses: {
+          "200": { description: "{ items } — upcoming releases (movies and TV interleaved by date) with availability enrichment" },
+          "403": { description: "feature.page.upcoming is disabled" },
+          "429": { description: "Rate limited (30 req/min per user)" },
+          "502": { description: "{ error } — the upstream fetch failed (never a 200 with an empty list)" },
+        },
       },
     },
     "/top-rated": {
@@ -379,16 +397,21 @@ const spec = {
         tags: ["Discovery"],
         summary: "Top-rated movies or TV",
         parameters: [
-          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movies", "tv"] }, description: "Restrict to one type (note the plural \"movies\"); omitted returns both" },
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
-          { name: "sortBy", in: "query", schema: { type: "string" } },
-          { name: "fromYear", in: "query", schema: { type: "integer" } },
-          { name: "toYear", in: "query", schema: { type: "integer" } },
+          { name: "sortBy", in: "query", schema: { type: "string", enum: ["imdb", "letterboxd", "rt", "trakt", "mdblist"], default: "imdb" }, description: "Rating source to sort by; an unknown value is read as `imdb`" },
+          { name: "fromYear", in: "query", schema: { type: "string", pattern: "^\\d{4}$" }, description: "4-digit year; anything else is ignored" },
+          { name: "toYear", in: "query", schema: { type: "string", pattern: "^\\d{4}$" }, description: "4-digit year; anything else is ignored" },
           { name: "minImdb", in: "query", schema: { type: "number" } },
           { name: "minVotes", in: "query", schema: { type: "integer" } },
-          { name: "hideAvailable", in: "query", schema: { type: "boolean" } },
+          { name: "hideAvailable", in: "query", schema: { type: "string", enum: ["1"] }, description: "`1` hides titles available on a server the user can see" },
         ],
-        responses: { "200": { description: "Top-rated results with availability enrichment" } },
+        responses: {
+          "200": { description: "{ movies, tv, totalMovies, totalTv, totalPages, page, sortBy } with availability enrichment" },
+          "403": { description: "feature.page.top is disabled" },
+          "429": { description: "Rate limited (30 req/min per user)" },
+          "500": { description: "{ error }" },
+        },
       },
     },
 
@@ -397,7 +420,7 @@ const spec = {
         tags: ["Search"],
         summary: "Search TMDB for movies or TV shows",
         parameters: [
-          { name: "q", in: "query", required: true, schema: { type: "string", maxLength: 200 } },
+          { name: "q", in: "query", schema: { type: "string", maxLength: 200 }, description: "An empty or whitespace-only query answers 200 with `[]`" },
           { name: "type", in: "query", schema: { type: "string", enum: ["movie", "tv"] } },
         ],
         responses: {
@@ -428,8 +451,10 @@ const spec = {
               },
             },
           },
-          "400": { description: "Missing or invalid query", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
+          "400": { description: "Query longer than 200 characters", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
           "429": { description: "Rate limited (30 req/min per user)" },
+          "500": { description: "{ error } — TMDB search failed" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -442,17 +467,17 @@ const spec = {
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
           { name: "status", in: "query", schema: { $ref: "#/components/schemas/RequestStatus" } },
           { name: "sort", in: "query", schema: { type: "string", enum: ["newest", "oldest"] } },
-          { name: "q", in: "query", schema: { type: "string" }, description: "Title search filter" },
+          { name: "q", in: "query", schema: { type: "string" }, description: "Title search filter (wildcard characters stripped, length bounded)" },
         ],
         responses: {
           "200": {
-            description: "Paginated request list",
+            description: "Paginated request list (fixed page size 20). MANAGE_REQUESTS callers see every request with the full row plus user { name, email }; everyone else sees only their own, in a reduced row (no adminNote/approvedAt) with user { name }. An unknown status/sort value is ignored.",
             content: {
               "application/json": {
                 schema: {
                   allOf: [
                     { $ref: "#/components/schemas/PaginatedMeta" },
-                    { type: "object", properties: { requests: { type: "array", items: { $ref: "#/components/schemas/MediaRequest" } } } },
+                    { type: "object", properties: { requests: { type: "array", items: { $ref: "#/components/schemas/MediaRequest" } }, statusCounts: { type: "object", additionalProperties: { type: "integer" }, description: "Count per status for the same scope and `q`, ignoring the selected `status`" } } },
                   ],
                 },
               },
@@ -502,9 +527,13 @@ const spec = {
               },
             },
           },
-          "400": { description: "Validation error" },
+          "400": { description: "Validation error (missing tmdbId/mediaType, non-positive tmdbId, bad mediaType, note over 500 chars, unavailable/unconfigured instance, invalid qualityProfileId)" },
+          "403": { description: "Missing/invalid `_token`, no permission for the media type/instance/profile, Discord link required, blacklisted title, content-rating cap, or permanently declined" },
           "409": { description: "Duplicate request" },
-          "429": { description: "Quota exceeded" },
+          "422": { description: "TMDB could not verify the title" },
+          "429": { description: "Quota exceeded, or the per-minute request rate limit (Retry-After)" },
+          "502": { description: "Could not connect to Radarr/Sonarr to validate the quality profile" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -521,7 +550,7 @@ const spec = {
             description: "Short-lived HMAC token",
             content: { "application/json": { schema: { type: "object", properties: { token: { type: "string" } } } } },
           },
-          "400": { description: "Missing or invalid tmdbId / mediaType" },
+          "400": { description: "Missing, non-positive or out-of-range tmdbId, or invalid mediaType" },
         },
       },
     },
@@ -538,7 +567,9 @@ const spec = {
                 properties: {
                   status: { $ref: "#/components/schemas/RequestStatus" },
                   adminNote: { type: "string", maxLength: 1000 },
-                  retry: { type: "boolean", description: "Re-push to Radarr/Sonarr" },
+                  qualityProfileId: { type: "integer", minimum: 1, description: "One-time quality-profile override for the Radarr/Sonarr push; only used by the APPROVE transition" },
+                  qualityProfileName: { type: "string", maxLength: 100, description: "Carried only so the audit log reads the profile name" },
+                  retry: { type: "boolean", description: "Re-push to Radarr/Sonarr (APPROVED requests only; 400 otherwise)" },
                   search: { type: "boolean", description: "Trigger search in ARR (APPROVED or AVAILABLE only). For a TV request this queues only what is missing (SeasonSearch for a season with nothing on disk and 2+ episodes missing, EpisodeSearch for the rest — never SeriesSearch); a series with nothing missing answers 200 with an `arrError` explaining so." },
                   permanent: { type: "boolean", description: "Permanently decline" },
                 },
@@ -547,9 +578,15 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Updated request", content: { "application/json": { schema: { $ref: "#/components/schemas/MediaRequest" } } } },
+          "200": { description: "Updated request. An approve / retry / search answers the row plus `arrError` (string or null) — when the Radarr/Sonarr push of an approval fails the status is rolled back to PENDING and the body reflects it. `adminNote` alone (no status/search/retry) is a note-only edit; an empty note clears it. Transitions: PENDING→APPROVED|DECLINED, APPROVED→AVAILABLE|DECLINED, DECLINED→PENDING|APPROVED.", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/MediaRequest" }, { type: "object", properties: { arrError: { type: "string", nullable: true } } }] } } } },
+          "400": { description: "Invalid status, adminNote over 1000 chars, bad qualityProfileId/Name, search on a request that is not APPROVED/AVAILABLE, retry on one that is not APPROVED, or a quality profile the instance does not have" },
           "403": { description: "Forbidden" },
           "404": { description: "Not found" },
+          "409": { description: "The request changed status concurrently" },
+          "422": { description: "Transition not allowed from the current status" },
+          "429": { description: "Rate limited (60 req/min per admin)" },
+          "502": { description: "Could not connect to Radarr/Sonarr to validate the quality profile" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
       delete: {
@@ -782,10 +819,10 @@ const spec = {
                 type: "object",
                 required: ["ids", "status"],
                 properties: {
-                  ids: { type: "array", items: { type: "string" }, maxItems: 100 },
+                  ids: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 100, description: "Only requests still PENDING are transitioned; others are skipped silently" },
                   status: { type: "string", enum: ["APPROVED", "DECLINED"] },
                   adminNote: { type: "string", maxLength: 1000 },
-                  permanent: { type: "boolean", description: "On DECLINED, mark the request permanently declined" },
+                  permanent: { type: "boolean", description: "On DECLINED, mark the request permanently declined (at most 25 ids per permanent batch; ignored on APPROVED)" },
                 },
               },
             },
@@ -816,7 +853,9 @@ const spec = {
               },
             },
           },
+          "400": { description: "ids empty/over 100/not strings, invalid status, adminNote over 1000 chars, non-boolean permanent, or a permanent batch over 25 ids (`code: \"permanent-batch-too-large\"`)" },
           "429": { description: "Rate limited (10/min per admin)" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -830,7 +869,7 @@ const spec = {
         ],
         responses: {
           "200": {
-            description: "Issues for the caller (own issues, or all when MANAGE_ISSUES)",
+            description: "Issues for the caller (own issues, or all when MANAGE_ISSUES), newest first, each with a `user` ({ name, email } for MANAGE_ISSUES, { name } otherwise)",
             content: {
               "application/json": {
                 schema: { type: "array", items: { $ref: "#/components/schemas/Issue" } },
@@ -867,6 +906,8 @@ const spec = {
           "400": { description: "Validation error" },
           "403": { description: "feature.page.issues is disabled" },
           "422": { description: "Title could not be verified with TMDB, or is not in a library the caller can see" },
+          "429": { description: "Rate limited (the `rateLimitIssues` setting per minute, default 10)" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -883,16 +924,20 @@ const spec = {
                 properties: {
                   status: { $ref: "#/components/schemas/IssueStatus" },
                   resolution: { type: "string", maxLength: 1000 },
-                  refetch: { type: "boolean", description: "Trigger a Radarr/Sonarr re-search for the issue media" },
+                  refetch: { type: "boolean", description: "Trigger a Radarr/Sonarr re-search for the issue media (scope's own search: movie MoviesSearch, EPISODE EpisodeSearch, SEASON SeasonSearch, FULL SeriesSearch). Takes precedence over status/resolution; 409 when the issue is RESOLVED." },
+                  instance: { type: "string", description: "With `refetch`: the Radarr/Sonarr instance slug to search on ('' = default). An invalid slug is 400." },
                 },
               },
             },
           },
         },
         responses: {
-          "200": { description: "Updated issue" },
+          "200": { description: "Updated issue. A `refetch` answers the issue plus `arrError` (string, or null when the search was queued); a failed search is still 200 with `arrError` set.", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/Issue" }, { type: "object", properties: { arrError: { type: "string", nullable: true } } }] } } } },
+          "400": { description: "Invalid status, resolution over 1000 chars or empty with no status, or (with refetch) an invalid instance slug" },
           "403": { description: "Forbidden" },
           "404": { description: "Not found" },
+          "409": { description: "`refetch` on a RESOLVED issue, or `{ error: \"status-conflict\" }` — the status changed concurrently" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
       delete: {
@@ -900,7 +945,10 @@ const spec = {
         summary: "Delete an issue (ADMIN / ISSUE_ADMIN)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
-          "200": { description: "Deleted" },
+          "200": { description: "Deleted", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" } } } } } },
+          "403": { description: "Forbidden" },
+          "404": { description: "Not found" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -909,7 +957,11 @@ const spec = {
         tags: ["Issues"],
         summary: "List messages on an issue",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Message list" } },
+        responses: {
+          "200": { description: "Messages oldest first, each with author { name, role } (+ email for MANAGE_ISSUES callers)" },
+          "403": { description: "Not the reporter and no MANAGE_ISSUES" },
+          "404": { description: "No such issue" },
+        },
       },
       post: {
         tags: ["Issues"],
@@ -927,7 +979,15 @@ const spec = {
             },
           },
         },
-        responses: { "200": { description: "Message added" } },
+        description: "An admin's first reply flips an OPEN issue to IN_PROGRESS; the reporter replying to their own RESOLVED issue reopens it.",
+        responses: {
+          "201": { description: "Message added (the new message with its author)" },
+          "400": { description: "Missing/non-string/empty body, or over 2000 characters" },
+          "403": { description: "Not the reporter and no MANAGE_ISSUES, or issue reporting is disabled (non-admins)" },
+          "404": { description: "No such issue" },
+          "429": { description: "Rate limited (10/min per user)" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
+        },
       },
     },
     "/issues/{id}/files": {
@@ -1122,6 +1182,8 @@ const spec = {
               },
             },
           },
+          "403": { description: "Deletion voting (feature.page.votes) is disabled" },
+          "429": { description: "Rate limited (30 req/min per user)" },
         },
       },
       post: {
@@ -1184,7 +1246,14 @@ const spec = {
           { name: "tmdbId", in: "path", required: true, schema: { type: "integer" } },
           { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
         ],
-        responses: { "200": { description: "Vote retracted" } },
+        responses: {
+          "200": { description: "Vote retracted", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" } } } } } },
+          "400": { description: "Invalid tmdbId or mediaType" },
+          "403": { description: "Deletion voting is disabled" },
+          "404": { description: "The caller has no vote on this title" },
+          "429": { description: "Rate limited (60/min per user)" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
+        },
       },
     },
 
@@ -1221,6 +1290,7 @@ const spec = {
               },
             },
           },
+          "400": { description: "Missing or invalid id / type, or a non-positive / out-of-range id" },
           "429": { description: "Rate limited (60 req/min)" },
         },
       },
@@ -1244,15 +1314,22 @@ const spec = {
                       properties: {
                         id: { type: "integer" },
                         type: { type: "string", enum: ["movie", "tv"] },
+                        releaseDate: { type: "string", nullable: true, description: "Optional; picks the ratings-cache TTL bucket" },
                       },
                     },
+                    maxItems: 200,
+                    description: "At most 200 items; malformed or out-of-range entries and duplicates are skipped silently",
                   },
                 },
               },
             },
           },
         },
-        responses: { "200": { description: "{ ratings } — a map keyed \"<type>:<tmdbId>\" (e.g. \"movie:603\") → ratings; titles with no ratings are omitted" } },
+        responses: {
+          "200": { description: "{ ratings } — a map keyed \"<type>:<tmdbId>\" (e.g. \"movie:603\") → { imdbId, imdbRating, imdbVotes, rottenTomatoes, rtAudienceScore, metacritic, traktRating, letterboxdRating, mdblistScore, malRating, rogerEbertRating } (strings or null); titles with no ratings are omitted" },
+          "400": { description: "`items` missing / not an array, or over 200 entries" },
+          "429": { description: "Rate limited (10 req/min per user)" },
+        },
       },
     },
 
@@ -1262,18 +1339,19 @@ const spec = {
         summary: "List play history across all users (ADMIN)",
         parameters: [
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
-          { name: "limit", in: "query", schema: { type: "integer" } },
+          { name: "limit", in: "query", schema: { type: "integer", default: 20, minimum: 1, maximum: 200 } },
           {
             name: "distinct", in: "query", schema: { type: "string", enum: ["platforms", "users"] },
             description:
-              "A MODE SWITCH, not a boolean. `platforms` returns a bare string[] of non-null platforms; `users` returns a bare array of { id, username, source } over every MediaServerUser (departed ones included, per guardrail 28). Both ignore every other parameter. Any other value — including `true` — falls through to the paginated list.",
+              "A MODE SWITCH, not a boolean. `platforms` returns a bare string[] of non-null platforms; `users` returns a bare array of { id, username, source, serverInstance } over every MediaServerUser (departed ones included, per guardrail 28). Both ignore every other parameter. Any other value — including `true` — falls through to the paginated list.",
           },
-          { name: "ungrouped", in: "query", schema: { type: "boolean" } },
-          { name: "sortBy", in: "query", schema: { type: "string" } },
-          { name: "sortDir", in: "query", schema: { type: "string", enum: ["asc", "desc"] } },
+          { name: "ungrouped", in: "query", schema: { type: "string", enum: ["true"] }, description: "Only the literal `true` lists individual segments; anything else collapses resume chains into one row each" },
+          { name: "sortBy", in: "query", schema: { type: "string", enum: ["startedAt", "title", "playDuration", "duration", "source", "platform"], default: "startedAt" }, description: "Unknown values fall back to startedAt" },
+          { name: "sortDir", in: "query", schema: { type: "string", enum: ["asc", "desc"], default: "desc" } },
           { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] } },
-          { name: "watched", in: "query", schema: { type: "string" } },
-          { name: "playMethod", in: "query", schema: { type: "string" } },
+          { name: "mediaType", in: "query", schema: { $ref: "#/components/schemas/MediaType" } },
+          { name: "watched", in: "query", schema: { type: "string", enum: ["true", "false"] }, description: "Any other value is ignored" },
+          { name: "playMethod", in: "query", schema: { type: "string" }, description: "A known play method; unknown values are ignored" },
           { name: "platform", in: "query", schema: { type: "string" } },
           { name: "startDate", in: "query", schema: { type: "string", format: "date" } },
           { name: "endDate", in: "query", schema: { type: "string", format: "date" } },
@@ -1281,7 +1359,12 @@ const spec = {
           { name: "userId", in: "query", schema: { type: "string" } },
           { name: "tmdbId", in: "query", schema: { type: "integer" } },
         ],
-        responses: { "200": { description: "Paginated play history rows" }, "403": { description: "Forbidden" } },
+        responses: {
+          "200": { description: "{ items, total, page, limit, totalPages, grouped } — grouped is false only on the `ungrouped=true` path. Rows carry posterPath/poster URLs resolved from the poster cache." },
+          "400": { description: "Unparseable startDate / endDate" },
+          "403": { description: "Forbidden" },
+          "429": { description: "Rate limited (120/min per admin)" },
+        },
       },
     },
     "/play-history/mine": {
@@ -1310,6 +1393,7 @@ const spec = {
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
           "200": { description: "{ item, plays (capped at 100, newest first), firstStartedAt, lastStartedAt }" },
+          "400": { description: "Invalid id" },
           "404": { description: "Unknown id, or a play outside the caller's linked media-server users" },
         },
       },
@@ -1362,15 +1446,42 @@ const spec = {
     "/play-history/stats": {
       get: {
         tags: ["Play History"],
-        summary: "Play history statistics",
-        responses: { "200": { description: "Aggregate stats (total runtime, titles, etc.)" } },
+        summary: "Play history statistics (ADMIN)",
+        parameters: [
+          { name: "days", in: "query", schema: { type: "integer" }, description: "Window in days; clamped server-side (parseActivityDays)" },
+          { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] }, description: "Other values are ignored" },
+          { name: "mediaType", in: "query", schema: { $ref: "#/components/schemas/MediaType" }, description: "Other values are ignored" },
+        ],
+        responses: {
+          "200": { description: "Aggregate stats (total runtime, titles, etc.)" },
+          "403": { description: "Forbidden — ADMIN only" },
+        },
       },
     },
     "/play-history/export": {
       get: {
         tags: ["Play History"],
-        summary: "Export play history as CSV (ADMIN)",
-        responses: { "200": { description: "CSV file download" } },
+        summary: "Export play history as CSV or JSON (ADMIN)",
+        description: "Takes the same filter parameters as GET /play-history (source, mediaType, watched, userId, tmdbId, playMethod, platform, startDate, endDate, search). Audited.",
+        parameters: [
+          { name: "format", in: "query", schema: { type: "string", enum: ["csv", "json"], default: "csv" } },
+          { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] } },
+          { name: "mediaType", in: "query", schema: { $ref: "#/components/schemas/MediaType" } },
+          { name: "watched", in: "query", schema: { type: "string", enum: ["true", "false"] } },
+          { name: "userId", in: "query", schema: { type: "string" } },
+          { name: "tmdbId", in: "query", schema: { type: "integer" } },
+          { name: "playMethod", in: "query", schema: { type: "string" } },
+          { name: "platform", in: "query", schema: { type: "string" } },
+          { name: "startDate", in: "query", schema: { type: "string", format: "date" } },
+          { name: "endDate", in: "query", schema: { type: "string", format: "date" } },
+          { name: "search", in: "query", schema: { type: "string" } },
+        ],
+        responses: {
+          "200": { description: "CSV (default) or JSON file download" },
+          "400": { description: "Unparseable startDate / endDate" },
+          "403": { description: "Forbidden — ADMIN only" },
+          "429": { description: "Rate limited (5 exports per hour per admin)" },
+        },
       },
     },
     "/play-history/{id}": {
@@ -1406,6 +1517,7 @@ const spec = {
           "400": { description: "Invalid id" },
           "403": { description: "Forbidden — ADMIN only" },
           "404": { description: "Not found" },
+          "429": { description: "Rate limited" },
         },
       },
     },
@@ -1433,6 +1545,7 @@ const spec = {
                       lastSeenAt: { type: "string", format: "date-time" },
                       expiresAt: { type: "string", format: "date-time" },
                       isCurrent: { type: "boolean" },
+                      indefinite: { type: "boolean", description: "Additive: a never-expiring (native) session — `expiresAt` is then the sentinel date" },
                     },
                   },
                 },
@@ -1453,16 +1566,19 @@ const spec = {
                 required: ["sessionId"],
                 properties: {
                   sessionId: { type: "string" },
-                  confirmPassword: { type: "string", description: "Step-up re-authentication, required to revoke a session other than the caller's own" },
+                  confirmPassword: { type: "string", description: "Step-up re-authentication, required to revoke a session other than the caller's own, for accounts with a local password. SSO accounts (no password) instead need the caller's own session to have been created within the last 5 minutes." },
                 },
               },
             },
           },
         },
         responses: {
-          "200": { description: "Session revoked" },
-          "401": { description: "Step-up authentication required or failed" },
-          "429": { description: "Rate limited" },
+          "200": { description: "Session revoked — { ok: true }" },
+          "400": { description: "sessionId missing or not a string" },
+          "401": { description: "Step-up required or failed: { error: \"password-required\" | \"invalid-password\" | \"session-too-old\" }" },
+          "404": { description: "No such session for this user" },
+          "429": { description: "Rate limited (10 revokes/min per user): { error: \"rate_limit\", message }" },
+          "500": { description: "The revocation did not commit" },
         },
       },
     },
@@ -1475,7 +1591,12 @@ const spec = {
           { name: "id", in: "path", required: true, schema: { type: "integer" }, description: "TMDB TV ID" },
           { name: "n", in: "path", required: true, schema: { type: "integer" }, description: "Season number" },
         ],
-        responses: { "200": { description: "Season episodes with availability" } },
+        responses: {
+          "200": { description: "Season episodes with availability" },
+          "400": { description: "Invalid TV id or season number" },
+          "429": { description: "Rate limited" },
+          "502": { description: "TMDB season fetch failed" },
+        },
       },
     },
 
@@ -1484,10 +1605,20 @@ const spec = {
         tags: ["TV Availability"],
         summary: "Episode-level availability for a TV show",
         parameters: [
-          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
-          { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] } },
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
         ],
-        responses: { "200": { description: "Per-episode availability map" } },
+        description: "Scoped by the caller's sign-in provider (a Plex user sees Plex episodes, a Jellyfin user Jellyfin, others both) and by the servers they may see. There is no `source` parameter.",
+        responses: {
+          "200": {
+            description: "{ source: \"plex\" | \"jellyfin\" | \"both\" | null, seasons: [{ seasonNumber, episodes: number[] }] }",
+            content: { "application/json": { schema: { type: "object", properties: {
+              source: { type: "string", nullable: true, enum: ["plex", "jellyfin", "both"] },
+              seasons: { type: "array", items: { type: "object", properties: { seasonNumber: { type: "integer" }, episodes: { type: "array", items: { type: "integer" } } } } },
+            } } } },
+          },
+          "400": { description: "Missing, non-positive or out-of-range tmdbId" },
+          "429": { description: "Rate limited (30 req/min per user)" },
+        },
       },
     },
 
@@ -1496,7 +1627,13 @@ const spec = {
         tags: ["Person"],
         summary: "Get TMDB person details and credits",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "integer" } }],
-        responses: { "200": { description: "Person details with cast/crew credits" } },
+        responses: {
+          "200": { description: "Person details with cast/crew credits" },
+          "400": { description: "Invalid person id" },
+          "404": { description: "Unknown person" },
+          "429": { description: "Rate limited" },
+          "502": { description: "TMDB upstream error" },
+        },
       },
     },
 
@@ -1513,7 +1650,7 @@ const spec = {
                 required: ["currentPassword", "newPassword"],
                 properties: {
                   currentPassword: { type: "string" },
-                  newPassword: { type: "string", minLength: 12 },
+                  newPassword: { type: "string", minLength: 12, maxLength: 1024 },
                 },
               },
             },
@@ -1521,8 +1658,11 @@ const spec = {
         },
         responses: {
           "200": { description: "Password updated ({ ok, requiresRelogin }) — every session is revoked" },
-          "400": { description: "Validation error, or wrong current password" },
+          "400": { description: "Validation error (newPassword missing, under 12 or over 1024 characters), or wrong current password" },
+          "401": { description: "User row not found" },
           "403": { description: "SSO account — local passwords are not available" },
+          "429": { description: "Too many attempts (5 per 15 minutes per user)" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -1564,6 +1704,7 @@ const spec = {
         responses: {
           "200": { description: "{ challengeToken, publicKey } — publicKey is PublicKeyCredentialRequestOptions (base64url); send the assertion back as secondFactor { method: \"webauthn\", credential, challengeToken }. Single-use, 5-minute, bound to this user and session" },
           "400": { description: "The account has no passkeys" },
+          "401": { description: "The session carries no session id" },
           "403": { description: "Not a local-credentials account" },
           "429": { description: "Too many challenges" },
           "503": { description: "AUTH_URL is not configured, so no WebAuthn RP ID exists" },
@@ -1631,6 +1772,7 @@ const spec = {
         responses: {
           "200": { description: "{ registrationToken, publicKey } — publicKey is PublicKeyCredentialCreationOptions with base64url binary fields; the token is single-use, 5-minute, bound to this user and session" },
           "400": { description: `${MFA_STEP_UP_400}, or the passkey limit is reached` },
+          "401": { description: "The session carries no session id" },
           "429": { description: "Too many step-up attempts, or code entry is locked" },
           "503": { description: "AUTH_URL is not configured, so no WebAuthn RP ID exists" },
         },
@@ -1660,6 +1802,7 @@ const spec = {
           "200": { description: "{ ok, recoveryCodes? } — recoveryCodes when this is the first factor, which also signs out every other session" },
           "400": { description: "Expired/foreign registration token, a token issued on the password alone to an account that has since gained a factor, or the response failed verification" },
           "409": { description: "That credential is already registered" },
+          "503": { description: "AUTH_URL is not configured, so no WebAuthn RP ID exists" },
         },
       },
     },
@@ -1690,7 +1833,11 @@ const spec = {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["locale"], properties: { locale: { type: "string", enum: [...LOCALES] } } } } },
         },
-        responses: { "200": { description: "Stored" }, "400": { description: "Unsupported locale" } },
+        responses: {
+          "200": { description: "Stored — { locale }", content: { "application/json": { schema: { type: "object", properties: { locale: { type: "string", enum: [...LOCALES] } } } } } },
+          "400": { description: "Unsupported locale" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
+        },
       },
     },
     "/profile/notifications": {
@@ -1750,7 +1897,7 @@ const spec = {
                   notifyOnIssue: { type: "boolean" },
                   notificationEmail: {
                     type: "string", nullable: true,
-                    description: "Jellyfin-provider accounts only — any other provider gets 403. Null clears it.",
+                    description: "Jellyfin-provider accounts only — any other provider gets 403. Null or blank clears it. A NEW address is also 403: it must be verified through POST /api/profile/notification-email (mails a one-time token, bound on /confirm); only a write-back of the currently stored address is accepted here.",
                   },
                 },
               },
@@ -1758,8 +1905,10 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Preferences updated" },
-          "403": { description: "notificationEmail was sent by a non-Jellyfin account" },
+          "200": { description: "Preferences updated — { ok: true }" },
+          "400": { description: "No valid field in the body, or a malformed notificationEmail" },
+          "403": { description: "notificationEmail was sent by a non-Jellyfin account, or names a new unverified address" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -1804,7 +1953,11 @@ const spec = {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["plexWatchlist"], properties: { plexWatchlist: { type: "boolean" } } } } },
         },
-        responses: { "200": { description: "Saved" }, "400": { description: "plexWatchlist is not a boolean" } },
+        responses: {
+          "200": { description: "Saved — { plexWatchlist }", content: { "application/json": { schema: { type: "object", properties: { plexWatchlist: { type: "boolean" } } } } } },
+          "400": { description: "plexWatchlist is not a boolean" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
+        },
       },
     },
 
@@ -1958,10 +2111,12 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Subscription registered" },
-          "400": { description: "Missing fields, or an endpoint that is not a recognized push service" },
+          "200": { description: "Subscription registered ({ ok: true })" },
+          "400": { description: "Missing fields, over-long fields (endpoint 2048, keys 256), a non-https endpoint, or an endpoint that is not a recognized push service" },
           "403": { description: "feature.integration.push is disabled" },
           "409": { description: "Endpoint already registered to another user" },
+          "429": { description: "Rate limited — 10/min per user" },
+          "503": { description: "Maintenance mode" },
         },
       },
       delete: {
@@ -1986,7 +2141,16 @@ const spec = {
       post: {
         tags: ["Push"],
         summary: "Send a test push notification to current user",
-        responses: { "200": { description: "Test notification dispatched" } },
+        description: "Sends a real test push to every device registered to the caller (iOS via the APNs relay, Web Push via VAPID). Bypasses feature.integration.push. Rate-limited 5/min per user.",
+        responses: {
+          "200": {
+            description: "Every device accepted the test",
+            content: { "application/json": { schema: { type: "object", properties: { results: { type: "array", items: { type: "object", properties: { platform: { type: "string", enum: ["ios", "web"] }, endpoint: { type: "string" }, ok: { type: "boolean" }, status: { type: "integer" }, message: { type: "string" } } } } } } } },
+          },
+          "404": { description: "The caller has no push subscription" },
+          "429": { description: "Rate limited" },
+          "502": { description: "At least one device failed (or none was reached) — same { results } body as 200" },
+        },
       },
     },
 
@@ -2009,19 +2173,23 @@ const spec = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["name", "email", "password"],
+                required: ["email", "password"],
                 properties: {
-                  name: { type: "string" },
-                  email: { type: "string", format: "email" },
-                  password: { type: "string", minLength: 12 },
+                  email: { type: "string", format: "email", maxLength: 254 },
+                  name: { type: "string", nullable: true, maxLength: 100 },
+                  password: { type: "string", minLength: 12, description: "12 characters minimum; also capped at MAX_PASSWORD_LENGTH" },
                 },
               },
             },
           },
         },
+        description: "First-run bootstrap ONLY: creates the initial ADMIN and never signs anyone in (no token or cookie in the response). Once any user exists or setup has completed it answers 403. Body capped at 16 KB; browsers must send a matching Origin (native clients are exempt via Authorization / X-Summonarr-Client).",
         responses: {
-          "200": { description: "User created" },
-          "400": { description: "Validation error or email already in use" },
+          "201": { description: "Initial admin created", content: { "application/json": { schema: { type: "object", properties: { id: { type: "string" }, email: { type: "string" }, name: { type: "string", nullable: true }, role: { type: "string" } } } } } },
+          "400": { description: "Validation error (missing/invalid email or password, password too short or too long, name too long)" },
+          "403": { description: "Registration is closed (a user already exists / setup completed), local login is disabled, or the Origin check failed" },
+          "429": { description: "Rate limited (rateLimitRegister, default 5 per 15 minutes per address)" },
+          "503": { description: "Maintenance mode" },
         },
       },
     },
@@ -2099,8 +2267,9 @@ const spec = {
           { name: "instance", in: "query", schema: { type: "string" }, description: "Media-instance slug; defaults to the default instance" },
         ],
         responses: {
-          "200": { description: "QuickConnect initiation state (code, secret) plus any flow state" },
+          "200": { description: "QuickConnect initiation state (code, secret). A caller sending X-Summonarr-Client also gets `flowState` (the signed flow token to present at sign-in); browsers get it as an HttpOnly cookie instead" },
           "400": { description: "Invalid instance slug" },
+          "429": { description: "Rate limited — 10/min per IP" },
           "502": { description: "QuickConnect is disabled or unavailable upstream" },
           "503": { description: "Jellyfin not configured" },
         },
@@ -2111,8 +2280,11 @@ const spec = {
         tags: ["Auth"],
         summary: "Get the current authenticated session (cookie or bearer)",
         responses: {
-          "200": { description: "Current user/session payload" },
-          "401": { description: "Not authenticated" },
+          "200": {
+            description: "Current session. Never cached (no-store); a re-signed cookie is appended for browsers only",
+            content: { "application/json": { schema: { type: "object", properties: { session: { type: "object", properties: { user: { type: "object", properties: { id: { type: "string" }, role: { type: "string" }, permissions: { type: "string", description: "Decimal bitmask" }, email: { type: "string", nullable: true }, name: { type: "string", nullable: true }, provider: { type: "string" }, mediaServer: { type: "string", nullable: true } } }, expiresAt: { type: "integer", description: "Unix seconds" } } } } } } },
+          },
+          "401": { description: "Not authenticated — body is { session: null }" },
         },
       },
     },
@@ -2120,7 +2292,8 @@ const spec = {
       post: {
         tags: ["Auth"],
         summary: "Sign out the current session (clears cookie / revokes session)",
-        responses: { "200": { description: "Signed out" } },
+        description: "Always 200 { ok: true } and clears the cookies, even when there was no session or the server-side revoke failed. Bearer token is read before the cookie.",
+        responses: { "200": { description: "Signed out ({ ok: true })" } },
       },
     },
 
@@ -2142,8 +2315,9 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Sessions revoked" },
-          "401": { description: "Step-up authentication required or failed" },
+          "200": { description: "Sessions revoked", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, count: { type: "integer", description: "AuthSession rows deleted" }, includeCurrent: { type: "boolean" } } } } } },
+          "401": { description: "Step-up authentication required or failed. `error` is a code: password-required, invalid-password, or session-too-old (SSO caller whose session is older than 5 minutes)" },
+          "429": { description: "Rate limited — 5/hour per user. Body is { error: \"rate_limit\", message }" },
         },
       },
     },
@@ -2197,7 +2371,8 @@ const spec = {
             },
           },
           "404": { description: "feature.integration.calendar is disabled, or the account is disabled" },
-          "429": { description: "Too many regenerations" },
+          "429": { description: "Too many regenerations — 10/hour per user; carries Retry-After" },
+          "503": { description: "Maintenance mode" },
         },
       },
       delete: {
@@ -2233,9 +2408,16 @@ const spec = {
         summary: "Close (disable) the caller's own account",
         description:
           "Revokes every session and blocks sign-in from then on. Nothing is scrubbed and nothing is cascade-deleted — an admin can re-enable the account, and the irreversible personal-data scrub is a separate admin action (POST /admin/users/{id}/purge).",
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", properties: { password: { type: "string", description: "Required (non-empty) for local-credentials accounts; ignored for SSO accounts" } } } } },
+        },
         responses: {
-          "200": { description: "Account disabled (idempotent)" },
+          "200": { description: "Account disabled ({ ok: true }; idempotent)" },
           "400": { description: "Cannot disable the last admin, or a missing/incorrect password on a local account" },
+          "404": { description: "Account not found" },
+          "429": { description: "Too many password attempts — 5 per 15 minutes (local accounts); carries Retry-After" },
+          "503": { description: "Maintenance mode" },
         },
       },
     },
@@ -2243,12 +2425,14 @@ const spec = {
     "/admin/users": {
       get: {
         tags: ["Admin – Users"],
-        summary: "List users (ADMIN)",
-        responses: { "200": { description: "User list" } },
+        summary: "List users (MANAGE_USERS)",
+        description: "Up to 1000 users, ordered by name then email.",
+        responses: { "200": { description: "User list", content: { "application/json": { schema: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string", nullable: true }, email: { type: "string", nullable: true }, role: { $ref: "#/components/schemas/UserRole" }, createdAt: { type: "string", format: "date-time" }, deactivatedAt: { type: "string", format: "date-time", nullable: true }, purgedAt: { type: "string", format: "date-time", nullable: true }, mediaServer: { type: "string", nullable: true }, maxContentRating: { type: "string", nullable: true }, source: { type: "string", description: "local | oidc | jellyfin | plex | discord (additive set)" }, movieQuotaLimit: { type: "integer", nullable: true }, movieQuotaDays: { type: "integer", nullable: true }, tvQuotaLimit: { type: "integer", nullable: true }, tvQuotaDays: { type: "integer", nullable: true }, permissions: { type: "string", description: "Decimal bitmask" }, notifyOnApproved: { type: "boolean" }, notifyOnAvailable: { type: "boolean" }, notifyOnDeclined: { type: "boolean" }, emailOnApproved: { type: "boolean" }, emailOnAvailable: { type: "boolean" }, emailOnDeclined: { type: "boolean" }, pushOnApproved: { type: "boolean" }, pushOnAvailable: { type: "boolean" }, pushOnDeclined: { type: "boolean" }, notifyOnIssue: { type: "boolean" }, requestCount: { type: "integer" } } } } } } } },
       },
       post: {
         tags: ["Admin – Users"],
-        summary: "Create a user (ADMIN)",
+        summary: "Create a local-credentials user (MANAGE_USERS)",
+        description: "Creating an ADMIN requires the caller to hold the ADMIN bit. Rate-limited 10/min per caller. Body capped at 16 KB.",
         requestBody: {
           required: true,
           content: {
@@ -2266,14 +2450,20 @@ const spec = {
             },
           },
         },
-        responses: { "200": { description: "User created" }, "400": { description: "Validation error" } },
+        responses: {
+          "201": { description: "User created (same shape as a list item)", content: { "application/json": { schema: { type: "object", properties: { id: { type: "string" }, name: { type: "string", nullable: true }, email: { type: "string", nullable: true }, role: { $ref: "#/components/schemas/UserRole" }, createdAt: { type: "string", format: "date-time" }, deactivatedAt: { type: "string", format: "date-time", nullable: true }, purgedAt: { type: "string", format: "date-time", nullable: true }, mediaServer: { type: "string", nullable: true }, maxContentRating: { type: "string", nullable: true }, source: { type: "string", description: "local | oidc | jellyfin | plex | discord (additive set)" }, movieQuotaLimit: { type: "integer", nullable: true }, movieQuotaDays: { type: "integer", nullable: true }, tvQuotaLimit: { type: "integer", nullable: true }, tvQuotaDays: { type: "integer", nullable: true }, permissions: { type: "string", description: "Decimal bitmask" }, notifyOnApproved: { type: "boolean" }, notifyOnAvailable: { type: "boolean" }, notifyOnDeclined: { type: "boolean" }, emailOnApproved: { type: "boolean" }, emailOnAvailable: { type: "boolean" }, emailOnDeclined: { type: "boolean" }, pushOnApproved: { type: "boolean" }, pushOnAvailable: { type: "boolean" }, pushOnDeclined: { type: "boolean" }, notifyOnIssue: { type: "boolean" }, requestCount: { type: "integer" } } } } } },
+          "400": { description: "Validation error" },
+          "403": { description: "Creating an ADMIN requires the ADMIN bit" },
+          "409": { description: "Email already in use" },
+          "429": { description: "Rate limited" },
+        },
       },
     },
     "/admin/users/{id}": {
       patch: {
         tags: ["Admin – Users"],
         summary: "Update user settings (MANAGE_USERS)",
-        description: "Conferring the ADMIN role, or editing an account that is already ADMIN, additionally requires the caller to hold ADMIN.",
+        description: "Conferring the ADMIN role, or editing an account that is already ADMIN, additionally requires the caller to hold ADMIN. ONE FIELD GROUP PER CALL: the handler applies only the first group present, in this order — mediaServer, maxContentRating, permissions, instanceGrants, mediaServerGrants, then the first quota* field, then the first notification flag, then role — and answers 200 with `{ id, <field>: <new value> }` (permissions as a decimal string). A body with none of them is 400. A non-ADMIN delegate may not edit its own limits/grants, may not touch an ADMIN account, and may only grant what it holds itself (403). Rate-limited 20/min per caller; body capped at 32 KB.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           content: {
@@ -2291,6 +2481,20 @@ const spec = {
                   notifyOnApproved: { type: "boolean" },
                   notifyOnAvailable: { type: "boolean" },
                   notifyOnDeclined: { type: "boolean" },
+                  emailOnApproved: { type: "boolean" },
+                  emailOnAvailable: { type: "boolean" },
+                  emailOnDeclined: { type: "boolean" },
+                  pushOnApproved: { type: "boolean" },
+                  pushOnAvailable: { type: "boolean" },
+                  pushOnDeclined: { type: "boolean" },
+                  notifyOnIssue: { type: "boolean" },
+                  maxContentRating: { type: "string", nullable: true, description: "Content-rating cap; null or empty clears it" },
+                  mediaServerGrants: {
+                    type: "object",
+                    nullable: true,
+                    description: "Per-server library visibility for RESTRICTED Plex/Jellyfin instances: { plex: { <slug>: { view } }, jellyfin: { <slug>: { view } } }",
+                    additionalProperties: { type: "object", additionalProperties: { type: "object", properties: { view: { type: "boolean" } } } },
+                  },
                   instanceGrants: {
                     type: "object",
                     nullable: true,
@@ -2305,7 +2509,13 @@ const spec = {
             },
           },
         },
-        responses: { "200": { description: "Updated fields" }, "403": { description: "Forbidden" } },
+        responses: {
+          "200": { description: "The single field group that was applied, echoed with `id`" },
+          "400": { description: "Invalid value, no recognized field, own-role change, or a last-admin / promote-first rule" },
+          "403": { description: "Forbidden (ADMIN-bit rule, own limits, or grant beyond the caller's own)" },
+          "404": { description: "User not found" },
+          "429": { description: "Rate limited" },
+        },
       },
       delete: {
         tags: ["Admin – Users"],
@@ -2314,9 +2524,11 @@ const spec = {
           "Revokes every session and blocks sign-in. Reversible — nothing is scrubbed, the account's requests/issues/votes stay attached, and its Plex/Jellyfin link stays intact so play history keeps being attributed. Re-enable with POST /admin/users/{id}/reactivate; erase with POST /admin/users/{id}/purge.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
-          "200": { description: "User disabled (idempotent)" },
-          "400": { description: "Cannot disable the last admin" },
-          "403": { description: "Forbidden" },
+          "200": { description: "User disabled ({ ok: true }; idempotent)" },
+          "400": { description: "Cannot disable the last admin, or the caller's own account" },
+          "403": { description: "Forbidden (an ADMIN target needs the ADMIN bit)" },
+          "404": { description: "User not found" },
+          "429": { description: "Rate limited" },
         },
       },
     },
@@ -2331,7 +2543,9 @@ const spec = {
           "200": { description: "User re-enabled (idempotent)" },
           "400": { description: "Account was purged and cannot be re-enabled" },
           "403": { description: "Forbidden" },
+          "404": { description: "User not found" },
           "409": { description: "Account state changed concurrently" },
+          "429": { description: "Rate limited" },
         },
       },
     },
@@ -2345,7 +2559,9 @@ const spec = {
         responses: {
           "200": { description: "Personal data purged (idempotent)" },
           "400": { description: "Account must be disabled before it can be purged" },
-          "403": { description: "Forbidden" },
+          "403": { description: "Forbidden (an ADMIN target needs the ADMIN bit)" },
+          "404": { description: "User not found" },
+          "429": { description: "Rate limited" },
         },
       },
     },
@@ -2361,6 +2577,7 @@ const spec = {
           "400": { description: "Own account" },
           "403": { description: "Forbidden" },
           "404": { description: "Not found" },
+          "429": { description: "Rate limited" },
         },
       },
     },
@@ -2474,6 +2691,11 @@ const spec = {
                         adminEmail: { type: "string", description: "Plex only" },
                         url: { type: "string", description: "Jellyfin only" },
                         apiKey: { type: "string", description: "Jellyfin only; write-only, send the mask sentinel to keep unchanged" },
+                        restrictSignIn: { type: "boolean", description: "Jellyfin only; omit to leave the stored value untouched" },
+                        restricted: { type: "boolean", description: "Gate this server's library behind a per-user view grant (never the default instance)" },
+                        libraries: { type: "string", description: "Comma-joined library ids/section keys to sync from THIS server; omit to leave untouched, \"\" syncs all" },
+                        moviePathStripPrefix: { type: "string", description: "Omit to leave untouched; \"\" deletes the row (inherit the default server's prefix)" },
+                        tvPathStripPrefix: { type: "string", description: "As moviePathStripPrefix" },
                       },
                     },
                   },
@@ -2483,26 +2705,42 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Saved; includes per-instance connection test results" },
-          "400": { description: "Invalid service or slug" },
+          "200": { description: "Saved ({ ok, instances, testResults }); includes per-instance connection test results" },
+          "400": { description: "Invalid service, slug, server URL or name, or `instances` is not an array" },
+          "413": { description: "Request body over the 64 KB cap" },
         },
       },
     },
     "/admin/users/{id}/sessions": {
       get: {
         tags: ["Admin – Users"],
-        summary: "List auth sessions for a user (ADMIN)",
+        summary: "List auth sessions for a user (MANAGE_USERS)",
+        description: "An ADMIN target needs the ADMIN bit.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Auth session list" } },
+        responses: {
+          "200": {
+            description: "Auth session list, most recently seen first",
+            content: { "application/json": { schema: { type: "array", items: { type: "object", properties: { id: { type: "string" }, sessionId: { type: "string" }, deviceType: { type: "string" }, deviceLabel: { type: "string", nullable: true }, ipAddress: { type: "string", nullable: true }, createdAt: { type: "string", format: "date-time" }, lastSeenAt: { type: "string", format: "date-time" }, expiresAt: { type: "string", format: "date-time", description: "Sentinel far-future date for a never-expiring native session" }, indefinite: { type: "boolean", description: "Additive: true for a never-expiring native session" } } } } } },
+          },
+          "403": { description: "An ADMIN target needs the ADMIN bit" },
+          "404": { description: "User not found" },
+        },
       },
       delete: {
         tags: ["Admin – Users"],
-        summary: "Revoke a specific auth session (ADMIN)",
-        parameters: [
-          { name: "id", in: "path", required: true, schema: { type: "string" } },
-          { name: "sessionId", in: "query", required: true, schema: { type: "string" } },
-        ],
-        responses: { "200": { description: "Session revoked" } },
+        summary: "Revoke one auth session, or all of them, for a user (MANAGE_USERS)",
+        description: "The target is chosen in the JSON BODY, not the query string. `all: true` (strictly boolean true) revokes every session; otherwise `sessionId` revokes that one, which must belong to this user.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: { sessionId: { type: "string" }, all: { type: "boolean" } } } } },
+        },
+        responses: {
+          "200": { description: "Revoked", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, revoked: { type: "string", description: "\"all\" or the revoked sessionId" } } } } } },
+          "400": { description: "Neither `all` nor a `sessionId` supplied" },
+          "403": { description: "An ADMIN target needs the ADMIN bit" },
+          "404": { description: "User not found, or the session does not belong to this user" },
+        },
       },
     },
 
@@ -2866,7 +3104,7 @@ const spec = {
           },
         },
         responses: {
-          "201": { description: "Protected (an upsert)" },
+          "201": { description: "Protected (an upsert): { item: { tmdbId, mediaType, title, reason, addedBy, createdAt } }" },
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Library cleanup is disabled" },
@@ -3335,7 +3573,7 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Removed" },
+          "200": { description: "Removed ({ ok: true })" },
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled or unknown instance" },
@@ -3563,7 +3801,7 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Sent to the download client" },
+          "200": { description: "Sent to the download client ({ ok: true })" },
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled or unknown instance" },
@@ -3846,7 +4084,7 @@ const spec = {
           "nothing changed. With `execute: true` and `confirm` echoing the id: removes it, `deleteFiles` and the import-list " +
           "exclusion always sent explicitly. 409 `{ approved }` while an APPROVED request on this instance would make the sync " +
           "add it back (nothing changed). Every AVAILABLE request on this instance is stamped `cleanedUpAt` before the delete " +
-          "(the sync never re-adds it), and unstamped only when the arr DEFINITELY refused the delete and a re-read shows the title still there — an unknown outcome (timeout, 502/504, network) keeps them, since the arr may have taken it (guardrail 14b). Audited ARR_TITLE_DELETE.",
+          "(the sync never re-adds it), and unstamped only when the arr DEFINITELY refused the delete and a re-read shows the title still there — an unknown outcome (timeout, 502/504, network) keeps them, since the arr may have taken it (guardrail 14b). Audited ARR_TITLE_DELETE. The execute is limited to 10 per minute per admin (429); the dry run is not.",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service", "id", "deleteFiles", "addImportExclusion"], properties: {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, id: { type: "integer", minimum: 1 },
           deleteFiles: { type: "boolean" }, addImportExclusion: { type: "boolean" }, execute: { type: "boolean" }, confirm: { type: "integer", description: "The id, echoed from the dry run" },
@@ -4487,7 +4725,7 @@ const spec = {
                 },
               } } } },
         responses: {
-          "201": { description: "Created" },
+          "201": { description: "Created — { agent } (the public shape GET lists: `hasSecret`, never the secret)" },
           "400": { description: "Invalid input, or the channel limit is reached" },
         },
       },
@@ -4516,13 +4754,13 @@ const spec = {
                   secret: { type: "string", nullable: true, description: "Omit to keep the saved value, null or \"\" to clear. Gotify requires one." },
                 },
               } } } },
-        responses: { "200": { description: "Updated" }, "400": { description: "Invalid input" }, "404": { description: "No such channel" } },
+        responses: { "200": { description: "Updated — { agent } (the public shape)" }, "400": { description: "Invalid input, including an attempt to change the kind" }, "404": { description: "No such channel" } },
       },
       delete: {
         tags: ["Admin – Settings"],
         summary: "Delete a channel (ADMIN)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Deleted" }, "404": { description: "No such channel" } },
+        responses: { "200": { description: "Deleted — { ok: true }" }, "404": { description: "No such channel" } },
       },
     },
 
@@ -4665,16 +4903,39 @@ const spec = {
       post: {
         tags: ["Admin – Sync"],
         summary: "Sync Plex library",
+        description:
+          "Resyncs ONE Plex server (the default unless the body names `instance`). Default is incremental (`recentOnly`: insert-only inside a 2-hour window); `full: true` deletes and repopulates that server's rows only. " +
+          "With more than one Plex server registered the shared TVEpisodeCache is left to /sync.",
         security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "Plex sync result" } },
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: {
+          full: { type: "boolean", description: "Only `true` selects the full replace; anything else is incremental" },
+          instance: { type: "string", description: "Registered Plex instance slug; absent = the default server" },
+        } } } } },
+        responses: {
+          "200": { description: "{ scanned: { movies, tv }, checked, marked, full }" },
+          "400": { description: "Malformed or unregistered `instance`, or Plex not configured" },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+          "502": { description: "The Plex library could not be fetched" },
+        },
       },
     },
     "/sync/jellyfin": {
       post: {
         tags: ["Admin – Sync"],
         summary: "Sync Jellyfin library",
+        description:
+          "Resyncs ONE Jellyfin server (the default unless the body names `instance`). Default is incremental (`recentOnly`: insert-only inside a 2-hour MinDateLastSaved window); `full: true` deletes and repopulates that server's rows only.",
         security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "Jellyfin sync result" } },
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: {
+          full: { type: "boolean", description: "Only `true` selects the full replace; anything else is incremental" },
+          instance: { type: "string", description: "Registered Jellyfin instance slug; absent = the default server" },
+        } } } } },
+        responses: {
+          "200": { description: "{ scanned: { movies, tv }, checked, marked, full }" },
+          "400": { description: "Malformed or unregistered `instance`, or Jellyfin not configured" },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+          "502": { description: "The Jellyfin library could not be fetched" },
+        },
       },
     },
     "/sync/radarr": {
@@ -4682,7 +4943,11 @@ const spec = {
         tags: ["Admin – Sync"],
         summary: "Sync Radarr wanted/available items",
         security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "Radarr sync result" } },
+        responses: {
+          "200": { description: "{ wanted, available }" },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+          "502": { description: "{ error }, or { skipped: true, reason: \"arr-unavailable\" } when every instance's fetch failed" },
+        },
       },
     },
     "/sync/sonarr": {
@@ -4690,7 +4955,11 @@ const spec = {
         tags: ["Admin – Sync"],
         summary: "Sync Sonarr wanted/available items",
         security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "Sonarr sync result" } },
+        responses: {
+          "200": { description: "{ wanted, available }" },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+          "502": { description: "{ error }, or { skipped: true, reason: \"arr-unavailable\" } when every instance's fetch failed" },
+        },
       },
     },
     "/sync/upcoming": {
@@ -4698,7 +4967,11 @@ const spec = {
         tags: ["Admin – Sync"],
         summary: "Sync upcoming releases from TMDB",
         security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "Upcoming sync result" } },
+        responses: {
+          "200": { description: "{ movies, tv, total, errors, durationMs, calendar, error? } — a partial failure still answers 200 with `X-Cron-Degraded: movies|tv`; or { skipped: true, reason: \"already running\" }" },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+          "502": { description: "Every TMDB fetch failed and nothing was written" },
+        },
       },
     },
     "/sync/ratings": {
@@ -4706,7 +4979,10 @@ const spec = {
         tags: ["Admin – Sync"],
         summary: "Sync external ratings cache",
         security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "Ratings sync result" } },
+        responses: {
+          "200": { description: "{ total, warmed, skipped, quotaExhausted, durationMs }, or { skipped: true, reason } (no MDBList/OMDB key configured, or already running)" },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+        },
       },
     },
     "/sync/play-history": {
@@ -4714,7 +4990,12 @@ const spec = {
         tags: ["Admin – Sync"],
         summary: "Ingest play history from Plex / Jellyfin",
         security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "Play history sync result" } },
+        responses: {
+          "200": { description: "An object keyed by source and server (`plex`, `plex:<slug>`, `jellyfin`, `jellyfin:<slug>`), each { started, updated, ended } or { error }; a failed source sets `X-Cron-Degraded` (status stays 200). `purged` (a number) appears when the hourly retention purge ran. Or { message } while play history tracking is disabled" },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+          "429": { description: "More than 30 runs a minute from one client IP" },
+          "500": { description: "{ error: \"Sync failed\" }" },
+        },
       },
     },
     "/sync/tv-episodes": {
@@ -4722,7 +5003,11 @@ const spec = {
         tags: ["Admin – Sync"],
         summary: "Sync TV episode cache from TMDB",
         security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "TV episode sync result" } },
+        description: "Rebuilds the shared TVEpisodeCache from the UNION of every configured server of each type, all-or-nothing: a type with any failed server is left untouched and named in `skipped`.",
+        responses: {
+          "200": { description: "{ plex, jellyfin, skipped, errors, … } — episode counts written per source" },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
+        },
       },
     },
 
@@ -4817,8 +5102,8 @@ const spec = {
           { name: "cursor", in: "query", schema: { type: "string" }, description: "AuditLog id from the previous response's nextCursor; exclusive" },
           { name: "action", in: "query", schema: { type: "string" }, description: "Exact AuditAction value. Takes precedence over `group`; an unrecognized value is ignored." },
           { name: "group", in: "query", schema: { type: "string", enum: ["auth", "admin", "system"] }, description: "Coarse action bucket, ignored when a valid `action` is given" },
-          { name: "dateFrom", in: "query", schema: { type: "string", format: "date" }, description: "createdAt >= this date; unparseable values are ignored" },
-          { name: "dateTo", in: "query", schema: { type: "string", format: "date" }, description: "Inclusive end date (compared as < dateTo + 1 day); unparseable values are ignored" },
+          { name: "dateFrom", in: "query", schema: { type: "string", format: "date" }, description: "createdAt >= this date; an unparseable value is a 400" },
+          { name: "dateTo", in: "query", schema: { type: "string", format: "date" }, description: "Inclusive end date (compared as < dateTo + 1 UTC day); an unparseable value is a 400" },
           { name: "user", in: "query", schema: { type: "string" }, description: "Case-insensitive substring match on userName — the display name, NOT the user id" },
           { name: "target", in: "query", schema: { type: "string" }, description: "Case-insensitive substring match on target" },
           { name: "hideCron", in: "query", schema: { type: "string", enum: ["1"] }, description: "Hide the `system` principal. Rows with a NULL userId (e.g. the machine-session mint) are deliberately kept." },
@@ -4839,6 +5124,7 @@ const spec = {
               },
             },
           },
+          "400": { description: "Unparseable dateFrom or dateTo" },
           "403": { description: "Forbidden — ADMIN only" },
           "429": { description: "Rate limited (60/min per admin)" },
         },
@@ -4847,8 +5133,24 @@ const spec = {
     "/admin/audit-log/export": {
       get: {
         tags: ["Admin – Audit Log"],
-        summary: "Export audit log as CSV (ADMIN)",
-        responses: { "200": { description: "CSV download" } },
+        summary: "Export audit log as CSV or JSON (ADMIN)",
+        description: "Streams up to 100,000 rows, newest first, and writes an AUDIT_LOG_EXPORT audit row before the stream starts. A capped export carries `X-Export-Truncated: true` and `X-Export-Limit`. 3 exports per hour per admin.",
+        parameters: [
+          { name: "format", in: "query", schema: { type: "string", enum: ["csv", "json"], default: "csv" }, description: "Anything but `json` is CSV" },
+          { name: "action", in: "query", schema: { type: "string" }, description: "Exact AuditAction; takes precedence over `group`; unrecognized values are ignored" },
+          { name: "group", in: "query", schema: { type: "string", enum: ["auth", "admin", "system"] } },
+          { name: "dateFrom", in: "query", schema: { type: "string", format: "date" }, description: "Unparseable → 400" },
+          { name: "dateTo", in: "query", schema: { type: "string", format: "date" }, description: "Inclusive end date; unparseable → 400" },
+          { name: "user", in: "query", schema: { type: "string" }, description: "Substring match on userName" },
+          { name: "target", in: "query", schema: { type: "string" } },
+          { name: "hideCron", in: "query", schema: { type: "string", enum: ["1"] } },
+        ],
+        responses: {
+          "200": { description: "CSV (text/csv) or JSON array download", headers: { "X-Export-Truncated": { schema: { type: "string", enum: ["true"] }, description: "Present only when more than 100,000 rows matched" } } },
+          "400": { description: "Unparseable dateFrom or dateTo" },
+          "403": { description: "Forbidden — ADMIN only" },
+          "429": { description: "More than 3 exports in an hour" },
+        },
       },
     },
 
@@ -4856,18 +5158,32 @@ const spec = {
       get: {
         tags: ["Admin – Backup"],
         summary: "Export encrypted database backup (ADMIN)",
-        responses: { "200": { description: "Encrypted .backup file" } },
+        description: "Streams the whole database as an AES-encrypted SQL dump (key from the BACKUP_DB_PASSWORD env var, at least 12 characters). Audited BACKUP_EXPORT. 5 per hour per admin.",
+        responses: {
+          "200": { description: "Encrypted dump, application/octet-stream, attachment `summonarr-full-backup-<date>.sql.enc`" },
+          "429": { description: "More than 5 exports in an hour" },
+          "503": { description: "BACKUP_DB_PASSWORD is unset or shorter than 12 characters" },
+        },
       },
     },
     "/admin/backup/db-import": {
       post: {
         tags: ["Admin – Backup"],
         summary: "Import database backup (ADMIN)",
+        description: "DESTRUCTIVE: truncates and replaces the database from an encrypted dump. The body is the raw encrypted dump bytes (not multipart), at most 500 MB plus 4 KB. The dump's schema fingerprint must match this server's. Audited BACKUP_IMPORT. 5 per hour per admin.",
         requestBody: {
           required: true,
-          content: { "multipart/form-data": { schema: { type: "object", properties: { file: { type: "string", format: "binary" } } } } },
+          content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } },
         },
-        responses: { "200": { description: "Import result" } },
+        responses: {
+          "200": { description: "{ ok: true, summary: { total, executed, skipped, errors }, warning? }; or, when statements failed, { ok: false, summary, errors } (status 200)" },
+          "400": { description: "Empty body, not an encrypted Summonarr dump, or unreadable" },
+          "409": { description: "Schema fingerprint mismatch — nothing touched" },
+          "413": { description: "Body (or decrypted SQL) over the size cap" },
+          "429": { description: "More than 5 restores in an hour" },
+          "500": { description: "Restore failed" },
+          "503": { description: "BACKUP_DB_PASSWORD is unset or shorter than 12 characters" },
+        },
       },
     },
 
@@ -4902,6 +5218,7 @@ const spec = {
           "200": {
             description: "Provider-configured flags, MDBList/OMDB quota-lockout state, raw ratings cache rows, details-cache rating fields, optional live probe",
           },
+          "400": { description: "tmdbId (a positive integer in range) and type=movie|tv are required" },
         },
       },
     },
@@ -4950,7 +5267,7 @@ const spec = {
         },
         responses: {
           "200": { description: "Dry run: counts + five-row sample. Execute: rows updated + watched flips" },
-          "409": { description: "confirmAffectedRows does not match the live candidate count" },
+          "409": { description: "{ error, hint, affectedRows } — `confirmAffectedRows` is missing or does not match the live candidate count (nothing changed)" },
         },
       },
     },
@@ -5019,22 +5336,25 @@ const spec = {
     "/admin/fix-match/candidates": {
       get: {
         tags: ["Admin – Fix Match"],
-        summary: "List Plex match candidates for a library item (ADMIN / ISSUE_ADMIN)",
+        summary: "List match candidates for a library item (ADMIN / ISSUE_ADMIN)",
+        description: "Plex: scored candidates from the server's agent search. Jellyfin: the remote-search candidates for the item. 30 per minute per admin.",
         parameters: [
-          { name: "server", in: "query", required: true, schema: { type: "string", enum: ["plex"] } },
+          { name: "server", in: "query", required: true, schema: { type: "string", enum: ["plex", "jellyfin"] } },
           { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
           { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
           { name: "correctTmdbId", in: "query", required: true, schema: { type: "integer" } },
           { name: "arrTmdbId", in: "query", schema: { type: "integer" }, description: "Radarr/Sonarr hint to boost a matching candidate" },
           {
             name: "serverInstance", in: "query", schema: { type: "string", default: "" },
-            description: "Which configured Plex instance to read the row from and search (\"\" = the default server). Echoed back in the response.",
+            description: "Which configured instance of `server` to read the row from and search (\"\" = the default server). Echoed back in the response.",
           },
         ],
         responses: {
           "200": { description: "Scored candidates plus target metadata, `ratingKey`, and the resolved `serverInstance`" },
-          "400": { description: "Missing params, a non-plex server, or an invalid serverInstance slug" },
-          "404": { description: "No Plex row for that tmdbId on that instance" },
+          "400": { description: "Missing or out-of-range params, a server other than plex|jellyfin, or an invalid serverInstance slug" },
+          "404": { description: "No Plex/Jellyfin library row for that tmdbId on that instance" },
+          "429": { description: "Rate limited (30/min/admin)" },
+          "500": { description: "Plex is not configured" },
         },
       },
     },
@@ -5087,22 +5407,31 @@ const spec = {
       post: {
         tags: ["Admin – Stats"],
         summary: "Pre-warm the library cache (ADMIN)",
-        security: [{ session: [] }, { cronSecret: [] }],
-        responses: { "200": { description: "Warm result" } },
+        description: "Admin session only (a bare CRON_SECRET bearer is rejected; the cron twin is POST /cron/warm-library). Takes the same advisory lock as that cron, and a 5-minute cooldown claimed inside the lock. Audited CACHE_WARM.",
+        responses: {
+          "200": { description: "The prewarm result (counts and durations)" },
+          "409": { description: "{ ok: false, error, retryAfter: 30 } — a library warm is already running (Retry-After: 30)" },
+          "429": { description: "{ error } — within 5 minutes of the last warm" },
+        },
       },
     },
     "/admin/library-sample-paths": {
       get: {
         tags: ["Admin – Stats"],
         summary: "Sample file paths from the library (ADMIN)",
-        responses: { "200": { description: "Sample paths" } },
+        description: "Default server instance only. Up to 500 paths per service and media type feed the common mount point and a few samples.",
+        responses: { "200": { description: "{ plex: { movie, tv }, jellyfin: { movie, tv } }, each { mountPoint, samples }" } },
       },
     },
     "/admin/check-schema": {
       get: {
         tags: ["Admin – Debug"],
         summary: "Check whether the DB schema is up to date (ADMIN)",
-        responses: { "200": { description: "Schema check result" } },
+        description: "Admin session only; a bare CRON_SECRET bearer is rejected. For a cookie session the route also demands a same-origin + device-fingerprint check (403 otherwise).",
+        responses: {
+          "200": { description: "{ allOk, tables: { <table>: { ok, missing, columns } }, allTables }" },
+          "403": { description: "Failed the same-origin / device-fingerprint check" },
+        },
       },
     },
     "/admin/clear-cache": {
@@ -5117,7 +5446,12 @@ const spec = {
             schema: { type: "string", enum: ["tmdb", "mdblist", "omdb", "all"], default: "all" },
           },
         ],
-        responses: { "200": { description: "Cleared source and deletion count" } },
+        description: "`tmdb` also resets the denormalized copies (TmdbMediaCore, TitleSuggestion edges); `mdblist` / `omdb` also reset stored recommendation quality verdicts. 5 per 5 minutes per admin.",
+        responses: {
+          "200": { description: "{ source, cleared, coreCleared, edgesCleared, verdictsCleared }" },
+          "400": { description: "Unknown source" },
+          "429": { description: "Rate limited (5 per 5 minutes per admin)" },
+        },
       },
     },
 
@@ -5125,12 +5459,13 @@ const spec = {
       post: {
         tags: ["Discord"],
         summary: "Issue a short-lived token to link a Discord account to the current user",
+        description: "The token lives 10 minutes and replaces any earlier one for the caller. With `discordId` only that Discord account can redeem it; without, any Discord account that sees it can. 5 per 10 minutes per user.",
         requestBody: {
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits)" } },
+                properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits); present but malformed is a 400" } },
               },
             },
           },
@@ -5150,6 +5485,7 @@ const spec = {
               },
             },
           },
+          "400": { description: "`discordId` is present but not a valid snowflake" },
           "429": { description: "Rate limited" },
         },
       },
@@ -5158,7 +5494,18 @@ const spec = {
       post: {
         tags: ["Discord"],
         summary: "Start Discord account merge flow",
-        responses: { "200": { description: "Merge token issued" } },
+        description: "DMs a 12-character code (valid 10 minutes) to the given Discord account through the bot. Deliberately does not say whether that Discord id is already linked; that surfaces at confirm-merge.",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["discordId"], properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits)" } } } } },
+        },
+        responses: {
+          "200": { description: "{ ok: true } — the code was DMed (it is never returned)" },
+          "400": { description: "Invalid Discord user id" },
+          "429": { description: "More than 10 initiations an hour, or 3 per target Discord id per 15 minutes" },
+          "502": { description: "The bot could not open or send the DM" },
+          "503": { description: "No Discord bot token configured" },
+        },
       },
     },
     "/discord/confirm-merge": {
@@ -5169,21 +5516,36 @@ const spec = {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["token"], properties: { token: { type: "string" } } } } },
         },
-        responses: { "200": { description: "Accounts merged" } },
+        responses: {
+          "200": { description: "{ ok: true, migrated, discordId }" },
+          "400": { description: "No pending code, expired, or incorrect code" },
+          "409": { description: "The merge was refused (for example the Discord id is linked to another account)" },
+          "429": { description: "{ error: \"rate_limit\", message } — more than 5 attempts in 10 minutes; the pending code is deleted" },
+        },
       },
     },
     "/discord/sync-roles": {
       post: {
         tags: ["Discord"],
-        summary: "Sync Discord roles for the current user",
-        responses: { "200": { description: "Roles synced" } },
+        summary: "Sync Discord roles for every linked account (ADMIN)",
+        description: "Assigns the linked/server/admin roles to every active linked account (shadow `@discord.local` accounts excluded) and strips them from deactivated ones. Audited SETTINGS_CHANGE.",
+        responses: {
+          "200": { description: "{ synced, revoked } (just { synced: 0 } when no account is linked or deactivated)" },
+          "403": { description: "Not ADMIN" },
+        },
       },
     },
     "/discord/register-commands": {
       post: {
         tags: ["Discord"],
         summary: "Register Discord slash commands (ADMIN)",
-        responses: { "200": { description: "Commands registered" } },
+        description: "Pushes the slash commands with the stored bot token and client id, to the guild when a guild id is stored, else globally.",
+        responses: {
+          "200": { description: "{ ok: true, message }" },
+          "400": { description: "Bot token or client id is not configured" },
+          "403": { description: "Not ADMIN" },
+          "502": { description: "Discord refused the registration" },
+        },
       },
     },
 
@@ -5191,11 +5553,13 @@ const spec = {
       get: {
         tags: ["Settings"],
         summary: "Get all settings (ADMIN)",
-        responses: { "200": { description: "Key-value settings map" } },
+        description: "Only allow-listed keys that have a stored row appear. Secret values come back masked as \"••••••••\" (or \"\" when unset) and URL values with any userinfo stripped.",
+        responses: { "200": { description: "Flat { key: string } map" } },
       },
       patch: {
         tags: ["Settings"],
         summary: "Update settings (ADMIN)",
+        description: "Body is a flat map of string values (64 KB cap); keys outside the allow-list are ignored; a non-string value or one failing its per-key rules is a 400 and nothing is written. A key written within the last 10 seconds is refused with 429 (exempt keys aside). Saving connection settings runs a connectivity test and rolls the write back when it fails. 10 per minute per admin.",
         requestBody: {
           content: {
             "application/json": {
@@ -5205,7 +5569,7 @@ const spec = {
         },
         responses: {
           "200": { description: "{ ok: true, ...connectivity test results }" },
-          "400": { description: "Validation error" },
+          "400": { description: "Validation error (unknown key, bad value, or a cross-field rule)" },
           "422": { description: "A connectivity test failed — the write was rolled back ({ ok: false, ...test results })" },
           "429": { description: "Rate limited, or a key was modified within its 10s cooldown" },
         },
@@ -5215,28 +5579,63 @@ const spec = {
       get: {
         tags: ["Settings"],
         summary: "Get available quality profiles / root folders from Radarr and Sonarr (ADMIN)",
-        responses: { "200": { description: "ARR options" } },
+        parameters: [
+          { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug (\"\" = default); the legacy `variant=4k` is still honored when `instance` is absent" },
+        ],
+        responses: {
+          "200": { description: "{ rootFolders, qualityProfiles, languageProfiles? } — languageProfiles only for a Sonarr v3 with usable ones" },
+          "400": { description: "Invalid service or instance" },
+          "422": { description: "That instance has no URL/API key configured" },
+        },
       },
     },
     "/settings/plex/libraries": {
       get: {
         tags: ["Settings"],
         summary: "List available Plex libraries (ADMIN)",
-        responses: { "200": { description: "Plex library list" } },
+        parameters: [{ name: "instance", in: "query", schema: { type: "string" }, description: "Plex instance slug; absent = the default server" }],
+        responses: {
+          "200": { description: "The server's library sections" },
+          "400": { description: "Invalid instance slug" },
+          "422": { description: "That server is not configured" },
+          "502": { description: "Plex could not be reached" },
+        },
       },
     },
     "/settings/jellyfin/libraries": {
       get: {
         tags: ["Settings"],
         summary: "List available Jellyfin libraries (ADMIN)",
-        responses: { "200": { description: "Jellyfin library list" } },
+        parameters: [{ name: "instance", in: "query", schema: { type: "string" }, description: "Jellyfin instance slug; absent = the default server" }],
+        responses: {
+          "200": { description: "The server's media folders" },
+          "400": { description: "Invalid instance slug" },
+          "422": { description: "That server is not configured" },
+          "502": { description: "Jellyfin could not be reached" },
+        },
       },
     },
     "/settings/test-ratings": {
       post: {
         tags: ["Settings"],
-        summary: "Test MDBList / OMDB connectivity with stored keys (ADMIN)",
-        responses: { "200": { description: "Test result" } },
+        summary: "Test MDBList / OMDB / Trakt / ipinfo connectivity with stored keys (ADMIN)",
+        description: "A live upstream request per call. 10 per minute per admin.",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service"], properties: { service: { type: "string", enum: ["omdb", "mdblist", "trakt", "ipinfo"] } } } } } },
+        responses: {
+          "200": { description: "{ ok: true, message }" },
+          "400": { description: "Unknown service" },
+          "422": { description: "{ ok: false, error } — the provider test failed" },
+          "429": { description: "Rate limited" },
+        },
+      },
+    },
+    "/settings/webhook-urls": {
+      get: {
+        tags: ["Settings"],
+        summary: "Radarr/Sonarr webhook tokens, fetched on demand for the copy buttons (ADMIN)",
+        description: "Kept off the settings page's server-rendered payload so the secrets cross the wire only when an admin asks. radarr/sonarr fall back to the legacy shared secret; the 4K entries do not.",
+        responses: { "200": { description: "{ radarr, sonarr, radarr4k, sonarr4k } — each a token string or null" } },
       },
     },
 
@@ -5252,7 +5651,14 @@ const spec = {
         security: [],
         parameters: [{ name: "token", in: "query", schema: { type: "string" } }],
         requestBody: { content: { "application/json": { schema: { type: "object" } } } },
-        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" }, "409": { description: "Replayed delivery" } },
+        responses: {
+          "200": { description: "Processed — { ok: true, ... } (a Test event answers { ok, message })" },
+          "400": { description: "Body is not valid JSON, or the payload's tmdbId is invalid" },
+          "401": { description: "Invalid token" },
+          "409": { description: "Replayed delivery" },
+          "413": { description: "Body over 1 MB" },
+          "429": { description: "More than 600 deliveries a minute from one client IP" },
+        },
       },
     },
     "/webhooks/sonarr": {
@@ -5267,7 +5673,14 @@ const spec = {
         security: [],
         parameters: [{ name: "token", in: "query", schema: { type: "string" } }],
         requestBody: { content: { "application/json": { schema: { type: "object" } } } },
-        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" }, "409": { description: "Replayed delivery" } },
+        responses: {
+          "200": { description: "Processed — { ok: true, ... } (a Test event answers { ok, message })" },
+          "400": { description: "Body is not valid JSON, or the payload's tmdbId is invalid" },
+          "401": { description: "Invalid token" },
+          "409": { description: "Replayed delivery" },
+          "413": { description: "Body over 1 MB" },
+          "429": { description: "More than 600 deliveries a minute from one client IP" },
+        },
       },
     },
 
@@ -5276,7 +5689,11 @@ const spec = {
         tags: ["Cron"],
         summary: "Purge expired auth sessions",
         security: [{ cronSecret: [] }],
-        responses: { "200": { description: "Purge result" } },
+        responses: {
+          "200": { description: "{ ok, deleted: { authSessions, discordLinkTokens, discordMergeCodes, ... counts per table }, errorCount, timestamp } — or { skipped: true, reason } when another run holds the lock (X-Cron-Skipped). Only rows past their `expiresAt` are swept (guardrail 6c)" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+          "500": { description: "Same body with ok:false — one or more table sweeps failed" },
+        },
       },
     },
     "/cron/scrub-audit-pii": {
@@ -5284,7 +5701,10 @@ const spec = {
         tags: ["Cron"],
         summary: "Scrub PII from old audit log entries",
         security: [{ cronSecret: [] }],
-        responses: { "200": { description: "Scrub result" } },
+        responses: {
+          "200": { description: "{ ok, scrubbed, authDetailsCleared, cutoff, timestamp } — or { skipped: true, reason } when another run holds the lock" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
       },
     },
     "/cron/warm-activity": {
@@ -5292,7 +5712,10 @@ const spec = {
         tags: ["Cron"],
         summary: "Pre-warm activity calendar cache",
         security: [{ cronSecret: [] }],
-        responses: { "200": { description: "Warm result" } },
+        responses: {
+          "200": { description: "{ ok, warmed, timestamp } — or { skipped: true, reason } when another run holds the lock" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
       },
     },
     "/cron/refresh-upstream-watch": {
@@ -5300,7 +5723,10 @@ const spec = {
         tags: ["Cron"],
         summary: "Snapshot each media server's own watch records for the never-watched report",
         security: [{ cronSecret: [] }],
-        responses: { "200": { description: "Per-server refresh result (skipped while both the Never Watched page and Library Cleanup are off)" } },
+        responses: {
+          "200": { description: "{ ok, ...per-server results, durationMs, trigger, timestamp } (a server that could not be checked sets ok:false, `error` and X-Cron-Degraded) — or { skipped: true, reason } while both the Never Watched page and Library Cleanup are off, or another run holds the lock" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
       },
     },
     "/cron/warm-library": {
@@ -5308,7 +5734,10 @@ const spec = {
         tags: ["Cron"],
         summary: "Incrementally re-warm the library :details/TmdbMediaCore caches",
         security: [{ cronSecret: [] }],
-        responses: { "200": { description: "Warm result" } },
+        responses: {
+          "200": { description: "{ ok, ...library counts, edges, translations, timestamp, error? } — or { skipped: true, reason } (no TMDB credentials, or another run holds the lock)" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
       },
     },
     "/cron/warm-mdblist": {
@@ -5316,7 +5745,10 @@ const spec = {
         tags: ["Cron"],
         summary: "Pre-warm MDBList ratings cache",
         security: [{ cronSecret: [] }],
-        responses: { "200": { description: "Warm result" } },
+        responses: {
+          "200": { description: "{ ok, total, ..., timestamp, error? } with X-Cron-Degraded when some items failed — or { skipped: true, reason } (no MDBList key, or another run holds the lock)" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
       },
     },
     "/cron/warm-omdb": {
@@ -5324,7 +5756,10 @@ const spec = {
         tags: ["Cron"],
         summary: "Pre-warm OMDB ratings cache",
         security: [{ cronSecret: [] }],
-        responses: { "200": { description: "Warm result" } },
+        responses: {
+          "200": { description: "{ ok, total, ..., timestamp, error? } with X-Cron-Degraded when some items failed — or { skipped: true, reason } (no OMDB key, or another run holds the lock)" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
       },
     },
     "/cron/warm-recommendations": {
@@ -5332,7 +5767,10 @@ const spec = {
         tags: ["Cron"],
         summary: "Pre-warm personalized \"For You\" recommendation cache",
         security: [{ cronSecret: [] }],
-        responses: { "200": { description: "Warm result" } },
+        responses: {
+          "200": { description: "{ ok, ...result, timestamp, error? } — a failed graph build or user computations set ok:false and X-Cron-Degraded (every stored shelf is kept) — or { skipped: true, reason } when another run holds the lock" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
       },
     },
 
@@ -5340,11 +5778,22 @@ const spec = {
       get: {
         tags: ["Notifications"],
         summary: "List the caller's in-app notifications + unread count",
+        description: "Newest first, 30 per page, keyset-paged: pass the previous response's `nextCursor` as `cursor`. An absent or malformed cursor reads the first page. `title`/`body` are rendered in the caller's language (native clients get the instance default). 120 reads per minute per user.",
+        parameters: [
+          { name: "cursor", in: "query", schema: { type: "string" }, description: "Opaque `<createdAt-iso>|<id>` from the previous page's `nextCursor`" },
+        ],
         responses: {
           "200": {
-            description: "Recent notifications and unread count",
-            content: { "application/json": { schema: { type: "object", properties: { items: { type: "array", items: { type: "object" } }, unreadCount: { type: "integer" } } } } },
+            description: "One page of notifications, the unread count and the caller's total",
+            content: { "application/json": { schema: { type: "object", properties: {
+              items: { type: "array", items: { type: "object" } },
+              unreadCount: { type: "integer" },
+              total: { type: "integer" },
+              nextCursor: { type: "string", nullable: true, description: "Null when the page was not full" },
+              pageSize: { type: "integer", example: 30 },
+            } } } },
           },
+          "429": { description: "Rate limited" },
         },
       },
       post: {
@@ -5354,7 +5803,11 @@ const spec = {
           required: false,
           content: { "application/json": { schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } } } } },
         },
-        responses: { "200": { description: "{ ok, unreadCount }" } },
+        responses: {
+          "200": { description: "{ ok, unreadCount }" },
+          "400": { description: "`ids` is present but not an array (never coerced to \"all\")" },
+          "429": { description: "Rate limited (60/min)" },
+        },
       },
       delete: {
         tags: ["Notifications"],
@@ -5368,6 +5821,7 @@ const spec = {
         responses: {
           "200": { description: "{ ok, unreadCount }" },
           "400": { description: "Neither ids nor all=1 supplied" },
+          "429": { description: "Rate limited (60/min)" },
         },
       },
     },
@@ -5377,13 +5831,15 @@ const spec = {
         summary: "List the caller's watchlist",
         parameters: [
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
-          { name: "type", in: "query", schema: { $ref: "#/components/schemas/MediaType" }, description: "Filter by media type" },
+          { name: "type", in: "query", schema: { $ref: "#/components/schemas/MediaType" }, description: "Filter by media type; any other value is ignored" },
+          { name: "q", in: "query", schema: { type: "string" }, description: "Case-insensitive substring match on the title (wildcard characters stripped)" },
         ],
         responses: {
           "200": {
-            description: "Paginated watchlist items",
+            description: "Paginated watchlist items, newest first, 60 per page",
             content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/PaginatedMeta" }, { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }] } } },
           },
+          "429": { description: "Rate limited (60/min)" },
         },
       },
       post: {
@@ -5411,7 +5867,7 @@ const spec = {
                       properties: {
                         outcome: {
                           type: "string",
-                          description: "requested | already-available | already-requested | quota | blacklisted | permanently-declined | rating-cap | forbidden | instance-unavailable | tmdb-unverified | arr-unreachable | discord-link-required | rate-limited | maintenance | error",
+                          description: "requested | already-available | already-requested | quota | blacklisted | permanently-declined | rating-cap | forbidden | instance-unavailable | tmdb-unverified | invalid-quality-profile | invalid-note | arr-unreachable | discord-link-required | rate-limited | maintenance | error",
                         },
                         requested: { type: "boolean" },
                         status: { type: "string", nullable: true, description: "The filed request's status when one was filed" },
@@ -5423,8 +5879,10 @@ const spec = {
               },
             },
           },
+          "400": { description: "tmdbId or mediaType missing or invalid" },
           "409": { description: "Already on watchlist" },
           "422": { description: "Could not verify media with TMDB" },
+          "429": { description: "Rate limited" },
         },
       },
       delete: {
@@ -5434,7 +5892,11 @@ const spec = {
           { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
           { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
         ],
-        responses: { "200": { description: "Removed (idempotent)" } },
+        responses: {
+          "200": { description: "{ ok: true } — removed, or it was not there (idempotent)" },
+          "400": { description: "tmdbId or mediaType missing or invalid" },
+          "429": { description: "Rate limited (60/min)" },
+        },
       },
     },
     "/hidden": {
@@ -5444,16 +5906,17 @@ const spec = {
         parameters: [{ name: "page", in: "query", schema: { type: "integer", default: 1 } }],
         responses: {
           "200": {
-            description: "Paginated hidden items",
+            description: "Paginated hidden items, newest first, 60 per page",
             content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/PaginatedMeta" }, { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }] } } },
           },
+          "429": { description: "Rate limited (60/min)" },
         },
       },
       post: {
         tags: ["Lists"],
         summary: "Hide a title from the caller's discovery",
-        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" }, title: { type: "string" }, posterPath: { type: "string", nullable: true } } } } } },
-        responses: { "201": { description: "Hidden" }, "409": { description: "Already hidden" } },
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" }, title: { type: "string", maxLength: 500, description: "Optional; cut to 500 characters. Not verified against TMDB" }, posterPath: { type: "string", nullable: true, maxLength: 500, description: "Stored only when 1–500 characters, else null" } } } } } },
+        responses: { "201": { description: "Hidden — { tmdbId, mediaType, title, posterPath, createdAt }" }, "400": { description: "tmdbId or mediaType missing or invalid" }, "409": { description: "Already hidden" }, "429": { description: "Rate limited (60/min)" } },
       },
       delete: {
         tags: ["Lists"],
@@ -5462,7 +5925,7 @@ const spec = {
           { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
           { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
         ],
-        responses: { "200": { description: "Un-hidden (idempotent)" } },
+        responses: { "200": { description: "{ ok: true } — un-hidden, or it was not hidden (idempotent)" }, "400": { description: "tmdbId or mediaType missing or invalid" }, "429": { description: "Rate limited (60/min)" } },
       },
     },
     "/media/{type}/{tmdbId}": {
@@ -5508,14 +5971,31 @@ const spec = {
       get: {
         tags: ["Play History"],
         summary: "365-day activity heatmap data (ADMIN)",
-        responses: { "200": { description: "Calendar cells" }, "403": { description: "Forbidden — ADMIN only" } },
+        description: "One row per UTC day with a watched-session count. Unrecognized `source` / `mediaType` values are ignored (the heatmap is then unfiltered).",
+        parameters: [
+          { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] } },
+          { name: "mediaType", in: "query", schema: { type: "string", enum: ["MOVIE", "TV"] } },
+        ],
+        responses: {
+          "200": { description: "Array of { day: \"YYYY-MM-DD\", count }", content: { "application/json": { schema: { type: "array", items: { type: "object", properties: { day: { type: "string", format: "date" }, count: { type: "integer" } } } } } } },
+          "403": { description: "Forbidden — ADMIN only" },
+        },
       },
     },
     "/play-history/transcode-offenders": {
       get: {
         tags: ["Play History"],
         summary: "Titles/users driving the most transcodes (ADMIN)",
-        responses: { "200": { description: "Transcode offender list" }, "403": { description: "Forbidden — ADMIN only" } },
+        description: "Top 6 users and top 6 titles forcing server-side transcodes in the window. Unrecognized `source` / `mediaType` values are ignored.",
+        parameters: [
+          { name: "days", in: "query", schema: { type: "integer", default: 30, minimum: 1, maximum: 3650 }, description: "Window in days; clamped, a non-number means 30" },
+          { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] } },
+          { name: "mediaType", in: "query", schema: { type: "string", enum: ["MOVIE", "TV"] } },
+        ],
+        responses: {
+          "200": { description: "{ topUsers: [{ id (MediaServerUser id), username, source, count }], topTitles: [{ title, tmdbId, mediaType, count }] }" },
+          "403": { description: "Forbidden — ADMIN only" },
+        },
       },
     },
     "/admin/library/match-check": {
@@ -5567,9 +6047,10 @@ const spec = {
     "/admin/library/bad-matches": {
       get: {
         tags: ["Admin – Debug"],
-        summary: "Library items whose TMDB match looks wrong",
-        parameters: [{ name: "mediaType", in: "query", schema: { $ref: "#/components/schemas/MediaType" } }],
-        responses: { "200": { description: "Bad-match candidates" } },
+        summary: "Library items whose TMDB match looks wrong (ADMIN)",
+        description: "Apply a fix with POST /admin/fix-match.",
+        parameters: [{ name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"] }, description: "LOWERCASE here (unlike most endpoints); anything else lists both" }],
+        responses: { "200": { description: "{ badMatches: [...] }" }, "500": { description: "The scan failed" } },
       },
     },
     "/discord/status": {
@@ -5583,15 +6064,27 @@ const spec = {
       post: {
         tags: ["Discord"],
         summary: "Unlink the caller's Discord account",
-        responses: { "200": { description: "Unlinked" } },
+        responses: { "200": { description: "{ ok: true } — also strips the Discord roles Summonarr granted, in the background" } },
       },
     },
     "/report": {
       post: {
         tags: ["Issues"],
         summary: "Report objectionable content (native app)",
-        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { contentType: { type: "string" }, contentId: { type: "string" }, context: { type: "string" }, reason: { type: "string" } } } } } },
-        responses: { "200": { description: "Report received" } },
+        description: "Writes a CONTENT_REPORT audit row for the admins. The reported content must exist. 10 reports per hour per user; refused with 503 while maintenance mode applies to the caller.",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["contentType", "contentId"], properties: {
+          contentType: { type: "string", enum: ["issue_message", "vote_reason", "issue"] },
+          contentId: { type: "string", maxLength: 200, description: "The id of the IssueMessage, DeletionVote or Issue" },
+          context: { type: "string", maxLength: 200, description: "Optional; cut to 200 characters" },
+          reason: { type: "string", maxLength: 500, description: "Optional; cut to 500 characters" },
+        } } } } },
+        responses: {
+          "200": { description: "{ ok: true } — report received" },
+          "400": { description: "Unknown contentType or missing/oversized contentId" },
+          "404": { description: "No such content" },
+          "429": { description: "Rate limited (10/hour)" },
+          "503": { description: "Maintenance mode" },
+        },
       },
     },
     "/requests/bulk": {
@@ -5600,14 +6093,17 @@ const spec = {
         summary: "Bulk-create requests, optionally on behalf of another user (REQUEST)",
         requestBody: {
           required: true,
-          content: { "application/json": { schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" } } } }, onBehalfOfUserId: { type: "string", nullable: true } } } } },
+          content: { "application/json": { schema: { type: "object", required: ["items"], properties: { items: { type: "array", minItems: 1, maxItems: 50, items: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer", minimum: 1 }, mediaType: { $ref: "#/components/schemas/MediaType" } } } }, onBehalfOfUserId: { type: "string", nullable: true } } } } },
         },
         responses: {
-          "201": { description: "{ results, created } — per-item results; at least one item reached the create phase" },
-          "200": { description: "{ results, created: 0 } — every item was skipped before the create phase" },
-          "400": { description: "Validation error" },
-          "403": { description: "Not permitted (on-behalf without REQUEST_ON_BEHALF, or a target with more permissions than the caller)" },
-          "429": { description: "Rate limited, or the target's quota would be exceeded" },
+          "201": { description: "{ results, created } — at least one request row was created; `results` is one { tmdbId, mediaType, result } per item, `result` being created | auto-approved | already-available | already-requested | skipped-declined | no-permission | blacklisted | rating-blocked | error" },
+          "200": { description: "{ results, created: 0 } — nothing was created (every item skipped: blacklisted, no permission, already available or requested, declined, rating-blocked, or a failed metadata lookup)" },
+          "400": { description: "Validation error: items missing, empty or over 50, an invalid tmdbId/mediaType, or a non-string onBehalfOfUserId" },
+          "403": { description: "Not permitted (on-behalf without REQUEST_ON_BEHALF, a target with more permissions than the caller, or the Discord-link requirement)" },
+          "404": { description: "The on-behalf target user does not exist" },
+          "422": { description: "The on-behalf target is deactivated" },
+          "429": { description: "Rate limited (the admin's requests-per-minute setting), or the target's quota would be exceeded" },
+          "503": { description: "Maintenance mode" },
         },
       },
     },
@@ -5620,7 +6116,15 @@ const spec = {
           { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug ('' default, '4k', or named)" },
           { name: "is4k", in: "query", schema: { type: "boolean" }, description: "Legacy shorthand for instance=4k" },
         ],
-        responses: { "200": { description: "{ qualityProfiles: [...] }" } },
+        description: "A live Radarr/Sonarr read (`mediaType` picks the service). A non-default instance needs the caller's grant unless they hold MANAGE_REQUESTS; an ungranted and an unknown slug answer the same 403. 120 per minute per user.",
+        responses: {
+          "200": { description: "{ qualityProfiles: [{ id, name }], defaultId }" },
+          "400": { description: "mediaType is not MOVIE|TV, or the instance slug is invalid" },
+          "403": { description: "Not permitted to read that instance" },
+          "422": { description: "That instance is not configured" },
+          "429": { description: "Rate limited" },
+          "502": { description: "The arr could not be reached" },
+        },
       },
     },
     "/requests/instances": {
@@ -5637,6 +6141,8 @@ const spec = {
             description:
               "{ instances: [{ slug, name, requested, available }] }. Filtered to instances this caller may target, so an ungranted or unknown slug is simply absent; empty when none are configured, none are grantable, or the title is blacklisted",
           },
+          "400": { description: "mediaType is not MOVIE|TV, or tmdbId is invalid or out of range" },
+          "429": { description: "Rate limited (60/min)" },
         },
       },
     },
@@ -5644,15 +6150,26 @@ const spec = {
       get: {
         tags: ["Requests"],
         summary: "Users the caller may request on behalf of (REQUEST_ON_BEHALF)",
-        responses: { "200": { description: "Eligible user list" } },
+        description: "Active accounts only (deactivated ones are left out), at most 1000, by name. A non-ADMIN caller is offered only targets whose permissions are a subset of their own, since the bulk route refuses any other.",
+        responses: { "200": { description: "{ users: [{ id, name, email }] }" } },
       },
     },
     "/issues/{id}/claim": {
       post: {
         tags: ["Issues"],
-        summary: "Claim an issue (issue-admin)",
+        summary: "Claim, release or take over an issue (ADMIN / ISSUE_ADMIN)",
+        description: "A toggle: unclaimed → claim for the caller; claimed by the caller → release; claimed by someone else → take over. Replies on a claimed issue narrow to the claimer and the reporter.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Claimed" } },
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: {
+          expectedClaimedBy: { type: "string", nullable: true, description: "Who the caller saw as the claimer (null = unclaimed). When present and it no longer matches, the call is refused with 409 instead of silently taking over. Omit to toggle without the check" },
+        } } } } },
+        responses: {
+          "200": { description: "{ id, claimedBy, claimedAt, claimedUser: { id, name, email } | null } after the change" },
+          "400": { description: "`expectedClaimedBy` is neither null nor a string" },
+          "404": { description: "No such issue" },
+          "409": { description: "{ error: \"claim-conflict\", message } — the claim changed since the caller read it" },
+          "503": { description: "Maintenance mode" },
+        },
       },
     },
     "/push/apns": {
@@ -5661,9 +6178,21 @@ const spec = {
         summary: "Register an iOS APNs device token (native)",
         requestBody: {
           required: true,
-          content: { "application/json": { schema: { type: "object", required: ["deviceToken"], properties: { deviceToken: { type: "string" }, label: { type: "string" }, publicKey: { type: "string" } } } } },
+          content: { "application/json": { schema: { type: "object", required: ["deviceToken"], properties: {
+            deviceToken: { type: "string", pattern: "^(?:[0-9a-fA-F]{2}){32,100}$", description: "Hex APNs token, 32–100 bytes; stored lowercased" },
+            label: { type: "string", maxLength: 100 },
+            publicKey: { type: "string", nullable: true, description: "Optional P-256 X9.63 uncompressed key (65 bytes, base64) for encrypted rich pushes. Omitted = keep the stored key; an explicit null clears it; a malformed value is ignored" },
+          } } } },
         },
-        responses: { "200": { description: "Registered" } },
+        description: "Registers or updates the caller's device. Per-user cap (maxPushSubscriptions setting, default 5) evicts the oldest subscription. 10 per minute per user.",
+        responses: {
+          "200": { description: "{ ok: true }" },
+          "400": { description: "Invalid deviceToken" },
+          "403": { description: "feature.integration.push is off" },
+          "409": { description: "That device token is registered to another account — its owner must unregister it first" },
+          "429": { description: "Rate limited" },
+          "503": { description: "Maintenance mode" },
+        },
       },
       delete: {
         tags: ["Push"],
@@ -5672,18 +6201,22 @@ const spec = {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["deviceToken"], properties: { deviceToken: { type: "string" } } } } },
         },
-        responses: { "200": { description: "Unregistered" } },
+        responses: { "200": { description: "{ ok: true } — removed, or nothing matched (only the caller's own rows)" }, "400": { description: "deviceToken missing" } },
       },
     },
     "/events": {
       get: {
         tags: ["Events"],
         summary: "Server-sent events stream for real-time UI updates",
+        description: "A heartbeat every 25 seconds; the session is re-validated against the database every minute (a revoked or demoted session stops receiving admin/issue/request frames), and the stream is closed after one hour, so clients reconnect. At most 5 concurrent streams per user and SSE_MAX_LISTENERS (default 500) in total.",
         responses: {
           "200": {
             description: "SSE stream",
             content: { "text/event-stream": { schema: { type: "string" } } },
           },
+          "401": { description: "Not signed in" },
+          "429": { description: "Too many SSE connections (per user or in total)" },
+          "503": { description: "Maintenance mode" },
         },
       },
     },

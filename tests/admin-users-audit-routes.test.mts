@@ -369,10 +369,16 @@ test("users: a full ADMIN CAN create an ADMIN account", async () => {
   assert.equal(res.status, 201);
 });
 
-test("users: a MANAGE_USERS holder can still create USER and ISSUE_ADMIN accounts", async () => {
+test("users: a MANAGE_USERS holder can create USER accounts, and ISSUE_ADMIN only if it holds MANAGE_ISSUES", async () => {
   const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
   assert.equal((await createUser(t, { email: "u1@example.com", password: "password12345", role: "USER" })).status, 201);
-  assert.equal((await createUser(t, { email: "u2@example.com", password: "password12345", role: "ISSUE_ADMIN" })).status, 201);
+  // ISSUE_ADMIN seeds MANAGE_ISSUES, which this delegate does not hold: grant only what you hold.
+  ops = [];
+  const denied = await createUser(t, { email: "u2@example.com", password: "password12345", role: "ISSUE_ADMIN" });
+  assert.equal(denied.status, 403);
+  assert.equal(opsOf("user.create").length, 0);
+  const t2 = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.MANAGE_ISSUES });
+  assert.equal((await createUser(t2, { email: "u3@example.com", password: "password12345", role: "ISSUE_ADMIN" })).status, 201);
 });
 
 test("users: an unknown role is rejected before any privilege check", async () => {

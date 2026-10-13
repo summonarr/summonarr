@@ -237,3 +237,13 @@ test("a provider switch names only its own kind's flags", () => {
   assert.equal(parseProviderEnableChange("downloadClient", {}), null);
   assert.equal(parseProviderEnableChange("downloadClient", { enable: "no" }), null);
 });
+
+import { editorBody as __editorBody } from "../src/lib/arr-title.ts";
+import { test as __t } from "node:test";
+import __assert from "node:assert/strict";
+__t("editorBody: a trailing slash on the root folder is not a move", () => {
+  const same = __editorBody("sonarr", 1, { rootFolderPath: "/tv/", monitored: true } as never, { rootFolderPath: "/tv" });
+  __assert.equal(same?.rootFolderPath, undefined);
+  const moved = __editorBody("sonarr", 1, { rootFolderPath: "/anime/" } as never, { rootFolderPath: "/tv" });
+  __assert.equal(moved?.rootFolderPath, "/anime/");
+});

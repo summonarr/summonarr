@@ -4,7 +4,7 @@ import { safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit } from "./concurrency";
 import { resolveTvdbToTmdb } from "./arr";
-import { withDuplicateRatingKeys, type PlexLegacyGuidRef, type PlexLibraryItemData } from "./plex";
+import { withDuplicateRatingKeys, getPlexTmdbIds, type PlexLegacyGuidRef, type PlexLibraryItemData, type PlexSection } from "./plex";
 
 // Resolves the legacy-agent secondary channel (see PlexLegacyGuidRef in
 // plex.ts) to tmdb ids via TMDB /find — com.plexapp.agents.thetvdb:// shows
@@ -131,4 +131,23 @@ export function mergeResolvedLegacyItems(
       ratingKeyToTmdb.set(r.ratingKey, [r.tmdbId]);
     }
   }
+}
+
+// The show ratingKey -> tmdb ids map a WHOLE-table TVEpisodeCache rewrite needs,
+// legacy-agent shows included. getPlexTVEpisodes' own fallback walk only reads
+// modern Guid[] shows, so a rewrite fed by it (the standalone tv-episodes route,
+// the per-source Plex resync's recentOnly path) silently dropped the episodes of
+// every thetvdb:// / imdb:// show the orchestrator had cached, until its next
+// run. Same listing the internal walk pages, so no extra requests.
+export async function buildPlexShowKeyMap(
+  serverUrl: string,
+  token: string,
+  selectedKeys: Set<string> | undefined,
+  sections: PlexSection[],
+): Promise<Map<string, number[]>> {
+  const ratingKeyToTmdb = new Map<string, number[]>();
+  const tvLegacy = new Map<string, PlexLegacyGuidRef>();
+  const tvIds = await getPlexTmdbIds(serverUrl, token, "TV", false, selectedKeys, sections, ratingKeyToTmdb, tvLegacy, true);
+  mergeResolvedLegacyItems(await resolvePlexLegacyGuids(tvLegacy, "TV"), tvIds, ratingKeyToTmdb);
+  return ratingKeyToTmdb;
 }

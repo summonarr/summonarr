@@ -22,6 +22,10 @@ function encryptAccountTokensInPlace(data: Record<string, unknown> | undefined |
     const v = data[field];
     if (typeof v === "string" && v.length > 0) {
       data[field] = encryptToken(v);
+    } else if (v && typeof v === "object" && typeof (v as { set?: unknown }).set === "string") {
+      // Prisma's `{ set: "…" }` update form is the same write — never plaintext.
+      const set = (v as { set: string }).set;
+      if (set.length > 0) (v as { set: string }).set = encryptToken(set);
     }
   }
 }
@@ -318,6 +322,14 @@ function createPrismaClient() {
           const where = args.where as { key?: string } | undefined;
           const data = args.data as { value?: unknown } | undefined;
           // Skip when the update doesn't touch `value` at all (e.g. metadata-only updates).
+          if (data && data.value !== null && typeof data.value === "object") {
+            // `{ set: "…" }` form: normalise to the plain string so the paths below encrypt it.
+            const set = (data.value as { set?: unknown }).set;
+            if (typeof set !== "string") {
+              throw new Error("[prisma] setting.update with a non-string `value` operation is forbidden");
+            }
+            data.value = set;
+          }
           const newValue = data && typeof data.value === "string" ? data.value : undefined;
           if (newValue !== undefined && newValue.length > 0) {
             const key = where?.key;
@@ -345,6 +357,13 @@ function createPrismaClient() {
               (create as { value: string }).value = encryptToken(create.value);
             }
             const update = args.update as { value?: unknown } | undefined;
+            if (update && update.value !== null && typeof update.value === "object") {
+              const set = (update.value as { set?: unknown }).set;
+              if (typeof set !== "string") {
+                throw new Error("[prisma] setting.upsert with a non-string `value` operation is forbidden");
+              }
+              update.value = set;
+            }
             if (update && typeof update.value === "string" && update.value.length > 0) {
               (update as { value: string }).value = encryptToken(update.value);
             }

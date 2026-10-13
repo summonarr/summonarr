@@ -176,6 +176,9 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `UPSTREAM_WATCH_SYNC_INTERVAL` | `86400` | Plex/Jellyfin's own watch records for the *Never Watched* report (a no-op while Never Watched and Library cleanup are both off). |
 | `ARR_WATCH_INTERVAL` | `900` | Radarr/Sonarr monitor: low disk space, failed downloads and downloads newly needing attention, sent to your notification channels (skipped while no Radarr/Sonarr is configured). |
 | `ARR_SNAPSHOT_INTERVAL` | `300` | How often the admin Radarr/Sonarr pages are re-read in the background so they open on recent data. Each page keeps its own pace by priority (queue and health every 5 minutes, Missing, history, calendar and titles every 10, Arr System every 15); only pages an admin opened in the last day are re-read. |
+| `WARM_RECOMMENDATIONS_INTERVAL` | `43200` | *For You* recommendations rebuild. |
+| `WARM_LIBRARY_INTERVAL` | `86400` | Library metadata and suggestion pre-warm. |
+| `CRON_RETRY_INTERVAL` | `300` | Wait before retrying a cron job that failed. |
 
 ### Advanced / rarely needed
 

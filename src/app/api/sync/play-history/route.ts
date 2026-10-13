@@ -577,7 +577,13 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
       // skipSSE: caller (syncPlayHistory POST) emits a single batched
       // activity:history-updated after the full sync run completes, so we
       // don't trigger N refetches per cron tick.
-      return recordCompletedSession(applyFinalTick(session, now), { skipSSE: true, stoppedAt: now })
+      // No final tick and no stoppedAt: the session has been ABSENT for >= the
+      // grace, so the interval since lastSeenAt is not playtime, and the stop
+      // happened right after lastSeenAt, not at `now` (the defaults —
+      // lastSeenAt as stoppedAt, increment 0 — are cleanupStaleSessions' rule).
+      // applyFinalTick(session, now) credited ~60s of phantom watch time to every
+      // session that ended without an SSE stop.
+      return recordCompletedSession(session, { skipSSE: true })
         .then(() => {
           // Ledger AFTER the write commits (guardrail 27): gate re-create against a racey
           // Plex reappearance only once the PlayHistory row exists, so a failed
@@ -932,7 +938,8 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
   const finalized = await Promise.all(
     stale.map((session) =>
       // skipSSE: see Plex branch above; one batched SSE per cron run.
-      recordCompletedSession(applyFinalTick(session, now), { skipSSE: true, stoppedAt: now })
+      // See the Plex sweep: absent past the grace ⇒ no final tick, stoppedAt = lastSeenAt.
+      recordCompletedSession(session, { skipSSE: true })
         .then(() => true)
         .catch((err) => {
           console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);

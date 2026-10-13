@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
-import { getCronActor, recordCronRun } from "@/lib/cron-auth";
+import { cronSkippedResponse, getCronActor, recordCronRun } from "@/lib/cron-auth";
 import {
   getTrending, getPopularMovies, getPopularTV,
   getUpcomingMovies, getUpcomingTV, getOnTheAirTV,
@@ -129,6 +129,6 @@ export async function POST(request: NextRequest) {
         timestamp: new Date().toISOString(),
       }, errorCount > 0 ? { headers: { "X-Cron-Degraded": String(errorCount) } } : undefined);
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    () => cronSkippedResponse(),
   );
 }

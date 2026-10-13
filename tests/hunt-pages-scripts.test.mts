@@ -53,3 +53,10 @@ test("smoke-test.sh checks every static sensitive Setting key for plaintext", ()
     assert.ok(listed.has(key), `smoke-test.sh plaintext check is missing ${key}`);
   }
 });
+
+// A six-figure played list passed through push(...spread) exceeds the engine's
+// argument limit and fails the whole server's snapshot.
+test("upstream-watch-data does not spread an unbounded collection into push()", () => {
+  const src = read("src/lib/upstream-watch-data.ts");
+  assert.doesNotMatch(src, /\.push\(\s*\.\.\.byItem\.values\(\)\s*\)/);
+});

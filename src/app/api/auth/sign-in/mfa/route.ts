@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { AccountDeactivatedError, buildDeviceMeta, signInAndMintSession } from "@/lib/auth";
 import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
-import { checkRateLimit, getClientIp, ipBucketKey, refundHit } from "@/lib/rate-limit";
+import { checkRateLimit, reserveRateLimit, getClientIp, ipBucketKey, refundHit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { commitToken, isTokenUsable, releaseToken, reserveToken, verifyMfaSigninToken } from "@/lib/mfa/mfa-token";
@@ -102,7 +102,8 @@ export async function POST(req: NextRequest) {
   if (!input) return NextResponse.json({ error: t("apiAuth.mfa.inputRequired") }, { status: 400 });
 
   const userKey = `mfa-user:${claims.userId}`;
-  if (!checkRateLimit(userKey, USER_LIMIT, USER_WINDOW_MS)) {
+  const userHitAt = reserveRateLimit(userKey, USER_LIMIT, USER_WINDOW_MS);
+  if (userHitAt === null) {
     fail("mfa_rate_limited", claims.userId);
     return NextResponse.json({ error: t("apiAuth.common.tooManyAttempts15") }, { status: 429 });
   }
@@ -161,7 +162,7 @@ export async function POST(req: NextRequest) {
   // One challenge, one session. Only the reservation holder gets here; this
   // fails only if the entry was evicted meanwhile.
   if (!commitToken(claims.jti)) return expired(t);
-  refundHit(userKey);
+  refundHit(userKey, userHitAt);
 
   const device = buildDeviceMeta(req.headers);
   let result;

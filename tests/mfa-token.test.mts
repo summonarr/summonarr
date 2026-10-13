@@ -165,6 +165,13 @@ test("per-subject cap: minting a sixth live token for one user evicts THAT user'
   assert.ok(isTokenUsable(other.jti), "another user's token is untouched");
 });
 
+test("an IN-FLIGHT token is never evicted by newer mints (its verifier may already have burned a recovery code)", async () => {
+  const mine = await signMfaSigninToken({ ...INPUT, userId: "owner" });
+  assert.equal(reserveToken(mine.jti), true);
+  for (let i = 0; i < MAX_LIVE_PER_SUBJECT + 3; i++) await signMfaSigninToken({ ...INPUT, userId: "owner" });
+  assert.equal(commitToken(mine.jti), true, "the reservation holder can still redeem");
+});
+
 test("a burned token can't be un-burned by eviction pressure on its subject", async () => {
   const burned = await signMfaSigninToken({ ...INPUT, userId: "u-burn" });
   for (let i = 0; i < MAX_TOKEN_FAILURES; i++) recordTokenFailure(burned.jti);

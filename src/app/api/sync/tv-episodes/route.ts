@@ -4,6 +4,7 @@ import { getMediaInstances } from "@/lib/media-instance-registry";
 import { prisma } from "@/lib/prisma";
 import { getPlexTVEpisodes, getPlexLibrarySections, type PlexTVEpisodeData } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
+import { buildPlexShowKeyMap } from "@/lib/plex-legacy-resolve";
 import { getJellyfinTVEpisodes, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { isCronAuthorized, replaceEpisodeCacheForSource, withCronRunRecording } from "@/lib/cron-auth";
@@ -66,7 +67,10 @@ async function syncTvEpisodes() {
         // configured instance's episodes, so spreading it as call arguments hits
         // V8's argument ceiling on a large library and the catch below downgrades
         // that to `complete = false`, skipping the rewrite entirely.
-        for (const e of await getPlexTVEpisodes(serverUrl, token, selected, sections)) episodes.push(e);
+        // The map is built with legacy-agent shows resolved, as the orchestrator does —
+        // the internal fallback walk can't see them and this rewrite is whole-table.
+        const showKeys = await buildPlexShowKeyMap(serverUrl, token, selected, sections);
+        for (const e of await getPlexTVEpisodes(serverUrl, token, selected, sections, showKeys)) episodes.push(e);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[sync/tv-episodes] Plex episode sync failed for instance "${inst.slug}":`, msg);

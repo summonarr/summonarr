@@ -5,7 +5,7 @@ import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { checkRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
+import { checkRateLimit, reserveRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
@@ -74,6 +74,7 @@ export async function findOrCreatePlexUser({
   name,
   image,
   plexClientId,
+  emailIsFresh = true,
 }: {
   plexUserId: string;
   email: string;
@@ -81,6 +82,11 @@ export async function findOrCreatePlexUser({
   image?: string | null;
   // The browser's X-Plex-Client-Identifier, when the sign-in carried a valid one.
   plexClientId?: string | null;
+  // False when `email` came from the PlexTokenCache (up to 30 days old) rather than
+  // a live plex.tv answer. A cached address is good enough to ADMIT a member but
+  // must not overwrite notificationEmail, which would revert a newer address the
+  // last live sign-in (or the user's profile) had set.
+  emailIsFresh?: boolean;
 }): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   const normalized = normalizeEmail(email);
   // Provider-supplied display names are untrusted — strip HTML/control chars so
@@ -103,7 +109,7 @@ export async function findOrCreatePlexUser({
     await prisma.user.update({
       where: { id: bySub.id },
       data: {
-        notificationEmail: normalized,
+        ...(emailIsFresh ? { notificationEmail: normalized } : {}),
         ...(name ? { name } : {}),
         ...(image ? { image } : {}),
         ...(plexClientId ? { plexClientId } : {}),
@@ -701,9 +707,9 @@ export async function authorizeWithCredentials(
   // Short-circuited on an IP rejection: that attempt never reaches the verify, so
   // reserving (and never refunding) an account slot for it would charge the
   // account bucket for an attempt it never judged.
-  const accountAllowed = ipAllowed && checkRateLimit(accountKey, accountLimit, accountWindowMs);
+  const accountHitAt = ipAllowed ? reserveRateLimit(accountKey, accountLimit, accountWindowMs) : null;
 
-  if (!ipAllowed || !accountAllowed) {
+  if (!ipAllowed || accountHitAt === null) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
     return null;
   }
@@ -726,7 +732,7 @@ export async function authorizeWithCredentials(
 
   // Successful sign-in: give the reserved slot back so the account bucket still counts
   // only failures, exactly as the peek/record split intended.
-  refundHit(accountKey);
+  refundHit(accountKey, accountHitAt);
 
   const device = buildDeviceMeta(headers);
   return { id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device };
@@ -806,6 +812,7 @@ export async function authorizeWithPlex(
     let plexUserSub:   string | null = null;
     let plexName: string | null = null;
     let plexThumb: string = "";
+    let emailIsFresh = false;
 
     if (cached && cached.verifiedAt > cacheCutoff) {
       // Cache hit is only honored when the row carries the Plex
@@ -847,6 +854,7 @@ export async function authorizeWithPlex(
     if (!verifiedEmail || !plexUserSub) {
       const plexUser = await getPlexUser(plexToken, browserClientId);
       verifiedEmail = normalizeEmail(plexUser.email);
+      emailIsFresh  = true;
       plexUserSub   = plexUser.id;
       plexName = plexUser.username;
       plexThumb = plexUser.thumb;
@@ -893,6 +901,7 @@ export async function authorizeWithPlex(
         name: plexName,
         image: plexThumb,
         plexClientId: browserClientId,
+        emailIsFresh,
       });
 
       if (plexDbUser === PROVIDER_REBIND_REQUIRED) {

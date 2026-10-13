@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
-import { arrFailure, arrGate } from "@/lib/arr-admin-http";
+import { arrFailure, arrGate, readWarnKey } from "@/lib/arr-admin-http";
 import { parseHistoryKind, parsePaging } from "@/lib/arr-history";
 import { loadHistoryPage } from "@/lib/arr-history-data";
+import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin → Download History (ADMIN): one instance's history, newest first,
@@ -24,9 +25,12 @@ export const GET = withAdmin(snapshotted(async (req) => {
   if (!paging || kind === null && rawKind !== null && rawKind !== "") {
     return NextResponse.json({ error: t("apiAdmin.arr.pagingInvalid") }, { status: 400 });
   }
+  const warnKey = readWarnKey("history", target);
   try {
-    return NextResponse.json(await loadHistoryPage(target.service, target.instance, paging, kind));
+    const page = await loadHistoryPage(target.service, target.instance, paging, kind);
+    forgetWarnOnChange(warnKey);
+    return NextResponse.json(page);
   } catch (err) {
-    return arrFailure(err, target, t, "history read");
+    return arrFailure(err, target, t, "history read", { warnKey });
   }
 }));

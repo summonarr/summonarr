@@ -1367,6 +1367,20 @@ test("claim: an ABSENT expectedClaimedBy keeps the ORIGINAL contract — a body-
   assert.equal((await emptyBody.json() as { claimedBy: string }).claimedBy, admin.userId);
 });
 
+test("claim: a literal JSON `null` (or primitive) body is treated as no body, never a 500", async () => {
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  for (const [i, body] of ([null, 5, "x"] as unknown[]).entries()) {
+    ops.length = 0;
+    issueRow = {
+      id: `issue-claim-null-${i}`, status: "OPEN", reportedBy: "reporter-n", title: "Tenet",
+      claimedBy: null, claimedUser: null,
+    };
+    const res = await postClaim(admin.token, `issue-claim-null-${i}`, body);
+    assert.equal(res.status, 200, `body ${JSON.stringify(body)} must behave like an absent body`);
+    assert.equal(opsOf("issue.updateMany").length, 1);
+  }
+});
+
 test("claim: a present-but-non-string, non-null expectedClaimedBy → 400 before any read or write", async () => {
   const admin = await mintSession({ role: "ISSUE_ADMIN" });
   issueRow = {

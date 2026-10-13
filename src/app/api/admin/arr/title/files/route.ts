@@ -2,12 +2,13 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrErrorMessage } from "@/lib/arr";
-import { arrFailure, arrTitleGate, parseIdArray } from "@/lib/arr-admin-http";
+import { arrFailure, arrTitleGate, parseIdArray, readWarnKey } from "@/lib/arr-admin-http";
 import { parseIdList } from "@/lib/arr-history";
 import { MAX_TITLE_FILE_IDS, TITLE_FILE_IDS_BODY_BYTES } from "@/lib/arr-title";
 import { deleteTitleFiles, loadTitleFiles } from "@/lib/arr-title-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
+import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { answerOf, jobResponse, startArrJob } from "@/lib/release-search-jobs";
 import { sanitizeForLog } from "@/lib/sanitize";
@@ -45,10 +46,13 @@ export const GET = withAdmin(snapshotted(async (req, _ctx, session) => {
   if (job !== null) return jobResponse(session.user.id, job, t, "apiAdmin.arr.filesJobGone");
   const target = await arrTitleGate(q.get("service"), q.get("instance"), q.get("id"), t);
   if (target instanceof NextResponse) return target;
+  const warnKey = readWarnKey("title-files", target);
   try {
-    return NextResponse.json({ files: await loadTitleFiles(target.service, target.instance, target.arrId) });
+    const files = await loadTitleFiles(target.service, target.instance, target.arrId);
+    forgetWarnOnChange(warnKey);
+    return NextResponse.json({ files });
   } catch (err) {
-    return arrFailure(err, target, t, "file listing");
+    return arrFailure(err, target, t, "file listing", { warnKey });
   }
 }));
 

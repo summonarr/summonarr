@@ -1173,6 +1173,15 @@ test("plex multi-instance: a blank-config default (token without URL) is skipped
   assert.ok(!fetchCalls.some((c) => c.url.hostname === "203.0.113.10"), "the blank-config default must never be dialed");
 });
 
+test("plex: an email served from the 30-day token cache (emailIsFresh:false) never overwrites notificationEmail", async () => {
+  seedUser({ id: "u-stale", email: "stale@example.com", name: "S", role: "USER", plexUserId: "px-stale" });
+  userById("u-stale").notificationEmail = "current@example.com";
+  await findOrCreatePlexUser({ plexUserId: "px-stale", email: "Old@Cached.example", emailIsFresh: false });
+  assert.equal(userById("u-stale").notificationEmail, "current@example.com");
+  await findOrCreatePlexUser({ plexUserId: "px-stale", email: "Live@example.com" });
+  assert.equal(userById("u-stale").notificationEmail, "live@example.com", "a live plex.tv answer still refreshes it");
+});
+
 test("provider-subject binding: an existing plex sub returns that identity (role preserved); an email match alone is REFUSED", async () => {
   // (a) Sub match wins — even when the provider now reports a different email.
   seedUser({

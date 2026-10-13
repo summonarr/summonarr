@@ -425,6 +425,15 @@ for (const [label, role, permissions] of [
   });
 }
 
+test("protect POST/DELETE reject a tmdbId past INT4 with 400 and write nothing", async () => {
+  const token = await mintSession();
+  const before = protections.length;
+  const big = { tmdbId: 2_147_483_648, mediaType: "MOVIE", title: "x" };
+  assert.equal((await call(protectRoute.POST as never, token, "/protect", "POST", big)).status, 400);
+  assert.equal((await call(protectRoute.DELETE as never, token, "/protect?tmdbId=2147483648&mediaType=MOVIE", "DELETE")).status, 400);
+  assert.equal(protections.length, before);
+});
+
 test("with feature.admin.cleanup off every route 404s and nothing is deleted", async () => {
   settings.set("feature.admin.cleanup", "false");
   invalidateFeatureFlagCache();

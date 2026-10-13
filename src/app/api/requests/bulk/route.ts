@@ -395,7 +395,12 @@ export const POST = withPermission([
     }
     // skipLibraryCheck instances (e.g. 4K) ignore the shared Plex/Jellyfin
     // library — only that instance's own arr availability short-circuits.
-    if ((!inst.skipLibraryCheck && libraryAvailSet.has(k)) || arrAvailSet.has(k)) {
+    // The *arr-available cache short-circuits ONLY for a requester who would be
+    // auto-approved — exactly request-create.ts (`isAutoApprove && arrHasInstance`)
+    // and the Discord path (`mayAutoApprove && arrHasInstance`). Everyone else files a
+    // normal request, so the sync's arr marking pass can notify them when it lands.
+    const arrCounts = arrAvailSet.has(k) && canAutoApproveInstance(targetPerms, inst, grants, it.mediaType);
+    if ((!inst.skipLibraryCheck && libraryAvailSet.has(k)) || arrCounts) {
       skipped.push({ ...it, result: "already-available" });
       continue;
     }
@@ -564,9 +569,9 @@ export const POST = withPermission([
             // (request-create.ts): the peer may have been marked off a restricted
             // server this target holds no grant for (guardrail 35). Every item here
             // has ALREADY been found absent from the target's visible libraries AND
-            // from the routed instance's *arr-available cache (the already-available
-            // gate above), so the one ungated signal that would justify copying
-            // AVAILABLE is known to be missing. The grant-gated sync marking pass
+            // (for an auto-approver) from the routed instance's *arr-available cache.
+            // Mirroring APPROVED is always safe: the sync's marking passes promote
+            // it. The grant-gated sync marking pass
             // promotes (and notifies) the row once the title is visible to them.
             const greenlitKeys = new Set<string>();
             for (const g of greenlit) greenlitKeys.add(keyOf(g.tmdbId, g.mediaType));

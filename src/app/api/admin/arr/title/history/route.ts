@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
-import { arrFailure, arrTitleGate } from "@/lib/arr-admin-http";
+import { arrFailure, arrTitleGate, readWarnKey } from "@/lib/arr-admin-http";
 import { loadTitleHistory } from "@/lib/arr-title-data";
+import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin title manager, the title's history (ADMIN): every grab, import,
@@ -17,9 +18,12 @@ export const GET = withAdmin(snapshotted(async (req) => {
   const q = req.nextUrl.searchParams;
   const target = await arrTitleGate(q.get("service"), q.get("instance"), q.get("id"), t);
   if (target instanceof NextResponse) return target;
+  const warnKey = readWarnKey("title-history", target);
   try {
-    return NextResponse.json({ events: await loadTitleHistory(target.service, target.instance, target.arrId) });
+    const events = await loadTitleHistory(target.service, target.instance, target.arrId);
+    forgetWarnOnChange(warnKey);
+    return NextResponse.json({ events });
   } catch (err) {
-    return arrFailure(err, target, t, "title history");
+    return arrFailure(err, target, t, "title history", { warnKey });
   }
 }));

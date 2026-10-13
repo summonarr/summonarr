@@ -6,7 +6,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, rolePresetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
 import type { InstanceGrants, MediaServerGrants } from "@/lib/permissions";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -431,6 +431,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   }
   if (body.role !== "ADMIN" && body.role !== "USER" && body.role !== "ISSUE_ADMIN") {
     return NextResponse.json({ error: t("apiAdmin.users.roleInvalid") }, { status: 400 });
+  }
+
+  // Subset rule (same as the permissions branch): re-seeding from the new role's
+  // preset hands out its management bits, so a delegate may only pick a role
+  // whose management bits it holds (ISSUE_ADMIN needs MANAGE_ISSUES).
+  if (rolePresetExceeds(body.role, session.user.permissions)) {
+    return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
   }
 
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, name: true, email: true } });

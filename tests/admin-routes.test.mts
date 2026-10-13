@@ -1527,3 +1527,21 @@ test("i18n (role-change validation): a templated message keeps its dynamic part 
   assert.equal(es.status, 400);
   assert.deepEqual(await es.json(), { error: "movieQuotaLimit debe ser un número entero no negativo o null" });
 });
+
+test("delegate SUBSET rule: a MANAGE_USERS delegate cannot promote an account to ISSUE_ADMIN without holding MANAGE_ISSUES", async () => {
+  const MANAGE_USERS = 1n << 1n;
+  const MANAGE_ISSUES = 1n << 3n;
+  const delegate = await mintSession("USER", MANAGE_USERS);
+  const targetId = seedUser("USER");
+  const patch = (d: { header: Record<string, string> }) => userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...d.header, "content-type": "application/json" },
+      body: JSON.stringify({ role: "ISSUE_ADMIN" }),
+    }),
+    ctxFor(targetId),
+  );
+  assert.equal((await patch(delegate)).status, 403);
+  const holder = await mintSession("USER", MANAGE_USERS | MANAGE_ISSUES);
+  assert.equal((await patch(holder)).status, 200);
+});

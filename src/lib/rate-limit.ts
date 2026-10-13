@@ -37,13 +37,21 @@ const MAX_KEYS = 100_000;
 // last `windowMs`. At most MAX_KEYS keys are kept; the least recently used key
 // is dropped first.
 export function checkRateLimit(key: string, limit: number, windowMs: number): boolean {
-  if (limit <= 0) return true;
+  return reserveRateLimit(key, limit, windowMs) !== null;
+}
+
+// checkRateLimit that also hands back the timestamp of the hit it recorded
+// (null = refused), so a caller that later refunds can give back ITS OWN hit.
+// A limit <= 0 means unlimited: nothing is recorded and the timestamp is 0, which
+// refundHit treats as "nothing to remove".
+export function reserveRateLimit(key: string, limit: number, windowMs: number): number | null {
+  if (limit <= 0) return 0;
   const now = Date.now();
   const cutoff = now - windowMs;
   const entry = windows.get(key);
   const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
   if (hits.length === 0) windows.delete(key);
-  if (hits.length >= limit) return false;
+  if (hits.length >= limit) return null;
 
   if (hits.length === 0 && windows.size >= MAX_KEYS) {
     const oldestKey = windows.keys().next().value;
@@ -54,7 +62,7 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
   // eviction above drops keys from the front, so this marks it recently used.
   windows.delete(key);
   windows.set(key, { hits, expiresAt: now + windowMs });
-  return true;
+  return now;
 }
 
 // Read-only counterpart of checkRateLimit: returns whether the key is still
@@ -78,10 +86,24 @@ export function peekRateLimit(key: string, limit: number, windowMs: number): boo
 // through. Instead the caller reserves a hit with checkRateLimit (check and
 // record in one step) and refunds it here on success, so a SUCCESSFUL login
 // still doesn't use up the account's budget.
-export function refundHit(key: string): void {
+//
+// Pass `hitAt` (the value reserveRateLimit returned) to remove THAT hit. Without
+// it the newest hit is popped, which under concurrency can be ANOTHER caller's
+// failed attempt: a victim's successful sign-in would then erase an attacker's
+// later failure and leave its own older timestamp, which expires sooner — the
+// attacker's guess budget refills early. A hit that already aged out of the
+// window is simply not found, so nothing else is removed.
+export function refundHit(key: string, hitAt?: number): void {
   const entry = windows.get(key);
   if (!entry || entry.hits.length === 0) return;
-  entry.hits.pop();
+  if (hitAt !== undefined) {
+    if (hitAt === 0) return;
+    const i = entry.hits.indexOf(hitAt);
+    if (i === -1) return;
+    entry.hits.splice(i, 1);
+  } else {
+    entry.hits.pop();
+  }
   if (entry.hits.length === 0) windows.delete(key);
 }
 

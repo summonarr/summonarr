@@ -113,13 +113,31 @@ function registerToken(jti: string, sub: string, expSec: number): void {
     }
     return true;
   });
-  // Per-subject cap: the newest token wins, the subject's oldest dies.
-  while (mine.length >= MAX_LIVE_PER_SUBJECT) removeEntry(mine.shift()!);
+  // Per-subject cap: the newest token wins, the subject's oldest dies. A token
+  // another request is verifying RIGHT NOW (inFlight) is never the victim: the
+  // verifier may already have burned a single-use factor (a recovery code), and
+  // evicting the entry would make commitToken refuse the sign-in afterwards —
+  // anyone holding the password could thereby grief the owner's in-flight
+  // challenge (and cost them a recovery code) by minting five new ones. If every
+  // slot is in flight the cap is briefly exceeded; reserveToken bounds that to
+  // the handful of parallel verifications.
+  while (mine.length >= MAX_LIVE_PER_SUBJECT) {
+    const victim = mine.findIndex((j) => !ledger.get(j)?.inFlight);
+    if (victim === -1) break;
+    removeEntry(mine.splice(victim, 1)[0]);
+  }
   if (ledger.size >= ledgerCap) sweepExpired(now);
   // Still full of live entries: evict the oldest overall (Map iteration is
-  // insertion order). An evicted token is dead, never fresh again.
+  // insertion order), skipping in-flight ones. An evicted token is dead, never
+  // fresh again.
   while (ledger.size >= ledgerCap) {
-    const oldest = ledger.keys().next().value as string | undefined;
+    let oldest: string | undefined;
+    for (const [j, e] of ledger) {
+      if (!e.inFlight) {
+        oldest = j;
+        break;
+      }
+    }
     if (oldest === undefined) break;
     removeEntry(oldest);
   }

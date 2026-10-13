@@ -79,7 +79,7 @@ export async function readQueuePages(service: QueueService, instance: string, si
     let res: { records?: unknown; totalRecords?: unknown };
     try {
       res = await arrFetch<{ records?: unknown; totalRecords?: unknown }>(
-        cfg, `/api/v3/queue?page=${page}&pageSize=${PAGE_SIZE}&${include}`,
+        cfg, `/api/v3/queue?page=${page}&pageSize=${PAGE_SIZE}&sortKey=added&sortDirection=ascending&${include}`,
         { quietErrors: true, timeoutMs: QUEUE_READ_TIMEOUT_MS, ...(signal ? { signal } : {}) },
       );
     } catch (err) {

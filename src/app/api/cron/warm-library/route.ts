@@ -4,7 +4,7 @@ import { prewarmSuggestionEdges } from "@/lib/recommendation-graph";
 import { prewarmTitleTranslations } from "@/lib/tmdb-localize";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, WARM_LIBRARY_LOCK_ID } from "@/lib/advisory-lock";
-import { getCronActor, recordCronRun } from "@/lib/cron-auth";
+import { cronSkippedResponse, getCronActor, recordCronRun } from "@/lib/cron-auth";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 
 // Scheduled version of the boot-time prewarm (instrumentation.ts) and the admin
@@ -87,6 +87,6 @@ export async function POST(request: NextRequest) {
         timestamp: new Date().toISOString(),
       }, failed > 0 ? { headers: { "X-Cron-Degraded": String(failed) } } : undefined);
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    () => cronSkippedResponse(),
   );
 }

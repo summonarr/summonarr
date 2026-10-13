@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections, plexLibraryRatingKeys, type PlexLegacyGuidRef } from "@/lib/plex";
-import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
+import { resolvePlexLegacyGuids, mergeResolvedLegacyItems, buildPlexShowKeyMap } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -144,7 +144,14 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
     // The precomputed show map is complete only when the walk above was FULL —
     // on recentOnly it covers just the 2h window while this episode rewrite is
     // a full replace, so getPlexTVEpisodes keeps its own walk there.
-    ? getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, recentOnly ? undefined : ratingKeyToTmdb, skipShowFilePaths ? episodeFilePaths : undefined)
+    ? (recentOnly
+        // recentOnly's own map covers only the 2h window, so the full-table rewrite
+        // needs a complete one — built WITH legacy-agent shows resolved, which
+        // getPlexTVEpisodes' own fallback walk cannot see (they'd lose their
+        // episodes until the orchestrator's next run).
+        ? buildPlexShowKeyMap(serverUrl, token, selectedPlexKeys, sections)
+            .then((fullMap) => getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, fullMap))
+        : getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, ratingKeyToTmdb, skipShowFilePaths ? episodeFilePaths : undefined))
     : Promise.resolve(null);
   episodesPromise
     .then(async (episodes) => {
