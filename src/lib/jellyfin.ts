@@ -20,6 +20,18 @@ const FETCH_TIMEOUT_MS = 30_000;
 // they honor, 10.12+ finds the only one it still reads.
 const JELLYFIN_IDENTITY = 'MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0"';
 
+// Sent on every /Items query that can list a Movie or a Series (guardrail 37d).
+// An API key has no user, and for a user-less query Jellyfin groups movies and
+// shows into their collections whatever the server's "group into collections"
+// settings say (Folder.CollapseBoxSetItems: those settings are only consulted
+// when there IS a user). Each member of a TMDB collection is then replaced by
+// its BoxSet — ExcludeItemTypes=BoxSet does not stop it, the grouping runs
+// after the type filter. Seen live on Jellyfin 12.2: 2,230 of 9,134 movies
+// were missing from the library sync, Practical Magic 2 among them. Only an
+// explicit false always wins; a filter like MinDateLastSaved or SearchTerm
+// does not turn the grouping off.
+export const JELLYFIN_NO_COLLECTION_GROUPING = "CollapseBoxSetItems=false";
+
 export async function authenticateWithJellyfin(
   baseUrl: string,
   username: string,
@@ -131,6 +143,7 @@ interface JellyfinItem {
   OfficialRating?:  string;
   CommunityRating?: number;
   DateCreated?:     string;
+  Type?:            string;
 }
 
 interface JellyfinItemsResponse {
@@ -164,7 +177,7 @@ export async function hasJellyfinItemByTmdbId(
   mediaType: "movie" | "tv",
 ): Promise<boolean> {
   const itemType = mediaType === "movie" ? "Movie" : "Series";
-  const url = `${baseUrl.replace(/\/$/, "")}/Items?IncludeItemTypes=${itemType}&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=${PROBE_RECENT_LIMIT}&EnableImages=false`;
+  const url = `${baseUrl.replace(/\/$/, "")}/Items?IncludeItemTypes=${itemType}&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=${PROBE_RECENT_LIMIT}&EnableImages=false`;
   try {
     const res = await safeFetchAdminConfigured(url, {
       headers: jellyfinHeaders(apiKey),
@@ -442,9 +455,17 @@ async function getJellyfinItemsByType(
   // Every item id seen for a tmdb id that turned up more than once. Populated
   // only on a collision, so the single-copy case allocates nothing extra.
   const extraItemIds = new Map<number, Set<string>>();
+  // Collections the server returned in place of their members. Zero while
+  // JELLYFIN_NO_COLLECTION_GROUPING is honoured; anything else means titles
+  // are missing from this listing (guardrail 37d).
+  let collections = 0;
 
   const processItems = (batch: JellyfinItem[]) => {
     for (const item of batch) {
+      if (item.Type === "BoxSet") {
+        collections++;
+        continue;
+      }
       const tmdb = item.ProviderIds?.Tmdb ?? item.ProviderIds?.tmdb;
       if (tmdb) {
         const n = parseInt(tmdb, 10);
@@ -494,7 +515,7 @@ async function getJellyfinItemsByType(
             // EnableImages=false + ImageTypeLimit=0: nothing here consumes
             // ImageTags/ImageBlurHashes, and Jellyfin enriches them by default
             // (enableImages defaults true) — they were the bulk of >10 MB pages.
-            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
+            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
             apiKey,
             processItems,
           )
@@ -503,7 +524,7 @@ async function getJellyfinItemsByType(
     }
   } else {
     await fetchJellyfinPages(
-      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
+      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
       apiKey,
       processItems,
     );
@@ -532,6 +553,15 @@ async function getJellyfinItemsByType(
       `jellyfin-dupes:${itemType}:${baseUrl}`,
       String(duplicatedTmdbIds),
       `[jellyfin] ${duplicatedTmdbIds} TMDB id(s) matched more than one ${itemType} across the scanned libraries; keeping the most recently added copy. The other copies stay resolvable ${itemType === "Series" ? "for episode mapping and play history" : "for play history"}, but only the winner's file path and ratings are stored.`,
+    );
+  }
+  if (collections > 0) {
+    // A condition of the server, re-derived every run — repeat-suppressed for
+    // the same reason as the duplicates line above (guardrail 7b).
+    warnOnChange(
+      `jellyfin-collections:${itemType}:${baseUrl}`,
+      String(collections),
+      `[jellyfin] the ${itemType} listing returned ${collections} collection(s) in place of their members, so those titles are missing from the library sync. The server ignored ${JELLYFIN_NO_COLLECTION_GROUPING}.`,
     );
   }
 
@@ -1011,7 +1041,9 @@ export async function getJellyfinUserPlayedItems(
   // an API key (role Administrator) RequestHelpers.GetUserId returns the given
   // id, so the Filters, the paging and the UserData are that user's either way.
   const query =
-    `${base}/Items?userId=${encodeURIComponent(userId)}&Recursive=true&IncludeItemTypes=Movie,Episode&Filters=${filter}` +
+    // The IsPlayed/IsResumable filter already stops collection grouping; the
+    // flag is sent anyway, so a missed movie here can't read as never watched.
+    `${base}/Items?userId=${encodeURIComponent(userId)}&Recursive=true&IncludeItemTypes=Movie,Episode&${JELLYFIN_NO_COLLECTION_GROUPING}&Filters=${filter}` +
     "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending";
   const walk = async (): Promise<{ out: JellyfinUserPlayedItems; total: number | null }> => {
     const out: JellyfinUserPlayedItems = { items: [], records: 0 };

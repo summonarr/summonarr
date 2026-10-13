@@ -294,7 +294,7 @@ test("availability probe fetches recent additions of the mapped type and matches
   assert.equal(await hasJellyfinItemByTmdbId(B, "key-2", 550, "movie"), true);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Movie&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
+    `${B}/Items?IncludeItemTypes=Movie&CollapseBoxSetItems=false&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
   );
   assert.equal(sent[0].headers.get("x-mediabrowser-token"), "key-2");
 
@@ -304,7 +304,7 @@ test("availability probe fetches recent additions of the mapped type and matches
   assert.equal(await hasJellyfinItemByTmdbId(B, "key-2", 1399, "tv"), false);
   assert.equal(
     sent[1].url,
-    `${B}/Items?IncludeItemTypes=Series&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
+    `${B}/Items?IncludeItemTypes=Series&CollapseBoxSetItems=false&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
     "tv must map to the Series item type",
   );
 });
@@ -388,7 +388,7 @@ test("library query pins the exact /Items wire shape (Fields list, BoxSet exclus
   assert.equal(sent.length, 1);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Movie&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=5000`,
+    `${B}/Items?IncludeItemTypes=Movie&ExcludeItemTypes=BoxSet&CollapseBoxSetItems=false&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=5000`,
     "the library sync's exact query — a drift here silently empties the sync",
   );
   assert.deepEqual(items.get(550), {
@@ -570,6 +570,96 @@ test("library scoping: each libraryId becomes a ParentId-scoped query and the pe
     assert.ok(req.url.includes("IncludeItemTypes=Movie") && req.url.includes("ExcludeItemTypes=BoxSet"));
   }
   assert.deepEqual([...items.keys()].sort((x, y) => x - y), [11, 22]);
+});
+
+// ── collection grouping (guardrail 37d) ─────────────────────────────────────
+//
+// An API key has no user, and for a user-less /Items query Jellyfin replaces
+// every member of a collection with its BoxSet unless the query says
+// CollapseBoxSetItems=false — ExcludeItemTypes=BoxSet doesn't stop it. Live on
+// Jellyfin 12.2 (2026-10-13) that hid 2,230 of 9,134 movies from the sync,
+// Practical Magic (6435) and Practical Magic 2 (1302904) among them, the day
+// the sequel's arrival created their collection. This stub groups the same way.
+function groupingJellyfin(url: string, members: { Id: string; Tmdb: string }[]) {
+  const grouped = new URL(url).searchParams.get("CollapseBoxSetItems") !== "false";
+  const Items = grouped
+    ? [{ Id: "boxset-1", Type: "BoxSet", Name: "Practical Magic Collection", ProviderIds: { TmdbCollection: "1354706" } }]
+    : members.map((m) => ({ Id: m.Id, Type: "Movie", ProviderIds: { Tmdb: m.Tmdb } }));
+  return okJson({ Items, TotalRecordCount: Items.length });
+}
+const PRACTICAL_MAGIC = [{ Id: "pm1", Tmdb: "6435" }, { Id: "pm2", Tmdb: "1302904" }];
+
+test("the library sync lists a collection's members, never the collection — unscoped, per library, and on the recentOnly window", async () => {
+  const B = nextBase();
+  respond = (url) => groupingJellyfin(url, PRACTICAL_MAGIC);
+
+  for (const run of [
+    () => getJellyfinTmdbIds(B, "k", "MOVIE"),
+    () => getJellyfinTmdbIds(B, "k", "MOVIE", new Set(["libA"])),
+    () => getJellyfinTmdbIds(B, "k", "MOVIE", undefined, new Date("2026-10-13T00:00:00.000Z")),
+  ]) {
+    const items = await run();
+    assert.deepEqual([...items.keys()].sort((x, y) => x - y), [6435, 1302904]);
+  }
+  respond = (url) => groupingJellyfin(url, [{ Id: "s1", Tmdb: "1399" }]);
+  const tv = await getJellyfinTmdbIds(B, "k", "TV");
+  assert.deepEqual([...tv.keys()], [1399], "Series are grouped the same way, so TV sends it too");
+  assert.deepEqual(warns, []);
+});
+
+test("a server that groups anyway is named once, and its collections never become titles", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { Id: "boxset-1", Type: "BoxSet", Name: "Practical Magic Collection", ProviderIds: { Tmdb: "1354706" } },
+      { Id: "m1", Type: "Movie", ProviderIds: { Tmdb: "550" } },
+    ],
+    TotalRecordCount: 2,
+  });
+  const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.deepEqual([...items.keys()], [550], "a BoxSet's id is a collection id, not a movie");
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /returned 1 collection\(s\) in place of their members/);
+  await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(warns.length, 1, "an unchanged condition is not re-logged (guardrail 7b)");
+});
+
+test("the availability probe finds a title that sits in a collection", async () => {
+  const B = nextBase();
+  respond = (url) => groupingJellyfin(url, PRACTICAL_MAGIC);
+  assert.equal(await hasJellyfinItemByTmdbId(B, "k", 1302904, "movie"), true);
+});
+
+test("every Jellyfin /Items query that can list a Movie or Series sends CollapseBoxSetItems=false", async () => {
+  // Structural: the behavioural tests above cover the sync and the probe; this
+  // holds every other /Items? literal in src to the same rule — the never-watched
+  // played-items read and fix-match's confirmation search included. A query
+  // limited to Episode can't be grouped (Folder.CollapseBoxSetItems only fires
+  // for Movie/Series or an untyped query) and is exempt.
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = new URL("../src/", import.meta.url).pathname;
+  const walk = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
+    if (name === "generated") return [];
+    const p = join(dir, name);
+    return statSync(p).isDirectory() ? walk(p) : /\.(ts|tsx)$/.test(name) ? [p] : [];
+  });
+  const offenders: string[] = [];
+  let seen = 0;
+  for (const file of walk(root)) {
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (!line.includes("/Items?") || line.trim().startsWith("//")) continue;
+      seen++;
+      const types = /IncludeItemTypes=([A-Za-z,$]+)/.exec(line)?.[1] ?? "";
+      const episodesOnly = types !== "" && types.split(",").every((t) => t === "Episode");
+      if (episodesOnly) continue;
+      if (!line.includes("JELLYFIN_NO_COLLECTION_GROUPING") && !line.includes("CollapseBoxSetItems=false")) {
+        offenders.push(`${file.replace(root, "src/")}: ${line.trim().slice(0, 140)}`);
+      }
+    }
+  }
+  assert.ok(seen >= 8, `the scan found the /Items? queries (saw ${seen})`);
+  assert.deepEqual(offenders, []);
 });
 
 // ── fetchPage retry / fast-fail (via getJellyfinTmdbIds) ────────────────────
@@ -1346,7 +1436,7 @@ test("getJellyfinUserPlayedItems: the exact per-user query, encoded user id, adm
   assert.equal(sent.length, 1);
   assert.equal(
     sent[0].url,
-    `${B}/Items?userId=user%201&Recursive=true&IncludeItemTypes=Movie,Episode&Filters=IsPlayed` +
+    `${B}/Items?userId=user%201&Recursive=true&IncludeItemTypes=Movie,Episode&CollapseBoxSetItems=false&Filters=IsPlayed` +
       "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending" +
       "&StartIndex=0&Limit=1000",
   );

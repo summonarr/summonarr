@@ -8,7 +8,7 @@ import { safeFetchAdminConfigured, safeFetchTrusted, SafeFetchError } from "@/li
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { getPlexEpisodesForShow } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
-import { getJellyfinEpisodesForShow, jellyfinAdminHeaders } from "@/lib/jellyfin";
+import { getJellyfinEpisodesForShow, jellyfinAdminHeaders, JELLYFIN_NO_COLLECTION_GROUPING } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
@@ -661,7 +661,9 @@ async function fixJellyfinMatch(
         const folderName = filePath.replace(/\\/g, "/").split("/").at(-2) ?? "";
         const searchTerm = folderName.replace(/\s*\(\d{4}\)\s*$/, "").trim();
         const findRes = await safeFetchAdminConfigured(
-          `${baseUrl}/Items?Recursive=true&Fields=ProviderIds,Path&IncludeItemTypes=Movie,Series` +
+          // Without the flag a movie in a collection comes back as its BoxSet
+          // and the path lookup below never finds it (guardrail 37d).
+          `${baseUrl}/Items?Recursive=true&Fields=ProviderIds,Path&IncludeItemTypes=Movie,Series&${JELLYFIN_NO_COLLECTION_GROUPING}` +
           (searchTerm ? `&SearchTerm=${encodeURIComponent(searchTerm)}` : "") +
           `&Limit=50`,
           { headers, timeoutMs: 10_000 },

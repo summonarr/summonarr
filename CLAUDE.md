@@ -1023,6 +1023,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Readers OR both columns (rows written before the column carry `[]` until a full sync): `resolveShowTmdbId`, the poller's movie prefetch, the admin-activity backfill, the never-watched evidence join. A lookup map is keyed by EVERY key a row answers to. A key held by several rows resolves through `pickPlexRowForKey` / `indexPlexRowsByKey` ([plex-dedupe.ts](src/lib/plex-dedupe.ts)) — the canonical holder, else the lowest tmdbId (37b's total order); the ONLY place one owner is picked — NEVER a `findFirst` without an order, and never last-write-wins in a key map (the 37b rule on the read side). The never-watched evidence join is the deliberate exception: it credits EVERY title a key answers to (14d — a lenient verdict leans the safe way for a delete).
     - GIN-indexed; `tests/schema-invariants.test.mts` and `tests/plex.test.mts` pin it.
 
+37d. **ALWAYS send `CollapseBoxSetItems=false` (`JELLYFIN_NO_COLLECTION_GROUPING`, [jellyfin.ts](src/lib/jellyfin.ts)) on every Jellyfin `/Items` query that can list a Movie or a Series.**
+
+    Why:
+    - Summonarr calls Jellyfin with an API key, and an API key has no user. For a user-less query Jellyfin replaces every member of a collection with its BoxSet. The server's "group movies/shows into collections" settings are only read when there IS a user, so turning them off does nothing for us. `ExcludeItemTypes=BoxSet` doesn't help either, because the grouping runs after the type filter. Neither does `MinDateLastSaved` or `SearchTerm`. Only an explicit `false` always wins (`Folder.CollapseBoxSetItems` / `AllowBoxSetCollapsing` in Jellyfin's source).
+    - Seen live on Jellyfin 12.2 (2026-10-13): the library sync was missing 2,230 of 9,134 movies, every one of them in a TMDB collection. Each read as "Plex only", and requests for them never saw Jellyfin. Practical Magic 2 arrived, Jellyfin created the Practical Magic Collection, and the 1998 film disappeared with it. A user token sees everything, so a check made while signed in to Jellyfin looks fine. Reproduce with an API key.
+
+    Rules:
+    - The sync, the availability probe, the never-watched played-items read and fix-match's confirmation search all send it. A query limited to `Episode` can't be grouped and is exempt.
+    - The library sync never turns a BoxSet into a title. A listing that still returns one logs once through `warnOnChange` (7b): it means the server ignored the flag and titles are missing.
+    - `tests/jellyfin.test.mts` stubs the grouping (members appear only when the flag is sent) and scans `src` for `/Items?` literals that can list a Movie or Series without it. Every site is mutation-verified.
+
 38. **`'unsafe-eval'` in the CSP is gated on `NODE_ENV === "development"` and NEVER widens. Don't delete the branch either.**
 
     Why:
