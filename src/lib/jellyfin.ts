@@ -531,7 +531,7 @@ async function getJellyfinItemsByType(
     warnOnChange(
       `jellyfin-dupes:${itemType}:${baseUrl}`,
       String(duplicatedTmdbIds),
-      `[jellyfin] ${duplicatedTmdbIds} TMDB id(s) matched more than one ${itemType} across the scanned libraries; keeping the most recently added copy. The other copies stay resolvable for episode mapping, but only the winner's file path and ratings are stored.`,
+      `[jellyfin] ${duplicatedTmdbIds} TMDB id(s) matched more than one ${itemType} across the scanned libraries; keeping the most recently added copy. The other copies stay resolvable ${itemType === "Series" ? "for episode mapping and play history" : "for play history"}, but only the winner's file path and ratings are stored.`,
     );
   }
 
