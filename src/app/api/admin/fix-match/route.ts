@@ -22,6 +22,7 @@ import {
 } from "@/lib/media-instances";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { dropMatchFlagInTx, findMatchFlag, moveItemToTitleInTx, readLibraryMatchReport } from "@/lib/library-match-data";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
@@ -41,6 +42,11 @@ type FixMatchBody = {
   // doesn't send it yet keeps targeting the only server that existed before
   // this field was added.
   serverInstance?: string;
+  // Item mode: remap ONE server item (Plex ratingKey / Jellyfin item id) that
+  // the library match check flagged, instead of every copy holding `tmdbId`.
+  // The item's current id, media type and path come from the stored report —
+  // `tmdbId` is ignored, and an item the check didn't flag is refused.
+  itemKey?: string;
 };
 
 interface PlexSearchResult {
@@ -729,11 +735,15 @@ async function fixJellyfinMatch(
 
 type FixMatchInput = {
   server: "plex" | "jellyfin";
+  // Item mode: the item's current TMDB id from the match report, 0 when it has none.
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
   correctTmdbId: number;
   canonicalGuid?: string;
   serverInstance: string;
+  // Item mode (see FixMatchBody.itemKey) — set only from a stored match flag.
+  itemKey?: string;
+  itemPath?: string | null;
 };
 type FixMatchActor = { userId: string; userName: string | null | undefined };
 
@@ -757,6 +767,45 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
   // remapped — the operator has to know the rest still carry the old match.
   let partialWarning: string | null = null;
   try {
+    if (input.itemKey !== undefined) {
+      // Item mode (the library match check's Fix): ONE server item, never every
+      // copy holding `tmdbId` — a title can hold a correct copy beside the wrong
+      // one. Its key, path and current id come from the stored flag.
+      const itemKey = input.itemKey;
+      let newKey = itemKey;
+      let conflatedWarning: string | null = null;
+      if (server === "plex") {
+        opts.report?.({ phase: "applying", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 });
+        const plexResult = await fixPlexMatch(itemKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
+        if (plexResult.conflated) conflatedWarning = t("apiAdmin.fixMatch.plexConflated", { tmdbId: correctTmdbId });
+      } else {
+        newKey = (await fixJellyfinMatch(itemKey, correctTmdbId, mediaType, serverInstance, input.itemPath ?? null, tmdbId, opts.background, opts.report)).newItemId;
+      }
+      remoteRemapped = true;
+      const keys = Array.from(new Set([itemKey, newKey]));
+      await prisma.$transaction(async (tx) => {
+        // The sync's library lock, so a concurrent sync can't interleave. The
+        // episode cache is left to the next full sync: it has no item key, so
+        // one copy's episodes can't be moved out of a shared title.
+        if (server === "plex") await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
+        else await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
+        await moveItemToTitleInTx(tx, server, serverInstance, mediaType, itemKey, newKey, correctTmdbId, input.itemPath ?? null);
+        // Plays of THIS item only, whatever id they were recorded under (none,
+        // for an unmatched item): a movie by its own key, an episode by its show's.
+        const plays = mediaType === "MOVIE"
+          ? { source: server, serverInstance, mediaType: "MOVIE" as const, sourceItemId: { in: keys } }
+          : { source: server, serverInstance, mediaType: "TV" as const, sourceShowId: { in: keys } };
+        await tx.playHistory.updateMany({ where: plays, data: { tmdbId: correctTmdbId } });
+        await tx.activeSession.updateMany({ where: plays, data: { tmdbId: correctTmdbId } });
+        await dropMatchFlagInTx(tx, server, serverInstance, itemKey);
+      }, { timeout: BATCH_TX_TIMEOUT });
+      void logAudit({
+        userId: actor.userId, userName: actor.userName, action: "FIX_MATCH", target: `tmdb:${tmdbId > 0 ? tmdbId : correctTmdbId}`,
+        details: { type: "fix-match", mode: "item", source: server, itemKey, fromTmdbId: tmdbId > 0 ? tmdbId : null, toTmdbId: correctTmdbId, mediaType, serverInstance },
+      });
+      return conflatedWarning ? { ok: true, warning: conflatedWarning } : { ok: true };
+    }
+
     if (server === "plex") {
       const item = await prisma.plexLibraryItem.findFirst({
         where: { tmdbId, mediaType, serverInstance },
@@ -1032,13 +1081,14 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.mediaTypeQuoted") }, { status: 400 });
   }
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  const itemMode = body.itemKey !== undefined;
+  if (!itemMode && (!Number.isInteger(tmdbId) || tmdbId <= 0)) {
     return NextResponse.json({ error: t("apiAdmin.common.tmdbIdPositive") }, { status: 400 });
   }
   if (!Number.isInteger(correctTmdbId) || correctTmdbId <= 0) {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.correctTmdbIdPositive") }, { status: 400 });
   }
-  if (tmdbId === correctTmdbId) {
+  if (!itemMode && tmdbId === correctTmdbId) {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.sameIds") }, { status: 400 });
   }
   if (canonicalGuid != null && typeof canonicalGuid !== "string") {
@@ -1048,7 +1098,24 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.common.invalidServerInstance", { slug: String(body.serverInstance) }) }, { status: 400 });
   }
   const serverInstance = body.serverInstance ?? DEFAULT_MEDIA_INSTANCE;
-  const input: FixMatchInput = { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance };
+  let input: FixMatchInput = { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance };
+  if (itemMode) {
+    // The key only NAMES an item the last match check flagged on this server;
+    // everything else about it is read from that stored flag, never the body.
+    const itemKey = body.itemKey;
+    const shaped = typeof itemKey === "string" && (server === "plex" ? /^\d{1,12}$/ : /^[0-9a-f-]{32,36}$/i).test(itemKey);
+    if (!shaped) {
+      return NextResponse.json({ error: t("apiAdmin.fixMatch.itemKeyInvalid") }, { status: 400 });
+    }
+    const flag = findMatchFlag(await readLibraryMatchReport(), server, serverInstance, itemKey);
+    if (!flag || flag.mediaType !== mediaType) {
+      return NextResponse.json({ error: t("apiAdmin.fixMatch.itemNotFlagged") }, { status: 404 });
+    }
+    if (flag.serverTmdbId === correctTmdbId) {
+      return NextResponse.json({ error: t("apiAdmin.fixMatch.sameIds") }, { status: 400 });
+    }
+    input = { ...input, tmdbId: flag.serverTmdbId ?? 0, mediaType: flag.mediaType, itemKey, itemPath: flag.path };
+  }
   const actor: FixMatchActor = { userId: session.user.id, userName: session.user.name ?? session.user.email };
 
   // Background mode (guardrail 37a): a series remap waits on the media server

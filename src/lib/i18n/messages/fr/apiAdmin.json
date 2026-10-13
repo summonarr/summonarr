@@ -350,5 +350,9 @@
   "apiAdmin.arr.providerSearchUnsupported": "D'après {service}, cet indexeur ne prend pas en charge la recherche, la recherche n'a donc pas été activée",
   "apiAdmin.neverWatched.refreshJobGone": "Cette vérification de l'historique de visionnage n'est plus suivie — Summonarr a peut-être redémarré. Rechargez pour voir les derniers résultats.",
   "apiAdmin.arr.filesJobGone": "Cette suppression n'est plus disponible — rechargez les fichiers pour voir ce qui a été supprimé, et ne la relancez pas à l'aveugle.",
-  "apiAdmin.arr.markInProgress": "Ce téléchargement est encore en cours de marquage en échec — réessayez dans une minute"
+  "apiAdmin.arr.markInProgress": "Ce téléchargement est encore en cours de marquage en échec — réessayez dans une minute",
+  "apiAdmin.libraryMatch.jobGone": "Cette vérification n'est plus disponible. Relancez-la.",
+  "apiAdmin.libraryMatch.running": "Une vérification des correspondances est déjà en cours. Réessayez sous peu.",
+  "apiAdmin.fixMatch.itemKeyInvalid": "itemKey doit être un ratingKey Plex ou un id d'élément Jellyfin.",
+  "apiAdmin.fixMatch.itemNotFlagged": "Cet élément ne figure pas dans la dernière vérification des correspondances. Relancez-la."
 }

@@ -9,6 +9,8 @@ import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button
 import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
 import { inferGroupMounts } from "@/lib/bad-matches";
 import { LibraryDiffClient, type DiffItem, type ClientBadMatch } from "@/components/admin/library-diff-client";
+import { LibraryMatchCheck, type ClientMatchReport } from "@/components/admin/library-match-check";
+import { readLibraryMatchReport } from "@/lib/library-match-data";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { Library } from "@/components/icons";
@@ -377,7 +379,7 @@ export default async function LibraryDiffPage({
   // overview is omitted here on purpose: it is the heaviest column and is only
   // rendered for the difference sets, so pulling it for up to 50k rows per render
   // is wasted. fetchOverviews backfills it for just the displayed rows below.
-  const [plexItems, jellyfinItems, prefixRows] = await Promise.all([
+  const [plexItems, jellyfinItems, prefixRows, matchReport] = await Promise.all([
     prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
     prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
     // The four connection keys ride along on the existing query so the Re-sync
@@ -389,7 +391,18 @@ export default async function LibraryDiffPage({
       "plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
       "plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey",
     ] } } }),
+    readLibraryMatchReport(),
   ]);
+  // The match check judges each server against Radarr/Sonarr, so unlike the
+  // diff below it means something on a one-server deployment too. Paths stay
+  // on the server: the rows show folder names only.
+  const clientMatchReport: ClientMatchReport | null = matchReport && {
+    checkedAt: matchReport.checkedAt,
+    sources: matchReport.sources,
+    counts: matchReport.counts,
+    truncated: matchReport.truncated,
+    flags: matchReport.flags.map(({ path: _path, ...flag }) => flag),
+  };
   const libraryCapped = plexItems.length >= LIBRARY_ITEM_CAP || jellyfinItems.length >= LIBRARY_ITEM_CAP;
 
   const plexConfigured    = plexItems.length > 0;
@@ -785,6 +798,8 @@ export default async function LibraryDiffPage({
           {t("adminManage.library.capped", { cap: LIBRARY_ITEM_CAP.toLocaleString(locale) })}
         </div>
       )}
+
+      <LibraryMatchCheck report={clientMatchReport} mediaType={activeType} />
 
       {oneSided ? (
         <EmptyState

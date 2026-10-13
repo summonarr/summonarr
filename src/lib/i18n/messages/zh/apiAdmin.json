@@ -350,5 +350,9 @@
   "apiAdmin.arr.providerSearchUnsupported": "{service} 表示此索引器不支持搜索，因此未开启搜索",
   "apiAdmin.neverWatched.refreshJobGone": "该观看记录检查已不再被跟踪——Summonarr 可能已重启。请刷新查看最新结果。",
   "apiAdmin.arr.filesJobGone": "该删除操作已不可用——请重新加载文件以查看已删除的内容，不要盲目再次执行。",
-  "apiAdmin.arr.markInProgress": "该下载仍在标记为失败的过程中——请一分钟后重试"
+  "apiAdmin.arr.markInProgress": "该下载仍在标记为失败的过程中——请一分钟后重试",
+  "apiAdmin.libraryMatch.jobGone": "该检查已不可用。请重新运行检查。",
+  "apiAdmin.libraryMatch.running": "已有匹配检查正在运行。请稍后再试。",
+  "apiAdmin.fixMatch.itemKeyInvalid": "itemKey 必须是 Plex 的 ratingKey 或 Jellyfin 项目 ID。",
+  "apiAdmin.fixMatch.itemNotFlagged": "该项目不在最近一次匹配检查中。请重新运行检查。"
 }

@@ -130,6 +130,7 @@ const {
   getJellyfinMediaFolders,
   refreshJellyfinLibrary,
   getJellyfinTmdbIds,
+  listJellyfinMatchEntries,
   buildSeriesItemIdIndex,
   getJellyfinTVEpisodes,
   getJellyfinEpisodesForShow,
@@ -1543,4 +1544,34 @@ test("getJellyfinUserPlayedItems THROWS on a 4xx (no retry) — never an empty l
   respond = () => okJson({}, 401);
   await assert.rejects(() => getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed"), /Jellyfin fetch failed: 401/);
   assert.equal(sent.length, 1);
+});
+
+// ── listJellyfinMatchEntries (the library match check) ──────────────────────
+
+test("listJellyfinMatchEntries lists every item ungrouped — copies and items with no Tmdb id included — once each across libraries", async () => {
+  const B = nextBase();
+  respond = (url) => {
+    const u = new URL(url);
+    assert.equal(u.searchParams.get("CollapseBoxSetItems"), "false", "a collection member must never hide behind its BoxSet (guardrail 37d)");
+    assert.equal(u.searchParams.get("IncludeItemTypes"), "Movie");
+    const both = [
+      { Id: "a1", Type: "Movie", Name: "Ghost in the Shell", ProductionYear: 1995, Path: "/m/Ghost in the Shell (1995)/a.mkv", ProviderIds: { Tmdb: "9323", Imdb: "tt0113568" } },
+      { Id: "b2", Type: "Movie", Name: "Ghost in the Shell", ProductionYear: 1995, Path: "/m/Ghost in the Shell (2017)/b.mkv", ProviderIds: { Tmdb: "9323" } },
+    ];
+    if (u.searchParams.get("ParentId") === "libA") return okJson({ Items: [...both, { Id: "c3", Type: "Movie", Name: "Left Holding Baby", Path: "/m/Left Holding Baby.mkv", ProviderIds: { Imdb: "tt1076827" } }], TotalRecordCount: 3 });
+    if (u.searchParams.get("ParentId") === "libB") return okJson({ Items: [both[1], { Id: "box", Type: "BoxSet", Name: "A Collection" }], TotalRecordCount: 2 });
+    throw new Error(`unexpected ${url}`);
+  };
+  const entries = await listJellyfinMatchEntries(B, "k", "remote", "MOVIE", new Set(["libA", "libB"]));
+  assert.deepEqual(entries.map((e) => [e.itemKey, e.tmdbIds, e.imdbId, e.path]), [
+    ["a1", [9323], "tt0113568", "/m/Ghost in the Shell (1995)/a.mkv"],
+    ["b2", [9323], null, "/m/Ghost in the Shell (2017)/b.mkv"],
+    ["c3", [], "tt1076827", "/m/Left Holding Baby.mkv"],
+  ]);
+  assert.ok(entries.every((e) => e.server === "jellyfin" && e.serverInstance === "remote" && e.mediaType === "MOVIE"));
+
+  respond = () => okJson({ Items: [{ Id: "s1", Type: "Series", Name: "Doctor Who", Path: "/tv/Doctor Who (2005)", ProviderIds: { Tmdb: "57243", Tvdb: "78804" } }], TotalRecordCount: 1 });
+  const series = await listJellyfinMatchEntries(B, "k", "", "TV");
+  assert.equal(new URL(sent.at(-1)!.url).searchParams.get("IncludeItemTypes"), "Series");
+  assert.deepEqual(series.map((e) => [e.itemKey, e.tmdbIds, e.tvdbId, e.mediaType]), [["s1", [57243], 78804, "TV"]]);
 });

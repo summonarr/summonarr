@@ -4943,10 +4943,15 @@ const spec = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["server", "tmdbId", "mediaType", "correctTmdbId"],
+                required: ["server", "mediaType", "correctTmdbId"],
                 properties: {
                   server: { type: "string", enum: ["plex", "jellyfin"] },
-                  tmdbId: { type: "integer", description: "The wrong TMDB ID currently on the library row" },
+                  tmdbId: { type: "integer", description: "The wrong TMDB ID currently on the library row (every copy holding it is remapped). Required unless `itemKey` is sent" },
+                  itemKey: {
+                    type: "string",
+                    description:
+                      "Item mode: remap ONE server item (Plex ratingKey / Jellyfin item id) that the last library match check flagged (/admin/library/match-check), never the other copies of its title. Its current TMDB id, media type and path are read from the stored flag — `tmdbId` is ignored. 404 when the last check didn't flag it.",
+                  },
                   mediaType: { $ref: "#/components/schemas/MediaType" },
                   correctTmdbId: { type: "integer" },
                   canonicalGuid: { type: "string", description: "Plex only — a candidate GUID preselected from /admin/fix-match/candidates" },
@@ -4970,8 +4975,8 @@ const spec = {
         responses: {
           "200": { description: "Match updated (may carry a `warning` when Plex conflated both TMDB IDs)" },
           "202": { description: "`async: true` — the job was started (or an identical one was already running); body carries `jobId`" },
-          "400": { description: "Bad body, or an invalid serverInstance slug" },
-          "404": { description: "No library row for that tmdbId on that instance — re-sync first" },
+          "400": { description: "Bad body, an invalid serverInstance slug, or a malformed itemKey" },
+          "404": { description: "No library row for that tmdbId on that instance — re-sync first; in item mode, the last match check didn't flag that item" },
           "429": { description: "Rate limited (10/min/admin)" },
           "502": { description: "Remote remap or the follow-up cache write failed" },
         },
@@ -5489,6 +5494,52 @@ const spec = {
         tags: ["Play History"],
         summary: "Titles/users driving the most transcodes (ADMIN)",
         responses: { "200": { description: "Transcode offender list" }, "403": { description: "Forbidden — ADMIN only" } },
+      },
+    },
+    "/admin/library/match-check": {
+      get: {
+        tags: ["Admin – Debug"],
+        summary: "The stored library match check, or poll a running one (ADMIN)",
+        description:
+          "Without `job`: `{ report }` — the last stored check, or null. Each flag is a Plex/Jellyfin item whose folder Radarr/Sonarr say holds a different title " +
+          "(`wrongMatch`), an item the sync can't place for want of a TMDB id (`noTmdbId`), or, in a folder no Radarr/Sonarr manages, a \"Name (YYYY)\" folder whose " +
+          "year is more than one year from the match (`yearMismatch`). `sibling` marks an item in a folder another item already matches (an extra or a second part). " +
+          "With `job`: 202 `{ job, running: true }` while a background check runs, then its answer.",
+        parameters: [
+          { name: "job", in: "query", required: false, schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "The job id from the POST's 202" },
+        ],
+        responses: {
+          "200": { description: "`{ report: { version, checkedAt, sources, counts, flags, truncated } | null }`, or the finished job's answer" },
+          "202": { description: "The job is still running: { job, running: true }" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "The job is unknown — expired, another admin's, or dropped by a restart" },
+        },
+      },
+      post: {
+        tags: ["Admin – Debug"],
+        summary: "Run the library match check (ADMIN)",
+        description:
+          "Lists every configured Plex/Jellyfin server's movies and shows (every copy, every unmatched item) and every Radarr/Sonarr title with its folder, judges " +
+          "them, and stores the report. Read-only towards every server. A source that can't be read is named in `sources` and judged nothing. No body is the " +
+          "synchronous run; `{ async: true }` answers 202 `{ job }` at once — poll GET `?job=`. The same admin asking again while theirs runs joins it (no rate " +
+          "token). 3 runs per 10 minutes per admin.",
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", properties: {
+            async: { type: "boolean", description: "Run as a background job: 202 { job }, poll GET ?job=. Default: synchronous" },
+          } } } },
+        },
+        responses: {
+          "200": { description: "`{ ok: true, checkedAt, counts, sources, truncated }`, or `{ ok: false, aborted: true }` when the run hit its time limit (nothing stored)" },
+          "202": {
+            description: "async: true — the check runs in the background: { job }",
+            content: { "application/json": { schema: { type: "object", required: ["job"], properties: { job: { type: "string", pattern: "^[0-9a-f]{32}$" } } } } },
+          },
+          "403": { description: "Not ADMIN" },
+          "409": { description: "A check is already running — { ok: false, error, retryAfter: 30 }", headers: { "Retry-After": { schema: { type: "integer" }, description: "Seconds (30)" } } },
+          "413": { description: "Request body over the 1 KB cap" },
+          "429": { description: "Rate limited (3 per 10 minutes per admin)" },
+        },
       },
     },
     "/admin/library/bad-matches": {

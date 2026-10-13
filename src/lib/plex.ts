@@ -6,6 +6,7 @@ import {
   PLEX_VIDEO_TRANSCODED,
 } from "./transcode-reasons";
 import { countsAsPlexWatchRecord, parsePlexHistoryItem, type PlexHistoryEntry } from "./upstream-watch";
+import type { ServerMatchEntry } from "./library-match";
 
 const PLEX_TV_HOSTS = ["plex.tv"];
 
@@ -97,6 +98,8 @@ interface PlexMetadataItem {
   summary?: string;
   contentRating?: string;
   addedAt?: number;
+  // A show's folder(s) on disk; read only by the library match check.
+  Location?: Array<{ path?: string }>;
 }
 
 function plexServerHeaders(token: string): Record<string, string> {
@@ -479,6 +482,61 @@ export async function getPlexTmdbIds(
     }
   }
   return combined;
+}
+
+function guidValue(item: PlexMetadataItem, scheme: "imdb" | "tvdb"): string | null {
+  const modern = item.Guid?.find((g) => g.id.startsWith(`${scheme}://`))?.id.slice(scheme.length + 3);
+  if (modern) return modern;
+  const legacy = scheme === "imdb" ? /imdb:\/\/(tt\d+)/.exec(item.guid ?? "") : /thetvdb:\/\/(\d+)/.exec(item.guid ?? "");
+  return legacy?.[1] ?? null;
+}
+
+/**
+ * Every item of the selected sections as the library match check judges it —
+ * each copy and each unmatched item, not the one-row-per-TMDB-id map the sync
+ * builds. A show's path is its folder (`Location`); one the server doesn't
+ * report is left null, and that show is simply not judged.
+ */
+export async function listPlexMatchEntries(
+  serverUrl: string,
+  token: string,
+  serverInstance: string,
+  mediaType: "MOVIE" | "TV",
+  selectedKeys?: Set<string>,
+): Promise<ServerMatchEntry[]> {
+  const sectionType = mediaType === "MOVIE" ? "movie" : "show";
+  const sections = (await getPlexLibrarySections(serverUrl, token))
+    .filter((s) => s.type === sectionType && (!selectedKeys?.size || selectedKeys.has(s.key)));
+  const out: ServerMatchEntry[] = [];
+  for (const section of sections) {
+    await plexFetchAllPages<PlexMetadataItem>(
+      `${serverUrl}/library/sections/${section.key}/all?type=${mediaType === "MOVIE" ? 1 : 2}&includeGuids=1`,
+      token,
+      (batch) => {
+        for (const item of batch) {
+          if (item.type === "collection" || !item.ratingKey) continue;
+          const tmdbIds = extractAllTmdbIds(item);
+          const tvdb = guidValue(item, "tvdb");
+          out.push({
+            server: "plex",
+            serverInstance,
+            mediaType,
+            itemKey: item.ratingKey,
+            title: item.title ?? null,
+            year: item.year ?? null,
+            path: mediaType === "MOVIE"
+              ? (item.Media?.[0]?.Part?.[0]?.file ?? null)
+              : (item.Location?.find((l) => l.path)?.path ?? null),
+            tmdbIds,
+            imdbId: guidValue(item, "imdb"),
+            tvdbId: tvdb !== null && /^\d+$/.test(tvdb) ? Number(tvdb) : null,
+            legacyPlaced: tmdbIds.length === 0 && extractLegacyExternalId(item) !== null,
+          });
+        }
+      },
+    );
+  }
+  return out;
 }
 
 interface PlexShowMeta extends PlexMetadataItem {

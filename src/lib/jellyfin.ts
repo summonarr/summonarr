@@ -2,6 +2,7 @@ import { safeFetchAdminConfigured } from "./safe-fetch";
 import { warnOnChange } from "./log-dedup";
 import { NO_REASON_REPORTED } from "./transcode-reasons";
 import { parseJellyfinPlayedItem, type JellyfinPlayedItem } from "./upstream-watch";
+import type { ServerMatchEntry } from "./library-match";
 
 export interface JellyfinUser {
   id: string;
@@ -1136,6 +1137,54 @@ export async function getJellyfinUserCount(baseUrl: string, apiKey: string): Pro
   const body = (await res.json()) as unknown[] | { Items?: unknown[] };
   if (Array.isArray(body)) return body.length;
   return Array.isArray(body.Items) ? body.Items.length : 0;
+}
+
+/**
+ * Every Movie or Series of the selected libraries as the library match check
+ * judges it — each copy and each item with no TMDB id, which the sync's
+ * one-row-per-TMDB-id map drops. A Series' path is its folder.
+ */
+export async function listJellyfinMatchEntries(
+  baseUrl: string,
+  apiKey: string,
+  serverInstance: string,
+  mediaType: "MOVIE" | "TV",
+  libraryIds?: Set<string>,
+): Promise<ServerMatchEntry[]> {
+  const base = baseUrl.replace(/\/$/, "");
+  const itemType = mediaType === "MOVIE" ? "Movie" : "Series";
+  const query = (parent: string) =>
+    `${base}/Items?${parent}IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,ProductionYear&EnableImages=false&ImageTypeLimit=0&SortBy=SortName,Id&SortOrder=Ascending`;
+  const seen = new Set<string>();
+  const out: ServerMatchEntry[] = [];
+  const intId = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : null);
+  const processItems = (batch: JellyfinItem[]) => {
+    for (const item of batch) {
+      // The same item can sit under two selected libraries' parents.
+      if (item.Type === "BoxSet" || !item.Id || seen.has(item.Id)) continue;
+      seen.add(item.Id);
+      const ids = item.ProviderIds ?? {};
+      const tmdb = intId(ids.Tmdb ?? ids.tmdb);
+      out.push({
+        server: "jellyfin",
+        serverInstance,
+        mediaType,
+        itemKey: item.Id,
+        title: item.Name ?? null,
+        year: item.ProductionYear ?? null,
+        path: item.Path ?? null,
+        tmdbIds: tmdb !== null ? [tmdb] : [],
+        imdbId: ids.Imdb ?? ids.imdb ?? null,
+        tvdbId: intId(ids.Tvdb ?? ids.tvdb),
+      });
+    }
+  };
+  if (libraryIds?.size) {
+    for (const parentId of libraryIds) await fetchJellyfinPages(query(`ParentId=${encodeURIComponent(parentId)}&`), apiKey, processItems);
+  } else {
+    await fetchJellyfinPages(query(""), apiKey, processItems);
+  }
+  return out;
 }
 
 export async function getJellyfinTmdbIds(

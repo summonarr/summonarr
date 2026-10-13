@@ -23,6 +23,10 @@ export const ARR_WATCH_LOCK_ID = 2051;
 // The admin arr pages' background re-reads (refresh-arr-snapshots cron,
 // src/lib/arr-snapshot.ts). Same reasoning: a parallel-branch-safe id.
 export const ARR_SNAPSHOT_LOCK_ID = 2061;
+// The library match check's walk of every media server and Radarr/Sonarr
+// (src/lib/library-match-data.ts). Its report row is written under the
+// two-key xact lock (2071, 1), which this single-key session lock never meets.
+export const LIBRARY_MATCH_CHECK_LOCK_ID = 2071;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

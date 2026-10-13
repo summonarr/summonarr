@@ -350,5 +350,9 @@
   "apiAdmin.arr.providerSearchUnsupported": "{service} says this indexer doesn't support searching, so searching wasn't switched on",
   "apiAdmin.neverWatched.refreshJobGone": "That watch-record check is no longer being followed — Summonarr may have restarted. Reload to see the latest results.",
   "apiAdmin.arr.filesJobGone": "That delete is no longer available — reload the files to see what was deleted, and don't run it again blindly.",
-  "apiAdmin.arr.markInProgress": "A mark for this download is still in progress — try again in a minute"
+  "apiAdmin.arr.markInProgress": "A mark for this download is still in progress — try again in a minute",
+  "apiAdmin.libraryMatch.jobGone": "That check is no longer available. Run the check again.",
+  "apiAdmin.libraryMatch.running": "A match check is already running. Try again shortly.",
+  "apiAdmin.fixMatch.itemKeyInvalid": "itemKey must be a Plex ratingKey or a Jellyfin item id.",
+  "apiAdmin.fixMatch.itemNotFlagged": "That item isn't in the latest match check. Run the check again."
 }

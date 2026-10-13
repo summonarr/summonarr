@@ -350,5 +350,9 @@
   "apiAdmin.arr.providerSearchUnsupported": "{service} indica que este indexador no admite búsquedas, así que la búsqueda no se activó",
   "apiAdmin.neverWatched.refreshJobGone": "Ya no se está siguiendo esa comprobación de los registros de visionado: puede que Summonarr se haya reiniciado. Recarga para ver los últimos resultados.",
   "apiAdmin.arr.filesJobGone": "Esa eliminación ya no está disponible: vuelve a cargar los archivos para ver qué se eliminó y no la ejecutes de nuevo a ciegas.",
-  "apiAdmin.arr.markInProgress": "Esta descarga todavía se está marcando como fallida — vuelve a intentarlo en un minuto"
+  "apiAdmin.arr.markInProgress": "Esta descarga todavía se está marcando como fallida — vuelve a intentarlo en un minuto",
+  "apiAdmin.libraryMatch.jobGone": "Esa comprobación ya no está disponible. Vuelve a ejecutarla.",
+  "apiAdmin.libraryMatch.running": "Ya hay una comprobación de coincidencias en curso. Inténtalo de nuevo en breve.",
+  "apiAdmin.fixMatch.itemKeyInvalid": "itemKey debe ser un ratingKey de Plex o un id de elemento de Jellyfin.",
+  "apiAdmin.fixMatch.itemNotFlagged": "Ese elemento no está en la última comprobación de coincidencias. Vuelve a ejecutarla."
 }

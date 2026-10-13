@@ -128,6 +128,7 @@ const {
   getPlexAccounts,
   getPlexMachineId,
   getPlexFriendEmails,
+  listPlexMatchEntries,
 } = await import("../src/lib/plex.ts");
 
 // ── extractTmdbIdFromGuids (pure) ───────────────────────────────────────────
@@ -1343,4 +1344,55 @@ test("getPlexWatchHistory: music tracks don't advance the cap; the raw ceiling r
   const capped = await getPlexWatchHistory(S, "t", { maxItems: 1 });
   assert.equal(capped.truncated, true, "a watch record past the cap exists");
   assert.deepEqual(capped.entries.map((e) => e.itemKey), ["10"]);
+});
+
+// ── listPlexMatchEntries (the library match check) ──────────────────────────
+
+test("listPlexMatchEntries lists EVERY item of the selected sections — copies, unmatched and legacy items included — with each one's own ids and path", async () => {
+  const S = "http://plex-match1.test:32400";
+  respond = (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [
+        { key: "1", title: "Movies", type: "movie" },
+        { key: "2", title: "4K Movies", type: "movie" },
+        { key: "3", title: "Shows", type: "show" },
+      ] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      assert.equal(url.searchParams.get("type"), "1");
+      assert.equal(url.searchParams.get("includeGuids"), "1");
+      return mediaContainer([
+        { type: "movie", ratingKey: "10", title: "Ghost in the Shell", year: 1995, Guid: [{ id: "tmdb://9323" }, { id: "imdb://tt0113568" }], Media: [{ Part: [{ file: "/m/Ghost in the Shell (1995)/a.mkv" }] }] },
+        // Same tmdb id, other folder: the sync folds this one into 9323's row; the check must see it.
+        { type: "movie", ratingKey: "11", title: "Ghost in the Shell", year: 1995, Guid: [{ id: "tmdb://9323" }], Media: [{ Part: [{ file: "/m/Ghost in the Shell (2017)/b.mkv" }] }] },
+        { type: "movie", ratingKey: "12", title: "Unmatched.Rip", Guid: [], Media: [{ Part: [{ file: "/m/Unmatched.Rip.mkv" }] }] },
+        { type: "movie", ratingKey: "13", title: "Old Agent", guid: "com.plexapp.agents.imdb://tt0000013?lang=en", Media: [{ Part: [{ file: "/m/Old (1990)/o.mkv" }] }] },
+        { type: "collection", ratingKey: "99", title: "A Collection" },
+      ], { totalSize: 5 });
+    }
+    if (url.pathname === "/library/sections/2/all") throw new Error("section 2 was not selected");
+    if (url.pathname === "/library/sections/3/all") {
+      assert.equal(url.searchParams.get("type"), "2");
+      return mediaContainer([
+        { type: "show", ratingKey: "20", title: "Doctor Who", year: 2005, Guid: [{ id: "tmdb://57243" }, { id: "tvdb://78804" }], Location: [{ path: "/tv/Doctor Who (2005)" }] },
+        { type: "show", ratingKey: "21", title: "No Location", Guid: [{ id: "tvdb://1" }] },
+      ], { totalSize: 2 });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const movies = await listPlexMatchEntries(S, "tok", "remote", "MOVIE", new Set(["1"]));
+  assert.deepEqual(movies.map((e) => [e.itemKey, e.tmdbIds, e.imdbId, e.path, e.legacyPlaced]), [
+    ["10", [9323], "tt0113568", "/m/Ghost in the Shell (1995)/a.mkv", false],
+    ["11", [9323], null, "/m/Ghost in the Shell (2017)/b.mkv", false],
+    ["12", [], null, "/m/Unmatched.Rip.mkv", false],
+    ["13", [], "tt0000013", "/m/Old (1990)/o.mkv", true],
+  ]);
+  assert.ok(movies.every((e) => e.server === "plex" && e.serverInstance === "remote" && e.mediaType === "MOVIE"));
+  assert.equal(movies[0].year, 1995);
+
+  const shows = await listPlexMatchEntries(S, "tok", "", "TV");
+  assert.deepEqual(shows.map((e) => [e.itemKey, e.tmdbIds, e.tvdbId, e.path]), [
+    ["20", [57243], 78804, "/tv/Doctor Who (2005)"],
+    ["21", [], 1, null],
+  ]);
 });

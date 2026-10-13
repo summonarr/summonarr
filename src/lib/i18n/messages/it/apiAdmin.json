@@ -350,5 +350,9 @@
   "apiAdmin.arr.providerSearchUnsupported": "{service} indica che questo indexer non supporta la ricerca, quindi la ricerca non è stata attivata",
   "apiAdmin.neverWatched.refreshJobGone": "Quella verifica della cronologia visioni non viene più seguita — Summonarr potrebbe essere stato riavviato. Ricarica per vedere i risultati più recenti.",
   "apiAdmin.arr.filesJobGone": "Questa eliminazione non è più disponibile: ricarica i file per vedere cosa è stato eliminato e non rieseguirla alla cieca.",
-  "apiAdmin.arr.markInProgress": "Questo download è ancora in fase di segnalazione come non riuscito — riprova tra un minuto"
+  "apiAdmin.arr.markInProgress": "Questo download è ancora in fase di segnalazione come non riuscito — riprova tra un minuto",
+  "apiAdmin.libraryMatch.jobGone": "Questa verifica non è più disponibile. Avviala di nuovo.",
+  "apiAdmin.libraryMatch.running": "Una verifica degli abbinamenti è già in corso. Riprova a breve.",
+  "apiAdmin.fixMatch.itemKeyInvalid": "itemKey deve essere un ratingKey di Plex o un id di elemento Jellyfin.",
+  "apiAdmin.fixMatch.itemNotFlagged": "Questo elemento non è nell'ultima verifica degli abbinamenti. Avviala di nuovo."
 }

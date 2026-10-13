@@ -57,8 +57,11 @@ export class FixMatchError extends Error {
 }
 
 export function fixMatchJobKey(input: {
-  server: string; serverInstance: string; mediaType: string; tmdbId: number; correctTmdbId: number;
+  server: string; serverInstance: string; mediaType: string; tmdbId: number; correctTmdbId: number; itemKey?: string;
 }): string {
+  // Item mode names the ONE item it remaps: two unmatched items (tmdbId 0)
+  // fixed to the same title are two remaps, never one joined job.
+  if (input.itemKey !== undefined) return `${input.server}:${input.serverInstance}:${input.mediaType}:item=${input.itemKey}->${input.correctTmdbId}`;
   return `${input.server}:${input.serverInstance}:${input.mediaType}:${input.tmdbId}->${input.correctTmdbId}`;
 }
 

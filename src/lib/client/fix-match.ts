@@ -14,12 +14,16 @@ import type { Translator } from "@/lib/i18n/translate";
 
 export type FixMatchRequest = {
   server: "plex" | "jellyfin";
-  tmdbId: number;
   mediaType: "MOVIE" | "TV";
   correctTmdbId: number;
   canonicalGuid?: string;
   serverInstance?: string;
-};
+} & (
+  | { tmdbId: number; itemKey?: undefined }
+  // Item mode: one item the library match check flagged; the server reads its
+  // current id from the stored report.
+  | { itemKey: string; tmdbId?: undefined }
+);
 
 // `warning` is the server's (translated) partial-remap note. `joined` means an
 // identical remap was already running server-side and this call attached to it
