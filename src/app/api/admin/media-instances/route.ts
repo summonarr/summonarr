@@ -11,6 +11,8 @@ import { getMediaInstances, buildMediaInstanceRegistryWrite } from "@/lib/media-
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { validateServerUrl, stripUrlUserinfo } from "@/lib/server-url";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { upstreamStatusKey } from "@/lib/never-watched-data";
+import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 
 // Admin management surface for the full Plex/Jellyfin instance list (multi-
 // server support): the registry metadata (slug/name — deliberately thin, see
@@ -275,6 +277,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // against unchanged state.
   const removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number }> = {};
   await prisma.$transaction(async (tx) => {
+    // The registry row FIRST: its row lock is what orders this removal against
+    // an upstream watch refresh in flight (stillRegisteredInTx in
+    // upstream-watch-data.ts locks the same row before writing a slug's
+    // evidence or status, so it never re-creates them for a removed slug).
     await tx.setting.upsert({
       where: { key: registryWrite.key },
       create: registryWrite,
@@ -325,7 +331,18 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
     // Clean up everything a removed named instance owned.
     for (const slug of removed) {
-      await tx.setting.deleteMany({ where: { key: { in: instanceSettingKeys(service, slug) } } });
+      // The connection/ancillary keys AND the upstream watch-record status
+      // (guardrail 14d). A status left behind is inherited by a server later
+      // registered under the same slug: it reads "ok" for up to 7 days before
+      // that server's own first refresh, lifting the cleanup's upstreamUnchecked
+      // hold on evidence it never produced. It can't collide with the default's
+      // key (the slug is its own segment), so no default-key filter is needed.
+      await tx.setting.deleteMany({
+        where: { key: { in: [...instanceSettingKeys(service, slug), upstreamStatusKey(service, slug)] } },
+      });
+      // The server's own watch-record snapshot: derived rows its next refresh
+      // would rebuild, but nothing ever refreshes a de-registered slug again.
+      await tx.upstreamWatchEvidence.deleteMany({ where: { source: service, serverInstance: slug } });
 
       // Library rows: a pure derived cache, rebuilt from scratch if the server is
       // ever re-added. Leaving them is the headline bug this cleanup exists for.
@@ -356,6 +373,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       removedCounts[slug] = { libraryItems: library.count, activeSessions: sessions.count, serverUsersDisabled: serverUsers.count };
     }
   }, { timeout: BATCH_TX_TIMEOUT });
+  // A removal changed the never-watched report's inputs (library rows, evidence,
+  // the coverage rows); the cached report must not outlive it (guardrail 14d).
+  if (removed.length > 0) invalidateNeverWatchedReport();
 
   // Connection tests for every instance that now has its required fields.
   // Bounded — the instance list is admin-sized but still input-scaled (guardrail 31).

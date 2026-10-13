@@ -571,6 +571,45 @@ test("import with corrections: an id the instance doesn't have is 400 and NO com
   assert.deepEqual(audits, []);
 });
 
+// Sonarr v3's manualimport rows carry ONE `language` object and no `languages`
+// array, and v3's ManualImportFile reads only `language` — a command without it
+// stores the file as Language Unknown (g-sonarr#3).
+const sonarrV3ManualRows = [
+  { path: "/dl/Show.S01/Show.S01E02.mkv", relativePath: "Show.S01E02.mkv", size: 1e9, quality: q, language: { id: 2, name: "French" },
+    series: { id: 3, title: "Show" }, episodes: [{ id: 102, seasonNumber: 1, episodeNumber: 2 }], rejections: [] },
+];
+
+test("import from a Sonarr v3 row: its ONE language object is carried back as the arr gave it, and a language correction it can't read is 400 with no command", async () => {
+  responder = (c) => {
+    if (c.path === "/api/v3/manualimport" && c.method === "GET") return json(sonarrV3ManualRows);
+    if (c.path === "/api/v3/language") return json(languageList);
+    if (c.path === "/api/v3/command" && c.method === "POST") return json({ id: 1 }, 201);
+    return undefined;
+  };
+  const token = await mintSession();
+  const res = await call(importRoute.POST, token, "/admin/queue/import", {
+    method: "POST",
+    body: { service: "sonarr", downloadId: "qb_3", paths: ["/dl/Show.S01/Show.S01E02.mkv"] },
+  });
+  assert.equal(res.status, 202);
+  const command = arrCalls().find((c) => c.path === "/api/v3/command")!;
+  assert.deepEqual(command.body, {
+    name: "ManualImport",
+    importMode: "auto",
+    files: [{ path: "/dl/Show.S01/Show.S01E02.mkv", quality: q, language: { id: 2, name: "French" }, indexerFlags: 0, downloadId: "qb_3", seriesId: 3, episodeIds: [102] }],
+  }, "the singular `language`, never an empty `languages` array v3 would ignore");
+
+  // A `languages` correction would be ignored by v3 — refused, not dropped.
+  calls = [];
+  const corrected = await call(importRoute.POST, token, "/admin/queue/import", {
+    method: "POST",
+    body: { service: "sonarr", downloadId: "qb_3", files: [{ path: "/dl/Show.S01/Show.S01E02.mkv", languageIds: [8] }] },
+  });
+  assert.equal(corrected.status, 400);
+  assert.deepEqual(await corrected.json(), { error: "Sonarr has no such language" }, "refused as the language correction, though the instance lists id 8");
+  assert.equal(arrCalls().filter((c) => c.path === "/api/v3/command").length, 0);
+});
+
 test("preview: the corrected file is RE-JUDGED by the arr's reprocess and its fresh verdict shown; nothing is imported", async () => {
   let reprocessed: unknown = null;
   responder = (c) => {

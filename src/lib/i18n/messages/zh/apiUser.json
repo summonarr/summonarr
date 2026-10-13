@@ -182,5 +182,12 @@
   "apiUser.requests.releases.grabRefused": "{service} 无法抓取该发布：{reason}",
   "apiUser.requests.releases.jobGone": "该搜索已不可用——请重新搜索。",
   "apiUser.requests.releases.grabInProgress": "该发布版本正在获取中",
-  "apiUser.requests.arrStatus.invalidStatus": "只有已批准或可观看的请求才能检查"
+  "apiUser.requests.arrStatus.invalidStatus": "只有已批准或可观看的请求才能检查",
+  "apiUser.issues.replaceFile.alreadyRunning": "此问题已有一个“替换文件”正在运行——请等待其完成，然后重新加载此问题。",
+  "apiUser.issues.replaceFile.jobGone": "该“替换文件”任务已不可用——请重新加载此问题，查看已删除了哪些内容，不要盲目再次运行。",
+  "apiUser.issues.replaceNeedsSeason": "Sonarr 只能搜索一季或一集，而不能搜索整部剧集——请对此问题使用“重新获取”",
+  "apiUser.requests.searchNothingMissing": "无需搜索——此剧集没有缺失的已播出且受监控的集",
+  "apiUser.requests.searchInstanceUnavailable": "此请求的 Sonarr 实例已不再配置",
+  "apiUser.requests.searchPartial": "搜索只启动了一部分——Sonarr 拒绝了其余部分。请稍后再次搜索仍缺失的内容。",
+  "apiUser.requests.searchSeriesNotInSonarr": "此剧集不在此请求的 Sonarr 实例中——请重新推送该请求以再次添加"
 }

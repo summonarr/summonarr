@@ -22,6 +22,12 @@
 //      now hides too — and the button and the run use that same list, so a
 //      filter change can't tick past the cap or make the button lie.
 //   9. Removing a title in the title manager re-reads the list.
+//  10. A cutoff listing that runs past the page ceiling is reported as
+//      truncated per instance (read of total), never as the complete list.
+//  11. The page's load/selection bookkeeping (the 2026-10-12 audit fixes): a
+//      row's own Search unticks it, a reload is tracked per key with only the
+//      newest load of a key committing, a fresh listing keeps a row whose
+//      search is still in flight, and the tables are paged.
 //
 // Route harness: the tests/arr-missing-routes.test.mts idiom — the real
 // withAdmin handler with a signed session JWT inside a synthetic request scope,
@@ -306,6 +312,8 @@ const RADARR = "http://10.0.0.5:7878";
 type Call = { origin: string; method: string; path: string; body: unknown };
 let calls: Call[] = [];
 let radarrMovies: unknown[] = [];
+// /api/v3/wanted/cutoff: how many records the arr says it has (served 500 a page).
+let cutoffTotal = 0;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
@@ -313,6 +321,16 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
   calls.push({ origin: url.origin, method, path: url.pathname, body });
   if (method === "POST" && url.pathname === "/api/v3/command") return Response.json({ id: calls.length, status: "queued", ...body }, { status: 201 });
+  if (method === "GET" && url.pathname === "/api/v3/qualityprofile") return Response.json([]);
+  if (method === "GET" && url.pathname === "/api/v3/wanted/cutoff") {
+    const page = Number(url.searchParams.get("page"));
+    const size = Number(url.searchParams.get("pageSize"));
+    const from = (page - 1) * size;
+    const records = Array.from({ length: Math.max(0, Math.min(size, cutoffTotal - from)) }, (_, i) => (
+      { id: from + i + 1, title: `Movie ${from + i + 1}`, hasFile: true, movieFile: { qualityCutoffNotMet: true } }
+    ));
+    return Response.json({ page, pageSize: size, totalRecords: cutoffTotal, records });
+  }
   const movieById = /^\/api\/v3\/movie\/(\d+)$/.exec(url.pathname);
   if (method === "GET" && movieById) {
     const row = radarrMovies.find((m) => (m as { id: number }).id === Number(movieById[1]));
@@ -381,7 +399,10 @@ shadowPrismaModel(prisma, "setting", {
   },
 });
 
+shadowPrismaModel(prisma, "tmdbMediaCore", { findMany: async () => [] });
+
 const searchRoute = await import("../src/app/api/admin/missing/search/route.ts");
+const missingData = await import("../src/lib/arr-missing-data.ts");
 
 function inScope<T>(fn: () => Promise<T>): Promise<T> {
   const workStore = { route: "/missing-fix.test", forceStatic: false, dynamicShouldError: false, afterContext: { after: () => {} } };
@@ -416,6 +437,7 @@ beforeEach(() => {
   settings.set("radarrUrl", RADARR);
   settings.set("radarrApiKey", "radarr-key");
   invalidateFeatureFlagCache();
+  cutoffTotal = 0;
   radarrMovies = [
     { id: 1, tmdbId: 101, title: "Released, no file", monitored: true, hasFile: false, digitalRelease: ago(5) },
     { id: 3, tmdbId: 103, title: "Has file", monitored: true, hasFile: true, physicalRelease: ago(100) },
@@ -465,24 +487,127 @@ test("route: its failure log line runs the body's instance through sanitizeForLo
 
 const missingPage = () => readFileSync(new URL("../src/components/admin/missing-report.tsx", import.meta.url), "utf8");
 
-test("page: the cap counts every ticked row of the tab — hidden by a filter or not — and the button and the run take that same list", () => {
+test("page: the cap counts every ticked row of the tab — on another page, hidden by a filter or not — and the button and the run take that same list", () => {
   const src = missingPage();
   assert.match(
     src,
-    /const selectedHidden = \(\(report\?\.items \?\? \[\]\) as ReadonlyArray<BulkRow>\)\.filter\(\(r\) => !shownKeys\.has\(selKey\(r\)\) && selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/,
+    /const selectedHidden = \(\(report\?\.items \?\? \[\]\) as ReadonlyArray<BulkRow>\)\.filter\(\(r\) => !listedKeys\.has\(selKey\(r\)\) && selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/,
     "the ticks a filter hides come from the UNFILTERED listing",
   );
-  assert.match(src, /const selectedHere = \[\.\.\.selectedShown, \.\.\.selectedHidden\];/);
+  assert.match(src, /const listedKeys = new Set\(currentRows\.map\(selKey\)\);/, "listed = every page of the filtered list");
+  assert.match(src, /const selectedListed = currentRows\.filter\(\(r\) => selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/, "ticks on other pages count");
+  assert.match(src, /const selectedHere = \[\.\.\.selectedListed, \.\.\.selectedHidden\];/);
   assert.match(src, /const atCap = selectedHere\.length >= BULK_SEARCH_MAX;/, "the cap counts them all");
   assert.match(src, /else if \(!atCap\) next\.add\(k\);/, "a tick past the cap is refused");
-  assert.match(src, /t\("adminArr\.missingBulk\.search", \{ count: selectedHere\.length \}\)/, "the button says what the run takes");
+  assert.match(src, /const toRun = capSelection\(selectedHere\);/);
+  assert.match(src, /t\("adminArr\.missingBulk\.search", \{ count: toRun\.length \}\)/, "the button says what the run takes");
+  assert.match(src, /t\("adminArr\.missingBulk\.searchCutoff", \{ count: toRun\.length \}\)/);
+  assert.doesNotMatch(src, /missingBulk\.search(?:Cutoff)?", \{ count: selectedHere\.length \}/, "never the uncapped count");
   assert.match(src, /const rows = capSelection\(selectedHere\);/);
   assert.match(src, /void searchSelected\(current, capSelection\(selectedHere\)\)/);
-  assert.match(src, /capSelection\(selectable, BULK_SEARCH_MAX - selectedHidden\.length\)/, "select-all leaves room for the hidden ticks");
+  assert.match(src, /const roomOnPage = BULK_SEARCH_MAX - selectedOffPage - selectedHidden\.length;/, "select-all leaves room for every tick elsewhere");
+  assert.match(src, /capSelection\(selectable, roomOnPage\)/);
+});
+
+// The body of `function name(` up to the next line that closes it at the
+// component's indentation.
+function fnBody(src: string, head: string): string {
+  const start = src.indexOf(head);
+  assert.ok(start >= 0, `${head} exists`);
+  const end = src.indexOf("\n  }\n", start);
+  return src.slice(start, end);
+}
+
+test("page: a row's own Search unticks it, so a failed search can't bring a tick back past the cap", () => {
+  const body = fnBody(missingPage(), "async function startSearch(");
+  const untick = body.search(/setSelected\(\(prev\) => \{[\s\S]*?next\.delete\(k\);[\s\S]*?\}\);/);
+  assert.ok(untick >= 0, "startSearch removes the row from the selection");
+  assert.ok(untick < body.indexOf("requestSearch("), "before the request goes out");
+  assert.match(body, /const k = `\$\{key\}\|\$\{rowKey\(row\)\}`;/, "the row's own key");
+  // The bulk runner's own requests never untick (it clears the selection itself when it ends).
+  assert.doesNotMatch(fnBody(missingPage(), "async function requestSearch("), /setSelected\(/);
+});
+
+test("page: a list's reload is tracked per key — a bulk run or a second listing never starts while that list's load is out, and only the newest load of a key commits", () => {
+  const src = missingPage();
+  assert.doesNotMatch(src, /useState<ReportKey \| null>/, "no single shared loading slot");
+  assert.doesNotMatch(src, /\bloading === current\b|\bloading !== current\b/);
+  assert.match(src, /const \[loadingKeys, setLoadingKeys\] = useState<ReadonlySet<ReportKey>>\(new Set\(\)\);/);
+  assert.match(src, /const loadingHere = loadingKeys\.has\(current\);/);
+  assert.match(src, /const needsLoad = configured\[service\] && !reports\[current\] && !errors\[current\] && !loadingHere;/, "no second listing of a list already loading");
+  assert.match(fnBody(src, "function requestBulk("), /if \(rows\.length === 0 \|\| bulkRunning \|\| loadingHere\) return;/);
+  assert.match(fnBody(src, "function confirmBulk("), /c\.key === current && !loadingKeys\.has\(current\)/);
+  assert.match(src, /<Button size="sm" disabled=\{bulkRunning \|\| loadingHere\} onClick=\{requestBulk\}>/, "Search selected is off while this list loads");
+  assert.match(src, /onClick=\{\(\) => void load\(service, mode\)\} disabled=\{loadingHere \|\| bulk\?\.key === current\}/, "Refresh too");
+
+  const load = src.slice(src.indexOf("const load = useCallback("), src.indexOf("}, [t, updateSearches]);"));
+  assert.match(load, /const seq = \(loadSeq\.current\[k\] \?\? 0\) \+ 1;\s*loadSeq\.current\[k\] = seq;/);
+  assert.match(load, /const superseded = \(\) => loadSeq\.current\[k\] !== seq;/);
+  const ok = load.indexOf("const data = await res.json();");
+  assert.ok(ok >= 0 && load.indexOf("if (superseded()) return;", ok) < load.indexOf("setReports(", ok), "a superseded load never writes the listing");
+  const failed = load.indexOf("if (!res.ok) {");
+  assert.ok(load.indexOf("if (superseded()) return;", failed) < load.indexOf("setErrors((e) => ({ ...e, [k]: message }))"), "nor its error");
+  assert.ok(load.indexOf("if (superseded()) return;", load.indexOf("} catch {")) < load.indexOf('t("adminManage.missing.error.loadNetwork")'), "nor its network error");
+  assert.match(load, /finally \{\s*if \(!superseded\(\)\) \{\s*setLoadingKeys\(\(prev\) => \{\s*const next = new Set\(prev\);\s*next\.delete\(k\);/, "only the newest load clears the key, and only its own key");
+});
+
+test("page: a fresh listing keeps the state of a row whose search is still in flight", () => {
+  assert.match(
+    missingPage(),
+    /updateSearches\(\(s\) => Object\.fromEntries\(Object\.entries\(s\)\.filter\(\(\[key, st\]\) => !key\.startsWith\(`\$\{k\}\|`\) \|\| st\.busy\)\)\);/,
+  );
+});
+
+test("page: the tables render one page of rows; the query is deferred for the filters", () => {
+  const src = missingPage();
+  assert.match(src, /const PAGE_SIZE = 100;/);
+  for (const list of ["movies", "series", "cutoffMovies", "cutoffSeries"]) {
+    assert.match(src, new RegExp(`onPage\\(${list}\\)\\.map\\(`), `${list} renders its page`);
+    assert.doesNotMatch(src, new RegExp(`\\{\\s*${list}\\.map\\(|,\\s*${list}\\.map\\(`), `${list} never renders whole`);
+  }
+  assert.match(src, /return rows\.slice\(pageStart, pageStart \+ PAGE_SIZE\);/);
+  assert.match(src, /const selectable = pageRows\.filter\(isOpen\);/, "select-all works on the page on screen");
+  assert.match(src, /const pageIndex = pageView\.view === viewKey \? Math\.min\(pageView\.page, pageCount - 1\) : 0;/, "a new view starts on its first page");
+  assert.match(src, /const deferredQuery = useDeferredValue\(query\);/);
+  assert.equal((src.match(/query: deferredQuery/g) ?? []).length, 4, "every list filters on the deferred query");
+});
+
+test("page: a Sonarr search refused part-way shows a neutral note on its started row", () => {
+  const src = missingPage();
+  assert.match(src, /return d\?\.partial === true \? \{ \.\.\.attempt, message: t\("adminManage\.missing\.searchPartial"\) \} : attempt;/);
+  assert.match(src, /\{\(already \|\| started\) && st\.message && \(/);
 });
 
 test("page: removing a title in the title manager re-reads the list (never mid bulk run)", () => {
   const blocks = [...missingPage().matchAll(/<ManageTitleButton\b[\s\S]*?\/>/g)].map((m) => m[0]);
   assert.equal(blocks.length, 1);
   assert.match(blocks[0], /onRemoved=\{\(\) => \{\s*(?:\/\/[^\n]*\n\s*)*if \(!bulkAbort\.current\) void load\(svc, mode\);\s*\}\}/);
+});
+
+// ── 10: a truncated cutoff listing ───────────────────────────────────────────
+
+test("cutoff: a listing past the page ceiling is reported as truncated (read of total) — never as the complete list", async () => {
+  const ceiling = missingData.CUTOFF_PAGE_SIZE * missingData.CUTOFF_MAX_PAGES;
+  assert.equal(ceiling, 20_000);
+  cutoffTotal = 25_000;
+  const capped = await missingData.loadCutoffMovies();
+  assert.deepEqual(capped.truncated, [{ instance: "", read: ceiling, total: 25_000 }]);
+  assert.equal(capped.items.length, ceiling);
+  assert.equal(calls.filter((c) => c.path === "/api/v3/wanted/cutoff").length, missingData.CUTOFF_MAX_PAGES, "bounded all the same");
+
+  // Exactly at the ceiling the read reached the end: complete, no flag (not even an empty one).
+  calls = [];
+  cutoffTotal = ceiling;
+  const whole = await missingData.loadCutoffMovies();
+  assert.equal("truncated" in whole, false);
+  assert.equal(whole.items.length, ceiling);
+
+  cutoffTotal = 3;
+  assert.equal("truncated" in (await missingData.loadCutoffMovies()), false);
+});
+
+test("page: a truncated cutoff listing is named per instance, with Arr System's library-wide search as the way past it", () => {
+  const src = missingPage();
+  assert.match(src, /report\.truncated && report\.truncated\.length > 0 &&/);
+  assert.match(src, /t\("adminManage\.missing\.cutoff\.truncated", \{ name: instanceLabel\(e\.instance\), read: e\.read, total: e\.total \}\)/);
 });

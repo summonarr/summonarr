@@ -242,7 +242,11 @@ export const WATCH_RATE_LIMITED_POLLS = 5;
 /** One poll's outcome, as the browser saw it. */
 export type WatchRead =
   | { kind: "ok"; states: ArrCommandState[] }
-  /** The tab is hidden: nothing was read, the poll still counts. */
+  /**
+   * The tab is hidden: nothing was read, the poll still counts — but the cap
+   * is only ever declared on an ANSWER, so a watch hidden past its budget
+   * reads when the tab is shown again before it gives up.
+   */
   | { kind: "skipped" }
   | { kind: "rateLimited" }
   /** A 4xx: asking again can't change the answer (not an admin any more, instance gone, …). */
@@ -250,7 +254,16 @@ export type WatchRead =
   /** A network failure, a 5xx, or an answer that isn't the list asked for. */
   | { kind: "failed"; error: string };
 
-export interface WatchCounters { polls: number; failures: number }
+export interface WatchCounters {
+  polls: number;
+  failures: number;
+  /**
+   * Reads past the poll cap that brought no answer (a failure, a 429). Past
+   * the cap only an answer ends the watch as a timeout, so these get their
+   * own small budget (WATCH_MAX_FAILED_READS) instead of polling forever.
+   */
+  overrun?: number;
+}
 
 export type WatchStep =
   | { next: "done"; states: ArrCommandState[] }
@@ -263,31 +276,43 @@ export type WatchStep =
  */
 export function watchStep(read: WatchRead, counters: WatchCounters): { step: WatchStep; counters: WatchCounters } {
   const polls = counters.polls + (read.kind === "rateLimited" ? WATCH_RATE_LIMITED_POLLS : 1);
+  const pastCap = polls >= WATCH_MAX_POLLS;
+  const overrun = (counters.overrun ?? 0) + (pastCap && read.kind !== "ok" && read.kind !== "skipped" ? 1 : 0);
   let failures = counters.failures;
   let states: ArrCommandState[] | null = null;
   switch (read.kind) {
     case "ok":
       failures = 0;
       if (read.states.every((s) => isTerminalCommandStatus(s.status))) {
-        return { step: { next: "done", states: read.states }, counters: { polls, failures } };
+        return { step: { next: "done", states: read.states }, counters: { polls, failures, overrun } };
       }
       states = read.states;
       break;
     case "refused":
-      return { step: { next: "stop", stopped: "error", error: read.error }, counters: { polls, failures } };
+      return { step: { next: "stop", stopped: "error", error: read.error }, counters: { polls, failures, overrun } };
     case "failed":
       failures += 1;
       if (failures >= WATCH_MAX_FAILED_READS) {
-        return { step: { next: "stop", stopped: "error", error: read.error }, counters: { polls, failures } };
+        return { step: { next: "stop", stopped: "error", error: read.error }, counters: { polls, failures, overrun } };
       }
       break;
     case "skipped":
     case "rateLimited":
       break;
   }
-  if (polls >= WATCH_MAX_POLLS) return { step: { next: "stop", stopped: "timeout", error: "" }, counters: { polls, failures } };
+  // Past the cap, only an ANSWER declares the timeout. A skipped poll read
+  // nothing, and neither did a failed or rate-limited one: timing out on any of
+  // them gives up on commands the watch never looked at (a tab hidden for the
+  // whole budget, then one network blip or 429 on return), and the page never
+  // re-reads what they changed. So the first answer past the cap decides —
+  // done if every command ended, otherwise the timeout — and the reads that
+  // bring none get WATCH_MAX_FAILED_READS of their own before it gives up
+  // (consecutive failures still stop it as an error first).
+  if (pastCap && (read.kind === "ok" || (read.kind !== "skipped" && overrun >= WATCH_MAX_FAILED_READS))) {
+    return { step: { next: "stop", stopped: "timeout", error: "" }, counters: { polls, failures, overrun } };
+  }
   const delayMs = read.kind === "rateLimited" ? WATCH_RATE_LIMITED_POLLS * WATCH_POLL_MS : WATCH_POLL_MS;
-  return { step: { next: "poll", delayMs, states }, counters: { polls, failures } };
+  return { step: { next: "poll", delayMs, states }, counters: { polls, failures, overrun } };
 }
 
 // ── the watcher ──────────────────────────────────────────────────────────────
@@ -299,7 +324,7 @@ export interface WatchDriver {
   read(target: WatchTarget, ids: readonly number[]): Promise<WatchRead>;
   schedule(fn: () => void, ms: number): unknown;
   cancel(handle: unknown): void;
-  /** The page is not visible: the poll counts, nothing is read. */
+  /** The page is not visible: the poll counts, nothing is read (and the cap waits for an answer). */
   hidden(): boolean;
   /** The newest read for a watch, or how it stopped. */
   update(key: string, change: { states?: ArrCommandState[]; stopped?: WatchStop; error?: string }): void;
@@ -308,11 +333,20 @@ export interface WatchDriver {
 export interface CommandWatcher {
   /**
    * Follow `ids` on one instance under `key`, replacing (and retiring) any
-   * watch there. False, following nothing, for an empty list.
+   * watch there. False, following nothing, for an empty list or after `dispose()`.
    */
   start(key: string, target: WatchTarget, ids: readonly number[], onDone?: (states: ArrCommandState[]) => void): boolean;
   /** Stop one watch, or every one: no read, no update and no onDone after this. */
   stop(key?: string): void;
+  /**
+   * The host is gone (an unmount): stop every watch AND refuse later starts —
+   * a command POST that resolves after the unmount follows nothing, so it
+   * never polls behind a dead page or calls its onDone. A plain `stop()`
+   * doesn't do this: a dialog that closes but stays mounted can watch again.
+   */
+  dispose(): void;
+  /** Undo `dispose()` — the host is mounted again (React StrictMode re-runs its effects). */
+  resume(): void;
   isRunning(key: string): boolean;
 }
 
@@ -320,24 +354,44 @@ export interface CommandWatcher {
  * The polling loop. One read at a time per watch — the next is scheduled only
  * from the previous answer, so a slow arr is never asked twice at once — and
  * only the run that scheduled a read may act on its answer: a stop, or a newer
- * watch under the same key, drops it.
+ * watch under the same key, drops it. Each poll reads only the ids still
+ * queued or running: a command that ended keeps the state it ended with (an
+ * arr command never leaves a terminal status), so a Sonarr "search missing"
+ * with dozens of season searches doesn't re-read every finished one each poll.
  */
 export function createCommandWatcher(driver: WatchDriver): CommandWatcher {
   interface Run {
     token: number;
     target: WatchTarget;
     ids: number[];
+    /** The ids that have ended, with the state each ended with — never read again. */
+    ended: Map<number, ArrCommandState>;
     handle: unknown;
     counters: WatchCounters;
     onDone?: (states: ArrCommandState[]) => void;
   }
   const runs = new Map<string, Run>();
   let seq = 0;
+  let disposed = false;
 
   const retire = (key: string) => {
     const run = runs.get(key);
     if (run && run.handle !== null) driver.cancel(run.handle);
     runs.delete(key);
+  };
+
+  // The read's states (for `live`, in that order) folded into the whole watch:
+  // every id in the order it was started with, an ended one keeping its stored
+  // state — the progress count and the final line still cover all of them. A
+  // read that doesn't answer for every id it was asked about is a failed read.
+  const mergeEnded = (run: Run, live: readonly number[], states: readonly ArrCommandState[]): WatchRead => {
+    const fresh = new Map(states.map((s) => [s.id, s]));
+    if (live.some((id) => !fresh.has(id))) return { kind: "failed", error: "" };
+    for (const id of live) {
+      const s = fresh.get(id) as ArrCommandState;
+      if (isTerminalCommandStatus(s.status)) run.ended.set(id, s);
+    }
+    return { kind: "ok", states: run.ids.map((id) => run.ended.get(id) ?? (fresh.get(id) as ArrCommandState)) };
   };
 
   const schedule = (key: string, run: Run, ms: number) => {
@@ -353,11 +407,13 @@ export function createCommandWatcher(driver: WatchDriver): CommandWatcher {
     let read: WatchRead;
     if (driver.hidden()) read = { kind: "skipped" };
     else {
+      const live = run.ids.filter((id) => !run.ended.has(id));
       try {
-        read = await driver.read(run.target, run.ids);
+        read = await driver.read(run.target, live);
       } catch (err) {
         read = { kind: "failed", error: err instanceof Error ? err.message : "" };
       }
+      if (read.kind === "ok") read = mergeEnded(run, live, read.states);
     }
     if (runs.get(key)?.token !== token) return;
     const { step, counters } = watchStep(read, run.counters);
@@ -380,15 +436,23 @@ export function createCommandWatcher(driver: WatchDriver): CommandWatcher {
   return {
     start(key, target, ids, onDone) {
       retire(key);
+      if (disposed) return false;
       const list = [...new Set(ids)];
       if (list.length === 0) return false;
-      const run: Run = { token: ++seq, target, ids: list, handle: null, counters: { polls: 0, failures: 0 }, onDone };
+      const run: Run = { token: ++seq, target, ids: list, ended: new Map(), handle: null, counters: { polls: 0, failures: 0, overrun: 0 }, onDone };
       runs.set(key, run);
       schedule(key, run, WATCH_FIRST_POLL_MS);
       return true;
     },
     stop(key) {
       for (const k of key === undefined ? [...runs.keys()] : [key]) retire(k);
+    },
+    dispose() {
+      disposed = true;
+      for (const k of [...runs.keys()]) retire(k);
+    },
+    resume() {
+      disposed = false;
     },
     isRunning(key) {
       return runs.has(key);

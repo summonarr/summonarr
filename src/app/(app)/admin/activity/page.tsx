@@ -2,6 +2,7 @@ import { authActive } from "@/lib/auth";
 import { plexSettingKey } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { prisma } from "@/lib/prisma";
+import { indexPlexRowsByKey } from "@/lib/plex-dedupe";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, getTranscodeOffenders, appendPlayHistoryFilter, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
@@ -343,10 +344,19 @@ export default async function ActivityPage({
             })
           : [],
       ]);
+      // Each key resolves to its ONE owner per instance (canonical holder, else
+      // lowest tmdbId — `indexPlexRowsByKey`), never last-write-wins: an array
+      // entry overwriting another row's canonical key made the answer follow
+      // findMany's row order, and this backfill PERSISTS it.
+      const plexByInstance = new Map<string, Array<(typeof plexItems)[number]>>();
       for (const i of plexItems) {
-        if (i.plexRatingKey) resolvedTmdb[`item:${i.serverInstance}:${i.plexRatingKey}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
-        for (const k of i.plexRatingKeys) {
-          resolvedTmdb[`item:${i.serverInstance}:${k}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        const list = plexByInstance.get(i.serverInstance);
+        if (list) list.push(i);
+        else plexByInstance.set(i.serverInstance, [i]);
+      }
+      for (const [inst, rows] of plexByInstance) {
+        for (const [k, i] of indexPlexRowsByKey(rows)) {
+          resolvedTmdb[`item:${inst}:${k}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
         }
       }
       for (const i of jellyfinItems) {

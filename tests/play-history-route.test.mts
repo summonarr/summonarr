@@ -349,7 +349,9 @@ const fakePrisma = {
     },
   },
   plexLibraryItem: {
-    findMany: async (args: unknown) => { rec("plexLibraryItem", "findMany", args); return []; },
+    // Returns whatever plexLibRows holds — the movie-prefetch fallback for a
+    // session whose Guid carries no tmdb id (guardrail 37c) reads through here.
+    findMany: async (args: unknown) => { rec("plexLibraryItem", "findMany", args); return plexLibRows; },
     findFirst: async (args: unknown) => { rec("plexLibraryItem", "findFirst", args); return null; },
   },
   jellyfinLibraryItem: {
@@ -430,6 +432,9 @@ let jfRemoteSnapshot: Array<Record<string, unknown>> = [];
 // JellyfinLibraryItem rows the poller's tmdbId fallback sees. Default [] keeps
 // every pre-existing test's "no library row" behaviour.
 let jfLibRows: Array<Record<string, unknown>> = [];
+// PlexLibraryItem rows, same idea. Default [] keeps every Guid-carrying fixture
+// on the in-payload tmdb id.
+let plexLibRows: Array<Record<string, unknown>> = [];
 let plexSessionsStatus = 200;
 let plexRemoteSessionsStatus = 200;
 let jfSessionsStatus = 200;
@@ -573,7 +578,7 @@ function seed(row: ActiveRow): ActiveRow {
 // tmdb Guid so no episode/library fallback lookups fire.
 function plexSnap(
   sessionKey: string,
-  opts: { state?: string; viewOffset: number; duration?: number; ratingKey?: string; platform?: string },
+  opts: { state?: string; viewOffset: number; duration?: number; ratingKey?: string; platform?: string; guids?: Array<{ id: string }> },
 ): Record<string, unknown> {
   return {
     sessionKey,
@@ -585,7 +590,7 @@ function plexSnap(
     year: 2020,
     duration: opts.duration ?? 1_260_000,
     viewOffset: opts.viewOffset,
-    Guid: [{ id: "tmdb://550" }],
+    Guid: opts.guids ?? [{ id: "tmdb://550" }],
   };
 }
 
@@ -661,6 +666,7 @@ beforeEach(() => {
   plexRemoteSnapshot = [];
   jfSnapshot = [];
   jfLibRows = [];
+  plexLibRows = [];
   plexSessionsStatus = 200;
   plexRemoteSessionsStatus = 200;
   jfSessionsStatus = 200;
@@ -974,6 +980,71 @@ test("a brand-new session (no existing row, non-DLNA) is created via createMany(
   );
   assert.equal((createCall!.args as CreateManyArgs).skipDuplicates, true, "overlapping poll ticks must not reject each other on a duplicate insert");
   assert.equal(historyRows().length, 0, "a fresh session writes no PlayHistory row");
+});
+
+// The prefetch tests below poll several times each; their own client IP keeps
+// them out of the shared 30/min poller bucket the rest of the file spends.
+const AS_CRON_PREFETCH = { ...AS_CRON, "x-forwarded-for": "10.77.0.9" };
+
+test("a movie with no tmdb Guid resolves through the library prefetch by ANY of its ratingKeys (guardrail 37c) — the 4K copy's key included", async () => {
+  // The title sits in "Movies" (rk-hd, the stored plexRatingKey) and "4K
+  // Movies" (rk-4k, only in plexRatingKeys). A play of the 4K copy used to
+  // record tmdbId null forever.
+  plexSnapshot = [plexSnap("lib-4k", { viewOffset: 42_000, ratingKey: "rk-4k", guids: [] })];
+  plexLibRows = [{ plexRatingKey: "rk-hd", plexRatingKeys: ["rk-hd", "rk-4k"], tmdbId: 603, mediaType: "MOVIE" }];
+  await POST(phReq({ headers: AS_CRON_PREFETCH }));
+  await settle();
+  const row = activeCreatesFor("plex:lib-4k")[0];
+  assert.equal(row.tmdbId, 603, "the 4K copy's key must find the row through plexRatingKeys");
+  const lookup = dbCalls.find((c) => c.model === "plexLibraryItem" && c.op === "findMany");
+  assert.deepEqual(
+    (lookup!.args as { where: unknown }).where,
+    { serverInstance: "", OR: [{ plexRatingKey: { in: ["rk-4k"] } }, { plexRatingKeys: { hasSome: ["rk-4k"] } }] },
+    "both ratingKey columns, instance-scoped (guardrail 35)",
+  );
+});
+
+test("the prefetch resolves a key held by two rows to its CANONICAL holder, whichever row findMany returns first", async () => {
+  // rk-4k rides 603's array (a duplicate copy key) AND is 604's canonical key:
+  // 604 owns it. An arrival-order map would follow Postgres row order.
+  for (const rows of [
+    [{ plexRatingKey: "rk-hd", plexRatingKeys: ["rk-hd", "rk-4k"], tmdbId: 603, mediaType: "MOVIE" },
+     { plexRatingKey: "rk-4k", plexRatingKeys: ["rk-4k"], tmdbId: 604, mediaType: "MOVIE" }],
+    [{ plexRatingKey: "rk-4k", plexRatingKeys: ["rk-4k"], tmdbId: 604, mediaType: "MOVIE" },
+     { plexRatingKey: "rk-hd", plexRatingKeys: ["rk-hd", "rk-4k"], tmdbId: 603, mediaType: "MOVIE" }],
+  ]) {
+    activeStore.clear();
+    dbCalls.length = 0;
+    plexSnapshot = [plexSnap("lib-own", { viewOffset: 42_000, ratingKey: "rk-4k", guids: [] })];
+    plexLibRows = rows;
+    await POST(phReq({ headers: AS_CRON_PREFETCH }));
+    await settle();
+    assert.equal(activeCreatesFor("plex:lib-own")[0].tmdbId, 604, "the canonical holder owns the key");
+  }
+  // Array-only holders: the lowest tmdbId, in either order.
+  for (const rows of [
+    [{ plexRatingKey: "rk-a", plexRatingKeys: ["rk-a", "rk-x"], tmdbId: 900, mediaType: "MOVIE" },
+     { plexRatingKey: "rk-b", plexRatingKeys: ["rk-b", "rk-x"], tmdbId: 700, mediaType: "MOVIE" }],
+    [{ plexRatingKey: "rk-b", plexRatingKeys: ["rk-b", "rk-x"], tmdbId: 700, mediaType: "MOVIE" },
+     { plexRatingKey: "rk-a", plexRatingKeys: ["rk-a", "rk-x"], tmdbId: 900, mediaType: "MOVIE" }],
+  ]) {
+    activeStore.clear();
+    dbCalls.length = 0;
+    plexSnapshot = [plexSnap("lib-arr", { viewOffset: 42_000, ratingKey: "rk-x", guids: [] })];
+    plexLibRows = rows;
+    await POST(phReq({ headers: AS_CRON_PREFETCH }));
+    await settle();
+    assert.equal(activeCreatesFor("plex:lib-arr")[0].tmdbId, 700);
+  }
+});
+
+test("a movie WITH a tmdb Guid never reads the library prefetch", async () => {
+  plexSnapshot = [plexSnap("lib-guid", { viewOffset: 42_000 })];
+  plexLibRows = [{ plexRatingKey: "rk-lib-guid", plexRatingKeys: ["rk-lib-guid"], tmdbId: 9999, mediaType: "MOVIE" }];
+  await POST(phReq({ headers: AS_CRON_PREFETCH }));
+  await settle();
+  assert.equal(activeCreatesFor("plex:lib-guid")[0].tmdbId, 550, "the payload's own tmdb guid wins");
+  assert.equal(dbCalls.filter((c) => c.model === "plexLibraryItem").length, 0, "no fallback read when the guid answers");
 });
 
 test("the server OWNER's local account id \"1\" is rewritten to the plex.tv admin id and flagged isServerAdmin", async () => {

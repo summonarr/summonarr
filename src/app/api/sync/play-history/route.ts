@@ -16,6 +16,7 @@ import {
   SESSION_ABSENCE_GRACE_MS,
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } from "@/lib/plex";
+import { indexPlexRowsByKey } from "@/lib/plex-dedupe";
 import { getJellyfinSessions } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -203,12 +204,10 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
       })
     : [];
   // Keyed by EVERY key a row answers to, or widening the query only finds a row
-  // the map then misses.
-  const libMap = new Map<string | null, (typeof libRows)[number]>();
-  for (const r of libRows) {
-    if (r.plexRatingKey) libMap.set(r.plexRatingKey, r);
-    for (const k of r.plexRatingKeys ?? []) if (!libMap.has(k)) libMap.set(k, r);
-  }
+  // the map then misses — and each key resolves to its ONE owner (canonical
+  // holder, else lowest tmdbId: `indexPlexRowsByKey`), never to whichever row
+  // findMany happened to return first, because the answer is persisted.
+  const libMap = indexPlexRowsByKey(libRows);
 
   // Resolve media server users in parallel — each upserts independently.
   // isServerAdmin = accountId matches the admin token's plex user id. When

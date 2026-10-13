@@ -43,6 +43,95 @@ test("credentials are masked in JSON, header, auth-scheme, encoded and path form
   assert.equal(maskSecrets("https://host.example/movies/Some Title (2020)"), "https://host.example/movies/Some Title (2020)", "short path segments survive");
 });
 
+// Each case names the rule that masks it — removing that rule must fail here.
+test("credentials are masked in the arrs' own `at [<url>]` form, quoted values, any Authorization header, and tracker path keys", () => {
+  const T32 = "0123456789abcdef0123456789abcdef";
+  const cases: Array<[string, string]> = [
+    [`HTTP request failed: [404:NotFound] [GET] at [https://tracker.example/rss/${T32}S1SECRET]`, "PATH_TOKEN ends at ]"],
+    [`(https://tracker.example/rss/${T32}S1SECRET)`, "PATH_TOKEN ends at )"],
+    [`https://tracker.example/rss/${T32}S1SECRET, then`, "PATH_TOKEN ends at ,"],
+    [`https://tracker.example/rss/12345.${T32}S1SECRET`, "PATH_TOKEN starts after ."],
+    [`https://tracker.example/torrent/download/12345.${T32}S1SECRET`, "PATH_TOKEN starts after . (UNIT3D download)"],
+    [`https://tracker.example/dl/${T32}S1SECRET.torrent`, "PATH_TOKEN ends at ."],
+    [`{"password":"pa;ss S1SECRET"}`, "QUOTED_PAIR: ; and a space inside the quotes"],
+    [`{"password": "p,ss word S1SECRET"}`, "QUOTED_PAIR: , inside the quotes"],
+    [`ApiKey="SE CRET S1SECRET"`, "QUOTED_PAIR after ="],
+    [`apikey: "S1SECRET with space"`, "QUOTED_PAIR, unquoted name"],
+    [String.raw`{\"apiKey\":\"S1SECRET\"}`, "QUOTED_PAIR, escaped JSON"],
+    [String.raw`{"apiKey":"pa\"ss S1SECRET"}`, "QUOTED_PAIR, an escaped quote inside the value"],
+    ["Authorization: Token S1SECRET", "AUTH_HEADER, any scheme"],
+    [`{"Authorization":"Token S1SECRET"}`, "AUTH_HEADER, JSON"],
+    ["authorization: bearer S1SECRET.x", "lower-case Authorization"],
+    ["sent bearer S1SECRET.x to the indexer", "lower-case bearer, no header name"],
+    ["apikey%253DS1SECRET", "%253D (double-encoded =)"],
+    ["https://rss24h.torrentleech.org/S1SECRETabcdef1234", "TORRENTLEECH rss key"],
+    ["https://www.torrentleech.org/rss/download/12345/S1SECRETabcdef/name.torrent", "TORRENTLEECH download key"],
+    ["https://iptorrents.com/t.rss?u=123;tp=abcdefS1SECRET;download", "IPTorrents tp="],
+    ["x1apikey=S1SECRET", "a digit in the name's prefix"],
+  ];
+  for (const [s, rule] of cases) assert.ok(!maskSecrets(s).includes("S1SECRET"), `${rule}: ${s} → ${maskSecrets(s)}`);
+  assert.equal(maskSecrets(`{"password":"a b","name":"x"}`), `{"password":"••••••••","name":"x"}`, "a quoted value is masked to ITS closing quote, not the next one");
+  assert.equal(maskSecrets("Authorization failed for user"), "Authorization failed for user", "prose survives");
+  assert.equal(maskSecrets("/downloads/Breaking.Bad.S01E01.1080p.mkv"), "/downloads/Breaking.Bad.S01E01.1080p.mkv", "short dotted segments survive");
+});
+
+test("masking is linear: a long run of name characters can't stall the server", () => {
+  // Unbounded, SECRET_NAME's prefix made this quadratic — ~3 s per run at this
+  // size, against a few milliseconds bounded. (A synchronous regex blocks the
+  // event loop, so a test timeout could never fire: the time is measured.)
+  for (const run of ["a-".repeat(30_000), "a_".repeat(30_000)]) {
+    const started = performance.now();
+    assert.equal(maskSecrets(run), run);
+    const ms = performance.now() - started;
+    assert.ok(ms < 1_000, `${ms.toFixed(0)} ms for ${run.length} characters`);
+    assert.ok(!safeMessage(`x ${run} apikey=S1SECRET`)?.includes("S1SECRET"));
+  }
+});
+
+test("an unclosed quoted value full of escapes can't stall the server", () => {
+  // QUOTED_PAIR's value once read `(?:\\.|.)*` — both branches eat a
+  // backslash, so with no closing quote each escape doubled the backtracking:
+  // ~1 s at 26 escapes, hours at 40. A release or file name the arrs quote in a
+  // status or failure message is enough to reach it. (A synchronous regex
+  // blocks the event loop, so a test timeout could never fire: the time is
+  // measured.)
+  const inputs = [
+    () => maskSecrets(`password: "${"\\a".repeat(40)}`),
+    () => safeMessage(`Import failed: file \`Show.S01E01 token: "${"\\x".repeat(40)}.mkv\` could not be parsed`),
+    // safeMessage's own cut leaves exactly this unclosed shape behind.
+    () => safeMessage(`{"password": "${"\\x".repeat(3_000)}`, 300),
+    () => maskSecrets(String.raw`{\"apiKey\":\"` + "\\\\x".repeat(40)),
+  ];
+  for (const run of inputs) {
+    const started = performance.now();
+    run();
+    const ms = performance.now() - started;
+    assert.ok(ms < 200, `${ms.toFixed(0)} ms`);
+  }
+  assert.ok(!safeMessage(`{"password": "${"\\x".repeat(3_000)}`, 300)?.includes("\\x\\x"), "the value the cut left open never shows");
+  // Still masked as before: an escaped quote inside, an escaped-JSON close, and
+  // a value that ends in a lone backslash before its quote.
+  assert.equal(maskSecrets(String.raw`{"apiKey":"pa\"ss S1"}`), `{"apiKey":"••••••••"}`);
+  assert.equal(maskSecrets(String.raw`{\"apiKey\":\"S1 x\",\"n\":1}`), String.raw`{\"apiKey\":\"••••••••\",\"n\":1}`);
+  assert.equal(maskSecrets(String.raw`password: "pa ss\" rest`), `password: "••••••••" rest`);
+});
+
+test("safeMessage masks a bounded prefix, and a credential the cut went through never shows", () => {
+  // Only a bounded prefix is masked: text far past the answer never reaches it,
+  // even when a long masked value shortens what comes before.
+  assert.equal(safeMessage(`token=${"A".repeat(10_000)} TAILWORD`, 300), "token=••••••••");
+  // Four long secrets shrink to a few characters each, so what straddled the
+  // cut (max + 4 KB) moves into the first `max` characters.
+  const shrink = Array.from({ length: 4 }, () => `token=${"A".repeat(1_000)} `).join("");
+  const quoted = safeMessage(`${shrink}"apiKey": "SECRETVALUE ${"word ".repeat(300)}"`, 300);
+  assert.ok(quoted && !quoted.includes("SECRETV"), `an unclosed quoted value at the cut is masked: ${quoted}`);
+  // One long secret, then a URL whose path key the cut leaves 20 characters of
+  // — too short for PATH_TOKEN to recognise.
+  const lead = `token=${"A".repeat(300 + 4_096 - 6 - 1 - "https://tracker.example/rss/".length - 20)} `;
+  const path = safeMessage(`${lead}https://tracker.example/rss/PATHKEY${"k".repeat(33)}`, 300);
+  assert.ok(path !== null && !path.includes("PATHKEY"), `half a path key at the cut is dropped: ${path}`);
+});
+
 test("a history record's protocol is read from either spelling", () => {
   assert.equal(protocolOf("1"), "usenet");
   assert.equal(protocolOf("2"), "torrent");

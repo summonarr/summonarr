@@ -18,7 +18,7 @@ import { AlertTriangle, Check, Loader2, Plus, X } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { queueFormatters } from "@/components/admin/queue-format";
 import type { Choice, RootFolderChoice } from "@/lib/arr-title";
-import { SONARR_ADD_MONITOR, type SonarrAddMonitor } from "@/lib/arr-title-add";
+import { SONARR_ADD_MONITOR, addSearchIsNoop, type SonarrAddMonitor } from "@/lib/arr-title-add";
 import { arrApi, type ArrServiceName } from "./shared";
 import { ManageTitleButton } from "./title-manager";
 
@@ -83,6 +83,9 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
   useEffect(() => {
     tRef.current = t;
   }, [t]);
+  // Nothing monitored ⇒ the arr's add-time search does nothing, so the box is
+  // off and disabled rather than a tick that silently means nothing.
+  const searchNoop = addSearchIsNoop(service, service === "radarr" ? { monitored } : { monitor });
 
   useEffect(() => {
     let live = true;
@@ -115,7 +118,7 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
     if (profile === null || !root) return;
     setBusy(true);
     setError("");
-    const body: Record<string, unknown> = { service, instance, tmdbId, qualityProfileId: profile, rootFolderPath: root, tags, search };
+    const body: Record<string, unknown> = { service, instance, tmdbId, qualityProfileId: profile, rootFolderPath: root, tags, search: search && !searchNoop };
     if (service === "radarr") Object.assign(body, { monitored, minimumAvailability: availability });
     else Object.assign(body, { monitor, seriesType, seasonFolder });
     const res = await arrApi<{ arrId: number }>("/api/admin/arr/title/add", { method: "POST", body }, t("adminArr.add.failed"));
@@ -232,11 +235,17 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
           </div>
         </div>
       )}
-      <label className="flex items-start gap-2 text-sm text-zinc-300">
-        <input type="checkbox" checked={search} onChange={(e) => setSearch(e.target.checked)} className="mt-0.5 accent-[var(--ds-accent)]" />
+      <label className={`flex items-start gap-2 text-sm ${searchNoop ? "text-zinc-500" : "text-zinc-300"}`}>
+        <input
+          type="checkbox"
+          checked={search && !searchNoop}
+          disabled={searchNoop}
+          onChange={(e) => setSearch(e.target.checked)}
+          className="mt-0.5 accent-[var(--ds-accent)]"
+        />
         <span>
           {service === "radarr" ? t("adminArr.add.searchMovie") : t("adminArr.add.searchSeries")}
-          <span className="block text-xs text-zinc-500">{t("adminArr.add.searchHint")}</span>
+          <span className="block text-xs text-zinc-500">{searchNoop ? t("adminArr.add.searchNeedsMonitor") : t("adminArr.add.searchHint")}</span>
         </span>
       </label>
       <p className="m-0 text-xs text-zinc-500">{t("adminArr.add.noRequest")}</p>

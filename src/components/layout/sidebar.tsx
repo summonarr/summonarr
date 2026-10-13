@@ -16,19 +16,18 @@ import {
 } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { useT } from "@/components/i18n/i18n-provider";
-import { AdminNavGroupList, NavCountBadge, type NavBadges } from "@/components/layout/admin-nav-groups";
+import { AdminNavGroupList, NavCountBadge, useNavBadges } from "@/components/layout/admin-nav-groups";
 
 export function Sidebar({
   siteTitle,
   featureFlags,
-  navBadges,
 }: {
   siteTitle?: string;
   featureFlags?: FeatureFlags;
-  // href → count, e.g. the Download Queue's downloads needing attention
-  // (readArrWatchNavBadges in the layout). Absent ⇒ no badges.
-  navBadges?: NavBadges;
 }) {
+  // href → count, e.g. the Download Queue's downloads needing attention — from
+  // the layout's ONE NavBadgesProvider, kept fresh between full loads. Absent ⇒ no badges.
+  const navBadges = useNavBadges();
   const pathname = usePathname();
   const t = useT();
   const { session } = useSummonarrSession();

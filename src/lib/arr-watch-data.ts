@@ -17,12 +17,15 @@ import {
   ARR_WATCH_DISK_LOW_PERCENT_KEY,
   arrWatchIntervalSeconds,
   attentionEvent,
+  attentionReadGapMs,
   diffAttention,
   diskEvent,
   effectiveCursor,
   failureEvent,
   instanceStateKey,
   judgeDisks,
+  MAX_ATTENTION_PER_RUN,
+  MAX_FAILURES_PER_RUN,
   parseArrWatchState,
   parseArrWatchSummary,
   parseDiskLowPercent,
@@ -70,7 +73,10 @@ export interface ArrWatchResult {
   aborted: boolean;
   errors: Array<{ service: string; instance: string; part: ArrWatchPart; error: string }>;
   events: { diskLow: number; diskOk: number; downloadFailed: number; queueAttention: number };
-  /** Failure records left for the next run (more failed downloads than one run announces). */
+  /**
+   * History RECORDS left for the next run once the per-run cap was reached. A
+   * Sonarr pack counts once per episode, so this is not a count of downloads.
+   */
   deferredFailures: number;
   /** Downloads newly needing attention left for the next run (more than one run announces). */
   deferredAttention: number;
@@ -134,7 +140,7 @@ async function watchInstance(
       arrFetch<unknown>(cfg, "/api/v3/diskspace", opts),
     ]),
     seeded ? Promise.resolve(null) : readHistory(cfg, inst, new Date(Date.parse(cursor.at) - HISTORY_QUERY_OVERLAP_MS).toISOString(), signal),
-    readQueuePages(inst.service, inst.slug),
+    readQueuePages(inst.service, inst.slug, signal),
   ]);
 
   // Disks: state changes only — a disk missing from this read keeps its state for the grace period.
@@ -156,7 +162,14 @@ async function watchInstance(
   const failedAt: string[] = [];
   if (history.status === "fulfilled") {
     // A seeded cursor read nothing (null projects to no records): it is stored as is.
-    const picked = selectNewFailures(projectHistoryRecords(inst.service, inst.slug, history.value), cursor, prev?.history?.recent ?? []);
+    // nowMs bounds the cursor from the future: a record dated past Summonarr's clock (+1 h) waits, unconsumed.
+    const picked = selectNewFailures(
+      projectHistoryRecords(inst.service, inst.slug, history.value),
+      cursor,
+      prev?.history?.recent ?? [],
+      MAX_FAILURES_PER_RUN,
+      nowMs,
+    );
     state.history = { cursor: picked.cursor, recent: picked.recent };
     for (const g of picked.groups) {
       events.push(failureEvent(inst, g));
@@ -172,12 +185,24 @@ async function watchInstance(
   // Downloads that newly need attention — remembered for the grace period, at most a capped few per run.
   let deferredAttention = 0;
   if (queue.status === "fulfilled") {
+    // readAt alone is not memory (it never exists without the keys): no keys ⇒ a silent seed.
     const memory = prev?.attention !== undefined || prev?.attentionSeen !== undefined
-      ? { keys: prev.attention, seen: prev.attentionSeen }
+      ? { keys: prev.attention, seen: prev.attentionSeen, readAt: prev.attentionReadAt }
       : null;
-    const diff = diffAttention(foldQueueRecords(inst.service, inst.slug, queue.value), memory, nowMs);
+    // The read gap follows the configured cadence — a daily monitor's regular
+    // 24 h gap is observed time, not an outage.
+    const diff = diffAttention(
+      foldQueueRecords(inst.service, inst.slug, queue.value),
+      memory,
+      nowMs,
+      MAX_ATTENTION_PER_RUN,
+      attentionReadGapMs(arrWatchIntervalSeconds(process.env.ARR_WATCH_INTERVAL)),
+    );
     state.attention = diff.keys;
     state.attentionSeen = diff.seen;
+    // Stamped on a SUCCESSFUL read only: a failed one keeps the previous stamp
+    // (the spread of prev above), so the time it couldn't see stays unobserved.
+    state.attentionReadAt = new Date(nowMs).toISOString();
     for (const item of diff.newly) events.push(attentionEvent(inst, item));
     deferredAttention = diff.deferred;
   } else {
@@ -287,17 +312,25 @@ export async function readArrWatchSummary(): Promise<ArrWatchSummary | null> {
 }
 
 /**
- * The admin nav's badges: { "/admin/queue": <downloads needing attention> }.
- * ONE Setting read; fails OPEN — any error, no snapshot, a zero count or a
- * snapshot older than three monitor intervals (at least an hour) is no badge,
- * never a broken page.
+ * The admin nav's badges from a summary already read: { "/admin/queue":
+ * <downloads needing attention> }, or undefined — no snapshot, a zero count or
+ * a snapshot older than three monitor intervals (at least an hour) is no
+ * badge. The one rule both readers share: the (app) layout's first render and
+ * GET /api/admin/arr-watch, which the browser re-reads (NavBadgesProvider).
+ */
+export function arrWatchNavBadgesFor(summary: ArrWatchSummary | null, nowMs: number): Record<string, number> | undefined {
+  const maxAgeMs = Math.max(3 * arrWatchIntervalSeconds(process.env.ARR_WATCH_INTERVAL) * 1000, 60 * 60_000);
+  const n = queueBadgeCount(summary, nowMs, maxAgeMs);
+  return n === null ? undefined : { "/admin/queue": n };
+}
+
+/**
+ * The admin nav's badges (arrWatchNavBadgesFor). ONE Setting read; fails OPEN —
+ * any error is no badge, never a broken page.
  */
 export async function readArrWatchNavBadges(): Promise<Record<string, number> | undefined> {
   try {
-    const summary = await readArrWatchSummary();
-    const maxAgeMs = Math.max(3 * arrWatchIntervalSeconds(process.env.ARR_WATCH_INTERVAL) * 1000, 60 * 60_000);
-    const n = queueBadgeCount(summary, Date.now(), maxAgeMs);
-    return n === null ? undefined : { "/admin/queue": n };
+    return arrWatchNavBadgesFor(await readArrWatchSummary(), Date.now());
   } catch {
     return undefined;
   }

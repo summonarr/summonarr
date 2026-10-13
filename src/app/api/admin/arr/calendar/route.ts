@@ -11,10 +11,14 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 //   per movie release date (in cinemas / physical / digital) in the window,
 //   each with whether the arr has the file or is downloading it (downloaded /
 //   downloading / missing / airing / aired / upcoming / unmonitored /
-//   released — see CalendarStatus). An instance that could not be read is named
-//   in `errors` with the KIND of failure (the page translates it) — its titles
-//   are absent, not "nothing airing". `now` is the server's clock, which the
-//   page's "today" follows.
+//   released — see CalendarStatus); a `downloading` entry also carries
+//   `attention`, Radarr/Sonarr's own needs-attention verdict on the download.
+//   Both arrs are asked for a PADDED window (Radarr a day either side, Sonarr
+//   14 h — calendarFetchWindow), so entries may fall slightly outside
+//   [start, end): the page keeps only those in its own days (entriesInWindow).
+//   An instance that could not be read is named in `errors` with the KIND of
+//   failure (the page translates it) — its titles are absent, not "nothing
+//   airing". `now` is the server's clock, which the page's "today" follows.
 export const GET = withAdmin(async (req) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;

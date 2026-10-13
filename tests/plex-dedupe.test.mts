@@ -154,3 +154,94 @@ test("unconflated rows pass through untouched alongside a conflated key", async 
   );
   assert.deepEqual(ids(kept), [700, 113988, 800], "only the conflated key loses candidates, and input order is preserved");
 });
+
+// ═══ plexRatingKeys are NEVER made exclusive on write (guardrails 37c + 14d) ═══
+//
+// A conflated item's key also rides the array of every title it claims whose
+// clean copy sits in another section. The never-watched evidence join credits a
+// play / upstream record / session of that key to EVERY title answering to it,
+// so stripping it from all but one row turned a watched title into a false
+// "never watched" — and that list feeds a delete. The single-answer readers
+// pick one owner on READ (`pickPlexRowForKey`, below).
+
+type KRow = { tmdbId: number; plexRatingKey: string | null; plexRatingKeys: string[] };
+const krow = (tmdbId: number, plexRatingKey: string | null, plexRatingKeys: string[]): KRow =>
+  ({ tmdbId, plexRatingKey, plexRatingKeys });
+const keysById = (rows: KRow[]): Record<number, string[]> =>
+  Object.fromEntries(rows.map((r) => [r.tmdbId, r.plexRatingKeys]));
+
+test("a conflated key resolved by 37b STAYS on a second kept row's plexRatingKeys", async () => {
+  // X at rk 100 claims A(1), B(2), C(3); C also sits clean at rk 200 in another
+  // section, so the merge put 100 on C's array.
+  reset([]);
+  const rows = [krow(1, "100", ["100"]), krow(2, "100", ["100"]), krow(3, "200", ["200", "100"])];
+  const kept = await deduplicatePlexRowsByRatingKey(rows, "TV", "", "sync");
+  assert.deepEqual(ids(kept as unknown as Row[]), [1, 3], "37b keeps A for key 100, and C for its own key");
+  assert.deepEqual(
+    keysById(kept),
+    { 1: ["100"], 3: ["200", "100"] },
+    "key 100 stays on C's array: a watch of X credits C too in the never-watched join",
+  );
+  assert.equal(kept[1], rows[2], "a kept row is returned as-is, never copied or rewritten");
+});
+
+test("with NO canonical conflation, keys shared only through arrays come back untouched — in either arrival order, with no DB read", async () => {
+  const forward = [krow(3, "200", ["200", "100"]), krow(4, "300", ["300", "100"])];
+  reset([]);
+  const a = await deduplicatePlexRowsByRatingKey(forward, "TV", "", "sync");
+  reset([]);
+  const b = await deduplicatePlexRowsByRatingKey([...forward].reverse(), "TV", "", "sync");
+  assert.deepEqual(keysById(a), { 3: ["200", "100"], 4: ["300", "100"] });
+  assert.deepEqual(keysById(b), keysById(a));
+  assert.equal(a, forward, "no conflation ⇒ the input array itself is returned");
+  assert.deepEqual(findManyWheres, [], "no canonical conflation ⇒ still no prior-mapping read");
+});
+
+test("a canonical key riding a lower tmdbId's array stays on both rows", async () => {
+  // Row 100 {k1, [k1, k2]} and row 200 {k2, [k2]}: canonical keys are unique,
+  // so 37b sees no conflict and both arrays are written as given.
+  reset([]);
+  const kept = await deduplicatePlexRowsByRatingKey([krow(100, "k1", ["k1", "k2"]), krow(200, "k2", ["k2"])], "TV", "", "sync");
+  assert.deepEqual(keysById(kept), { 100: ["k1", "k2"], 200: ["k2"] });
+});
+
+test("a legitimate duplicate-copy key held by ONE row is kept, and that row is returned as-is", async () => {
+  reset([]);
+  const solo = krow(603, "rk-hd", ["rk-hd", "rk-4k"]);
+  const kept = await deduplicatePlexRowsByRatingKey([solo, krow(604, "rk-x", ["rk-x"])], "MOVIE", "", "sync");
+  assert.deepEqual(keysById(kept), { 603: ["rk-hd", "rk-4k"], 604: ["rk-x"] }, "37c's whole point: the 4K copy's key stays addressable");
+  assert.equal(kept[0], solo, "an unchanged row is not copied");
+});
+
+// ═══ the read-side owner rule ═══════════════════════════════════════════════
+
+const { pickPlexRowForKey, indexPlexRowsByKey } = await import("../src/lib/plex-dedupe.ts");
+
+test("pickPlexRowForKey: the canonical holder beats an array holder, in both orders", () => {
+  const canon = { tmdbId: 200, plexRatingKey: "k2" };
+  const viaArray = { tmdbId: 100, plexRatingKey: "k1" };
+  assert.equal(pickPlexRowForKey([viaArray, canon], "k2"), canon);
+  assert.equal(pickPlexRowForKey([canon, viaArray], "k2"), canon, "first-row-wins (findFirst) would answer 100 here");
+});
+
+test("pickPlexRowForKey: among array-only holders the lowest tmdbId wins, in both orders; none ⇒ null", () => {
+  const a = { tmdbId: 300, plexRatingKey: "k3" };
+  const b = { tmdbId: 50, plexRatingKey: "k4" };
+  assert.equal(pickPlexRowForKey([a, b], "k9"), b);
+  assert.equal(pickPlexRowForKey([b, a], "k9"), b);
+  assert.equal(pickPlexRowForKey([], "k9"), null);
+});
+
+test("indexPlexRowsByKey: every key a row answers to, each mapped to its one owner", () => {
+  const r100 = { tmdbId: 100, plexRatingKey: "k1", plexRatingKeys: ["k1", "k2", "k5"] };
+  const r200 = { tmdbId: 200, plexRatingKey: "k2", plexRatingKeys: ["k2"] };
+  const r300 = { tmdbId: 300, plexRatingKey: "k3", plexRatingKeys: ["k3", "k5"] };
+  for (const order of [[r100, r200, r300], [r300, r200, r100]]) {
+    const idx = indexPlexRowsByKey(order);
+    assert.deepEqual(
+      Object.fromEntries([...idx].map(([k, r]) => [k, r.tmdbId]).sort()),
+      { k1: 100, k2: 200, k3: 300, k5: 100 },
+      "last-write-wins over a key map lets an array entry overwrite the canonical owner",
+    );
+  }
+});

@@ -467,8 +467,13 @@ export async function createMediaRequest(
       //
       // No approvedAt: the copy made no decision of its own. The watch grade
       // counts it through the approval of the request it copied (per title).
+      //
+      // A row stamped `cleanedUpAt` is a REMOVAL, not a greenlight (guardrail
+      // 14b): an admin deliberately took the title off this instance. Copying it
+      // would create an APPROVED row the sync re-pushes, re-downloading what was
+      // deleted with no admin decision — so it goes to review like any request.
       const greenlit = await tx.mediaRequest.findFirst({
-        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
+        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null },
         select: { status: true },
       });
       if (greenlit) {

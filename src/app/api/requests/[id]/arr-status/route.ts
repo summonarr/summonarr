@@ -39,7 +39,7 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
   const { id } = await params;
   const row = await prisma.mediaRequest.findUnique({
     where: { id },
-    select: { id: true, mediaType: true, tmdbId: true, status: true, arrInstance: true, requestedBy: true, approvedAt: true, createdAt: true },
+    select: { id: true, mediaType: true, tmdbId: true, tvdbId: true, status: true, arrInstance: true, requestedBy: true, approvedAt: true, createdAt: true },
   });
   if (!row) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
   if (row.status !== "APPROVED" && row.status !== "AVAILABLE") {
@@ -56,6 +56,8 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
       service,
       instance: row.arrInstance,
       tmdbId: row.tmdbId,
+      // Sonarr-sourced (the push and the webhook write it): the fallback when the series' tmdbId drifted.
+      tvdbId: row.tvdbId ?? null,
       mediaType: row.mediaType,
       requestedBy: row.requestedBy,
       since: row.approvedAt ?? row.createdAt,

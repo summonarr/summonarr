@@ -14,6 +14,7 @@ import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
 import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
+import { createRefreshGate } from "@/lib/refresh-gate";
 import type { WatchGradeSummary } from "@/lib/watch-grade";
 import { WatchGradeChip } from "./watch-grade";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
@@ -79,6 +80,12 @@ interface AdminRequestListProps {
   instanceNames?: Record<string, string>;
   /** ADMIN viewer: show "Open in Radarr/Sonarr" (the route behind it is ADMIN-only). */
   canOpenArr?: boolean;
+  /**
+   * Which integrations are switched on. A movie's Open in / Manage icons need
+   * Radarr's, a show's Sonarr's: the routes behind them 404 while the
+   * integration is off (arrGate). Absent = both on.
+   */
+  arrServices?: { radarr: boolean; sonarr: boolean };
 }
 
 function formatUserLabel(r: Requester, t: Translator) {
@@ -109,7 +116,7 @@ function formatUserLabel(r: Requester, t: Translator) {
 
 // Admin request queue: groups requests by title, drives per-group + batch
 // approve/decline, and paginates. Live-refreshes on request:* SSE events.
-export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false }: AdminRequestListProps) {
+export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false, arrServices }: AdminRequestListProps) {
   const router = useRouter();
   const mounted = useHasMounted();
   const t = useT();
@@ -118,21 +125,45 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   const instanceLabel = (slug: string) =>
     instanceNames?.[slug] ?? (slug === "4k" ? "4K" : slug);
 
+  // While a row's title manager is open the list's refresh WAITS: a refresh
+  // can drop the row — its status left the ?status= filter, a new request
+  // pushed it to the next page — and the dialog with it, unsaved edits and
+  // all, or re-prop it mid-edit. The deferred refresh runs once the last
+  // manager closes (the Download Queue pauses its poll the same way).
+  const [refreshGate] = useState(createRefreshGate);
+  const unmountedRef = useRef(false);
+  function refreshList() {
+    if (refreshGate.request()) router.refresh();
+  }
+
   // Debounced ~500ms so a burst of request:* events (bulk approve, a sync run)
   // coalesces into one refresh — mirrors activity-live-refresher.tsx.
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function scheduleRefresh() {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      refreshList();
+    }, 500);
+  }
   useLiveEvents((event) => {
     if (event.type === "request:new" || event.type === "request:updated" || event.type === "request:deleted") {
-      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = setTimeout(() => {
-        refreshTimerRef.current = null;
-        router.refresh();
-      }, 500);
+      scheduleRefresh();
     }
   });
-  useEffect(() => () => {
-    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
   }, []);
+  // ManageTitleButton's onActiveChange. Its close arrives from an effect
+  // cleanup, also when the list itself is unmounting: nothing is scheduled then.
+  function onManagerActive(open: boolean) {
+    if (open) return refreshGate.opened();
+    if (refreshGate.closed() && !unmountedRef.current) scheduleRefresh();
+  }
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchNote, setBatchNote] = useState("");
   const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
@@ -242,7 +273,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
         clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = null;
       }
-      router.refresh();
+      refreshList();
     } catch {
       setBatchError(t("shared.thread.networkError"));
     } finally {
@@ -500,6 +531,9 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
           const representativeInstance =
             group.requesters.find((r) => r.status === group.aggregateStatus)?.arrInstance ??
             primaryRequester.arrInstance;
+          // Open in / Manage for THIS row's service only while its integration is on.
+          const showArrLinks =
+            canOpenArr && (arrServices?.[group.mediaType === "MOVIE" ? "radarr" : "sonarr"] ?? true);
           const groupInstances = [...new Set(group.requesters.map((r) => r.arrInstance))].filter(
             (slug) => slug !== "",
           );
@@ -591,7 +625,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     }}
                   />
                 </Link>
-                {canOpenArr && (
+                {showArrLinks && (
                   <OpenInArrLink
                     service={group.mediaType === "MOVIE" ? "radarr" : "sonarr"}
                     instance={representativeInstance}
@@ -607,7 +641,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                   />
                 )}
                 {/* Only once it was pushed: a pending title isn't on the instance yet. */}
-                {canOpenArr && (group.aggregateStatus === "APPROVED" || group.aggregateStatus === "AVAILABLE") && (
+                {showArrLinks && (group.aggregateStatus === "APPROVED" || group.aggregateStatus === "AVAILABLE") && (
                   <ManageTitleButton
                     service={group.mediaType === "MOVIE" ? "radarr" : "sonarr"}
                     instance={representativeInstance}
@@ -619,6 +653,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     )}
                     variant="icon"
                     initialTab={group.aggregateStatus === "AVAILABLE" ? "files" : group.mediaType === "MOVIE" ? "settings" : "seasons"}
+                    onActiveChange={onManagerActive}
                   />
                 )}
                 </div>
@@ -826,6 +861,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                   currentStatus={group.aggregateStatus}
                   mediaType={group.mediaType}
                   arrInstance={representativeInstance}
+                  arrInstanceName={instanceLabel(representativeInstance)}
                   existingAdminNote={representativeAdminNote}
                   groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
                 />

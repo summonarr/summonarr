@@ -127,7 +127,10 @@ const BLOCKLIST_SCAN_PAGES = 20;
  * `viewed` is the page the admin picked them from: it is re-read first, and
  * the newest-first scan (up to BLOCKLIST_SCAN_PAGES × BLOCKLIST_SCAN_PAGE
  * records, every one embedding its movie/series) runs only for ids that page
- * no longer holds. Resolves to what was removed, in `ids` order, for the audit.
+ * no longer holds. When that scan stops at its cap with ids still missing, the
+ * viewed page's neighbours are re-read too (an entry deep in the list shifts
+ * by a page when one is added or removed above it). Resolves to what was
+ * removed, in `ids` order, for the audit.
  */
 export async function removeFromBlocklist(
   service: ArrService,
@@ -148,9 +151,26 @@ export async function removeFromBlocklist(
     return { count: records.length, total: typeof raw?.totalRecords === "number" ? raw.totalRecords : 0 };
   };
   if (viewed) await take(viewed.page, viewed.pageSize);
+  // Records the scan read through; null once it reached the end of the list.
+  let scannedThrough: number | null = 0;
   for (let page = 1; page <= BLOCKLIST_SCAN_PAGES && wanted.size > 0; page++) {
     const { count, total } = await take(page, BLOCKLIST_SCAN_PAGE);
-    if (count === 0 || page * BLOCKLIST_SCAN_PAGE >= total) break;
+    if (count === 0 || page * BLOCKLIST_SCAN_PAGE >= total) {
+      scannedThrough = null;
+      break;
+    }
+    scannedThrough = page * BLOCKLIST_SCAN_PAGE;
+  }
+  // The scan stopped at its cap short of the list's end, and the viewed page
+  // lies past it: an entry picked there moves to the NEXT page when one is
+  // blocklisted meanwhile (newest first) and to the previous one when one is
+  // removed. Re-read those two pages — each still read fresh, never trusted
+  // from the browser — before calling it gone.
+  if (viewed && scannedThrough !== null) {
+    for (const page of [viewed.page + 1, viewed.page - 1]) {
+      if (wanted.size === 0) break;
+      if (page >= 1 && page * viewed.pageSize > scannedThrough) await take(page, viewed.pageSize);
+    }
   }
   if (wanted.size > 0) throw new BlocklistGoneError();
   await arrFetchNoContent(cfg, "/api/v3/blocklist/bulk", { method: "DELETE", body: JSON.stringify({ ids: [...ids] }) });

@@ -20,6 +20,7 @@ import { AlertTriangle, Check, ChevronDown, ChevronUp, Download, Loader2, Magnet
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { ArrRelease, SonarrSeasonSummary } from "@/lib/arr";
+import { RELEASE_SEARCH_POLL_MS, runReleaseSearchJob } from "@/lib/client/release-search-job";
 
 function sizeFormatter(locale: string) {
   const gb = new Intl.NumberFormat(locale, { style: "unit", unit: "gigabyte", unitDisplay: "narrow", maximumFractionDigits: 1 });
@@ -32,10 +33,7 @@ function ageFormatter(locale: string) {
   return (days: number) => d.format(Math.max(0, Math.round(days)));
 }
 
-const SEARCH_POLL_MS = 2_000;
 const SLOW_SEARCH_MS = 15_000;
-// The server stops waiting on the arr after 120 s; past this the job is lost.
-const SEARCH_GIVE_UP_MS = 5 * 60_000;
 
 // The season to search first: the earliest with something missing, else the latest.
 export function defaultSeason(seasons: readonly SonarrSeasonSummary[]): number | null {
@@ -126,28 +124,17 @@ export function ReleaseSearchDialog({
         url = `/api/requests/${requestId}/releases${s !== null ? `?season=${s}` : ""}`;
       }
       // In the background (release-search-jobs.ts): indexers can take a minute
-      // or two, longer than a reverse proxy keeps one request open.
-      url += url.includes("?") ? "&async=1" : "?async=1";
-      let res = await fetch(withBasePath(url));
-      const pollBase = url.split("?")[0];
-      // Time is counted in polls, not read off the clock.
-      let polls = 0;
-      while (res.status === 202) {
-        const pending = (await res.json().catch(() => null)) as { job?: string } | null;
-        if (id !== seq.current) return;
-        if (!pending?.job || polls * SEARCH_POLL_MS > SEARCH_GIVE_UP_MS) {
-          setError(tRef.current("adminQueue.releases.failed"));
-          return;
-        }
-        if (polls * SEARCH_POLL_MS >= SLOW_SEARCH_MS) setSlow(true);
-        polls++;
-        await new Promise((r) => setTimeout(r, SEARCH_POLL_MS));
-        if (id !== seq.current) return;
-        res = await fetch(withBasePath(`${pollBase}?job=${encodeURIComponent(pending.job)}`));
-      }
-      const data = (await res.json().catch(() => null)) as { releases?: ArrRelease[]; error?: string } | null;
-      if (id !== seq.current) return;
-      if (!res.ok || !data?.releases) {
+      // or two, longer than a reverse proxy keeps one request open. Time is
+      // counted in polls, not read off the clock.
+      const answer = await runReleaseSearchJob(fetch, withBasePath(url), {
+        isAlive: () => id === seq.current,
+        onPoll: (polls) => {
+          if (polls * RELEASE_SEARCH_POLL_MS >= SLOW_SEARCH_MS) setSlow(true);
+        },
+      });
+      if (answer === null || id !== seq.current) return;
+      const data = answer.data as { releases?: ArrRelease[]; error?: string } | null;
+      if (answer.status < 200 || answer.status >= 300 || !data?.releases) {
         setError(data?.error ?? tRef.current("adminQueue.releases.failed"));
         return;
       }
@@ -165,8 +152,14 @@ export function ReleaseSearchDialog({
   useEffect(() => {
     if (!open) return;
     const t = tRef.current;
-    // The counter object itself (not a value read from it) for the cleanup below.
+    // The counter object itself (not a value read from it) for the cleanup:
+    // closing (or switching request) invalidates whatever is still in flight —
+    // a movie's or a title manager's search too, whose poll would otherwise
+    // keep running for minutes behind a closed (or unmounted) dialog.
     const counter = seq;
+    const invalidate = () => {
+      counter.current++;
+    };
     seq.current++;
     setSeasons(null);
     setSeason(null);
@@ -175,7 +168,7 @@ export function ReleaseSearchDialog({
     setGrabbed(false);
     if (!isTv) {
       void search(null);
-      return;
+      return invalidate;
     }
     const id = ++seq.current;
     setLoading("seasons");
@@ -205,10 +198,7 @@ export function ReleaseSearchDialog({
         }
       }
     })();
-    // Closing (or switching request) invalidates whatever is still in flight.
-    return () => {
-      counter.current++;
-    };
+    return invalidate;
   }, [open, isTv, requestId, search]);
 
   async function grab() {

@@ -15,6 +15,7 @@ import {
   idsOf,
   int,
   isoOrNull,
+  languageNamesOf,
   namesOf,
   nonNegInt,
   posInt,
@@ -535,7 +536,8 @@ export function projectFiles(service: ArrService, raw: unknown, episodes: readon
       dateAdded: isoOrNull(f.dateAdded),
       quality,
       qualityTags,
-      languages: namesOf(f.languages),
+      // Sonarr v3's EpisodeFileResource carries ONE `language`, no list.
+      languages: languageNamesOf(f),
       customFormats: namesOf(f.customFormats),
       customFormatScore: int(f.customFormatScore),
       qualityCutoffNotMet: bool(f.qualityCutoffNotMet),
@@ -550,6 +552,18 @@ export function projectFiles(service: ArrService, raw: unknown, episodes: readon
   const firstEp = (f: TitleFile) => f.episodes[0]?.episodeNumber ?? 0;
   return out.sort((a, b) => (a.seasonNumber ?? 0) - (b.seasonNumber ?? 0) || firstEp(a) - firstEp(b) || a.relativePath.localeCompare(b.relativePath));
 }
+
+// ── file ids from the browser ────────────────────────────────────────────────
+
+/**
+ * The most file ids one delete or one rename takes — the Files tab's "select
+ * all" on a long daily show or anime. Delete and rename share it: RenameFiles
+ * takes the whole list in one command body, and a preview the page pre-ticks
+ * must never be refused for its length alone.
+ */
+export const MAX_TITLE_FILE_IDS = 10_000;
+/** Their JSON body cap (guardrail 30): 10k ids of up to 7 digits is ~80 KB. */
+export const TITLE_FILE_IDS_BODY_BYTES = 256 * 1024;
 
 // ── renames ──────────────────────────────────────────────────────────────────
 
@@ -566,10 +580,12 @@ export interface RenamePreview {
 export function projectRenames(service: ArrService, raw: unknown): RenamePreview[] {
   if (!Array.isArray(raw)) return [];
   const out: RenamePreview[] = [];
+  const seen = new Set<number>();
   for (const x of raw) {
     const r = obj(x);
     const fileId = posInt(service === "radarr" ? r?.movieFileId : r?.episodeFileId);
-    if (!r || fileId === null || out.some((p) => p.fileId === fileId)) continue;
+    if (!r || fileId === null || seen.has(fileId)) continue;
+    seen.add(fileId);
     out.push({
       fileId,
       existingPath: text(r.existingPath, 1_000),

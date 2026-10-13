@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import {
   ArrItemNotFoundError,
-  ArrResponseError,
   arrErrorMessage,
   getReleasesForMovie,
   getReleasesForSeries,
@@ -11,6 +10,7 @@ import {
   grabSeriesRelease,
   isArrConfigured,
   resolveTvdbIdFromTmdbId,
+  type GrabProgress,
 } from "@/lib/arr";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { auditContext, logAudit } from "@/lib/audit";
@@ -21,7 +21,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { grabRefusalResponse } from "@/lib/release-grab";
+import { grabDefinitelyRefused, grabRefusalResponse } from "@/lib/release-grab";
 import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseReleaseHandle } from "@/lib/release-handles";
 import { answerOf, releaseSearchJobResponse, runningReleaseSearchJob, startReleaseSearchJob } from "@/lib/release-search-jobs";
 
@@ -153,7 +153,7 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
         const releases = loaded.mediaType === "MOVIE"
           ? await getReleasesForMovie(loaded.tmdbId, loaded.arrInstance)
           : await getReleasesForSeries(tvdbId as number, "SEASON", season as number, null, loaded.arrInstance);
-        return NextResponse.json({ releases: issueReleaseHandles(key, releases) });
+        return NextResponse.json({ releases: issueReleaseHandles(key, releases, { owner: session.user.id }) });
       } catch (err) {
         return arrFailure(err, t, service, "search");
       }
@@ -192,22 +192,26 @@ export const POST = withPermission(Permission.MANAGE_REQUESTS)(async (req, { par
   if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });
   const { guid, indexerId } = picked;
 
+  const progress: GrabProgress = { sent: false };
   try {
     if (loaded.mediaType === "MOVIE") {
-      await grabMovieRelease(loaded.tmdbId, guid, indexerId, loaded.arrInstance);
+      await grabMovieRelease(loaded.tmdbId, guid, indexerId, loaded.arrInstance, progress);
     } else {
       const tvdbId = await tvdbIdFor(loaded);
       if (!tvdbId) {
         releaseReleaseHandle(handle);
         return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
       }
-      await grabSeriesRelease(tvdbId, guid, indexerId, season ?? null, null, loaded.arrInstance);
+      await grabSeriesRelease(tvdbId, guid, indexerId, season ?? null, null, loaded.arrInstance, progress);
     }
   } catch (err) {
-    // The arr answered (it refused, or doesn't have the title): the release may
-    // be tried again. No answer (a timeout, the network): it may well have taken
-    // it — never send it twice.
-    if (err instanceof ArrResponseError || err instanceof ArrItemNotFoundError) releaseReleaseHandle(handle);
+    // Nothing sent yet (no config, the title lookup or the tvdb resolution
+    // failed), or the arr definitely refused (a 4xx, or it doesn't have the
+    // title): the release may be tried again. No answer, or a 408/5xx (a
+    // timeout, the network, a gateway that gave up while the arr was still
+    // sending it to the client): it may well have taken it — never send it twice.
+    if (!progress.sent) releaseReleaseHandle(handle);
+    else if (grabDefinitelyRefused(err)) releaseReleaseHandle(handle);
     else forgetReleaseHandle(handle);
     const refused = grabRefusalResponse(err, service === "radarr" ? "Radarr" : "Sonarr", t);
     if (refused) return refused;

@@ -92,3 +92,16 @@ const PLEX_WHAT_LABELS = new Set([PLEX_VIDEO_TRANSCODED, PLEX_AUDIO_TRANSCODED])
 export function isPlexStreamOnlyReason(reason: string): boolean {
   return reason.split(REASON_SEPARATOR).some((part) => PLEX_WHAT_LABELS.has(part));
 }
+
+/**
+ * How the Statistics callout must word its top reason. "unknown" — the row
+ * predates reason capture (clears as new sessions arrive); "unreported" — the
+ * SERVER sent no reason for a new session (does not clear, so it needs its own
+ * sentence, and must never read as "the most common reason"); "cause" —
+ * anything the server did report.
+ */
+export function reasonCalloutKind(reason: string): "unknown" | "unreported" | "cause" {
+  if (reason === UNKNOWN_REASON) return "unknown";
+  if (reason === NO_REASON_REPORTED) return "unreported";
+  return "cause";
+}

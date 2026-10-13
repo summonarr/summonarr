@@ -198,7 +198,14 @@ async function plexFetchAllPages<T>(
     // false after one page and silently truncates any library larger than a page
     // when a Plex build omits totalSize. Infinity defers termination to the
     // empty-page break below, the correct terminator on that path.
-    if (start === 0) total = container.totalSize ?? Infinity;
+    //
+    // Refreshed on EVERY page that reports it, not fixed from page 0: the
+    // watch history is read viewedAt-desc, so a view recorded mid-walk is
+    // prepended, shifts every older record one offset down, and a total frozen
+    // at page 0 ended the walk before the shifted tail — the OLDEST records,
+    // the same ones every run on a busy server. A page that omits it keeps the
+    // last known count; MAX_PAGES still bounds an ever-growing one.
+    if (container.totalSize != null) total = container.totalSize;
     const stop = processItems(items) === true;
     start += items.length;
     if (stop || items.length === 0) break;
@@ -595,7 +602,11 @@ export async function getPlexEpisodesForShow(
       for (const ep of batch) {
         if (!Number.isInteger(ep.parentIndex) || ep.parentIndex < 1) continue;
         if (!Number.isInteger(ep.index) || ep.index < 1) continue;
-        episodes.push({ tmdbId, seasonNumber: ep.parentIndex, episodeNumber: ep.index });
+        // Mapped exactly as getPlexTVEpisodes does: fix-match rebuilds a show's
+        // TVEpisodeCache rows from this helper, and one undated episode makes
+        // its season `unobservable` on the never-watched report (14d).
+        const addedAt = typeof ep.addedAt === "number" && ep.addedAt > 0 ? new Date(ep.addedAt * 1000) : null;
+        episodes.push({ tmdbId, seasonNumber: ep.parentIndex, episodeNumber: ep.index, addedAt });
       }
     },
   );
@@ -607,7 +618,14 @@ export async function getPlexEpisodesForShow(
 // UNVERIFIED response-shape assumptions). Newest first, so a walk stopped at
 // `maxItems` keeps the most recent views. Parsed while paging, so the raw
 // records never accumulate in memory.
+//
+// The cap counts WATCH RECORDS (countsAsPlexWatchRecord), not raw records: a
+// music-heavy history would otherwise hit it on track plays and drop the
+// oldest VIDEO views — the pre-install ones the snapshot exists for. Raw
+// records get their own ceiling, kept below plexFetchAllPages' silent 2M one so
+// that a walk stopped by it is still reported `truncated`.
 export const PLEX_WATCH_HISTORY_MAX_ITEMS = 500_000;
+export const PLEX_WATCH_HISTORY_MAX_RAW = 1_500_000;
 
 export interface PlexWatchHistory {
   // Every record the parser could place (movies and episodes with a key).
@@ -617,16 +635,18 @@ export interface PlexWatchHistory {
   // all, records > 0 with nothing matching the library) is how a changed
   // response shape shows up instead of reading as "nobody watched anything".
   records: number;
-  // The walk stopped at maxItems; older history was not read.
+  // The walk stopped at a cap with older history still unread (a record past
+  // the cap was seen); the caller must not read the result as complete.
   truncated: boolean;
 }
 
 export async function getPlexWatchHistory(
   serverUrl: string,
   token: string,
-  opts: { signal?: AbortSignal; maxItems?: number } = {},
+  opts: { signal?: AbortSignal; maxItems?: number; maxRaw?: number } = {},
 ): Promise<PlexWatchHistory> {
   const maxItems = opts.maxItems ?? PLEX_WATCH_HISTORY_MAX_ITEMS;
+  const maxRaw = opts.maxRaw ?? PLEX_WATCH_HISTORY_MAX_RAW;
   const out: PlexWatchHistory = { entries: [], records: 0, truncated: false };
   if (opts.signal?.aborted) return out;
   let seen = 0;
@@ -635,15 +655,20 @@ export async function getPlexWatchHistory(
     token,
     (batch) => {
       for (const raw of batch) {
-        if (seen >= maxItems) break;
+        const counts = countsAsPlexWatchRecord(raw);
+        // Truncated only when a record PAST a cap exists — a history of exactly
+        // maxItems records is complete.
+        if (seen >= maxRaw || (counts && out.records >= maxItems)) {
+          out.truncated = true;
+          break;
+        }
         seen++;
-        if (countsAsPlexWatchRecord(raw)) out.records++;
+        if (counts) out.records++;
         const entry = parsePlexHistoryItem(raw);
         if (entry) out.entries.push(entry);
       }
-      if (seen >= maxItems) out.truncated = true;
       // Stop paging on abort (guardrail 41 — the caller discards the result) or
-      // at the cap. Overshoot is bounded to the page already in flight.
+      // at a cap. Overshoot is bounded to the page already in flight.
       return opts.signal?.aborted === true || out.truncated;
     },
   );

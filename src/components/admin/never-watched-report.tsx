@@ -33,15 +33,27 @@ import {
   readApiError,
   useCleanupDelete,
 } from "@/components/admin/cleanup-delete";
-import type { NwLevel, NwSortKey, NwStateFilter } from "@/lib/never-watched";
+import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { arrFailureText, upstreamFailureText } from "@/lib/cleanup-error-text";
+import {
+  lastValidPage,
+  upstreamCheckCounts,
+  upstreamChipKey,
+  type NwLevel,
+  type NwSortKey,
+  type NwStateFilter,
+  type NwUpstreamHealth,
+} from "@/lib/never-watched";
 import type { NeverWatchedReport, NwSeasonRow, NwTitleRow } from "@/lib/never-watched-report";
+import { CLEANUP_MAX_ITEMS } from "@/lib/library-cleanup";
 
 type Summary = Omit<NeverWatchedReport, "titles" | "seasons">;
 type Page = Summary & { rows: Array<NwTitleRow | NwSeasonRow>; total: number };
 type Selected = { tmdbId: number; mediaType: "MOVIE" | "TV"; title: string; sizeOnDisk: number | null };
 
-// The route caps a delete at 500 titles.
-const MAX_SELECTION = 500;
+// The selection never grows past what one delete takes — the route's own cap,
+// shared with Library cleanup's page so the three can't drift.
+const MAX_SELECTION = CLEANUP_MAX_ITEMS;
 
 // Literal key maps — the i18n dead-string check can't see a built key.
 const STATE_KEYS = {
@@ -59,11 +71,20 @@ const REASON_KEYS = {
 } as const;
 const HEALTH_KEYS = {
   ok: "adminManage.neverWatched.upstream.ok",
+  okUnmeasured: "adminManage.neverWatched.upstream.okUnmeasured",
   unreliable: "adminManage.neverWatched.upstream.unreliable",
   failed: "adminManage.neverWatched.upstream.failed",
+  incomplete: "adminManage.neverWatched.upstream.incomplete",
   stale: "adminManage.neverWatched.upstream.stale",
   never: "adminManage.neverWatched.upstream.never",
 } as const;
+
+// The upstream walk reads every server's whole watch history — longer than a
+// reverse proxy holds a request (the guardrail-37a shape), so "Check now" runs
+// it as a background job and polls. Counted, never timed (guardrail 16): ~30
+// minutes of polls covers the refresh's 25-minute run budget.
+const CHECK_POLL_MS = 3_000;
+const CHECK_MAX_POLLS = 600;
 const FILTER_KEYS: Record<NwStateFilter, string> = {
   never: "adminManage.neverWatched.filter.never",
   possible: "adminManage.neverWatched.filter.possible",
@@ -107,11 +128,22 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<Map<string, Selected>>(new Map());
-  const [busyKey, setBusyKey] = useState<string | null>(null);
+  // One entry per Protect/Unprotect in flight. A single key let a second row's
+  // click re-enable the first row's button mid-request, and the first one's
+  // finish re-enable the second's — a re-click then sent a duplicate POST or
+  // flipped the title back.
+  const [busyKeys, setBusyKeys] = useState<Set<string>>(() => new Set());
   const [checking, setChecking] = useState(false);
   const [checkNote, setCheckNote] = useState("");
   const loadSeq = useRef(0);
   const freshNext = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // Debounce the search box: a keystroke is not a whole-report request.
   useEffect(() => {
@@ -127,10 +159,16 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     setLoading(true);
     setError("");
     const params = new URLSearchParams({
-      level, state: stateFilter, type, sortBy, sortDir, page: String(page), limit: String(limit),
+      level, state: stateFilter, sortBy: effectiveSort(level, sortBy), sortDir, page: String(page), limit: String(limit),
     });
     if (appliedQuery) params.set("q", appliedQuery);
-    if (eligibleOnly) params.set("eligible", "1");
+    // The type filter and "deletable now only" are Titles-only controls; the
+    // Seasons tab hides them, so it must not send them either (the server
+    // ignores them there too — parseNwQuery).
+    if (level === "title") {
+      params.set("type", type);
+      if (eligibleOnly) params.set("eligible", "1");
+    }
     if (freshNext.current) {
       params.set("fresh", "1");
       freshNext.current = false;
@@ -144,6 +182,14 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
       }
       const next = (await res.json()) as Page;
       if (seq !== loadSeq.current) return;
+      // A delete or protect shrank the list under the page on screen: step
+      // back to the last page that holds rows (the page change reloads it)
+      // rather than showing "Nothing matches" over a "51–50 of 50" pager.
+      const last = lastValidPage(next.total, limit);
+      if (next.rows.length === 0 && next.total > 0 && page > last) {
+        setPage(last);
+        return;
+      }
       setData(next);
     } catch {
       if (seq === loadSeq.current) setError(t("adminManage.neverWatched.error.loadNetwork"));
@@ -165,10 +211,20 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     window.history.replaceState(null, "", s ? `?${s}` : window.location.pathname);
   }, [level, stateFilter]);
 
+  // A reload after a slow action (the upstream check, a protect, a delete) runs
+  // the loader of the view on screen WHEN IT FINISHES, never the one captured
+  // at click time: that would fetch the old tab/page/filters with a newer
+  // loadSeq and paint them over the load the admin's later change made (the
+  // arr-download-history `loadRef` pattern).
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
+
   const reload = useCallback(async (fresh = false) => {
     freshNext.current = fresh;
-    await load();
-  }, [load]);
+    await loadRef.current();
+  }, []);
 
   const del = useCleanupDelete({
     items: () => [...selected.values()].map((s) => ({ tmdbId: s.tmdbId, mediaType: s.mediaType })),
@@ -179,7 +235,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   });
 
   function sortOn(key: NwSortKey) {
-    if (sortBy === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    if (effectiveSort(level, sortBy) === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     else {
       setSortBy(key);
       setSortDir(key === "title" ? "asc" : "desc");
@@ -198,7 +254,14 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     });
   }
 
+  // Rows are rendered by their own kind, never cast by the `level` state: a tab
+  // switch updates `level` at once while `data` still holds the other tab's
+  // rows until the new page lands (or for good, if that fetch fails).
   const titleRows = (data?.rows ?? []).filter((r): r is NwTitleRow => r.kind === "title");
+  const seasonRows = (data?.rows ?? []).filter((r): r is NwSeasonRow => r.kind === "season");
+  const levelRows: ReadonlyArray<NwTitleRow | NwSeasonRow> = level === "title" ? titleRows : seasonRows;
+  // Rows on hand belong to the other tab: say nothing about this one yet.
+  const otherLevelRows = levelRows.length === 0 && (data?.rows.length ?? 0) > 0;
   const selectableOnPage = titleRows.filter((r) => r.eligible);
 
   function toggleAllOnPage() {
@@ -217,7 +280,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
 
   async function setProtected(r: NwTitleRow, on: boolean) {
     const k = cleanupKeyOf(r);
-    setBusyKey(k);
+    setBusyKeys((prev) => new Set(prev).add(k));
     setError("");
     try {
       const res = on
@@ -241,7 +304,12 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     } catch {
       setError(t("adminManage.cleanup.error.network"));
     } finally {
-      setBusyKey(null);
+      // Only this row's entry: another row's request may still be running.
+      setBusyKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(k);
+        return next;
+      });
     }
   }
 
@@ -250,14 +318,27 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     setCheckNote("");
     setError("");
     try {
-      const res = await fetch(withBasePath("/api/admin/never-watched/refresh"), { method: "POST" });
-      if (!res.ok) {
-        setError(await readApiError(res, t("adminManage.neverWatched.error.check")));
+      const answer = await runReplaceFileJob(fetch, withBasePath("/api/admin/never-watched/refresh"), {}, {
+        intervalMs: CHECK_POLL_MS,
+        maxPolls: CHECK_MAX_POLLS,
+        isAlive: () => mounted.current,
+      });
+      if (!answer) return;
+      if (answer.status === 0) {
+        // No answer came (out of polls, or the polls kept failing): the walk
+        // may still be running on the server — never call that a failure.
+        setCheckNote(t("adminManage.neverWatched.checkStillRunning"));
         return;
       }
-      const body = (await res.json().catch(() => null)) as { servers?: Array<{ ok: boolean }> } | null;
-      const failed = (body?.servers ?? []).filter((s) => !s.ok).length;
-      setCheckNote(failed > 0 ? t("adminManage.neverWatched.checkedSomeFailed", { count: failed }) : t("adminManage.neverWatched.checked"));
+      if (answer.status < 200 || answer.status >= 300) {
+        const msg = (answer.data as { error?: unknown } | null)?.error;
+        setError(typeof msg === "string" && msg ? msg : t("adminManage.neverWatched.error.check"));
+        return;
+      }
+      const body = answer.data as { servers?: Array<{ ok: boolean; health: NwUpstreamHealth }> } | null;
+      const { unread, unhealthy } = upstreamCheckCounts(body?.servers ?? []);
+      const base = unread > 0 ? t("adminManage.neverWatched.checkedSomeFailed", { count: unread }) : t("adminManage.neverWatched.checked");
+      setCheckNote(unhealthy > 0 ? `${base} ${t("adminManage.neverWatched.checkedSomeUnhealthy", { count: unhealthy })}` : base);
       await reload(true);
     } catch {
       setError(t("adminManage.neverWatched.error.checkNetwork"));
@@ -280,10 +361,13 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
   const totalPages = Math.max(1, Math.ceil(data.total / limit));
   const selectedList = [...selected.values()];
   const selectedBytes = selectedList.reduce((n, s) => n + (s.sizeOnDisk ?? 0), 0);
-  const unchecked = data.coverage.filter((c) => c.upstream.health !== "ok");
+  // Only a server that holds titles can hold one back (upstreamUnchecked is per
+  // holder): a de-registered or emptied server stays listed below but is never
+  // named here, where nothing the admin does could clear it.
+  const unchecked = data.coverage.filter((c) => c.holds && c.upstream.health !== "ok");
 
   const sortHead = (k: NwSortKey, label: string, align?: "right") => {
-    const active = sortBy === k;
+    const active = effectiveSort(level, sortBy) === k;
     const Icon = !active ? ArrowUpDown : sortDir === "asc" ? ArrowUp : ArrowDown;
     return (
       <th key={k} style={{ ...th, textAlign: align ?? "left" }} aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}>
@@ -347,6 +431,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
           <ul className="flex flex-col gap-1" style={{ margin: 0, padding: 0, listStyle: "none", fontSize: 13 }}>
             {data.coverage.map((c) => {
               const u = c.upstream;
+              const chip = upstreamChipKey(u);
               const pct = u.samples > 0 ? Math.round((u.agreed / u.samples) * 100) : null;
               return (
                 <li key={c.server} className="flex flex-wrap items-center gap-x-3 gap-y-1" style={{ color: "var(--ds-fg)" }}>
@@ -359,7 +444,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
                         : t("adminManage.neverWatched.coverage.noHistory")}
                   </span>
                   <Chip tone={u.health === "ok" ? "approved" : u.health === "never" ? "neutral" : "declined"}>
-                    {t(HEALTH_KEYS[u.health], {
+                    {t(HEALTH_KEYS[chip], {
                       date: day(u.fetchedAt),
                       pct: pct ?? 0,
                       agreed: u.agreed,
@@ -367,7 +452,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
                     })}
                   </Chip>
                   {u.health === "failed" && u.error ? (
-                    <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{u.error}</span>
+                    <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{upstreamFailureText(t, u)}</span>
                   ) : null}
                 </li>
               );
@@ -395,7 +480,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
       {data.arrErrors.length > 0 && (
         <div role="status" className={`${bannerClass("warn")} flex flex-wrap items-center gap-2`} style={{ padding: "8px 12px", fontSize: 13 }}>
           <span className="flex-1">
-            {t("adminManage.cleanup.arrErrors", { list: data.arrErrors.map((e) => `${arrInstanceLabel(e.service, e.instance)} (${e.error})`).join(", ") })}
+            {t("adminManage.cleanup.arrErrorsList", { list: data.arrErrors.map((e) => arrFailureText(t, arrInstanceLabel(e.service, e.instance), e)).join("; ") })}
           </span>
           {/* Re-lists Radarr/Sonarr now instead of waiting out the shared cache. */}
           <Button size="xs" variant="outline" onClick={() => void reload(true)} disabled={loading}>
@@ -489,12 +574,21 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
       </div>
 
       {(error || del.error) && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error || del.error}</p>}
+      {data.cleanupEnabled && selected.size >= MAX_SELECTION && (
+        <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.cleanup.selectionFull", { max: MAX_SELECTION })}</p>
+      )}
 
       <CleanupPlanPanel del={del} formatBytes={formatBytes} />
       <CleanupResultPanel result={del.result} />
 
       {/* ── table ──────────────────────────────────────────────────────── */}
-      {data.rows.length === 0 ? (
+      {levelRows.length === 0 && (loading || otherLevelRows) ? (
+        loading ? (
+          <div className="flex items-center gap-2" style={{ color: "var(--ds-fg-subtle)", fontSize: 13 }}>
+            <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> {t("adminManage.neverWatched.loading")}
+          </div>
+        ) : null
+      ) : levelRows.length === 0 ? (
         <EmptyState
           icon={EyeOff}
           title={
@@ -546,7 +640,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
                   cleanupEnabled={data.cleanupEnabled}
                   checked={selected.has(cleanupKeyOf(r))}
                   onToggle={() => toggle(r)}
-                  busy={busyKey === cleanupKeyOf(r)}
+                  busy={busyKeys.has(cleanupKeyOf(r))}
                   onProtect={(on) => void setProtected(r, on)}
                   day={day}
                   formatBytes={formatBytes}
@@ -570,7 +664,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
               </tr>
             </thead>
             <tbody>
-              {(data.rows as NwSeasonRow[]).map((r) => (
+              {seasonRows.map((r) => (
                 <SeasonRow key={`${r.tmdbId}:${r.seasonNumber}`} r={r} day={day} formatBytes={formatBytes} />
               ))}
             </tbody>
@@ -578,7 +672,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
         </div>
       )}
 
-      {data.total > 0 && (
+      {data.total > 0 && !otherLevelRows && (
         <HistoryPagination
           page={page}
           setPage={(p) => setPage(Math.min(Math.max(1, p), totalPages))}
@@ -598,6 +692,12 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
       </p>
     </div>
   );
+}
+
+// The sort the server applies: a season has no Added column, so "added" sorts
+// it on its window start — the Since column (parseNwQuery maps it the same way).
+function effectiveSort(level: NwLevel, sortBy: NwSortKey): NwSortKey {
+  return level === "season" && sortBy === "added" ? "since" : sortBy;
 }
 
 function StateChips({ r }: { r: NwTitleRow | NwSeasonRow }) {

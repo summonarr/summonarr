@@ -1,7 +1,8 @@
 // "Why is this request stuck?" — the pure half. Judges one APPROVED request
 // from what its own Radarr/Sonarr instance reports for the title (the library
-// resource, the queue, the DownloadFailed history) and whether a media server
-// the requester can see holds it, then projects the answer COARSELY: the
+// resource, the queue, the DownloadFailed and import history), whether a
+// media server the requester can see holds it and whether the requester has a
+// media-server preference, then projects the answer COARSELY: the
 // request queue's MANAGE_REQUESTS delegates read it too, so no output path,
 // download id, download client or indexer name, release title or arr URL ever
 // leaves the server (guardrail 5e). Zero I/O; the data half is
@@ -19,15 +20,30 @@
 //   notInArr           the instance doesn't have the title (Re-push)
 //   inArrNotInLibrary  the arr has everything, no library row — the sync's
 //                      Radarr/Sonarr marking pass marks it available on its
-//                      next run, scanned or not
+//                      next run, scanned or not. That pass flips ONLY a
+//                      requester with no media-server preference
+//                      (User.mediaServer); for one with a preference it is
+//   waitingForLibrary  instead: the request turns available only once a
+//                      library they can see holds the title (the library
+//                      marking pass), so it waits on a scan, not a sync
 //   unreachable        the queue read failed (only read past this point)
 //   importBlocked      a queue item the arr itself says needs attention
 //   downloading        the queue has the title
-//   unmonitored        nothing is searching for it (Re-push re-monitors)
+//   unmonitored        nothing is searching for it (Re-push re-monitors).
+//                      A Sonarr series monitored at the SERIES level counts
+//                      too when nothing under it is: no aired regular episode
+//                      monitored or on disk, no monitored airing ahead
+//                      (nothingMonitoredToSearch) — `monitored` stays true so
+//                      the panel can say so, and Re-push is not offered (it
+//                      re-monitors only an unmonitored series)
 //   notReleased        movie: no physical/digital date passed; series: no
 //                      regular-season episode has aired
-//   unreachable        the history read failed
+//   unreachable        the history read failed (failures; imports once a
+//                      failure needs them)
 //   downloadFailed     a DownloadFailed event since the request's approval
+//                      with no import of the title at or after it — a later
+//                      successful download (Sonarr's partial pack, a re-grab)
+//                      answers it, and the title is incomplete or waiting
 //   incomplete         Sonarr has some episodes, not every aired one
 //   waiting            monitored, released, nothing queued, nothing failed
 //
@@ -59,6 +75,7 @@ export const ARR_STATUS_VERDICTS = [
   "notInArr",
   "ready",
   "inArrNotInLibrary",
+  "waitingForLibrary",
   "importBlocked",
   "downloading",
   "unmonitored",
@@ -216,13 +233,20 @@ export function titleFacts(service: ArrService, instance: string, raw: unknown, 
 
 // ── scrubbing upstream text ──────────────────────────────────────────────────
 
-// A URL — the arr's own address, an indexer's or a client's.
-const URL_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+// A URL — the arr's own address, an indexer's or a client's — or a magnet
+// link (its dn= is the release name, its tr= can carry a tracker passkey).
+const URL_TEXT = /\b(?:[a-z][a-z0-9+.-]*:\/\/|magnet:\?)[^\s"'<>]+/gi;
+// A bare host:port ("sabnzbd.lan:8080/api") — a dotted host, so neither a
+// quality name ("Bluray-1080p") nor a time ("12:30") is one.
+const HOST_PORT = /\b[a-z0-9-]+(?:\.[a-z0-9-]+)+:\d{2,5}\b\S*/gi;
 // An absolute path (POSIX, a drive letter, a UNC share) — "No files found are
 // eligible for import in /downloads/complete/Name" names the output path. A
-// path with spaces is cut at the first one; the exact output path is removed
-// whole as a named private value before this runs.
-const PATH = /(^|[\s"'(\[=:,])(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"'<>)\]]*/g;
+// path runs to the END of the message: release and file names have spaces
+// ("/downloads/Show Name S01 1080p WEB-DL-GRP"), so stopping at the first one
+// leaked the rest; the reason comes before the path. "…" is a boundary too —
+// the tail of a removed private value ("…/Show Name - S01E01") is a path —
+// and a lone " / " separator is not a path.
+const PATH = /(^|[\s"'(\[=:,…])(?:[A-Za-z]:[\\/]|\\\\|\/(?=[^\s/]))[\s\S]*$/;
 const MEDIA_EXT = "mkv|mp4|m4v|avi|mov|wmv|ts|m2ts|iso|img|vob|mpg|mpeg|webm|flv|rar|zip|7z|par2|nzb|torrent|nfo|srt|ass|sub|idx|r\\d{2}";
 // A file name the release put on disk ("Name.S01E01.1080p.mkv") — a release name in all but form.
 const FILE_NAME = new RegExp(`[^\\s"'<>/\\\\]+\\.(?:${MEDIA_EXT})\\b`, "gi");
@@ -245,8 +269,9 @@ export function scrubMessage(raw: unknown, privateValues: ReadonlyArray<string |
     .filter((v): v is string => typeof v === "string" && v.trim().length >= 3)
     .map((v) => v.trim())
     .sort((a, b) => b.length - a.length);
-  for (const v of known) s = s.split(v).join("…");
-  s = s.replace(URL_TEXT, "…").replace(PATH, "$1…").replace(FILE_NAME, "…").replace(ELLIPSIS_RUN, "…").trim();
+  // Case-insensitive: a client may lower-case a download id (a torrent's info hash).
+  for (const v of known) s = s.replace(new RegExp(v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "…");
+  s = s.replace(URL_TEXT, "…").replace(HOST_PORT, "…").replace(PATH, "$1…").replace(FILE_NAME, "…").replace(ELLIPSIS_RUN, "…").trim();
   if (s === "" || s === "…") return null;
   return s.slice(0, MAX_MESSAGE_LEN);
 }
@@ -284,7 +309,14 @@ export interface ArrStatusInputs {
   queue: ArrRead<QueueItem[]> | null;
   /** The title's DownloadFailed history events. Null when not read. */
   failures: ArrRead<ArrHistoryEvent[]> | null;
+  /** The title's import history events — a failure an import followed is answered. Null when not read. */
+  imports: ArrRead<ArrHistoryEvent[]> | null;
   inLibrary: boolean;
+  /**
+   * The requester has a media-server preference (User.mediaServer): the sync's
+   * Radarr/Sonarr marking pass skips them, so only a library row flips the request.
+   */
+  requesterPinned: boolean;
   /** The request's approval, else its creation. */
   sinceMs: number;
   nowMs: number;
@@ -298,6 +330,29 @@ export interface ArrStatusInputs {
  */
 export function needsNoDownload(service: ArrService, facts: TitleFacts, inLibrary: boolean): boolean {
   return facts.hasEverything || (service === "radarr" && inLibrary);
+}
+
+/**
+ * A Sonarr series monitored at the series level with nothing under it to
+ * search for. Sonarr searches only MONITORED episodes, and its counts say none
+ * qualifies: `episodeCount` is "(monitored AND aired) OR has-file", so 0 means
+ * no aired regular episode is monitored and none has a file; `nextAiring`
+ * counts monitored episodes only, so null means none is scheduled either. And
+ * either something aired (a season's previousAiring includes unmonitored
+ * episodes) or every regular season is unmonitored — an arr whose
+ * previousAiring leaves unmonitored episodes out would otherwise read it as
+ * "not released". The title manager's season switch and a Sonarr add with
+ * Monitor: None/Future both leave a series in exactly this state.
+ */
+export function nothingMonitoredToSearch(service: ArrService, facts: TitleFacts): boolean {
+  if (service !== "sonarr" || facts.episodes?.total !== 0 || facts.expectedAt !== null) return false;
+  const regular = facts.title.seasons.filter((s) => s.seasonNumber > 0);
+  return facts.released || (regular.length > 0 && regular.every((s) => !s.monitored));
+}
+
+/** The `unmonitored` verdict for a series monitored at the series level only (nothingMonitoredToSearch). */
+export function unmonitoredEpisodesOnly(s: Pick<RequestArrStatus, "verdict" | "service" | "monitored">): boolean {
+  return s.verdict === "unmonitored" && s.service === "sonarr" && s.monitored === true;
 }
 
 // Reads not taken yet are not "failed": a caller that skipped one past a
@@ -336,7 +391,10 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
   base.expectedAt = facts.expectedAt;
   base.episodes = facts.episodes;
 
-  if (needsNoDownload(input.service, facts, input.inLibrary)) return done(input.inLibrary ? "ready" : "inArrNotInLibrary");
+  if (needsNoDownload(input.service, facts, input.inLibrary)) {
+    if (input.inLibrary) return done("ready");
+    return done(input.requesterPinned ? "waitingForLibrary" : "inArrNotInLibrary");
+  }
 
   if (!input.queue?.ok) return done("unreachable", { errorKind: kindOf(input.queue) });
   const queue = input.queue.value;
@@ -348,7 +406,7 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
     return done(queue.some((d) => d.attention) ? "importBlocked" : "downloading");
   }
 
-  if (!facts.title.monitored) return done("unmonitored");
+  if (!facts.title.monitored || nothingMonitoredToSearch(input.service, facts)) return done("unmonitored");
   if (!facts.released) return done("notReleased");
 
   if (!input.failures?.ok) return done("unreachable", { errorKind: kindOf(input.failures) });
@@ -366,7 +424,15 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
       lastAt: last.date,
       message: scrubMessage(last.message, [last.sourceTitle, last.downloadId, last.downloadClient, last.indexer, last.droppedPath, last.importedPath]),
     };
-    return done("downloadFailed");
+    // The newest failure is the reason only when no import came at or after it.
+    if (!input.imports?.ok) return done("unreachable", { errorKind: kindOf(input.imports) });
+    const importMs = input.imports.value
+      .filter((e) => e.kind === "imported")
+      .map((e) => arrDateMs(e.date))
+      .filter((ms): ms is number => ms !== null);
+    const lastImportMs = importMs.length > 0 ? Math.max(...importMs) : null;
+    const lastFailureMs = arrDateMs(last.date);
+    if (lastImportMs === null || (lastFailureMs !== null && lastFailureMs > lastImportMs)) return done("downloadFailed");
   }
 
   if (input.service === "sonarr" && (facts.episodes?.withFile ?? 0) > 0) return done("incomplete");

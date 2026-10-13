@@ -938,7 +938,8 @@ test("jellyfin recentOnly with a small windowed series set fetches episodes PER 
     epOps.map((o) => ({ method: o.method, args: o.args })),
     [
       { method: "deleteMany", args: { where: { source: "jellyfin", OR: [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: { in: [1] } }] } } },
-      { method: "createMany", args: { data: [{ source: "jellyfin", tmdbId: 1399, seasonNumber: 1, episodeNumber: 1 }], skipDuplicates: true } },
+      // addedAt from the per-show helper's DateCreated (the fixture serves none ⇒ null).
+      { method: "createMany", args: { data: [{ source: "jellyfin", tmdbId: 1399, seasonNumber: 1, episodeNumber: 1, addedAt: null }], skipDuplicates: true } },
     ],
   );
 });

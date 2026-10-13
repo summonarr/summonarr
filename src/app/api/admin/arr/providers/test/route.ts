@@ -26,7 +26,9 @@ const TEST_ONE_PER_MIN = 20;
 //   A test waits on the arr for up to 120 s — past what a reverse proxy holds
 //   a request — so `async: true` answers 202 { job } at once and runs it in the
 //   background (release-search-jobs.ts); the same test while one runs is
-//   joined and spends no rate token.
+//   joined and spends no rate token. A background Test All waits up to 270 s
+//   (the arr tests the providers in turn, and a dead one hangs ~100 s); a
+//   synchronous one, and every single test, 120 s.
 //   GET ?job=<id> → that test's poll: 202 { job, running } while it runs, then
 //   the test's own answer, 404 once the job is gone (expired, another admin's,
 //   or dropped by a restart).
@@ -65,7 +67,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const runTest = async (): Promise<NextResponse> => {
     try {
-      return NextResponse.json({ results: await testProviders(target.service, target.instance, kind, id) });
+      return NextResponse.json({ results: await testProviders(target.service, target.instance, kind, id, { background: background === true }) });
     } catch (err) {
       return arrFailure(err, target, t, `${kind} test`);
     }

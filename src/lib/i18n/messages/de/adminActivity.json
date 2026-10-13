@@ -409,5 +409,7 @@
   "adminActivity.trackingOff.description": "Es wird nichts aufgezeichnet, daher hat dieses Dashboard keine Wiedergaben, Sehzeit oder Zuschauer anzuzeigen. Aktivieren Sie die Erfassung unter Einstellungen → Medien → Wiedergabeverlauf, um es zu füllen.",
   "adminActivity.trackingOff.cta": "Einstellungen zum Wiedergabeverlauf öffnen",
   "adminActivity.common.hoursShort": "{n} h",
-  "adminActivity.detail.openPlay": "Wiedergabe öffnen →"
+  "adminActivity.detail.openPlay": "Wiedergabe öffnen →",
+  "adminActivity.stats.noReasonReportedTop": "{pct} % der Transkodierungen wurden ohne Grund gemeldet – der Server hat nicht angegeben, warum er transkodiert hat.",
+  "adminActivity.stats.movieDecadesTvFiltered": "Nur Filme – wird nicht angezeigt, solange der Serien-Filter aktiv ist."
 }

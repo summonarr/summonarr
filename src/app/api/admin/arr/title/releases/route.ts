@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrTitleGate, parseArrId, parseSeasonNumber, type ArrTitleTarget } from "@/lib/arr-admin-http";
+import type { GrabProgress } from "@/lib/arr";
 import { grabTitleRelease, searchTitleReleases, type ReleaseScope } from "@/lib/arr-title-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { ArrResponseError } from "@/lib/arr";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
-import { grabRefusalResponse } from "@/lib/release-grab";
+import { grabDefinitelyRefused, grabRefusalResponse } from "@/lib/release-grab";
 import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseReleaseHandle } from "@/lib/release-handles";
 import { answerOf, releaseSearchJobResponse, runningReleaseSearchJob, startReleaseSearchJob } from "@/lib/release-search-jobs";
 
@@ -33,7 +33,8 @@ const HANDLE_RE = /^[0-9a-f]{32}$/;
 //       grab it. 410 when the handle is unknown, expired, or from another
 //       search — or when the arr's own 30-minute search cache no longer has
 //       the release; 409 with the arr's reason when the indexer or download
-//       client refused it. The handle is spent on success. Audited
+//       client refused it. The handle is spent on success, and on an
+//       unknown outcome; a failure before the grab is sent hands it back. Audited
 //       ARR_RELEASE_GRAB (with the release name) after the arr accepted it;
 //       the guid is never recorded.
 function scopeOf(target: ArrTitleTarget, rawSeason: unknown, rawEpisode: unknown): ReleaseScope | "invalid" {
@@ -72,7 +73,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const search = async (): Promise<NextResponse> => {
     try {
       const releases = await searchTitleReleases(target.service, target.instance, target.arrId, scope);
-      return NextResponse.json({ releases: issueReleaseHandles(key, releases) });
+      return NextResponse.json({ releases: issueReleaseHandles(key, releases, { owner: session.user.id }) });
     } catch (err) {
       return arrFailure(err, target, t, "release search");
     }
@@ -98,12 +99,17 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const picked = claimReleaseHandle(handleScope(target, scope), handle);
   if (picked === "unknown") return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
   if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });
+  const progress: GrabProgress = { sent: false };
   try {
-    await grabTitleRelease(target.service, target.instance, target.arrId, picked, scope);
+    await grabTitleRelease(target.service, target.instance, target.arrId, picked, scope, progress);
   } catch (err) {
-    // The arr answered (it refused): the release may be tried again. No answer
-    // (a timeout, the network): it may well have taken it — never send it twice.
-    if (err instanceof ArrResponseError) releaseReleaseHandle(handle);
+    // Nothing sent yet (the config or the title read failed), or the arr
+    // definitely refused (a 4xx): the release may be tried again. No answer,
+    // or a 408/5xx (a timeout, the network, a gateway that gave up while the
+    // arr was still sending it to the client): it may well have taken it —
+    // never send it twice.
+    if (!progress.sent) releaseReleaseHandle(handle);
+    else if (grabDefinitelyRefused(err)) releaseReleaseHandle(handle);
     else forgetReleaseHandle(handle);
     const refused = grabRefusalResponse(err, ARR_SERVICE_LABEL[target.service], t);
     if (refused) return refused;

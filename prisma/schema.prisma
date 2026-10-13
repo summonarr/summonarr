@@ -1184,6 +1184,12 @@ model PlayHistory {
   @@index([source, startedAt(sort: Desc)])
   @@index([mediaType, startedAt(sort: Desc)])
   @@index([source, serverInstance])
+  // The never-watched verdict's narrowed read (the ADMIN detail-page chip, the
+  // cleanup delete's re-judgement) looks a show's plays up by `sourceShowId IN
+  // (…)` with no source predicate; without this it is a sequential scan of the
+  // whole table on every admin TV page view. The movie twin is served by
+  // [source, sourceItemId, …] above (never-watched-data.ts scopes it by source).
+  @@index([sourceShowId])
 }
 
 model ActiveSession {

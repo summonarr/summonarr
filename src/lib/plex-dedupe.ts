@@ -3,7 +3,17 @@
 // keyed ([tmdbId, mediaType, serverInstance]), so those candidates would become
 // several rows all pointing at the same item — and every reader that maps
 // ratingKey → title (play-history, fix-match) would then have no single answer.
-// Exactly one candidate may survive per conflated ratingKey.
+// Exactly one candidate may survive per conflated CANONICAL ratingKey.
+//
+// `plexRatingKeys` (guardrail 37c) is deliberately NOT made exclusive here: a
+// conflated item's key also rides the array of every title it claims whose
+// clean copy sits in another section, and it stays there. The never-watched
+// evidence join (guardrail 14d) credits a play / upstream record / session of
+// that key to EVERY title answering to it — stripping it from all but one row
+// turns a watched title into a false "never watched", and that list feeds a
+// delete. Readers that need ONE answer per key (resolveShowTmdbId, the poller's
+// movie prefetch, the activity backfill) resolve it on read through
+// `pickPlexRowForKey` / `indexPlexRowsByKey`, so row order never decides.
 //
 // ONE definition, called by both writers — the orchestrator's Plex arm
 // (/api/sync) and the admin Resync route (/api/sync/plex). They previously held
@@ -24,6 +34,9 @@ import { warnOnChange } from "@/lib/log-dedup";
 
 export type PlexDedupeRow = { tmdbId: number; plexRatingKey: string | null };
 
+/** Anything that names the ratingKeys it answers to — a stored row or a batch row. */
+type PlexKeyHolder = { tmdbId: number; plexRatingKey: string | null; plexRatingKeys?: readonly string[] | null };
+
 /** Log/dedup scope — distinct per writer so the admin Resync's finding is not
  *  swallowed just because the hourly orchestrator logged the same conflicts. */
 export type PlexDedupeScope = "sync" | "sync/plex";
@@ -42,6 +55,68 @@ export type PlexDedupeScope = "sync" | "sync/plex";
  */
 function lowestTmdbId(ids: number[]): number {
   return ids.reduce((best, id) => (id < best ? id : best));
+}
+
+/**
+ * The ONE owner of `key` among rows that all hold it: the row whose CANONICAL
+ * `plexRatingKey` it is, else the lowest tmdbId (the same total order as the
+ * 37b tiebreak above — never arrival order, never "the first row Postgres
+ * returned").
+ *
+ * Why a rule and not `findFirst`: a conflated item's key can be one row's
+ * canonical key AND ride another row's `plexRatingKeys` (a second section's
+ * copy of one of the titles it claims), so a read that ORs both columns
+ * (guardrail 37c) matches two rows. Taking whichever came first let the answer
+ * follow physical row order, which a full-sync delete-and-reinsert changes —
+ * and the poller PERSISTS the answer onto every PlayHistory row it writes.
+ * The arrays are never made exclusive on write (the never-watched join needs
+ * every holder — see the header), so this read-side rule is the ONLY place
+ * that picks one owner.
+ */
+export function pickPlexRowForKey<T extends { tmdbId: number; plexRatingKey: string | null }>(
+  rows: readonly T[],
+  key: string,
+): T | null {
+  let best: T | null = null;
+  let bestIsCanonical = false;
+  for (const r of rows) {
+    const canonical = r.plexRatingKey === key;
+    if (
+      best === null ||
+      (canonical && !bestIsCanonical) ||
+      (canonical === bestIsCanonical && r.tmdbId < best.tmdbId)
+    ) {
+      best = r;
+      bestIsCanonical = canonical;
+    }
+  }
+  return best;
+}
+
+/**
+ * Every ratingKey the rows answer to (canonical AND `plexRatingKeys`), mapped
+ * to its one owner through `pickPlexRowForKey`. For a caller holding rows of
+ * ONE server (ratingKeys are server-local — guardrail 35); a multi-instance
+ * caller groups by instance first.
+ */
+export function indexPlexRowsByKey<T extends PlexKeyHolder>(rows: readonly T[]): Map<string, T> {
+  const holders = new Map<string, T[]>();
+  for (const r of rows) {
+    const keys = new Set<string>();
+    if (r.plexRatingKey) keys.add(r.plexRatingKey);
+    for (const k of r.plexRatingKeys ?? []) if (k) keys.add(k);
+    for (const k of keys) {
+      const list = holders.get(k);
+      if (list) list.push(r);
+      else holders.set(k, [r]);
+    }
+  }
+  const owners = new Map<string, T>();
+  for (const [k, list] of holders) {
+    const owner = pickPlexRowForKey(list, k);
+    if (owner) owners.set(k, owner);
+  }
+  return owners;
 }
 
 export async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(

@@ -13,6 +13,7 @@ import {
   OTHER_REASONS,
   UNKNOWN_REASON,
   isPlexStreamOnlyReason,
+  reasonCalloutKind,
   translateTranscodeReason,
 } from "@/lib/transcode-reasons";
 import {
@@ -147,9 +148,13 @@ const STREAM_METHODS = ["DirectPlay", "DirectStream", "Transcode"];
 export function ActivityStatsRedesign({
   stats,
   days,
+  mediaType,
 }: {
   stats: ActivityStatsData;
   days: number;
+  // The page's media-type filter. Only "TV" changes anything: the Movie decades
+  // card is empty by construction then, and says why instead of "No data yet".
+  mediaType?: string;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -653,8 +658,13 @@ export function ActivityStatsRedesign({
                         reason and its share. It used to add "addressing it
                         would meaningfully cut server transcode load" whatever
                         the share — and for Plex, whose "reason" was a guess. */}
-                    {topReason.reason === UNKNOWN_REASON ? (
+                    {/* "No reason reported" is the server saying nothing for a
+                        NEW session — not a cause, and unlike Unknown it does
+                        not clear as data accumulates (guardrail 19c). */}
+                    {reasonCalloutKind(topReason.reason) === "unknown" ? (
                       <>{t("adminActivity.stats.noReason", { pct: topReasonPct })}</>
+                    ) : reasonCalloutKind(topReason.reason) === "unreported" ? (
+                      <>{t("adminActivity.stats.noReasonReportedTop", { pct: topReasonPct })}</>
                     ) : (
                       <>
                         {(() => {
@@ -793,14 +803,29 @@ export function ActivityStatsRedesign({
               label={t("adminActivity.stats.movieDecades")}
               sub={t("adminActivity.stats.releaseYear")}
             />
-            <HorizontalBars
-              items={stats.decadeBreakdown.map((d) => ({
-                label: bucketLabel(d.decade, t),
-                count: d.count,
-              }))}
-              color="var(--ds-chart-3)"
-              labelWidth={56}
-            />
+            {mediaType === "TV" ? (
+              // Same block as HorizontalBars' empty state, so the row keeps its
+              // three cards and the note reads like one.
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "var(--ds-fg-subtle)",
+                  padding: "20px 0",
+                  textAlign: "center",
+                }}
+              >
+                {t("adminActivity.stats.movieDecadesTvFiltered")}
+              </div>
+            ) : (
+              <HorizontalBars
+                items={stats.decadeBreakdown.map((d) => ({
+                  label: bucketLabel(d.decade, t),
+                  count: d.count,
+                }))}
+                color="var(--ds-chart-3)"
+                labelWidth={56}
+              />
+            )}
           </ActivityCard>
         </div>
       </section>

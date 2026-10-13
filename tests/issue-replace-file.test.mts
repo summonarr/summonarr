@@ -113,6 +113,8 @@ const { Permission } = await import("../src/lib/permissions.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { projectHistoryRecords } = await import("../src/lib/arr-history.ts");
 const { projectEpisodes, projectFiles } = await import("../src/lib/arr-title.ts");
+const { _resetReleaseSearchJobsForTests } = await import("../src/lib/release-search-jobs.ts");
+const { _resetMarkClaimsForTests } = await import("../src/lib/arr-title-data.ts");
 const replace = await import("../src/lib/issue-replace.ts");
 
 // ── auth fixture ─────────────────────────────────────────────────────────────
@@ -178,12 +180,24 @@ shadowPrismaModel(prisma, "tmdbCache", {
 
 let issueRow: Record<string, unknown> | null = null;
 let casCount = 1;
+// Runs once, right after the route's read — e.g. another admin resolving the issue meanwhile.
+let afterIssueRead: (() => void) | null = null;
 shadowPrismaModel(prisma, "issue", {
-  findUnique: async () => (issueRow ? { ...issueRow } : null),
-  updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+  findUnique: async () => {
+    const row = issueRow ? { ...issueRow } : null;
+    const after = afterIssueRead;
+    afterIssueRead = null;
+    after?.();
+    return row;
+  },
+  // Honours the CAS's own predicate (`status: { not: "RESOLVED" }`), so a route
+  // that dropped it would flip a resolved issue — and the test below would see it.
+  updateMany: async (args: { where: { id?: string; status?: { not?: string } }; data: Record<string, unknown> }) => {
     seq.push("db:issue.updateMany");
-    if (casCount > 0 && issueRow) Object.assign(issueRow, args.data);
-    return { count: casCount };
+    const refused = args.where.status?.not !== undefined && issueRow?.status === args.where.status.not;
+    const count = casCount > 0 && issueRow && !refused ? 1 : 0;
+    if (count > 0 && issueRow) Object.assign(issueRow, args.data);
+    return { count };
   },
 });
 const grabs: Array<Record<string, unknown>> = [];
@@ -283,6 +297,8 @@ let unmonitorDeleted = false;
 // Monitoring set since the fixture: by the admin before the test, or by PUT /episode/monitor.
 let episodeMonitored = new Map<number, boolean>();
 let monitorPutFails = false;
+// A Sonarr command that answers 503 (Sonarr under import load) — matched on the command body.
+let sonarrCommandFails: ((body: Record<string, unknown>) => boolean) | null = null;
 const liveEpisodes = () => EPISODES.map((e) => {
   const gone = deletedEpisodeFiles.has(e.episodeFileId);
   const base = episodeMonitored.get(e.id) ?? e.monitored;
@@ -293,7 +309,9 @@ let radarrDeleteFailsFor: number | null = null;
 // Radarr's movie: unmonitored by a delete while "Unmonitor Deleted Movies" is on.
 let movieMonitored = true;
 let movieEditorFails = false;
-const liveMovie = () => ({ ...movie, monitored: movieMonitored });
+// Radarr's `isAvailable` (Minimum Availability reached); undefined = the arr doesn't say.
+let movieIsAvailable: boolean | undefined;
+const liveMovie = () => ({ ...movie, monitored: movieMonitored, ...(movieIsAvailable === undefined ? {} : { isAvailable: movieIsAvailable }) });
 
 const radarr: Responder = (c) => {
   if (c.origin !== RADARR) return undefined;
@@ -353,7 +371,10 @@ const sonarr: Responder = (c) => {
     return json([], 202);
   }
   if (c.method === "POST" && c.path.startsWith("/api/v3/history/failed/")) return json({});
-  if (c.method === "POST" && c.path === "/api/v3/command") return json({ id: 6 }, 201);
+  if (c.method === "POST" && c.path === "/api/v3/command") {
+    if (sonarrCommandFails?.(c.body as Record<string, unknown>)) return json({ message: "Service Unavailable" }, 503);
+    return json({ id: 6 }, 201);
+  }
   return undefined;
 };
 
@@ -373,14 +394,19 @@ beforeEach(() => {
   warnLines = [];
   auditThrows = false;
   casCount = 1;
+  afterIssueRead = null;
+  _resetReleaseSearchJobsForTests();
+  _resetMarkClaimsForTests();
   redownloadConfig = { autoRedownloadFailed: true };
   radarrDeleteFailsFor = null;
   deletedEpisodeFiles = new Set();
   unmonitorDeleted = false;
   episodeMonitored = new Map();
   monitorPutFails = false;
+  sonarrCommandFails = null;
   movieMonitored = true;
   movieEditorFails = false;
+  movieIsAvailable = undefined;
   movieFiles = [{ id: 7, movieId: 11, relativePath: "The Matrix.mkv", path: MOVIE_FILE_PATH, size: 4e9, quality: { quality: { name: "Remux-1080p" } } }];
   movieHistory = [
     { id: 900, movieId: 11, eventType: "grabbed", date: "2026-10-01T10:00:00Z", sourceTitle: "The.Matrix.1999.1080p", downloadId: "abc",
@@ -481,6 +507,49 @@ test("grab mapping: a movie with two files needs an import naming the file's pat
   assert.equal(replace.replaceableFiles("sonarr", { kind: "series" }, multi, split)[0].grab, null);
 });
 
+test("grab mapping: an import naming ANOTHER path is a guess — unknown unless a later rename of the unit names this file; an import with no path still stands", () => {
+  const scope = { kind: "episode", seasonNumber: 1, episodeNumber: 1 } as const;
+  // The import on record put a DIFFERENT file there (a manual in-folder import since wrote no history).
+  const other = SERIES_HISTORY.map((r) => (r.id === 61 ? { ...r, data: { importedPath: "/tv/Breaking Bad/Season 01/OTHER.mkv" } } : r));
+  assert.equal(replace.replaceableFiles("sonarr", scope, sonarrFiles(), sonarrHistory(other))[0].grab, null);
+  // Renamed afterwards to the file on disk (the rename record's relative path): the same file, attributed.
+  const renamed = [...other, { id: 62, seriesId: 21, episode: ep(1, 1), eventType: "episodeFileRenamed", sourceTitle: "x", data: { sourceRelativePath: "Season 01/OTHER.mkv", relativePath: "Season 01/S01E01.mkv" } }];
+  assert.equal(replace.replaceableFiles("sonarr", scope, sonarrFiles(), sonarrHistory(renamed))[0].grab?.event.id, 60);
+  // A rename to some other name, or one BEFORE the import, proves nothing.
+  const renamedElsewhere = [...other, { id: 62, seriesId: 21, episode: ep(1, 1), eventType: "episodeFileRenamed", sourceTitle: "x", data: { relativePath: "Season 01/ELSE.mkv" } }];
+  assert.equal(replace.replaceableFiles("sonarr", scope, sonarrFiles(), sonarrHistory(renamedElsewhere))[0].grab, null);
+  const renamedBefore = [...other, { id: 59, seriesId: 21, episode: ep(1, 1), eventType: "episodeFileRenamed", sourceTitle: "x", data: { relativePath: "Season 01/S01E01.mkv" } }];
+  assert.equal(replace.replaceableFiles("sonarr", scope, sonarrFiles(), sonarrHistory(renamedBefore))[0].grab, null);
+  // A single-file movie whose import names another path: the same rule.
+  const movieFile = projectFiles("radarr", [{ id: 7, movieId: 11, relativePath: "The Matrix.mkv", path: MOVIE_FILE_PATH, size: 1 }]);
+  const movieHist = (path: string | null) => projectHistoryRecords("radarr", "", [
+    { id: 1, movieId: 11, eventType: "grabbed", sourceTitle: "A", downloadId: "A" },
+    { id: 2, movieId: 11, eventType: "downloadFolderImported", sourceTitle: "A", downloadId: "A", data: path === null ? {} : { importedPath: path } },
+  ]);
+  assert.equal(replace.replaceableFiles("radarr", { kind: "movie" }, movieFile, movieHist("/movies/The Matrix (1999)/old.mkv"))[0].grab, null);
+  assert.equal(replace.replaceableFiles("radarr", { kind: "movie" }, movieFile, movieHist(null))[0].grab?.event.id, 1, "no path on record: still the movie's import");
+});
+
+test("grab mapping: a title FOLDER that moved since the import keeps its attribution — the import names the same relative file", () => {
+  const scope = { kind: "episode", seasonNumber: 1, episodeNumber: 1 } as const;
+  // The series moved /old → /tv (no history record for a move): same relative path, other folder.
+  const moved = SERIES_HISTORY.map((r) => (r.id === 61 ? { ...r, data: { importedPath: "/old/Breaking Bad/Season 01/S01E01.mkv" } } : r));
+  assert.equal(replace.replaceableFiles("sonarr", scope, sonarrFiles(), sonarrHistory(moved))[0].grab?.event.id, 60);
+  // A Windows-separated import path is the same file too.
+  const movedWin = SERIES_HISTORY.map((r) => (r.id === 61 ? { ...r, data: { importedPath: "D:\\TV\\Breaking Bad\\Season 01\\S01E01.mkv" } } : r));
+  assert.equal(replace.replaceableFiles("sonarr", scope, sonarrFiles(), sonarrHistory(movedWin))[0].grab?.event.id, 60);
+  // A suffix that isn't on a separator boundary is a different file.
+  const notBoundary = SERIES_HISTORY.map((r) => (r.id === 61 ? { ...r, data: { importedPath: "/old/Breaking Bad/XSeason 01/S01E01.mkv" } } : r));
+  assert.equal(replace.replaceableFiles("sonarr", scope, sonarrFiles(), sonarrHistory(notBoundary))[0].grab, null);
+  // The Radarr twin.
+  const movieFile = projectFiles("radarr", [{ id: 7, movieId: 11, relativePath: "The Matrix.mkv", path: MOVIE_FILE_PATH, size: 1 }]);
+  const movieHist = projectHistoryRecords("radarr", "", [
+    { id: 1, movieId: 11, eventType: "grabbed", sourceTitle: "A", downloadId: "A" },
+    { id: 2, movieId: 11, eventType: "downloadFolderImported", sourceTitle: "A", downloadId: "A", data: { importedPath: "/old/The Matrix (1999)/The Matrix.mkv" } },
+  ]);
+  assert.equal(replace.replaceableFiles("radarr", { kind: "movie" }, movieFile, movieHist)[0].grab?.event.id, 1);
+});
+
 test("marks: ONE per download — a season pack's files share one mark; a failed or unknown grab gets none", () => {
   const files = replace.replaceableFiles("sonarr", { kind: "series" }, sonarrFiles(), sonarrHistory());
   const marks = replace.planMarks(files);
@@ -499,11 +568,36 @@ test("follow-up search: scoped, and never a whole-season search beside files sti
   assert.deepEqual(replace.followUpSearch(season2, byId(503), false, byId(501, 502, 504)), { kind: "episodes", episodes: [ep(2, 1)] });
   // Part of the deletion covered by a mark's redownload → exactly the rest.
   assert.deepEqual(replace.followUpSearch(season2, byId(504), true, byId(501, 502)), { kind: "episodes", episodes: [ep(2, 2)] });
-  assert.deepEqual(replace.followUpSearch({ kind: "series" }, byId(501, 503), false, byId(502, 504)), { kind: "missing" });
+  // A series: the DELETED episodes only, never the series' missing backlog — files left in both seasons ⇒ named one by one.
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, byId(501, 503), false, byId(502, 504)), { kind: "plan", seasons: [], episodes: [ep(1, 1), ep(2, 1)] });
+  // A whole season gone (2+ episodes, nothing of it left) ⇒ a season pack; one episode of the other ⇒ by name.
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, byId(501, 503, 504), false, byId(502)), { kind: "plan", seasons: [2], episodes: [ep(1, 1)] });
   assert.deepEqual(replace.followUpSearch({ kind: "episode", seasonNumber: 1, episodeNumber: 1 }, byId(501), false, []), { kind: "episodes", episodes: [ep(1, 1)] });
   assert.deepEqual(replace.followUpSearch({ kind: "movie" }, [files[0]], false, []), { kind: "movie" });
   assert.equal(replace.followUpSearch({ kind: "movie" }, [files[0]], true, []), null, "a mark's redownload already searches the movie");
   assert.equal(replace.followUpSearch(season2, [], true, []), null);
+});
+
+test("follow-up search: a FULL series names deleted specials and episodes in any season — specials are never a season pack; no episode data ⇒ the Missing plan", () => {
+  // Two specials + a whole regular season deleted, nothing left anywhere.
+  const files = projectFiles("sonarr", [
+    { id: 801, seriesId: 21, seasonNumber: 0, relativePath: "Specials/S00E01.mkv", size: 1 },
+    { id: 802, seriesId: 21, seasonNumber: 0, relativePath: "Specials/S00E02.mkv", size: 1 },
+    { id: 803, seriesId: 21, seasonNumber: 3, relativePath: "Season 03/S03E01.mkv", size: 1 },
+    { id: 804, seriesId: 21, seasonNumber: 3, relativePath: "Season 03/S03E02.mkv", size: 1 },
+  ], projectEpisodes([
+    { id: 1, seriesId: 21, seasonNumber: 0, episodeNumber: 1, episodeFileId: 801, hasFile: true },
+    { id: 2, seriesId: 21, seasonNumber: 0, episodeNumber: 2, episodeFileId: 802, hasFile: true },
+    // No air date at all: the Missing plan would never reach it.
+    { id: 3, seriesId: 21, seasonNumber: 3, episodeNumber: 1, episodeFileId: 803, hasFile: true },
+    { id: 4, seriesId: 21, seasonNumber: 3, episodeNumber: 2, episodeFileId: 804, hasFile: true },
+  ]));
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, files, false, []), { kind: "plan", seasons: [3], episodes: [ep(0, 1), ep(0, 2)] });
+  // A lone deleted special beside the rest of the show.
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, files.slice(0, 1), false, files.slice(1)), { kind: "plan", seasons: [], episodes: [ep(0, 1)] });
+  // Files that name no episodes at all: nothing to name, so the Missing page's plan.
+  const bare = files.map((f) => ({ ...f, episodes: [] }));
+  assert.deepEqual(replace.followUpSearch({ kind: "series" }, bare, false, []), { kind: "missing" });
 });
 
 test("the Redownload Failed switch is read as the arr reports it, null when it doesn't say", () => {
@@ -583,6 +677,120 @@ test("an issue resolved before the delete (the CAS loses) deletes nothing", asyn
   assert.deepEqual(writes(), []);
   assert.deepEqual(seq, ["db:issue.updateMany"]);
   assert.equal(audits.length, 0);
+});
+
+test("an issue resolved AFTER the route's read is refused by the CAS's own predicate — nothing deleted, nothing audited", async () => {
+  const token = await mintSession();
+  issueRow = { ...MOVIE_ISSUE };
+  // The early `status === "RESOLVED"` check passes on the OPEN copy; only the CAS can refuse now.
+  afterIssueRead = () => { issueRow!.status = "RESOLVED"; };
+  const res = await postFiles(token, "issue-1", { instance: "", fileIds: [7], then: "search" });
+  assert.equal(res.status, 409);
+  assert.equal(issueRow.status, "RESOLVED", "a resolved issue is never flipped back to IN_PROGRESS");
+  assert.deepEqual(writes(), []);
+  assert.deepEqual(seq, ["db:issue.updateMany"]);
+  assert.equal(audits.length, 0);
+});
+
+// A DELETE /episodefile/bulk that waits until `open()` — parks a replace mid-flight.
+function parkSonarrDelete(): { open: () => void } {
+  let open!: () => void;
+  const gate = new Promise<void>((r) => { open = r; });
+  responder = (c) => (c.origin === SONARR && c.method === "DELETE" && c.path === "/api/v3/episodefile/bulk"
+    ? (gate.then(() => sonarr(c)!) as unknown as Response)
+    : radarr(c) ?? sonarr(c));
+  return { open };
+}
+// Bounded: answers whether `cond` came true — a mutant must fail, never hang on the gate.
+async function until(cond: () => boolean): Promise<boolean> {
+  for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setImmediate(r));
+  return cond();
+}
+function tracked<T>(p: Promise<T>): { p: Promise<T>; settled: () => boolean } {
+  let done = false;
+  return { p: p.finally(() => { done = true; }), settled: () => done };
+}
+const deletes = () => writes().filter((c) => c.method === "DELETE");
+
+test("one replace per issue at a time: a second POST while one runs is 409 with nothing written or sent; the claim is released when it ends", async () => {
+  issueRow = { ...SEASON_ISSUE };
+  const { open } = parkSonarrDelete();
+  const first = postFiles(await mintSession(), "issue-1", { instance: "", fileIds: [503], then: "markFailed" });
+  assert.ok(await until(() => deletes().length === 1));
+  const casesBefore = seq.filter((x) => x === "db:issue.updateMany").length;
+  const secondCall = tracked(postFiles(await mintSession(), "issue-1", { instance: "", fileIds: [504], then: "markFailed" }));
+  const answeredWhileParked = await until(secondCall.settled);
+  const deletesWhileParked = deletes().length;
+  open();
+  const second = await secondCall.p;
+  assert.ok(answeredWhileParked, "refused at once, while the first is still running");
+  assert.equal(deletesWhileParked, 1, "no second delete");
+  assert.equal(second.status, 409);
+  assert.match(((await second.json()) as { error: string }).error, /already running/);
+  assert.equal(seq.filter((x) => x === "db:issue.updateMany").length, casesBefore, "no second CAS");
+  assert.equal((await first).status, 200);
+  // Released: the next replace of the issue goes through.
+  const third = await postFiles(await mintSession(), "issue-1", { instance: "", fileIds: [504], then: "search" });
+  assert.equal(third.status, 200);
+  assert.equal(deletes().length, 2);
+});
+
+test("a refusal after the claim (the CAS losing) releases it", async () => {
+  issueRow = { ...MOVIE_ISSUE };
+  casCount = 0;
+  assert.equal((await postFiles(await mintSession(), "issue-1", { instance: "", fileIds: [7], then: "search" })).status, 409);
+  casCount = 1;
+  assert.equal((await postFiles(await mintSession(), "issue-1", { instance: "", fileIds: [7], then: "search" })).status, 200);
+});
+
+test("async: 202 { job } at once, the replace runs once in the background, and the poll answers exactly what the synchronous POST would", async () => {
+  issueRow = { ...SEASON_ISSUE };
+  const token = await mintSession();
+  const { open } = parkSonarrDelete();
+  const call = tracked(postFiles(token, "issue-1", { instance: "", fileIds: [503, 504], then: "markFailed", async: true }));
+  const answeredFirst = await until(call.settled);
+  if (!answeredFirst) open();
+  assert.ok(answeredFirst, "answered before the delete finished");
+  const res = await call.p;
+  assert.equal(res.status, 202);
+  const { job } = (await res.json()) as { job: string };
+  assert.match(job, /^[0-9a-f]{32}$/);
+  assert.ok(await until(() => deletes().length === 1));
+  // Running: the poll says so; the same admin posting again JOINS it — no second read, delete or rate token.
+  assert.equal((await getFiles(token, "issue-1", `?job=${job}`)).status, 202);
+  const readsBefore = arrCalls().length;
+  const againCall = tracked(postFiles(token, "issue-1", { instance: "", fileIds: [503, 504], then: "markFailed", async: true }));
+  const againAnswered = await until(againCall.settled);
+  if (!againAnswered) open();
+  assert.ok(againAnswered, "joined at once");
+  const again = await againCall.p;
+  assert.equal(again.status, 202);
+  assert.equal(((await again.json()) as { job: string }).job, job);
+  assert.equal(arrCalls().length, readsBefore, "joining reads nothing");
+  // Another admin is refused while it runs, and cannot read this admin's job.
+  const other = await mintSession();
+  const otherCall = tracked(postFiles(other, "issue-1", { instance: "", fileIds: [503], then: "search", async: true }));
+  const otherAnswered = await until(otherCall.settled);
+  open();
+  assert.ok(otherAnswered);
+  assert.equal((await otherCall.p).status, 409);
+  let poll: Response;
+  for (;;) {
+    poll = await getFiles(token, "issue-1", `?job=${job}`);
+    if (poll.status !== 202) break;
+    await new Promise((r) => setImmediate(r));
+  }
+  assert.equal(poll.status, 200);
+  assert.deepEqual(await poll.json(), { deleted: 2, requested: 2, marked: 1, unmarked: 0, searched: false, redownload: true, redownloading: 1, remonitored: 0, remonitorFailed: false, nothingMissing: false });
+  assert.equal(deletes().length, 1, "deleted once");
+  assert.equal((await getFiles(other, "issue-1", `?job=${job}`)).status, 404, "a job is its owner's only");
+  assert.equal((await getFiles(token, "issue-1", "?job=not-a-job")).status, 404);
+  assert.deepEqual(audits.map((a) => a.action), ["ISSUE_STATUS_CHANGE", "ARR_FILE_DELETE", "ARR_MARK_FAILED"]);
+  // The job released the claim: the issue can be replaced again.
+  deletedEpisodeFiles = new Set();
+  responder = (c) => radarr(c) ?? sonarr(c);
+  assert.equal((await postFiles(other, "issue-1", { instance: "", fileIds: [503], then: "search" })).status, 200);
+  assert.equal((await postFiles(token, "issue-1", { instance: "", fileIds: [504], then: "search", async: "yes" })).status, 400, "`async` must be a boolean");
 });
 
 // ── route: the replace ───────────────────────────────────────────────────────
@@ -710,14 +918,50 @@ test("a failing audit write never fails the replace (guardrail 26)", async () =>
   assert.equal(((await res.json()) as { deleted: number }).deleted, 2);
 });
 
-test("a FULL series issue searches through the Missing page's own plan — a whole season gone is a SeasonSearch, never SeriesSearch", async () => {
+test("a FULL series issue applies the Missing page's season-pack rule to the deleted files — a whole season gone is a SeasonSearch, never SeriesSearch", async () => {
   const token = await mintSession();
   issueRow = { ...issue({ tmdbId: 1396, mediaType: "TV", scope: "FULL" }) };
   assert.equal((await postFiles(token, "issue-1", { instance: "", fileIds: [503, 504], then: "search" })).status, 200);
   assert.deepEqual(commands(), [{ name: "SeasonSearch", seriesId: 21, seasonNumber: 2 }]);
 });
 
-test("a FULL issue with Unmonitor Deleted Episodes on: the delete's unmonitoring is undone first, so the Missing plan sees the season again", async () => {
+test("a FULL plan that stops part-way still counts as searched — the queued SeasonSearch is running, so the IssueGrab is recorded and no 502", async () => {
+  const token = await mintSession();
+  issueRow = { ...issue({ tmdbId: 1396, mediaType: "TV", scope: "FULL" }) };
+  // Both seasons emptied: one SeasonSearch each; Sonarr accepts S1 and 503s S2.
+  sonarrCommandFails = (b) => b.name === "SeasonSearch" && b.seasonNumber === 2;
+  const res = await postFiles(token, "issue-1", { instance: "", fileIds: [501, 502, 503, 504], then: "search" });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { searched: boolean; error?: string };
+  assert.equal(body.searched, true);
+  assert.equal(body.error, undefined);
+  assert.deepEqual(commands().map((c) => c.seasonNumber), [1, 2], "S1 queued, S2 refused");
+  assert.equal(grabs.length, 1, "the replacement's import is still announced");
+  assert.ok(warnLines.some((l) => l.includes("replacement search for series 21 stopped after 1 command(s)")));
+});
+
+test("a FULL plan whose FIRST command fails queued nothing — still the 502 searchFailed, with no IssueGrab", async () => {
+  const token = await mintSession();
+  issueRow = { ...issue({ tmdbId: 1396, mediaType: "TV", scope: "FULL" }) };
+  sonarrCommandFails = (b) => b.name === "SeasonSearch";
+  const res = await postFiles(token, "issue-1", { instance: "", fileIds: [501, 502, 503, 504], then: "search" });
+  assert.equal(res.status, 502);
+  assert.equal(((await res.json()) as { searched: boolean }).searched, false);
+  assert.equal(grabs.length, 0);
+});
+
+test("a FULL series issue searches only what was DELETED — a long-missing episode of another season is not searched", async () => {
+  const token = await mintSession();
+  issueRow = { ...issue({ tmdbId: 1396, mediaType: "TV", scope: "FULL" }) };
+  // S01E02 has been missing for years (monitored, aired, no file) — nobody deleted it.
+  deletedEpisodeFiles.add(502);
+  const res = await postFiles(token, "issue-1", { instance: "", fileIds: [503], then: "search" });
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { searched: boolean }).searched, true);
+  assert.deepEqual(commands(), [{ name: "EpisodeSearch", episodeIds: [201] }], "the deleted episode only — never S01E02, never a SeasonSearch beside S02E02");
+});
+
+test("a FULL issue with Unmonitor Deleted Episodes on: the delete's unmonitoring is undone first, so the SeasonSearch sees the season again", async () => {
   const token = await mintSession();
   issueRow = { ...issue({ tmdbId: 1396, mediaType: "TV", scope: "FULL" }) };
   unmonitorDeleted = true;
@@ -825,6 +1069,8 @@ test("a movie with Unmonitor Deleted Movies on: re-monitored through the movie e
 
   calls = [];
   audits.length = 0;
+  // A fresh scenario on an unchanged scripted history: drop the first mark's claim.
+  _resetMarkClaimsForTests();
   movieMonitored = true;
   movieEditorFails = true;
   issueRow = { ...MOVIE_ISSUE };
@@ -847,6 +1093,31 @@ test("pure: both redownload switches; an interactive grab is covered only with t
   assert.equal(replace.redownloadCovers({ failed: true, interactive: null }, true), true, "no interactive switch: the main one decides");
   assert.equal(replace.redownloadCovers({ failed: false, interactive: true }, false), false);
   assert.equal(replace.redownloadCovers({ failed: null, interactive: null }, false), false, "unreadable ⇒ we search");
+  // A Radarr movie not yet "available": its redownload is an automatic search that Minimum Availability rejects.
+  assert.equal(replace.redownloadCovers({ failed: true, interactive: true }, false, false), false);
+  assert.equal(replace.redownloadCovers({ failed: true, interactive: true }, false, true), true);
+});
+
+test("markFailed on a Radarr movie that isn't 'available' yet: blocklisted, and OUR manual MoviesSearch runs — Radarr's automatic redownload would reject every release", async () => {
+  const token = await mintSession();
+  issueRow = { ...MOVIE_ISSUE };
+  movieIsAvailable = false;
+  const res = await postFiles(token, "issue-1", { instance: "", fileIds: [7], then: "markFailed" });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { marked: number; redownloading: number; searched: boolean };
+  assert.deepEqual([body.marked, body.redownloading, body.searched], [1, 0, true]);
+  assert.deepEqual(writes().filter((c) => c.path.startsWith("/api/v3/history/failed/")).map((c) => c.path), ["/api/v3/history/failed/900"]);
+  assert.deepEqual(commands(), [{ name: "MoviesSearch", movieIds: [11] }]);
+  // Available (or not said): Radarr's redownload covers it — no search of ours.
+  for (const avail of [true, undefined]) {
+    calls = [];
+    _resetMarkClaimsForTests();
+    issueRow = { ...MOVIE_ISSUE };
+    movieIsAvailable = avail;
+    const again = (await (await postFiles(await mintSession(), "issue-1", { instance: "", fileIds: [7], then: "markFailed" })).json()) as { redownloading: number; searched: boolean };
+    assert.deepEqual([again.redownloading, again.searched], [1, false], String(avail));
+    assert.deepEqual(commands(), []);
+  }
 });
 
 test("pure: a grab is interactive when any grab of its download says releaseSource InteractiveSearch (either key case); another title's record never counts", () => {
@@ -878,6 +1149,7 @@ test("markFailed on a grab picked by hand while Redownload Failed from Interacti
   // The same grab with the switch ON (or absent, an older arr): the arr redownloads it — no search of ours.
   for (const cfg of [{ autoRedownloadFailed: true, autoRedownloadFailedFromInteractiveSearch: true }, { autoRedownloadFailed: true }]) {
     calls = [];
+    _resetMarkClaimsForTests();
     deletedEpisodeFiles = new Set();
     issueRow = { ...SEASON_ISSUE };
     redownloadConfig = cfg;
@@ -891,6 +1163,7 @@ test("markFailed on a grab picked by hand while Redownload Failed from Interacti
 
   // A grab NOT picked by hand is redownloaded even with the interactive switch off.
   calls = [];
+  _resetMarkClaimsForTests();
   deletedEpisodeFiles = new Set();
   issueRow = { ...SEASON_ISSUE };
   redownloadConfig = { autoRedownloadFailed: true, autoRedownloadFailedFromInteractiveSearch: false };
@@ -901,6 +1174,7 @@ test("markFailed on a grab picked by hand while Redownload Failed from Interacti
 
   // The releaseSource read failing: every grab counts as interactive — we search rather than trust a redownload.
   calls = [];
+  _resetMarkClaimsForTests();
   deletedEpisodeFiles = new Set();
   issueRow = { ...SEASON_ISSUE };
   responder = (c) => (c.origin === SONARR && c.path === "/api/v3/history/series" && c.query.get("includeEpisode") === null

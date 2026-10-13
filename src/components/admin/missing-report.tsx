@@ -7,12 +7,14 @@
 // server render) and keeps it until Refresh. A Sonarr row expands to its
 // episodes — fetched on demand for Missing, already in the listing for Cutoff —
 // and every row's Search queues a Radarr/Sonarr search for exactly that title's
-// gap (POST /api/admin/missing/search, `mode` picking which). Every date is a
+// gap (POST /api/admin/missing/search, `mode` picking which). The tables show
+// PAGE_SIZE rows at a time; a tick survives a page turn and counts toward the
+// bulk cap wherever it is. Every date is a
 // server-supplied ISO string formatted for the viewer's locale, and "missing
 // for" is a server-computed day count — nothing here reads the clock while
 // rendering (guardrail 16).
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
@@ -27,7 +29,7 @@ import { Poster } from "@/components/admin/activity-ui";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
 import { manageTabFor } from "@/lib/arr-manage-links";
-import { Check, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Loader2, RefreshCw, RotateCcw, Search, X } from "@/components/icons";
+import { Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, Loader2, RefreshCw, RotateCcw, Search, X } from "@/components/icons";
 import type { CutoffMovie, CutoffSeries, MissingEpisode, MissingMovie, MissingSeries } from "@/lib/arr-missing";
 import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
 import {
@@ -51,6 +53,8 @@ type Report<T> = {
   // `kind` is what the page shows (translated); `error` is the raw upstream detail.
   errors: Array<{ instance: string; error: string; kind?: ArrErrorKind }>;
   items: T[];
+  // Cutoff only: instances whose listing ran past the server's page ceiling.
+  truncated?: Array<{ instance: string; read: number; total: number }>;
 };
 type Reports = {
   "sonarr:missing"?: Report<MissingSeries>;
@@ -79,6 +83,10 @@ type MovieSort = "recent" | "oldest" | "title";
 type SeriesSort = "recent" | "most" | "title";
 
 const SERVICE_LABEL: Record<Service, string> = { sonarr: "Sonarr", radarr: "Radarr" };
+// Rows rendered per page. A cutoff listing can be library-sized (Radarr's is a
+// row per movie), and every row carries a poster, links and a title manager —
+// the whole list re-rendered on each keystroke and each bulk-run settle.
+const PAGE_SIZE = 100;
 const SONARR_STATUSES = new Set(["continuing", "ended", "upcoming", "deleted"]);
 const rowKey = (r: { instance: string; arrId: number }) => `${r.instance}:${r.arrId}`;
 const episodeCode = (e: { seasonNumber: number; episodeNumber: number }) =>
@@ -124,13 +132,25 @@ export function MissingReport({
   const [service, setService] = useState<Service>(initialService);
   const [mode, setMode] = useState<Mode>(initialMode);
   const [reports, setReports] = useState<Reports>({});
-  const [loading, setLoading] = useState<ReportKey | null>(null);
+  // Every list with a load in flight — per key, so a load of one list can't
+  // hide another's: a single slot let a tab switch overwrite it, and the
+  // "not while this list is reloading" guards then read false mid-load.
+  const [loadingKeys, setLoadingKeys] = useState<ReadonlySet<ReportKey>>(new Set());
+  // The newest load of each list: only that one may commit (an older listing
+  // landing late never overwrites a newer one, nor clears its loading mark).
+  const loadSeq = useRef<Partial<Record<ReportKey, number>>>({});
   const [errors, setErrors] = useState<Partial<Record<ReportKey, string>>>({});
   const [query, setQuery] = useState("");
   const [instance, setInstance] = useState("all");
   const [showUnmonitored, setShowUnmonitored] = useState(false);
   const [movieSort, setMovieSort] = useState<MovieSort>("recent");
   const [seriesSort, setSeriesSort] = useState<SeriesSort>("recent");
+  // The filters read the query a beat behind the input, so typing stays
+  // responsive over a long listing.
+  const deferredQuery = useDeferredValue(query);
+  // The page on screen, for the view (list, filters, order) it was turned in —
+  // any other view starts again at its first page.
+  const [pageView, setPageView] = useState<{ view: string; page: number }>({ view: "", page: 0 });
   // Keyed `${reportKey}|${instance}:${arrId}` — the two modes list the same series.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [episodes, setEpisodes] = useState<Record<string, EpisodeState>>({});
@@ -162,33 +182,51 @@ export function MissingReport({
 
   const load = useCallback(async (svc: Service, m: Mode) => {
     const k: ReportKey = `${svc}:${m}`;
-    setLoading(k);
+    const seq = (loadSeq.current[k] ?? 0) + 1;
+    loadSeq.current[k] = seq;
+    // A newer load of this list owns its state from here on.
+    const superseded = () => loadSeq.current[k] !== seq;
+    setLoadingKeys((prev) => new Set(prev).add(k));
     setErrors((e) => ({ ...e, [k]: "" }));
     try {
       const res = await fetch(withBasePath(`/api/admin/missing?service=${svc}&mode=${m}`));
       if (!res.ok) {
         const message = await readError(res, t("adminManage.missing.error.load"));
+        if (superseded()) return;
         setErrors((e) => ({ ...e, [k]: message }));
         return;
       }
       const data = await res.json();
+      if (superseded()) return;
       setReports((r) => ({ ...r, [k]: data }));
       // A fresh listing is a fresh start: the rows that were searched may be
       // gone, and any still listed can be searched again; every expanded
-      // episode list belongs to the old listing.
-      updateSearches((s) => Object.fromEntries(Object.entries(s).filter(([key]) => !key.startsWith(`${k}|`))));
+      // episode list belongs to the old listing. A row whose search is still
+      // IN FLIGHT keeps its state — its request settles it, and until then its
+      // Search stays off (a cleared entry re-armed the button mid-request).
+      updateSearches((s) => Object.fromEntries(Object.entries(s).filter(([key, st]) => !key.startsWith(`${k}|`) || st.busy)));
       setSelected((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
       setBulkResult((r) => (r?.key === k ? null : r));
       setExpanded((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
       setEpisodes((s) => Object.fromEntries(Object.entries(s).filter(([key]) => !key.startsWith(`${k}|`))));
     } catch {
+      if (superseded()) return;
       setErrors((e) => ({ ...e, [k]: t("adminManage.missing.error.loadNetwork") }));
     } finally {
-      setLoading((cur) => (cur === k ? null : cur));
+      if (!superseded()) {
+        setLoadingKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(k);
+          return next;
+        });
+      }
     }
   }, [t, updateSearches]);
 
-  const needsLoad = configured[service] && !reports[current] && !errors[current];
+  const loadingHere = loadingKeys.has(current);
+  // Not while a load of this list is already out: switching away and back
+  // mid-load used to start a second live listing of the same report.
+  const needsLoad = configured[service] && !reports[current] && !errors[current] && !loadingHere;
   useEffect(() => {
     if (needsLoad) void load(service, mode);
   }, [needsLoad, service, mode, load]);
@@ -225,7 +263,13 @@ export function MissingReport({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ service: svc, instance: row.instance, arrId: row.arrId, mode: m }),
       });
-      if (res.ok) return searchAttemptFromResponse(res.status, "", null);
+      if (res.ok) {
+        const attempt = searchAttemptFromResponse(res.status, "", null);
+        // Sonarr refused a later command after earlier ones were queued: those
+        // are running, the rest of the title's gap is not being searched.
+        const d = (await res.json().catch(() => null)) as { partial?: unknown } | null;
+        return d?.partial === true ? { ...attempt, message: t("adminManage.missing.searchPartial") } : attempt;
+      }
       const message = await readError(res, t("adminManage.missing.searchError"));
       return searchAttemptFromResponse(res.status, message, res.headers.get("Retry-After"));
     } catch {
@@ -242,6 +286,16 @@ export function MissingReport({
   // A row's own Search button. A 429 here just says so — only the bulk run
   // waits it out.
   async function startSearch(key: ReportKey, row: { instance: string; arrId: number }) {
+    // A row being searched can't be ticked, so its own Search takes it out of
+    // the selection: left ticked, it dropped out of the cap count only while
+    // busy, a failure brought it back, and the ticks then exceeded the cap.
+    const k = `${key}|${rowKey(row)}`;
+    setSelected((prev) => {
+      if (!prev.has(k)) return prev;
+      const next = new Set(prev);
+      next.delete(k);
+      return next;
+    });
     const attempt = await requestSearch(key, row);
     settleSearch(key, row, attempt.outcome === "rateLimited" ? "failed" : attempt.outcome, attempt.message);
   }
@@ -287,21 +341,21 @@ export function MissingReport({
   // The server sends each list in its default order; the other orders are
   // re-sorts of the filtered copy.
   const movies = useMemo(() => {
-    const rows = applyFilters(missingMovieItems ?? [], { showUnmonitored, instance, query });
+    const rows = applyFilters(missingMovieItems ?? [], { showUnmonitored, instance, query: deferredQuery });
     if (movieSort === "oldest") rows.sort((a, b) => a.releasedAt.localeCompare(b.releasedAt));
     else if (movieSort === "title") rows.sort((a, b) => a.title.localeCompare(b.title, locale));
     return rows;
-  }, [missingMovieItems, movieSort, showUnmonitored, instance, query, locale]);
+  }, [missingMovieItems, movieSort, showUnmonitored, instance, deferredQuery, locale]);
 
   const series = useMemo(() => {
-    const rows = applyFilters(missingSeriesItems ?? [], { showUnmonitored, instance, query });
+    const rows = applyFilters(missingSeriesItems ?? [], { showUnmonitored, instance, query: deferredQuery });
     if (seriesSort === "most") rows.sort((a, b) => b.missing - a.missing || a.title.localeCompare(b.title, locale));
     else if (seriesSort === "title") rows.sort((a, b) => a.title.localeCompare(b.title, locale));
     return rows;
-  }, [missingSeriesItems, seriesSort, showUnmonitored, instance, query, locale]);
+  }, [missingSeriesItems, seriesSort, showUnmonitored, instance, deferredQuery, locale]);
 
-  const cutoffMovies = useMemo(() => applyFilters(cutoffMovieItems ?? [], { showUnmonitored: true, instance, query }), [cutoffMovieItems, instance, query]);
-  const cutoffSeries = useMemo(() => applyFilters(cutoffSeriesItems ?? [], { showUnmonitored: true, instance, query }), [cutoffSeriesItems, instance, query]);
+  const cutoffMovies = useMemo(() => applyFilters(cutoffMovieItems ?? [], { showUnmonitored: true, instance, query: deferredQuery }), [cutoffMovieItems, instance, deferredQuery]);
+  const cutoffSeries = useMemo(() => applyFilters(cutoffSeriesItems ?? [], { showUnmonitored: true, instance, query: deferredQuery }), [cutoffSeriesItems, instance, deferredQuery]);
 
   const tabCount = (svc: Service) => {
     const r = reports[`${svc}:${mode}`];
@@ -344,7 +398,7 @@ export function MissingReport({
             {st.message}
           </div>
         )}
-        {already && st.message && (
+        {(already || started) && st.message && (
           <div role="status" style={{ fontSize: 11, color: "var(--ds-fg-muted)", marginTop: 4, whiteSpace: "normal", maxWidth: 220, marginLeft: "auto" }}>
             {st.message}
           </div>
@@ -420,8 +474,17 @@ export function MissingReport({
   // library-wide search in Arr System is the tool for more), the confirmation
   // above BULK_SEARCH_CONFIRM_OVER titles, and Cancel. Every row shows its own
   // outcome.
+  // Every row the filters list, in the order shown, across every page.
   const currentRows: ReadonlyArray<BulkRow> =
     current === "radarr:missing" ? movies : current === "sonarr:missing" ? series : current === "radarr:cutoff" ? cutoffMovies : cutoffSeries;
+  const viewKey = `${current}|${instance}|${query}|${showUnmonitored}|${movieSort}|${seriesSort}`;
+  const pageCount = Math.max(1, Math.ceil(currentRows.length / PAGE_SIZE));
+  const pageIndex = pageView.view === viewKey ? Math.min(pageView.page, pageCount - 1) : 0;
+  const pageStart = pageIndex * PAGE_SIZE;
+  function onPage<T>(rows: readonly T[]): T[] {
+    return rows.slice(pageStart, pageStart + PAGE_SIZE);
+  }
+  const pageRows = onPage(currentRows);
   const selKey = (r: { instance: string; arrId: number }) => `${current}|${rowKey(r)}`;
   // A row that is being searched, was searched, or turned out complete can't be
   // ticked; one a bulk run still holds can't either.
@@ -430,19 +493,28 @@ export function MissingReport({
     const st = searches[k];
     return !st?.busy && st?.outcome !== "started" && st?.outcome !== "already" && !bulkPending.has(k);
   };
-  const selectable = currentRows.filter(isOpen);
-  // A tick outlives a filter change, so the selection is every ticked row of
-  // this tab and mode — the ones on screen in the order shown, then those the
-  // filters now hide. The cap, the count on the button and the run all use
-  // this one list: counting only the rows on screen let a filter change tick
-  // past the cap, and the run then searched fewer titles than the button said.
-  const shownKeys = new Set(currentRows.map(selKey));
+  // The header box works on the rows on screen: this page.
+  const selectable = pageRows.filter(isOpen);
+  // A tick outlives a page turn and a filter change, so the selection is every
+  // ticked row of this tab and mode — the listed ones in the order shown (every
+  // page), then those the filters now hide. The cap, the count on the button
+  // and the run all use this one list: counting only the rows on screen let a
+  // filter change tick past the cap, and the run then searched fewer titles
+  // than the button said.
+  const shownKeys = new Set(pageRows.map(selKey));
+  const listedKeys = new Set(currentRows.map(selKey));
+  const selectedListed = currentRows.filter((r) => selected.has(selKey(r)) && isOpen(r));
   const selectedShown = selectable.filter((r) => selected.has(selKey(r)));
-  const selectedHidden = ((report?.items ?? []) as ReadonlyArray<BulkRow>).filter((r) => !shownKeys.has(selKey(r)) && selected.has(selKey(r)) && isOpen(r));
-  const selectedHere = [...selectedShown, ...selectedHidden];
+  const selectedOffPage = selectedListed.length - selectedShown.length;
+  const selectedHidden = ((report?.items ?? []) as ReadonlyArray<BulkRow>).filter((r) => !listedKeys.has(selKey(r)) && selected.has(selKey(r)) && isOpen(r));
+  const selectedHere = [...selectedListed, ...selectedHidden];
+  // What a run takes — and so what the button says.
+  const toRun = capSelection(selectedHere);
   const atCap = selectedHere.length >= BULK_SEARCH_MAX;
+  // The room the cap leaves on this page beside the ticks elsewhere.
+  const roomOnPage = BULK_SEARCH_MAX - selectedOffPage - selectedHidden.length;
   // Every row on screen that the cap leaves room for is ticked.
-  const allSelected = selectedShown.length > 0 && selectedShown.length === Math.min(selectable.length, BULK_SEARCH_MAX - selectedHidden.length);
+  const allSelected = selectedShown.length > 0 && selectedShown.length === Math.min(selectable.length, roomOnPage);
   const bulkRunning = bulk !== null;
   const runningHere = bulk?.key === current ? bulk : null;
   const resultHere = bulkResult?.key === current ? bulkResult : null;
@@ -468,13 +540,14 @@ export function MissingReport({
     });
   }
 
-  // The header box: on ticks the rows on screen, in the order shown, as far as
-  // the cap leaves room beside the ticks the filters hide; off unticks the rows
-  // on screen. Hidden ticks stay either way — "Clear selection" drops them too.
+  // The header box: on ticks the rows on screen (this page), in the order
+  // shown, as far as the cap leaves room beside the ticks on other pages and
+  // the ones the filters hide; off unticks the rows on screen. The ticks
+  // elsewhere stay either way — "Clear selection" drops them too.
   function selectAll(on: boolean) {
     setSelected((prev) => {
       const next = new Set([...prev].filter((k) => !shownKeys.has(k)));
-      if (on) for (const r of capSelection(selectable, BULK_SEARCH_MAX - selectedHidden.length)) next.add(selKey(r));
+      if (on) for (const r of capSelection(selectable, roomOnPage)) next.add(selKey(r));
       return next;
     });
   }
@@ -487,7 +560,7 @@ export function MissingReport({
     const rows = capSelection(selectedHere);
     // Not while this list is reloading: the fresh listing clears every row's
     // state and selection, mid-run.
-    if (rows.length === 0 || bulkRunning || loading === current) return;
+    if (rows.length === 0 || bulkRunning || loadingHere) return;
     if (rows.length > BULK_SEARCH_CONFIRM_OVER) {
       setConfirming({ key: current, count: rows.length, unmonitored: rows.filter((r) => r.monitored === false).length });
       return;
@@ -499,7 +572,7 @@ export function MissingReport({
     const c = confirming;
     setConfirming(null);
     // The dialog is modal, so the selection it described is still the one here.
-    if (c && c.key === current && loading !== current) void searchSelected(current, capSelection(selectedHere));
+    if (c && c.key === current && !loadingKeys.has(current)) void searchSelected(current, capSelection(selectedHere));
   }
 
   function cancelBulk() {
@@ -624,7 +697,7 @@ export function MissingReport({
         <th style={{ ...th, textAlign: "right" }}>{t("adminManage.missing.col.missingFor")}</th>
         <th style={th} />
       </>,
-      movies.map((m) => (
+      onPage(movies).map((m) => (
         <tr key={rowKey(m)} className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
           {selectCell(m)}
           <td style={td}>{titleCell("radarr", m, m.tmdbId !== null ? `/movie/${m.tmdbId}` : null)}</td>
@@ -650,7 +723,7 @@ export function MissingReport({
         <th style={th}>{t("adminManage.missing.col.lastAired")}</th>
         <th style={th} />
       </>,
-      series.map((s) => {
+      onPage(series).map((s) => {
         const k = `sonarr:missing|${rowKey(s)}`;
         const ep = episodes[k];
         return (
@@ -719,7 +792,7 @@ export function MissingReport({
         <th style={th}>{t("adminManage.missing.cutoff.col.profile")}</th>
         <th style={th} />
       </>,
-      cutoffMovies.map((m) => (
+      onPage(cutoffMovies).map((m) => (
         <tr key={rowKey(m)} className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
           {selectCell(m)}
           <td style={td}>{titleCell("radarr", m, m.tmdbId !== null ? `/movie/${m.tmdbId}` : null)}</td>
@@ -743,7 +816,7 @@ export function MissingReport({
         <th style={th}>{t("adminManage.missing.cutoff.col.profile")}</th>
         <th style={th} />
       </>,
-      cutoffSeries.map((s) => {
+      onPage(cutoffSeries).map((s) => {
         const k = `sonarr:cutoff|${rowKey(s)}`;
         return (
           <Fragment key={k}>
@@ -777,6 +850,20 @@ export function MissingReport({
       }),
     );
   }
+
+  const pager = pageCount > 1 ? (
+    <nav aria-label={t("adminManage.missing.page.label")} className="flex flex-wrap items-center justify-end gap-2" style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>
+      <span className="ds-mono">
+        {t("adminManage.missing.page.range", { from: pageStart + 1, to: Math.min(pageStart + PAGE_SIZE, currentRows.length), total: currentRows.length })}
+      </span>
+      <Button size="xs" variant="outline" disabled={pageIndex === 0} onClick={() => setPageView({ view: viewKey, page: pageIndex - 1 })}>
+        <ChevronLeft /> {t("adminManage.missing.page.previous")}
+      </Button>
+      <Button size="xs" variant="outline" disabled={pageIndex >= pageCount - 1} onClick={() => setPageView({ view: viewKey, page: pageIndex + 1 })}>
+        {t("adminManage.missing.page.next")} <ChevronRight />
+      </Button>
+    </nav>
+  ) : null;
 
   let body: React.ReactNode;
   if (!configured[service] || (report && !report.enabled)) {
@@ -845,6 +932,21 @@ export function MissingReport({
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+
+        {/* Cutoff: an instance whose listing ran past the read's ceiling — the list is incomplete, and says so. */}
+        {report.truncated && report.truncated.length > 0 && (
+          <div role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13 }}>
+            <ul className="m-0" style={{ paddingLeft: 18 }}>
+              {report.truncated.map((e) => (
+                <li key={e.instance}>{t("adminManage.missing.cutoff.truncated", { name: instanceLabel(e.instance), read: e.read, total: e.total })}</li>
+              ))}
+            </ul>
+            <p className="m-0" style={{ marginTop: 4 }}>
+              {t("adminManage.missing.cutoff.truncatedHint", { action: t("adminArr.system.searchAllCutoff") })}{" "}
+              <Link href="/admin/arr-system" className="underline">{t("adminArr.missingBulk.capLink")}</Link>
+            </p>
           </div>
         )}
 
@@ -927,11 +1029,14 @@ export function MissingReport({
                 {selectedHere.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2">
                     <span>{t("adminArr.missingBulk.selected", { count: selectedHere.length })}</span>
+                    {selectedOffPage > 0 && (
+                      <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{t("adminArr.missingBulk.selectedOffPage", { count: selectedOffPage })}</span>
+                    )}
                     {selectedHidden.length > 0 && (
                       <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{t("adminArr.missingBulk.selectedHidden", { count: selectedHidden.length })}</span>
                     )}
-                    <Button size="sm" disabled={bulkRunning || loading === current} onClick={requestBulk}>
-                      <Search /> {mode === "cutoff" ? t("adminArr.missingBulk.searchCutoff", { count: selectedHere.length }) : t("adminArr.missingBulk.search", { count: selectedHere.length })}
+                    <Button size="sm" disabled={bulkRunning || loadingHere} onClick={requestBulk}>
+                      <Search /> {mode === "cutoff" ? t("adminArr.missingBulk.searchCutoff", { count: toRun.length }) : t("adminArr.missingBulk.search", { count: toRun.length })}
                     </Button>
                     <Button size="sm" variant="ghost" disabled={bulkRunning} onClick={clearSelection}>{t("adminArr.missingBulk.clear")}</Button>
                     <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>
@@ -968,7 +1073,10 @@ export function MissingReport({
             />
           )
         ) : (
-          table
+          <>
+            {table}
+            {pager}
+          </>
         )}
       </div>
     );
@@ -1017,8 +1125,8 @@ export function MissingReport({
               // Off while a bulk search runs on this tab: a Refresh clears every
               // row's search state, and the rows already searched could be ticked
               // and searched again.
-              <Button size="sm" variant="outline" onClick={() => void load(service, mode)} disabled={loading === current || bulk?.key === current}>
-                {loading === current ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              <Button size="sm" variant="outline" onClick={() => void load(service, mode)} disabled={loadingHere || bulk?.key === current}>
+                {loadingHere ? <Loader2 className="animate-spin" /> : <RefreshCw />}
                 {t("adminManage.missing.refresh")}
               </Button>
             ) : null}

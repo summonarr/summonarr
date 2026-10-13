@@ -182,5 +182,12 @@
   "apiUser.requests.releases.grabRefused": "{service} n'a pas pu récupérer cette version : {reason}",
   "apiUser.requests.releases.jobGone": "Cette recherche n'est plus disponible — relancez-la.",
   "apiUser.requests.releases.grabInProgress": "Cette version est déjà en cours de récupération",
-  "apiUser.requests.arrStatus.invalidStatus": "Seules les demandes approuvées ou disponibles peuvent être vérifiées"
+  "apiUser.requests.arrStatus.invalidStatus": "Seules les demandes approuvées ou disponibles peuvent être vérifiées",
+  "apiUser.issues.replaceFile.alreadyRunning": "Un remplacement de fichier est déjà en cours pour ce signalement — attendez qu'il se termine, puis rechargez le signalement.",
+  "apiUser.issues.replaceFile.jobGone": "Ce remplacement de fichier n'est plus disponible — rechargez le signalement pour voir ce qui a été supprimé, et ne le relancez pas à l'aveugle.",
+  "apiUser.issues.replaceNeedsSeason": "Sonarr ne peut rechercher qu'une saison ou un épisode, pas une série entière — utilisez Retélécharger pour ce signalement",
+  "apiUser.requests.searchNothingMissing": "Rien à rechercher — aucun épisode diffusé et surveillé de cette série ne manque",
+  "apiUser.requests.searchInstanceUnavailable": "L'instance Sonarr de cette demande n'est plus configurée",
+  "apiUser.requests.searchPartial": "Seule une partie de la recherche a démarré — Sonarr a refusé le reste. Relancez plus tard une recherche pour ce qui manque encore.",
+  "apiUser.requests.searchSeriesNotInSonarr": "Cette série n'est pas dans l'instance Sonarr de cette demande — renvoyez la demande pour l'ajouter à nouveau"
 }

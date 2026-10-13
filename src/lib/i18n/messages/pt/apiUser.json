@@ -181,6 +181,13 @@
   "apiUser.requests.releases.cacheExpired": "O {service} não tem mais estes resultados de busca — ele os guarda por 30 minutos, e uma reinicialização os descarta. Busque de novo.",
   "apiUser.requests.releases.grabRefused": "O {service} não conseguiu capturar esse release: {reason}",
   "apiUser.requests.releases.jobGone": "Essa busca não está mais disponível — busque de novo.",
-  "apiUser.requests.releases.grabInProgress": "Essa versão já está sendo baixada",
-  "apiUser.requests.arrStatus.invalidStatus": "Só solicitações aprovadas ou disponíveis podem ser verificadas"
+  "apiUser.requests.releases.grabInProgress": "Esse release já está sendo capturado",
+  "apiUser.requests.arrStatus.invalidStatus": "Só solicitações aprovadas ou disponíveis podem ser verificadas",
+  "apiUser.issues.replaceFile.alreadyRunning": "Já há um Substituir arquivo em andamento para este problema — aguarde até que termine e depois recarregue o problema.",
+  "apiUser.issues.replaceFile.jobGone": "Esse Substituir arquivo não está mais disponível — recarregue o problema para ver o que foi excluído e não o execute de novo às cegas.",
+  "apiUser.issues.replaceNeedsSeason": "O Sonarr só consegue buscar uma temporada ou um episódio, não uma série inteira — use Baixar de novo para este problema",
+  "apiUser.requests.searchNothingMissing": "Nada para buscar — não falta nenhum episódio exibido e monitorado desta série",
+  "apiUser.requests.searchInstanceUnavailable": "A instância do Sonarr desta solicitação não está mais configurada",
+  "apiUser.requests.searchPartial": "Só parte da busca foi iniciada — o Sonarr recusou o resto. Busque de novo mais tarde o que ainda está em falta.",
+  "apiUser.requests.searchSeriesNotInSonarr": "Esta série não está na instância do Sonarr desta solicitação — reenvie a solicitação para adicioná-la de novo"
 }

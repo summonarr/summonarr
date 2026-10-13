@@ -394,5 +394,10 @@
   "adminQueue.releases.seasonMissing_one": "Season {number} · {count} missing",
   "adminQueue.releases.seasonMissing_other": "Season {number} · {count} missing",
   "adminQueue.releases.seeders_one": "{count} seeder",
-  "adminQueue.releases.seeders_other": "{count} seeders"
+  "adminQueue.releases.seeders_other": "{count} seeders",
+  "adminQueue.arrStatus.verdict.waitingForLibrary": "Waiting for the library",
+  "adminQueue.arrStatus.why.waitingForLibrary": "{service} has it — the request turns available once the requester's media server has it in a library they can see. If it stays here, check that the server scanned the file.",
+  "adminQueue.arrStatus.why.unmonitoredEpisodes": "{service} monitors the series but none of its episodes, so nothing searches for them. Monitor its seasons or episodes in {service}.",
+  "adminQueue.issueActions.searchAgain": "Search again",
+  "adminQueue.issueActions.replaceFileNoAnswer": "No answer from the server — the replace may still be running and some files may already be deleted. Reload the issue to see what's left before running it again."
 }

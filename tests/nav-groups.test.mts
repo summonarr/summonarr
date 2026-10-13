@@ -54,6 +54,7 @@ const {
 const { Permission } = await import("../src/lib/permissions.ts");
 
 const hrefs = (items: readonly { href: string }[]) => items.map((i) => i.href);
+const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 const ARR_PAGES = ["/admin/queue", "/admin/missing", "/admin/arr-calendar", "/admin/arr-history", "/admin/arr-system"];
 const OFF = { "feature.integration.radarr": false, "feature.integration.sonarr": false };
 
@@ -136,14 +137,18 @@ test("each gated page enforces the same gate in its own source — the link is h
   // The arr pages render their "nothing configured" state through
   // enabledArrInstances (which skips a switched-off integration) or an inline
   // feature.integration.<service> check — not requireFeature, which takes one flag.
+  // Live code only: comments are stripped (the `[^:]` guard keeps a `https://`
+  // in a string), and the gate must be an AWAITED call — a comment or a string
+  // naming enabledArrInstances() is not a gate.
   const appDir = resolve(HERE, "../src/app/(app)");
   for (const href of Object.keys(NAV_ITEM_ANY_FEATURE_KEYS)) {
     const file = resolve(appDir, `.${href}`, "page.tsx");
     assert.ok(existsSync(file), `${href} has no page`);
-    const src = readFileSync(file, "utf8");
+    const code = stripComments(readFileSync(file, "utf8"));
     assert.ok(
-      src.includes("enabledArrInstances(") || src.includes("feature.integration.${service}"),
-      `${href} is hidden by the Radarr/Sonarr gate in the nav but its page never checks the integrations`,
+      /await\s+enabledArrInstances\(/.test(code) || /await\s+isFeatureEnabled\(`feature\.integration\.\$\{service\}`\)/.test(code),
+      `${href} is hidden by the Radarr/Sonarr gate in the nav but its page never checks the integrations ` +
+        "(if it gates through a new helper, extend this pattern — don't loosen it to a substring)",
     );
   }
   const admin = readFileSync(resolve(HERE, "../src/lib/arr-admin.ts"), "utf8");
@@ -175,5 +180,22 @@ test("a group header is a real disclosure button, and collapsing never hides the
   assert.match(src, /<button[\s\S]*?aria-expanded=\{!isCollapsed\}[\s\S]*?aria-controls=\{listId\}/);
   assert.match(src, /isCollapsed \? g\.items\.filter\(isActive\) : g\.items/);
   // Collapsed state is read after mount (guardrail 16): the server render has every group open.
-  assert.match(src, /useEffect\(\(\) => \{\s*try \{\s*const raw = localStorage\.getItem/);
+  assert.match(src, /useState<ReadonlySet<AdminNavGroup>>\(\(\) => new Set\(\)\)/);
+  assert.match(src, /useEffect\(\(\) => \{\s*const apply = \(\) => \{\s*const stored = readStoredCollapsed\(\);/);
+});
+
+test("the sidebar and the drawer stay in step on ONE storage key: a toggle re-reads storage, writes, and tells every mounted instance", () => {
+  const src = stripComments(readFileSync(resolve(HERE, "../src/components/layout/admin-nav-groups.tsx"), "utf8"));
+  const toggle = /function toggle\(id: AdminNavGroup\) \{([\s\S]*?)\n  \}/.exec(src)?.[1] ?? "";
+  assert.ok(toggle, "toggle not found");
+  // Built from what is stored, not this instance's possibly stale copy.
+  assert.match(toggle, /new Set\(readStoredCollapsed\(\) \?\? collapsed\)/);
+  // The write is announced, AFTER it lands.
+  assert.match(toggle, /localStorage\.setItem\(STORAGE_KEY,[\s\S]*?\);\s*window\.dispatchEvent\(new Event\(SYNC_EVENT\)\)/);
+  // Every instance listens (and stops listening when the drawer unmounts).
+  const effect = /useEffect\(\(\) => \{([\s\S]*?)\n  \}, \[\]\);/.exec(src)?.[1] ?? "";
+  assert.match(effect, /window\.addEventListener\(SYNC_EVENT, apply\)/);
+  assert.match(effect, /window\.removeEventListener\(SYNC_EVENT, apply\)/);
+  assert.match(effect, /window\.addEventListener\("storage", apply\)/);
+  assert.match(effect, /window\.removeEventListener\("storage", apply\)/);
 });

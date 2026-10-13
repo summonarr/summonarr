@@ -16,11 +16,14 @@
 //   which is never eligible.
 // - The WINDOW a claim is made over is honest. A title is only judged when every
 //   server holding it is being recorded and has history; the claim starts at the
-//   LATER of when the title arrived (the earliest date anything recorded for it)
-//   and when the last of its servers began recording. A media server's own
-//   "added" date resets on a re-add or an upgrade, so it is never trusted to make
-//   a claim LONGER — only the earliest of every source is used as the arrival,
-//   and the window can only start at or after every holder's recording start.
+//   LATER of when the title arrived and when the last of its servers began
+//   recording. The arrival is the earliest of the dates that can only be at or
+//   after the file reached the shelf: every holder's own "added" (it resets on a
+//   re-add or an upgrade, so it errs LATE — a shorter claim, never a longer one)
+//   and a fulfilled request's delivery. Never Radarr/Sonarr's "added": that is
+//   when the title entered the arr, often months before a file existed, and it
+//   would make the claim longer. The window can only start at or after every
+//   holder's recording start.
 // - Retention purges move the earliest recorded play forward, which moves the
 //   window start forward with them: "never watched since <date>" stays true.
 
@@ -64,7 +67,9 @@ export interface NwEvidence {
   // Some hard evidence has no date (an upstream "played" flag with no
   // LastPlayedDate). Watched either way; the idle-time rule can't use it.
   undated: boolean;
-  // Soft evidence: unattributed plays whose title matches, on a holding server.
+  // Soft evidence: unattributed plays whose title matches a library title of
+  // the same type — on any server, not only a holder (one that never identified
+  // the item, or whose library isn't synced, still serves the same file).
   softPlays: number;
   softLastPlayedAt: Date | null;
   softServers: string[];
@@ -272,7 +277,10 @@ export function normalizeTitleKey(title: string | null | undefined): string {
 
 // ── Upstream (the media server's own watch records) ────────────────────────
 
-export type NwUpstreamHealth = "ok" | "unreliable" | "failed" | "stale" | "never";
+// "incomplete" = the read stopped at its cap: what it holds is real, but the
+// OLDEST records were never read. Every value but "ok" is an upstreamUnchecked
+// exclusion (guardrail 14d).
+export type NwUpstreamHealth = "ok" | "unreliable" | "failed" | "incomplete" | "stale" | "never";
 
 export interface NwUpstreamStatus {
   fetchedAt: string | null; // last SUCCESSFUL fetch (ISO)
@@ -283,22 +291,91 @@ export interface NwUpstreamStatus {
   samples: number; // titles Summonarr itself recorded as played in the snapshot's span
   agreed: number; // of those, how many the server also reports
   error: string | null;
+  // The read stopped at its cap (a Plex history past PLEX_WATCH_HISTORY_MAX_ITEMS,
+  // read newest first): the records it dropped are the OLDEST — the views from
+  // before Summonarr was installed, which the snapshot exists for. Absent (a row
+  // written before the field) = false.
+  truncated?: boolean;
+  // Episode records the server returned, and how many carried no show id — an
+  // episode's ONLY join to a library title (aggregateUpstream skips it). Absent = 0.
+  episodeRecords?: number;
+  unplacedEpisodes?: number;
 }
 
 // Below this many samples the agreement ratio says nothing.
 export const UPSTREAM_MIN_SAMPLES = 20;
 export const UPSTREAM_MIN_AGREEMENT = 0.5;
+// More than this share of episode records with no show id is a parser that
+// can't place TV evidence — broken, like one that matches nothing.
+export const UPSTREAM_MAX_UNPLACED_EPISODES = 0.5;
 // A snapshot older than this no longer counts as a check.
 export const UPSTREAM_MAX_AGE_MS = 7 * NW_DAY_MS;
 
+// Most of the episode records carry no show id. `matched` can't see it on a
+// mixed server — movies alone keep it above 0 — and neither can the agreement
+// check, which compares the items' OWN keys; yet every such episode is dropped
+// from the evidence, so the server's TV reads as unwatched while health says "ok".
+export function upstreamEpisodesUnplaced(status: NwUpstreamStatus): boolean {
+  const episodes = status.episodeRecords ?? 0;
+  return episodes >= UPSTREAM_MIN_SAMPLES && (status.unplacedEpisodes ?? 0) / episodes > UPSTREAM_MAX_UNPLACED_EPISODES;
+}
+
 export function upstreamHealth(status: NwUpstreamStatus | null, now: Date): NwUpstreamHealth {
-  if (!status || !status.fetchedAt) return "never";
+  if (!status) return "never";
+  // A FIRST attempt that failed has no successful fetch, but it ran and its
+  // error is the only thing that says why: "failed", not "not checked yet". A
+  // row that records no attempt at all (malformed) stays "never".
+  if (!status.ok && status.attemptedAt) return "failed";
+  if (!status.fetchedAt) return "never";
   if (!status.ok) return "failed";
   // A parser that understands nothing it is handed is broken, not "no plays".
   if (status.entries > 0 && status.matched === 0) return "failed";
+  // …and so is one that can't place most episodes on a show.
+  if (upstreamEpisodesUnplaced(status)) return "failed";
+  // NO records at all while Summonarr itself recorded completed plays on this
+  // server is a disagreement however few the samples: a play Summonarr calls
+  // completed (≥95%) is past the server's own watched threshold, so it must be
+  // there. The sample floor below is for the agreement RATIO only — without
+  // this line an empty answer read "ok" next to 1–19 recorded completions.
+  if (status.entries === 0 && status.samples > 0) return "unreliable";
   if (status.samples >= UPSTREAM_MIN_SAMPLES && status.agreed / status.samples < UPSTREAM_MIN_AGREEMENT) return "unreliable";
+  // A truncated read is never "ok": it would let the snapshot's missing oldest
+  // records read as "no plays" (14d — a partial snapshot is never zero plays).
+  if (status.truncated === true) return "incomplete";
   if (now.getTime() - new Date(status.fetchedAt).getTime() > UPSTREAM_MAX_AGE_MS) return "stale";
   return "ok";
+}
+
+// A refresh that READ the server but whose snapshot the self-check refuses
+// (failed / unreliable / incomplete). An unread server (`ok: false`) is not
+// this — it keeps its previous snapshot and is reported as unread. The cron's
+// degraded count is `!ok || isUnhealthyUpstreamCheck` (upstreamRefreshProblems).
+export function isUnhealthyUpstreamCheck(s: { ok: boolean; health: NwUpstreamHealth }): boolean {
+  return s.ok && s.health !== "ok";
+}
+
+// The page's "Check now" note: servers that couldn't be read, and servers read
+// whose records the self-check refuses.
+export function upstreamCheckCounts(
+  servers: ReadonlyArray<{ ok: boolean; health: NwUpstreamHealth }>,
+): { unread: number; unhealthy: number } {
+  let unread = 0;
+  let unhealthy = 0;
+  for (const s of servers) {
+    if (!s.ok) unread++;
+    else if (isUnhealthyUpstreamCheck(s)) unhealthy++;
+  }
+  return { unread, unhealthy };
+}
+
+// What a server's coverage chip says. "ok" below the sample floor is the right
+// VERDICT (too few plays to measure agreement against), but the agreement it
+// would print was never measured — 0% on a fresh install — so it gets its own
+// wording with no percentage.
+export type NwUpstreamChip = NwUpstreamHealth | "okUnmeasured";
+
+export function upstreamChipKey(u: { health: NwUpstreamHealth; samples: number }): NwUpstreamChip {
+  return u.health === "ok" && u.samples < UPSTREAM_MIN_SAMPLES ? "okUnmeasured" : u.health;
 }
 
 // ── Tracking stamps ────────────────────────────────────────────────────────
@@ -364,19 +441,34 @@ export function parseNwQuery(params: { get(name: string): string | null }): NwQu
     const n = raw === null ? NaN : Number(raw);
     return Number.isInteger(n) ? Math.min(max, Math.max(min, n)) : fallback;
   };
-  const sortBy = pick(params.get("sortBy"), NW_SORT_KEYS, "size");
+  const level = pick(params.get("level"), ["title", "season"] as const, "title");
+  const season = level === "season";
+  // The media-type filter, "deletable now only" and the Added column exist for
+  // TITLE rows only: a season is always TV and is never deletable, so either
+  // filter would empty the Seasons tab behind a control it doesn't show. Added
+  // sorts a season on its window start — the Since column the season table has.
+  const rawSort = pick(params.get("sortBy"), NW_SORT_KEYS, "size");
+  const sortBy: NwSortKey = season && rawSort === "added" ? "since" : rawSort;
   return {
-    level: pick(params.get("level"), ["title", "season"] as const, "title"),
+    level,
     state: pick(params.get("state"), ["never", "possible", "unknown", "all"] as const, "never"),
-    type: pick(params.get("type"), ["all", "movie", "tv"] as const, "all"),
+    type: season ? "all" : pick(params.get("type"), ["all", "movie", "tv"] as const, "all"),
     q: (params.get("q") ?? "").trim().slice(0, 100),
-    eligibleOnly: params.get("eligible") === "1",
+    eligibleOnly: !season && params.get("eligible") === "1",
     sortBy,
     // Title sorts A→Z by default; everything else biggest/oldest first.
     sortDir: pick(params.get("sortDir"), ["asc", "desc"] as const, sortBy === "title" ? "asc" : "desc"),
     page: int(params.get("page"), 1, 1, 100_000),
     limit: int(params.get("limit"), NW_PAGE_DEFAULT, 1, NW_PAGE_MAX),
   };
+}
+
+// The last page that holds a row (1 when there are none). A reload after a
+// delete or protect can shrink the total under the page on screen; the page
+// then steps back to this one instead of showing an empty page with a pager
+// reading "51–50 of 50".
+export function lastValidPage(total: number, limit: number): number {
+  return Math.max(1, Math.ceil(total / Math.max(1, limit)));
 }
 
 export function stateMatchesFilter(state: NwState, filter: NwStateFilter): boolean {

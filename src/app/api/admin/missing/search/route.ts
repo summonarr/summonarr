@@ -31,8 +31,11 @@ const LIMIT_WINDOW_MS = 60_000;
 // instance for exactly what the title is missing, re-judged live: a Radarr
 // MoviesSearch for the movie, or for a series a Sonarr SeasonSearch per season
 // with no file at all plus one EpisodeSearch for every other missing episode
-// (never SeriesSearch — that would also hunt upgrades). 409 when nothing is
-// missing any more. `mode: "cutoff"` is the Cutoff tab's button: an upgrade
+// (never SeriesSearch — that would also hunt upgrades). 409 (with an additive
+// `nothingMissing: true`) when nothing is missing any more (404 when the
+// instance no longer has the title). A Sonarr
+// search refused part-way is still 202, counting only the commands it queued,
+// with an additive `partial: true`. `mode: "cutoff"` is the Cutoff tab's button: an upgrade
 // search for exactly what Radarr/Sonarr say is below cutoff right now (Radarr
 // MoviesSearch; one Sonarr EpisodeSearch), 409 when nothing is. Nothing in
 // Summonarr is written. 429 (with Retry-After) past LIMIT_PER_MIN per admin; a
@@ -72,7 +75,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service: label }) }, { status: 404 });
     }
     if (err instanceof NothingMissingError) {
-      return NextResponse.json({ error: t("apiAdmin.missing.nothingMissing") }, { status: 409 });
+      // Additive flag, the same as /api/admin/arr/title/command's: the Arr
+      // Calendar shows "nothing left" only for a 409 carrying it.
+      return NextResponse.json({ error: t("apiAdmin.missing.nothingMissing"), nothingMissing: true }, { status: 409 });
     }
     if (err instanceof NothingToUpgradeError) {
       return NextResponse.json({ error: t("apiAdmin.missing.nothingToUpgrade") }, { status: 409 });

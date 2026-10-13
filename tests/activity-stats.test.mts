@@ -314,3 +314,125 @@ test("every reason key exists in the English catalog, and every legacy rewrite l
     assert.ok(!/'/.test(from + to), "the rewrites are inlined as SQL literals — no quotes allowed");
   }
 });
+
+// ═══ 2026-10 audit fixes ════════════════════════════════════════════════════
+
+test("reasonCalloutKind: Unknown (pre-capture rows), No reason reported (the server said nothing) and real causes are three different sentences", () => {
+  assert.equal(reasons.reasonCalloutKind(reasons.UNKNOWN_REASON), "unknown");
+  assert.equal(
+    reasons.reasonCalloutKind(reasons.NO_REASON_REPORTED),
+    "unreported",
+    "falling through to 'cause' renders 'Most common reason: No reason reported' — an absence framed as a cause (19c)",
+  );
+  assert.equal(reasons.reasonCalloutKind("Video codec not supported"), "cause");
+  assert.equal(reasons.reasonCalloutKind(reasons.PLEX_VIDEO_TRANSCODED), "cause");
+});
+
+test("the Statistics callout words its top reason through reasonCalloutKind, with its own 'unreported' sentence", () => {
+  const src = readFileSync(new URL("../src/components/admin/activity-stats-redesign.tsx", import.meta.url), "utf8");
+  assert.match(src, /reasonCalloutKind\(topReason\.reason\) === "unknown"/);
+  assert.match(src, /reasonCalloutKind\(topReason\.reason\) === "unreported"/);
+  assert.match(src, /t\("adminActivity\.stats\.noReasonReportedTop"/);
+  assert.doesNotMatch(src, /topReason\.reason === UNKNOWN_REASON/, "the UNKNOWN-only branch is gone");
+  const en = JSON.parse(
+    readFileSync(new URL("../src/lib/i18n/messages/en/adminActivity.json", import.meta.url), "utf8"),
+  ) as Record<string, string>;
+  assert.doesNotMatch(en["adminActivity.stats.noReasonReportedTop"], /clears/, "an unreported reason does not clear as data accumulates");
+});
+
+test("a TV filter issues no Movie decades statement and answers [] (the two predicates contradict)", async () => {
+  let stats: Awaited<ReturnType<typeof getPlayHistoryStats>> | null = null;
+  const queries = await capture(async () => { stats = await getPlayHistoryStats({ days: freshDays(), mediaType: "TV" }); });
+  assert.equal(queries.filter((q) => q.sql.includes("AS decade")).length, 0);
+  assert.deepEqual(stats!.decadeBreakdown, []);
+  const movie = await capture(() => getPlayHistoryStats({ days: freshDays(), mediaType: "MOVIE" }));
+  assert.equal(movie.filter((q) => q.sql.includes("AS decade")).length, 1, "a MOVIE filter still asks");
+});
+
+test("the Movie decades card says why it is empty under the TV filter, and the page passes the filter down", () => {
+  const ui = readFileSync(new URL("../src/components/admin/activity-stats-redesign.tsx", import.meta.url), "utf8");
+  assert.match(ui, /mediaType === "TV" \?/);
+  assert.match(ui, /t\("adminActivity\.stats\.movieDecadesTvFiltered"\)/);
+  const page = readFileSync(new URL("../src/app/(app)/admin/activity/stats/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /<ActivityStatsRedesign[^>]*mediaType=\{mediaType\}/);
+});
+
+test("rewatch: the item key is a match for EVERY play (an unmatched earlier play still counts), and the show-level tmdb match is movies only", async () => {
+  const q = one(await capture(() => getPlayHistoryStats({ days: freshDays() })), "AS rewatches");
+  const sql = flat(q.sql);
+  assert.match(sql, /END\) OR \(p\."sourceItemId" IS NOT NULL AND EXISTS/, "the item key sits OUTSIDE the CASE");
+  assert.doesNotMatch(sql, /WHEN p\."sourceItemId" IS NOT NULL THEN/, "as a CASE branch it only ran for unmatched plays");
+  assert.match(sql, /WHEN p\."tmdbId" IS NOT NULL AND p\."mediaType"::text = 'MOVIE' THEN EXISTS/);
+  assert.doesNotMatch(
+    sql,
+    /WHEN p\."tmdbId" IS NOT NULL THEN EXISTS/,
+    "a numberless TV play matched every other numberless episode of the show through IS NOT DISTINCT FROM",
+  );
+});
+
+// prevPeriod.complete reads Settings through loadSettings' 15 s memo, so each
+// call steps the clock past it.
+async function completeWith(
+  t: { after: (fn: () => void) => void },
+  rows: { key: string; value: string | null }[],
+  filters: Parameters<typeof getPlayHistoryStats>[0],
+): Promise<{ complete: boolean; probe: Captured }> {
+  const realNow = Date.now;
+  t.after(() => { Date.now = realNow; canned = []; settingRows = []; });
+  completeSkew += 20_000;
+  const skew = completeSkew;
+  Date.now = () => realNow() + skew;
+  settingRows = rows;
+  canned = [{ marker: "AS observed", rows: [{ observed: true }] }];
+  clearActivityCache();
+  let complete = false;
+  const queries = await capture(async () => { complete = (await getPlayHistoryStats(filters)).prevPeriod.complete; });
+  Date.now = realNow;
+  return { complete, probe: one(queries, "AS observed") };
+}
+// Starts an hour ahead: earlier tests in this file step the clock too, and a
+// settings memo they left behind must already be expired.
+let completeSkew = 60 * 60_000;
+const DAY = 24 * 60 * 60 * 1000;
+const daysAgo = (n: number) => new Date(Date.now() + completeSkew + 20_000 - n * DAY).toISOString();
+
+test("prevPeriod.complete: a source's tracking stamp inside the previous window hides the delta, an older one or none does not", async (t) => {
+  const j = (n: number | null) => (n === null ? [] : [{ key: "playHistoryJellyfinTrackedSince", value: daysAgo(n) }]);
+  assert.equal((await completeWith(t, j(40), { days: 30, source: "jellyfin" })).complete, false, "turned back on 40 days ago: the previous window holds 10 days");
+  assert.equal((await completeWith(t, j(70), { days: 30, source: "jellyfin" })).complete, true);
+  assert.equal((await completeWith(t, j(null), { days: 30, source: "jellyfin" })).complete, true, "no stamp keeps the old behaviour");
+  assert.equal(
+    (await completeWith(t, j(40), { days: 30, source: "plex" })).complete,
+    true,
+    "a Jellyfin stamp says nothing about the Plex view",
+  );
+  assert.equal((await completeWith(t, j(40), { days: 30 })).complete, false, "the unfiltered view counts every source's stamp");
+});
+
+test("prevPeriod.complete: the global tracking stamp counts in every view", async (t) => {
+  const g = [{ key: "playHistoryTrackedSince", value: daysAgo(40) }];
+  assert.equal((await completeWith(t, g, { days: 30 })).complete, false);
+  assert.equal((await completeWith(t, g, { days: 30, source: "plex" })).complete, false);
+});
+
+test("prevPeriod.complete: unfiltered, EVERY source with plays since the bound must have one before it", async (t) => {
+  const unfiltered = flat((await completeWith(t, [], { days: 30 })).probe.sql);
+  assert.match(unfiltered, /AND NOT EXISTS \( SELECT 1 FROM \(VALUES \('plex'\), \('jellyfin'\)\) AS s\(src\)/);
+  assert.match(unfiltered, /n\."source" = s\.src AND n\."startedAt" >= \$1\) AND NOT EXISTS \(SELECT 1 FROM "PlayHistory" o WHERE o\."source" = s\.src AND o\."startedAt" < \$1\)/);
+  const filtered = flat((await completeWith(t, [], { days: 30, source: "plex" })).probe.sql);
+  assert.doesNotMatch(filtered, /VALUES/, "a filtered probe is already per source");
+});
+
+test("prevPeriod.complete: with retention ≥ both windows the probe's bound moves to a day past the purge cutoff", async (t) => {
+  const bound = async (retention: string) => {
+    const { probe } = await completeWith(t, [{ key: "playHistoryRetentionDays", value: retention }], { days: 30 });
+    return (probe.params[0] as Date).getTime() - completeSkew; // back onto the real clock
+  };
+  const now = Date.now();
+  const at60 = await bound("60");
+  assert.ok(Math.abs(at60 - (now - 59 * DAY)) < 5 * 60_000, "retention = 2 × days: the purge erased every row before prevStart");
+  const at90 = await bound("90");
+  assert.ok(Math.abs(at90 - (now - 60 * DAY)) < 5 * 60_000, "retention well past both windows: prevStart, as before");
+  const none = await bound("");
+  assert.ok(Math.abs(none - (now - 60 * DAY)) < 5 * 60_000, "no retention: prevStart");
+});

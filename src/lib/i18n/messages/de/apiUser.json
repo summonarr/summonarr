@@ -182,5 +182,12 @@
   "apiUser.requests.releases.grabRefused": "{service} konnte dieses Release nicht holen: {reason}",
   "apiUser.requests.releases.jobGone": "Diese Suche ist nicht mehr verfügbar – bitte erneut suchen.",
   "apiUser.requests.releases.grabInProgress": "Dieses Release wird bereits geholt",
-  "apiUser.requests.arrStatus.invalidStatus": "Nur genehmigte oder verfügbare Anfragen können geprüft werden"
+  "apiUser.requests.arrStatus.invalidStatus": "Nur genehmigte oder verfügbare Anfragen können geprüft werden",
+  "apiUser.issues.replaceFile.alreadyRunning": "Für dieses Problem läuft bereits ein „Datei ersetzen“ – warten Sie, bis es abgeschlossen ist, und laden Sie das Problem dann neu.",
+  "apiUser.issues.replaceFile.jobGone": "Dieser „Datei ersetzen“-Vorgang ist nicht mehr verfügbar – laden Sie das Problem neu, um zu sehen, was gelöscht wurde, und starten Sie ihn nicht blind erneut.",
+  "apiUser.issues.replaceNeedsSeason": "Sonarr kann nur eine Staffel oder eine Folge suchen, keine ganze Serie – verwenden Sie für dieses Problem „Neu suchen“",
+  "apiUser.requests.searchNothingMissing": "Nichts zu suchen – von dieser Serie fehlt keine ausgestrahlte, überwachte Folge",
+  "apiUser.requests.searchInstanceUnavailable": "Die Sonarr-Instanz dieser Anfrage ist nicht mehr konfiguriert",
+  "apiUser.requests.searchPartial": "Nur ein Teil der Suche wurde gestartet – Sonarr hat den Rest abgelehnt. Suchen Sie später erneut nach dem, was noch fehlt.",
+  "apiUser.requests.searchSeriesNotInSonarr": "Diese Serie ist nicht in der Sonarr-Instanz dieser Anfrage – senden Sie die Anfrage erneut, um sie wieder hinzuzufügen"
 }

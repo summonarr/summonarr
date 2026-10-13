@@ -11,6 +11,7 @@
 import {
   int,
   isoOrNull,
+  languageNamesOf,
   namesOf,
   nonNegInt,
   posInt,
@@ -144,11 +145,6 @@ function sizeFrom(s: string | undefined): number | null {
   return Number.isSafeInteger(n) && n > 0 ? n : null;
 }
 
-/** A record's `languages` — or the singular `language` object Sonarr v3 and older Radarr send instead. */
-function languagesOf(r: Raw): string[] {
-  const list = namesOf(r.languages);
-  return list.length > 0 || !obj(r.language) ? list : namesOf([r.language]);
-}
 
 /** One /api/v3/history record → an event, or null when it has no usable id. */
 export function projectHistoryRecord(service: ArrService, instance: string, raw: unknown): ArrHistoryEvent | null {
@@ -178,7 +174,7 @@ export function projectHistoryRecord(service: ArrService, instance: string, raw:
     episodeId: service === "sonarr" ? posInt(r.episodeId) : null,
     quality,
     qualityTags,
-    languages: languagesOf(r),
+    languages: languageNamesOf(r),
     customFormats: namesOf(r.customFormats),
     customFormatScore: int(r.customFormatScore),
     downloadId: textOrNull(r.downloadId, 200),
@@ -350,14 +346,32 @@ export interface GrabState {
 }
 
 /**
+ * A failure newer than a grab with NO downloadId (a Blackhole client reports
+ * none) that answers it: the arr's manual mark of such a grab fails that one
+ * record and writes a failure with no id, the same release name and the same
+ * title (and, on Sonarr, the same episode id — every Sonarr record carries
+ * one). Without that identity nothing is joined: a record whose episode can't
+ * be told reads as not failed rather than hiding a mark nobody made.
+ * markHistoryFailed refuses a second mark by the same rule.
+ */
+export function failsIdlessGrab(grab: ArrHistoryEvent, e: ArrHistoryEvent): boolean {
+  if (e.kind !== "failed" || e.id <= grab.id || e.downloadId !== null || grab.downloadId !== null) return false;
+  if (grab.arrMediaId === null || e.instance !== grab.instance || e.arrMediaId !== grab.arrMediaId || e.sourceTitle !== grab.sourceTitle) return false;
+  return grab.service === "radarr" || (grab.episodeId !== null && e.episodeId === grab.episodeId);
+}
+
+/**
  * A grab row's state, from the records the list holds. Only a record NEWER
  * than the grab counts (a higher id — ids are the arr's insert order): a
  * torrent grabbed again after a failure keeps its info hash. A list filtered
- * to one kind holds no failures or imports, so it reads as neither.
+ * to one kind holds no failures or imports, so it reads as neither — which is
+ * why `grabStateKnown` says whether "neither" can be believed. A grab with no
+ * downloadId is failed by `failsIdlessGrab`; nothing links an import to it.
  */
 export function grabStateOf(row: HistoryRow, events: readonly ArrHistoryEvent[]): GrabState {
+  if (row.lead.kind !== "grabbed") return { failed: false, imported: false };
   const k = downloadKey(row.lead);
-  if (row.lead.kind !== "grabbed" || k === null) return { failed: false, imported: false };
+  if (k === null) return { failed: events.some((e) => failsIdlessGrab(row.lead, e)), imported: false };
   let failed = false;
   let imported = false;
   for (const e of events) {
@@ -366,6 +380,18 @@ export function grabStateOf(row: HistoryRow, events: readonly ArrHistoryEvent[])
     else if (e.kind === "imported") imported = true;
   }
   return { failed, imported };
+}
+
+/**
+ * Whether a grab's `grabStateOf` is the whole story. A failure or import found
+ * on the list is proof on any list; NOT finding one proves nothing on a list
+ * that can't hold every newer record of the download — one the arr filtered
+ * by kind (a grabs-only page holds no failures or imports at all), or a page
+ * past the first (newer records sit on the pages before it). There the state
+ * is unknown and the confirm says so, instead of implying "neither".
+ */
+export function grabStateKnown(state: GrabState, list: { complete: boolean }): boolean {
+  return list.complete || state.failed || state.imported;
 }
 
 // ── paging ───────────────────────────────────────────────────────────────────
@@ -459,7 +485,7 @@ export function projectBlocklistRecords(service: ArrService, instance: string, r
       date: isoOrNull(r.date),
       quality,
       qualityTags,
-      languages: languagesOf(r),
+      languages: languageNamesOf(r),
       customFormats: namesOf(r.customFormats),
       protocol: protocolOf(r.protocol),
       indexer: textOrNull(r.indexer, 200),

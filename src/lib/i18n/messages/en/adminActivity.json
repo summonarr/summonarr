@@ -409,5 +409,7 @@
   "adminActivity.trackingOff.description": "Nothing is being recorded, so this dashboard has no plays, watch time or viewers to show. Turn tracking on under Settings → Media → Play History to start populating it.",
   "adminActivity.trackingOff.cta": "Open play history settings",
   "adminActivity.common.hoursShort": "{n}h",
-  "adminActivity.detail.openPlay": "Open play →"
+  "adminActivity.detail.openPlay": "Open play →",
+  "adminActivity.stats.noReasonReportedTop": "{pct}% of transcodes were reported without a reason — the server didn't say why it transcoded.",
+  "adminActivity.stats.movieDecadesTvFiltered": "Movies only — not shown while the TV filter is on."
 }

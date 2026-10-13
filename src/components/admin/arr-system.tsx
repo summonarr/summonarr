@@ -31,7 +31,10 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
 import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
 import {
+  bulkActionCommand,
   createLoadGate,
+  isTransientJobPollFailure,
+  JOB_MAX_FAILED_POLLS,
   taskRisk,
   type ArrCommandRow, type ArrDisk, type ArrDownloadClient, type ArrIndexer, type ArrRootFolder, type ArrTag, type ArrTask,
   type CommandStatus, type LoadKind, type ProviderTestResult,
@@ -82,7 +85,10 @@ const JOB_MAX_POLLS = 150;
  * `call` as a background job. Null when `alive()` turned false (the tab went
  * away) — the caller drops it. Out of polls, the answer is `stillRunning`
  * (body `{ stillRunning: true }`): the job may yet finish, so the caller shows
- * it as pending, never as a failure of the change.
+ * it as pending, never as a failure of the change. A poll that failed on the
+ * way (isTransientJobPollFailure — a network blip, a proxy 502 with no JSON)
+ * is not the job's answer: it is retried, and JOB_MAX_FAILED_POLLS of them in
+ * a row are `stillRunning` too, because the job keeps running on the server.
  */
 async function callJob<T>(
   path: string,
@@ -92,13 +98,21 @@ async function callJob<T>(
   alive: () => boolean,
 ): Promise<CallResult<T> | null> {
   let res = await call<T>(path, { method: init.method, body: { ...init.body, async: true } }, fallback);
+  let failedPolls = 0;
   for (let polls = 0; "data" in res && res.status === 202; polls++) {
     const job = (res.data as { job?: unknown }).job;
     if (typeof job !== "string") return { error: fallback, status: 0, body: null };
     if (polls >= JOB_MAX_POLLS) return { error: stillRunning, status: 0, body: { stillRunning: true } };
     await new Promise((resolve) => window.setTimeout(resolve, JOB_POLL_MS));
     if (!alive()) return null;
-    res = await call<T>(`${path}?job=${encodeURIComponent(job)}`, undefined, fallback);
+    const next = await call<T>(`${path}?job=${encodeURIComponent(job)}`, undefined, fallback);
+    if (!("data" in next) && isTransientJobPollFailure(next.status, next.body)) {
+      // `res` stays the last 202: poll again (the polls cap still counts).
+      if (++failedPolls >= JOB_MAX_FAILED_POLLS) return { error: stillRunning, status: 0, body: { stillRunning: true } };
+      continue;
+    }
+    failedPolls = 0;
+    res = next;
   }
   return alive() ? res : null;
 }
@@ -106,7 +120,9 @@ async function callJob<T>(
 /**
  * Load one of the system reports; `poll` re-reads while the tab is visible. A
  * poll tick is skipped while a read is out; Reload, and the re-read after an
- * action, start at once and supersede it (createLoadGate).
+ * action, start at once and supersede it (createLoadGate). `load` resolves
+ * true only when ITS report landed — false when it was skipped, superseded or
+ * failed (the old report is then still shown).
  */
 function useReport<T>(path: string, fallback: string, poll: number | null) {
   const [report, setReport] = useState<Report<T> | null>(null);
@@ -117,17 +133,20 @@ function useReport<T>(path: string, fallback: string, poll: number | null) {
   useEffect(() => {
     fallbackRef.current = fallback;
   }, [fallback]);
-  const load = useCallback(async (kind: LoadKind = "manual") => {
+  const load = useCallback(async (kind: LoadKind = "manual"): Promise<boolean> => {
     const id = gate.begin(kind);
-    if (id === null) return;
+    if (id === null) return false;
     setLoading(true);
     const res = await call<Report<T>>(path, undefined, fallbackRef.current);
-    if (!gate.settle(id)) return;
+    if (!gate.settle(id)) return false;
     setLoading(false);
     if ("data" in res) {
       setReport(res.data);
       setError("");
-    } else setError(res.error);
+      return true;
+    }
+    setError(res.error);
+    return false;
   }, [path, gate]);
   useEffect(() => {
     void load();
@@ -202,7 +221,11 @@ function TasksTab() {
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
   const { report, loading, error, load } = useReport<{ tasks: ArrTask[]; commands: ArrCommandRow[] }>("/api/admin/arr/tasks", t("adminArr.system.loadFailed"), TASKS_POLL_MS);
-  const [busy, setBusy] = useState<string | null>(null);
+  // Per instance card: the action in flight there. A dark instance holds its
+  // POST for the whole arr timeout; that must not lock every other card.
+  const [busy, setBusy] = useState<Record<string, string>>({});
+  const startBusy = (card: string, action: string) => setBusy((m) => ({ ...m, [card]: action }));
+  const endBusy = (card: string) => setBusy((m) => Object.fromEntries(Object.entries(m).filter(([k]) => k !== card)));
   const [confirming, setConfirming] = useState<string | null>(null);
   // Per card: the newest run's outcome — a refusal, or the key of the command
   // it is following (its line replaces the "started" notice once the arr reports).
@@ -214,11 +237,11 @@ function TasksTab() {
   const { watch, watches } = useArrCommandWatch();
 
   async function run(key: string, service: Service, instance: string, body: Record<string, unknown>, done: string) {
-    setBusy(key);
+    const card = `${service}:${instance}`;
+    startBusy(card, key);
     setConfirming(null);
     const res = await call<{ id: number | null }>("/api/admin/arr/tasks", { method: "POST", body: { service, instance, ...body } }, t("adminArr.system.runFailed"));
-    setBusy(null);
-    const card = `${service}:${instance}`;
+    endBusy(card);
     if (!("data" in res)) {
       setMessages((m) => ({ ...m, [card]: { ok: false, text: res.error } }));
       return;
@@ -235,21 +258,23 @@ function TasksTab() {
   }
 
   async function cancel(service: Service, instance: string, id: number) {
-    setBusy(`cancel:${service}:${instance}:${id}`);
+    const card = `${service}:${instance}`;
+    startBusy(card, `cancel:${card}:${id}`);
     const q = new URLSearchParams({ service, instance, commandId: String(id) });
     const res = await call<{ ok: true }>(`/api/admin/arr/tasks?${q.toString()}`, { method: "DELETE" }, t("adminArr.system.runFailed"));
-    setBusy(null);
+    endBusy(card);
     if (!("data" in res)) setMessages((m) => ({ ...m, [`${service}:${instance}`]: { ok: false, text: res.error } }));
     void load();
   }
 
-  if (!report) return <Loading error={error} />;
+  if (!report) return <Loading error={error} loading={loading} onRetry={() => void load()} />;
   return (
     <div className="grid gap-4">
       <Toolbar loading={loading} onReload={() => void load()} error={error} />
       <InstanceErrors report={report} />
       {report.results.map((r) => {
         const card = `${r.service}:${r.instance}`;
+        const cardBusy = busy[card];
         const name = labelOf(report, r.service, r.instance);
         const msg = messages[card];
         const msgWatch = msg?.watchKey ? watches[msg.watchKey] : undefined;
@@ -257,20 +282,25 @@ function TasksTab() {
         const bulk = (action: "searchMissing" | "searchCutoff") => {
           const key = `${card}:${action}`;
           const label = action === "searchMissing" ? t("adminArr.system.searchAllMissing") : t("adminArr.system.searchAllCutoff");
-          const active = isWatchActive(watches[key]);
+          // This page's own run still followed live, or — after a tab switch,
+          // a page load, or once the watch's poll cap ran out — the same
+          // search still queued or running in the 15 s report (a library-wide
+          // search runs for hours), as a task row's Run does.
+          const commandName = bulkActionCommand(r.service, action).name;
+          const active = isWatchActive(watches[key]) || r.commands.some((c) => c.commandName === commandName && (c.status === "started" || c.status === "queued"));
           return confirming === key ? (
             <span key={key} className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-300">
               {action === "searchMissing" ? t("adminArr.system.confirmMissing") : t("adminArr.system.confirmCutoff")}
               {/* Radarr searches from the API ignore Minimum Availability (bulkActionCommand). */}
               {r.service === "radarr" && <> {t("adminArr.system.radarrCaveat")}</>}
               <Button variant="ghost" size="xs" onClick={() => setConfirming(null)}>{t("adminArr.common.cancel")}</Button>
-              <Button size="xs" disabled={busy !== null || active} onClick={() => void run(key, r.service, r.instance, { action }, t("adminArr.system.bulkStarted", { action: label }))}>
-                {busy === key && <Loader2 className="animate-spin" />} {t("adminArr.system.confirmRun")}
+              <Button size="xs" disabled={cardBusy !== undefined || active} onClick={() => void run(key, r.service, r.instance, { action }, t("adminArr.system.bulkStarted", { action: label }))}>
+                {cardBusy === key && <Loader2 className="animate-spin" />} {t("adminArr.system.confirmRun")}
               </Button>
             </span>
           ) : (
-            <Button key={key} variant="outline" size="sm" disabled={busy !== null || active} onClick={() => setConfirming(key)}>
-              {busy === key || active ? <Loader2 className="animate-spin" /> : <Search />} {label}
+            <Button key={key} variant="outline" size="sm" disabled={cardBusy !== undefined || active} onClick={() => setConfirming(key)}>
+              {cardBusy === key || active ? <Loader2 className="animate-spin" /> : <Search />} {label}
             </Button>
           );
         };
@@ -280,7 +310,7 @@ function TasksTab() {
               <CommandWatchLine watch={msgWatch} />
             ) : msg && (
               <p role={msg.ok ? "status" : "alert"} className={`m-0 flex items-center gap-1.5 text-xs ${msg.ok ? "text-green-400" : ""}`} style={msg.ok ? undefined : { color: "var(--ds-danger)" }}>
-                {msg.ok ? <Check className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />} {msg.text}
+                {msg.ok ? <Check className="h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />} <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>{msg.text}</span>
               </p>
             )}
             <div className="overflow-x-auto">
@@ -318,11 +348,11 @@ function TasksTab() {
                             <Button
                               variant="ghost"
                               size="xs"
-                              disabled={busy !== null || running}
+                              disabled={cardBusy !== undefined || running}
                               onClick={() => (risk ? setConfirming(key) : start())}
                               aria-label={t("adminArr.system.runAria", { task: task.name })}
                             >
-                              {busy === key || running ? <Loader2 className="animate-spin" /> : <Play />} <span className="hidden sm:inline">{t("adminArr.system.run")}</span>
+                              {cardBusy === key || running ? <Loader2 className="animate-spin" /> : <Play />} <span className="hidden sm:inline">{t("adminArr.system.run")}</span>
                             </Button>
                           </td>
                         </tr>
@@ -334,8 +364,8 @@ function TasksTab() {
                                   ? t("adminArr.system.confirmUpdate", { service: SERVICE_LABEL[r.service] })
                                   : t("adminArr.system.confirmRefresh", { service: SERVICE_LABEL[r.service] })}
                                 <Button variant="ghost" size="xs" onClick={() => setConfirming(null)}>{t("adminArr.common.cancel")}</Button>
-                                <Button size="xs" disabled={busy !== null || running} onClick={start}>
-                                  {busy === key && <Loader2 className="animate-spin" />} {t("adminArr.system.confirmRun")}
+                                <Button size="xs" disabled={cardBusy !== undefined || running} onClick={start}>
+                                  {cardBusy === key && <Loader2 className="animate-spin" />} {t("adminArr.system.confirmRun")}
                                 </Button>
                               </span>
                             </td>
@@ -362,7 +392,7 @@ function TasksTab() {
                       {c.trigger === "scheduled" && <span className="text-zinc-500">{t("adminArr.system.scheduled")}</span>}
                       {c.message && <span className="min-w-0 truncate text-zinc-500" title={c.message}>{c.message}</span>}
                       {c.status === "queued" && (
-                        <Button variant="ghost" size="icon-xs" disabled={busy !== null} onClick={() => void cancel(r.service, r.instance, c.id)} aria-label={t("adminArr.system.cancelCommand", { name: c.name })} title={t("adminArr.system.cancelCommand", { name: c.name })}>
+                        <Button variant="ghost" size="icon-xs" disabled={cardBusy !== undefined} onClick={() => void cancel(r.service, r.instance, c.id)} aria-label={t("adminArr.system.cancelCommand", { name: c.name })} title={t("adminArr.system.cancelCommand", { name: c.name })}>
                           <X />
                         </Button>
                       )}
@@ -407,7 +437,11 @@ type ToggleOpts = { acceptWarnings?: boolean; confirmed?: boolean };
 function ProvidersTab() {
   const t = useT();
   const { report, loading, error, load } = useReport<{ indexers: ArrIndexer[]; downloadClients: ArrDownloadClient[]; tags?: ArrTag[] }>("/api/admin/arr/providers", t("adminArr.system.loadFailed"), null);
-  const [busy, setBusy] = useState<string | null>(null);
+  // Per instance card (`service:instance`): the test or save in flight there.
+  // One card at a time keeps a Test All and a single test on it from racing
+  // the results; a dead indexer hanging ~100 s on one instance must not lock
+  // every other instance's switches.
+  const [busy, setBusy] = useState<Record<string, string>>({});
   const [results, setResults] = useState<Record<string, TestView>>({});
   // The last Test All per instance and kind: how many answered, how many work.
   const [summaries, setSummaries] = useState<Record<string, { working: number; count: number }>>({});
@@ -428,11 +462,14 @@ function ProvidersTab() {
 
   const keyOf = (service: Service, instance: string, kind: ProviderKind, id: number) => `${service}:${instance}:${kind}:${id}`;
   const without = <V,>(m: Record<string, V>, drop: (k: string) => boolean) => Object.fromEntries(Object.entries(m).filter(([k]) => !drop(k)));
+  const startBusy = (card: string, action: string) => setBusy((m) => ({ ...m, [card]: action }));
+  const endBusy = (card: string) => setBusy((m) => without(m, (key) => key === card));
 
   async function test(service: Service, instance: string, kind: ProviderKind, id: number | null) {
     const prefix = `${service}:${instance}:${kind}:`;
     const k = id === null ? `${prefix}all` : keyOf(service, instance, kind, id);
-    setBusy(`test:${k}`);
+    const card = `${service}:${instance}`;
+    startBusy(card, `test:${k}`);
     const res = await callJob<{ results: ProviderTestResult[] }>(
       "/api/admin/arr/providers/test",
       { method: "POST", body: { service, instance, kind, ...(id !== null ? { id } : {}) } },
@@ -441,7 +478,7 @@ function ProvidersTab() {
       isAlive,
     );
     if (res === null) return;
-    setBusy(null);
+    endBusy(card);
     if ("data" in res) {
       const answered = res.data.results;
       setResults((m) => {
@@ -470,7 +507,8 @@ function ProvidersTab() {
       return;
     }
     setProwlarrAsk(null);
-    setBusy(`toggle:${k}`);
+    const card = `${service}:${instance}`;
+    startBusy(card, `toggle:${k}`);
     const res = await callJob<{ provider: ArrIndexer | ArrDownloadClient }>(
       "/api/admin/arr/providers",
       { method: "PATCH", body: { service, instance, kind, id: provider.id, ...change, ...(opts.acceptWarnings ? { acceptWarnings: true } : {}) } },
@@ -479,7 +517,7 @@ function ProvidersTab() {
       isAlive,
     );
     if (res === null) return;
-    setBusy(null);
+    endBusy(card);
     setHeld((m) => without(m, (key) => key === k));
     if ("data" in res) {
       setOverrides((m) => ({ ...m, [k]: res.data.provider }));
@@ -505,7 +543,7 @@ function ProvidersTab() {
     if (r.pending) {
       return (
         <span role="status" className="flex items-start gap-1 text-xs text-amber-400">
-          <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /> {r.messages.join(" ")}
+          <Clock className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden /> <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>{r.messages.join(" ")}</span>
         </span>
       );
     }
@@ -515,13 +553,13 @@ function ProvidersTab() {
     if (r.ok) {
       return (
         <span className="flex items-start gap-1 text-xs text-amber-400">
-          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {t("adminArr.system.testWarnings")}{r.messages.length > 0 && `: ${r.messages.join(" ")}`}
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>{t("adminArr.system.testWarnings")}{r.messages.length > 0 && `: ${r.messages.join(" ")}`}</span>
         </span>
       );
     }
     return (
       <span className="flex items-start gap-1 text-xs" style={{ color: "var(--ds-danger)" }}>
-        <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {r.messages.join(" ") || t("adminArr.system.testFailed")}
+        <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>{r.messages.join(" ") || t("adminArr.system.testFailed")}</span>
       </span>
     );
   }
@@ -541,13 +579,14 @@ function ProvidersTab() {
   function pending(service: Service, instance: string, kind: ProviderKind, provider: ArrIndexer | ArrDownloadClient) {
     const k = keyOf(service, instance, kind, provider.id);
     const h = held[k];
+    const cardBusy = busy[`${service}:${instance}`];
     return (
       <>
         {prowlarrAsk?.key === k && (
           <span className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-300">
             {t("adminArr.system.prowlarrConfirm", { name: provider.name })}
             <Button variant="ghost" size="xs" onClick={() => setProwlarrAsk(null)}>{t("adminArr.common.cancel")}</Button>
-            <Button size="xs" disabled={busy !== null} onClick={() => void toggle(service, instance, kind, provider, prowlarrAsk.change, { confirmed: true })}>
+            <Button size="xs" disabled={cardBusy !== undefined} onClick={() => void toggle(service, instance, kind, provider, prowlarrAsk.change, { confirmed: true })}>
               {t("adminArr.system.changeAnyway")}
             </Button>
           </span>
@@ -559,9 +598,9 @@ function ProvidersTab() {
               <ul className="m-0 grid list-disc gap-0.5 pl-5">{h.messages.map((m) => <li key={m} style={{ overflowWrap: "anywhere" }}>{m}</li>)}</ul>
             )}
             <span className="flex flex-wrap items-center gap-1.5">
-              <Button variant="ghost" size="xs" disabled={busy !== null} onClick={() => setHeld((m) => without(m, (key) => key === k))}>{t("adminArr.common.cancel")}</Button>
-              <Button size="xs" disabled={busy !== null} onClick={() => void toggle(service, instance, kind, provider, h.change, { acceptWarnings: true, confirmed: true })}>
-                {busy === `toggle:${k}` && <Loader2 className="animate-spin" />} {t("adminArr.system.switchAnyway")}
+              <Button variant="ghost" size="xs" disabled={cardBusy !== undefined} onClick={() => setHeld((m) => without(m, (key) => key === k))}>{t("adminArr.common.cancel")}</Button>
+              <Button size="xs" disabled={cardBusy !== undefined} onClick={() => void toggle(service, instance, kind, provider, h.change, { acceptWarnings: true, confirmed: true })}>
+                {cardBusy === `toggle:${k}` && <Loader2 className="animate-spin" />} {t("adminArr.system.switchAnyway")}
               </Button>
             </span>
           </div>
@@ -570,15 +609,33 @@ function ProvidersTab() {
     );
   }
 
-  if (!report) return <Loading error={error} />;
+  // Reload: the switches keep what this page saved until the NEW report lands —
+  // a failed reload keeps the old report, and dropping them first showed every
+  // switched provider back in its pre-change state beside the error. Only the
+  // overrides and held-warnings prompts already there at the click are
+  // replaced: one a save writes while the reload is out may be newer than what
+  // the reload read — a "switch anyway" prompt that arrived meanwhile stays.
+  function reload() {
+    setProwlarrAsk(null);
+    const before = overrides;
+    const heldBefore = held;
+    void load().then((ok) => {
+      if (!ok) return;
+      setOverrides((m) => without(m, (key) => m[key] === before[key]));
+      setHeld((m) => without(m, (key) => m[key] === heldBefore[key]));
+    });
+  }
+
+  if (!report) return <Loading error={error} loading={loading} onRetry={() => void load()} />;
   const anyProwlarr = report.results.some((r) => r.indexers.some((ix) => ix.managedByProwlarr));
   return (
     <div className="grid gap-4">
-      <Toolbar loading={loading} onReload={() => { setOverrides({}); setHeld({}); setProwlarrAsk(null); void load(); }} error={error} />
+      <Toolbar loading={loading} onReload={reload} error={error} />
       {anyProwlarr && <p className="m-0 text-xs text-zinc-500">{t("adminArr.system.prowlarrHint")}</p>}
       <InstanceErrors report={report} />
       {report.results.map((r) => {
         const card = `${r.service}:${r.instance}`;
+        const cardBusy = busy[card];
         const tagList = (ids: number[]) => ids.map((id) => r.tags?.find((tag) => tag.id === id)?.label ?? `#${id}`).join(", ");
         return (
           <Card key={card} title={labelOf(report, r.service, r.instance)}>
@@ -588,8 +645,8 @@ function ProvidersTab() {
                 <span className="flex-1" />
                 {summary(`${card}:indexer`)}
                 {result(`${card}:indexer:all`)}
-                <Button variant="outline" size="xs" disabled={busy !== null || r.indexers.length === 0} onClick={() => void test(r.service, r.instance, "indexer", null)}>
-                  {busy === `test:${card}:indexer:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
+                <Button variant="outline" size="xs" disabled={cardBusy !== undefined || r.indexers.length === 0} onClick={() => void test(r.service, r.instance, "indexer", null)}>
+                  {cardBusy === `test:${card}:indexer:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
                 </Button>
               </div>
               {r.indexers.length === 0 ? (
@@ -609,28 +666,35 @@ function ProvidersTab() {
                           {ix.managedByProwlarr && <Chip title={t("adminArr.system.prowlarrHint")}>{t("adminArr.system.prowlarrChip")}</Chip>}
                           {ix.tags.length > 0 && <span className="text-xs text-zinc-500">{t("adminArr.system.tags", { list: tagList(ix.tags) })}</span>}
                           <span className="flex-1" />
-                          <Button variant="ghost" size="xs" disabled={busy !== null} onClick={() => void test(r.service, r.instance, "indexer", ix.id)}>
-                            {busy === `test:${k}` && <Loader2 className="animate-spin" />} {t("adminArr.system.test")}
+                          <Button variant="ghost" size="xs" disabled={cardBusy !== undefined} onClick={() => void test(r.service, r.instance, "indexer", ix.id)}>
+                            {cardBusy === `test:${k}` && <Loader2 className="animate-spin" />} {t("adminArr.system.test")}
                           </Button>
                         </div>
                         <div className="flex flex-wrap items-center gap-4 text-xs text-zinc-400">
                           {([
-                            ["enableRss", ix.enableRss, "adminArr.system.rss"],
-                            ["enableAutomaticSearch", ix.enableAutomaticSearch, "adminArr.system.automatic"],
-                            ["enableInteractiveSearch", ix.enableInteractiveSearch, "adminArr.system.interactive"],
-                          ] as const).map(([field, on, label]) => (
-                            <label key={field} className="flex items-center gap-1.5">
-                              <Switch
-                                size="sm"
-                                checked={on}
-                                loading={busy === `toggle:${k}`}
-                                disabled={busy !== null}
-                                onCheckedChange={(v) => void toggle(r.service, r.instance, "indexer", ix, { [field]: v })}
-                                aria-label={t("adminArr.system.toggleAria", { what: t(label), name: ix.name })}
-                              />
-                              {t(label)}
-                            </label>
-                          ))}
+                            ["enableRss", ix.enableRss, "adminArr.system.rss", ix.supportsRss],
+                            ["enableAutomaticSearch", ix.enableAutomaticSearch, "adminArr.system.automatic", ix.supportsSearch],
+                            ["enableInteractiveSearch", ix.enableInteractiveSearch, "adminArr.system.interactive", ix.supportsSearch],
+                          ] as const).map(([field, on, label, supported]) => {
+                            // A use the indexer can't do (a Torrent RSS Feed can't search) is
+                            // not offered — as the arr's own dialog — but one that is somehow
+                            // on can still be switched off. Null (an arr that doesn't say) keeps it.
+                            const unsupported = supported === false && !on;
+                            return (
+                              <label key={field} className="flex items-center gap-1.5" title={unsupported ? t("adminArr.system.useUnsupportedHint", { service: SERVICE_LABEL[r.service] }) : undefined}>
+                                <Switch
+                                  size="sm"
+                                  checked={on}
+                                  loading={cardBusy === `toggle:${k}`}
+                                  disabled={cardBusy !== undefined || unsupported}
+                                  onCheckedChange={(v) => void toggle(r.service, r.instance, "indexer", ix, { [field]: v })}
+                                  aria-label={t("adminArr.system.toggleAria", { what: t(label), name: ix.name })}
+                                />
+                                {t(label)}
+                                {unsupported && <span className="text-zinc-500">({t("adminArr.system.useUnsupported")})</span>}
+                              </label>
+                            );
+                          })}
                         </div>
                         {pending(r.service, r.instance, "indexer", ix)}
                         {result(k)}
@@ -647,8 +711,8 @@ function ProvidersTab() {
                 <span className="flex-1" />
                 {summary(`${card}:downloadClient`)}
                 {result(`${card}:downloadClient:all`)}
-                <Button variant="outline" size="xs" disabled={busy !== null || r.downloadClients.length === 0} onClick={() => void test(r.service, r.instance, "downloadClient", null)}>
-                  {busy === `test:${card}:downloadClient:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
+                <Button variant="outline" size="xs" disabled={cardBusy !== undefined || r.downloadClients.length === 0} onClick={() => void test(r.service, r.instance, "downloadClient", null)}>
+                  {cardBusy === `test:${card}:downloadClient:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
                 </Button>
               </div>
               {r.downloadClients.length === 0 ? (
@@ -664,8 +728,8 @@ function ProvidersTab() {
                           <Switch
                             size="sm"
                             checked={dc.enable}
-                            loading={busy === `toggle:${k}`}
-                            disabled={busy !== null}
+                            loading={cardBusy === `toggle:${k}`}
+                            disabled={cardBusy !== undefined}
                             onCheckedChange={(v) => void toggle(r.service, r.instance, "downloadClient", dc, { enable: v })}
                             aria-label={t("adminArr.system.toggleAria", { what: t("adminArr.system.enabled"), name: dc.name })}
                           />
@@ -682,8 +746,8 @@ function ProvidersTab() {
                           {dc.removeFailedDownloads === false && <Chip>{t("adminArr.system.removesFailedOff")}</Chip>}
                           {dc.tags.length > 0 && <span className="text-xs text-zinc-500">{t("adminArr.system.tags", { list: tagList(dc.tags) })}</span>}
                           <span className="flex-1" />
-                          <Button variant="ghost" size="xs" disabled={busy !== null} onClick={() => void test(r.service, r.instance, "downloadClient", dc.id)}>
-                            {busy === `test:${k}` && <Loader2 className="animate-spin" />} {t("adminArr.system.test")}
+                          <Button variant="ghost" size="xs" disabled={cardBusy !== undefined} onClick={() => void test(r.service, r.instance, "downloadClient", dc.id)}>
+                            {cardBusy === `test:${k}` && <Loader2 className="animate-spin" />} {t("adminArr.system.test")}
                           </Button>
                         </div>
                         {pending(r.service, r.instance, "downloadClient", dc)}
@@ -727,7 +791,7 @@ function StorageTab() {
   const { report, loading, error, load } = useReport<{ rootFolders: ArrRootFolder[]; disks: ArrDisk[] }>("/api/admin/arr/storage", t("adminArr.system.loadFailed"), null);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
 
-  if (!report) return <Loading error={error} />;
+  if (!report) return <Loading error={error} loading={loading} onRetry={() => void load()} />;
   return (
     <div className="grid gap-4">
       <Toolbar loading={loading} onReload={() => void load()} error={error} />
@@ -840,12 +904,22 @@ function Toolbar({ loading, onReload, error }: { loading: boolean; onReload: () 
   );
 }
 
-function Loading({ error }: { error: string }) {
+/**
+ * Before the first report: a spinner, or the first read's error with a Reload
+ * — the Indexers and Storage tabs never poll, so without it a failed first
+ * read stayed on screen until the tab was switched.
+ */
+function Loading({ error, loading, onRetry }: { error: string; loading: boolean; onRetry: () => void }) {
   const t = useT();
   return error ? (
-    <p role="alert" className="m-0 flex items-center gap-1.5 py-6 text-sm" style={{ color: "var(--ds-danger)" }}>
-      <AlertTriangle className="h-4 w-4 shrink-0" /> {error}
-    </p>
+    <div className="flex flex-wrap items-center gap-2 py-6">
+      <p role="alert" className="m-0 flex min-w-0 items-center gap-1.5 text-sm" style={{ color: "var(--ds-danger)" }}>
+        <AlertTriangle className="h-4 w-4 shrink-0" /> <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>{error}</span>
+      </p>
+      <Button variant="ghost" size="sm" disabled={loading} onClick={onRetry}>
+        {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />} {t("adminArr.common.reload")}
+      </Button>
+    </div>
   ) : (
     <div className="flex items-center gap-2 py-10 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> {t("adminArr.common.loading")}</div>
   );

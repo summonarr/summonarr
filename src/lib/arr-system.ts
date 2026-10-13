@@ -207,6 +207,14 @@ export interface ArrIndexer {
   enableRss: boolean;
   enableAutomaticSearch: boolean;
   enableInteractiveSearch: boolean;
+  /**
+   * Whether the indexer can do RSS / search at all (the arr's own
+   * `supportsRss` / `supportsSearch` — a Torrent RSS Feed cannot search). Its
+   * edit dialog disables a use it doesn't support; the arr itself saves the
+   * flag anyway and nothing ever uses it. Null when the arr didn't say.
+   */
+  supportsRss: boolean | null;
+  supportsSearch: boolean | null;
   tags: number[];
   /**
    * Synced from Prowlarr, which names the indexers it pushes "<name> (Prowlarr)".
@@ -249,6 +257,8 @@ export function projectIndexers(raw: unknown): ArrIndexer[] {
       enableRss: bool(r.enableRss),
       enableAutomaticSearch: bool(r.enableAutomaticSearch),
       enableInteractiveSearch: bool(r.enableInteractiveSearch),
+      supportsRss: typeof r.supportsRss === "boolean" ? r.supportsRss : null,
+      supportsSearch: typeof r.supportsSearch === "boolean" ? r.supportsSearch : null,
       tags: idsOf(r.tags, 100),
       managedByProwlarr: PROWLARR_SUFFIX.test(name),
     });
@@ -314,6 +324,20 @@ export function withProviderEnabled(raw: unknown, change: ProviderEnableChange):
 }
 
 /**
+ * The use a change switches ON that the indexer reports it can't do
+ * (`supportsRss` / `supportsSearch` false on the fresh read), or null. A
+ * download client, or an arr that doesn't say, never refuses. Switching an
+ * unsupported use OFF is always allowed.
+ */
+export function unsupportedIndexerUse(raw: unknown, change: ProviderEnableChange): "rss" | "search" | null {
+  const r = obj(raw);
+  if (!r) return null;
+  if (change.enableRss === true && r.supportsRss === false) return "rss";
+  if ((change.enableAutomaticSearch === true || change.enableInteractiveSearch === true) && r.supportsSearch === false) return "search";
+  return null;
+}
+
+/**
  * Did the arr's own copy, read back after a save we stopped waiting for, take
  * the change? Every switched flag must read as asked.
  */
@@ -347,11 +371,16 @@ export interface ValidationFailures {
 }
 
 // NzbDroneValidationFailure carries `isWarning`, which is what the arr itself
-// decides on (its result's IsValid counts the non-warnings); FluentValidation's
-// `severity` ("warning", or 1 as a number) is the fallback.
+// decides on (its result's IsValid counts the non-warnings). Without it: the
+// failure's `customState` — an `.AsWarning()` rule sets NzbDroneValidationState
+// { isWarning }, and an object-typed property is written with its runtime shape
+// even where a serializer writes a list by its declared base type (Test All's
+// list may be one) — then FluentValidation's `severity` ("warning", or 1).
 function isWarningFailure(r: Raw | null): boolean {
   if (!r) return false;
   if (typeof r.isWarning === "boolean") return r.isWarning;
+  const state = obj(r.customState);
+  if (typeof state?.isWarning === "boolean") return state.isWarning;
   return (typeof r.severity === "string" && r.severity.toLowerCase() === "warning") || r.severity === 1;
 }
 
@@ -402,6 +431,26 @@ export function validationFailuresFromBody(body: string): ValidationFailures {
 
 export function validationMessagesFromBody(body: string): string[] {
   return validationFailuresFromBody(body).messages;
+}
+
+// ── background jobs, as the page polls them ──────────────────────────────────
+
+/**
+ * How many `?job=` polls in a row may fail in TRANSPORT before the page stops
+ * waiting — and then it shows the change as still running, never as failed.
+ */
+export const JOB_MAX_FAILED_POLLS = 5;
+
+/**
+ * A `?job=` poll that failed on the way, not the job's own answer: the fetch
+ * threw (status 0), or a proxy answered 502–504 with no JSON body. The job
+ * keeps running on the server, and may land and be audited, so this is never
+ * the change's failure. Every answer of the job itself is JSON — arrFailure's
+ * 502/504, a save's 504 { timedOut }, a 409 — and stays terminal; so does the
+ * 500 a thrown job answers with.
+ */
+export function isTransientJobPollFailure(status: number, body: unknown): boolean {
+  return status === 0 || (status >= 502 && status <= 504 && (body === null || body === undefined));
 }
 
 // ── tags ─────────────────────────────────────────────────────────────────────
@@ -472,10 +521,44 @@ export function diskFor(path: string, disks: readonly ArrDisk[]): ArrDisk | null
 }
 
 /**
+ * A root folder's free space and its disk's agree within the larger of these —
+ * the two are read moments apart, and an import in flight moves both.
+ */
+export const DISK_MATCH_TOLERANCE_BYTES = 1000 ** 3;
+export const DISK_MATCH_TOLERANCE_RATIO = 0.01;
+
+/**
+ * The /diskspace entry a root folder is on, or null when none can be believed.
+ * diskFor takes the longest disk path holding the folder's — and "/" holds
+ * every path, so a root folder on a mount /diskspace doesn't list (mergerfs,
+ * Unraid's shfs, an rclone mount) is matched to the container root and judged
+ * against ITS size. The match is believed only when the root folder's own free
+ * space (Radarr/Sonarr measure the folder itself) agrees with that disk's. A
+ * root folder or disk that reports none can't be checked: a nearer disk keeps
+ * the match, but the catch-all "/" never does (unless the folder IS "/") — it
+ * is the one match this exists to refuse, and with nothing to compare it can't
+ * be believed (an arr whose statfs on a slow network mount timed out reports
+ * the folder accessible with no free space).
+ * Shared by the Storage tab (projectRootFolders) and the monitor (arr-watch,
+ * guardrail 7c), so the two never disagree about which disk a folder is on.
+ */
+export function rootDisk(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks: readonly ArrDisk[]): ArrDisk | null {
+  const disk = diskFor(root.path, disks);
+  if (!disk) return null;
+  if (root.freeSpace === null || disk.freeSpace === null) {
+    return comparablePath(disk.path) === "/" && comparablePath(root.path) !== "/" ? null : disk;
+  }
+  const tolerance = Math.max(DISK_MATCH_TOLERANCE_BYTES, disk.freeSpace * DISK_MATCH_TOLERANCE_RATIO);
+  return Math.abs(root.freeSpace - disk.freeSpace) <= tolerance ? disk : null;
+}
+
+/**
  * /api/v3/rootfolder → the root folders. Neither arr's RootFolderResource has a
  * total size, so it comes from the disk the folder sits on (`disks`, the same
  * instance's /api/v3/diskspace) — without one the page could show free space
- * but never how full the disk is.
+ * but never how full the disk is. Only a disk rootDisk believes lends its
+ * size: a folder on a mount /diskspace doesn't list would otherwise show the
+ * container root's ("18 TB free of 100 GB"), so its total stays unknown.
  */
 export function projectRootFolders(raw: unknown, disks: readonly ArrDisk[] = []): ArrRootFolder[] {
   if (!Array.isArray(raw)) return [];
@@ -494,12 +577,13 @@ export function projectRootFolders(raw: unknown, disks: readonly ArrDisk[] = [])
       unmapped.push({ name, path: text(f.path, 1_000) });
       if (unmapped.length >= MAX_UNMAPPED) break;
     }
+    const freeSpace = bytesOrNull(r.freeSpace);
     out.push({
       id,
       path,
       accessible: r.accessible !== false,
-      freeSpace: bytesOrNull(r.freeSpace),
-      totalSpace: bytesOrNull(r.totalSpace) ?? diskFor(path, disks)?.totalSpace ?? null,
+      freeSpace,
+      totalSpace: bytesOrNull(r.totalSpace) ?? rootDisk({ path, freeSpace }, disks)?.totalSpace ?? null,
       unmappedFolders: unmapped.sort((a, b) => a.name.localeCompare(b.name)),
       unmappedCount: list.length,
     });

@@ -8,16 +8,18 @@
 // no SSR/hydration pair to disagree), and "idle" is a server-computed day count
 // — nothing here reads the clock while rendering (guardrail 16).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { posterUrl } from "@/lib/tmdb-types";
+import { applyLocalProtection, createCoalescedReload, nextCleanupDraft } from "@/lib/cleanup-delete-plan";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
 import { EmptyState, SectionHeader, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
+import { arrFailureText } from "@/lib/cleanup-error-text";
 import { ArrowDown, ArrowUp, ArrowUpDown, FileX, Loader2, Shield, ShieldOff, Trash2 } from "@/components/icons";
 import {
   CleanupPlanPanel,
@@ -31,8 +33,12 @@ import {
 } from "@/components/admin/cleanup-delete";
 import {
   CLEANUP_EXCLUSION_LABELS,
+  CLEANUP_MAX_ITEMS,
   CLEANUP_NUMERIC_BOUNDS,
   CLEANUP_RULE_LABELS,
+  cleanupSelectAllOn,
+  toggleAllCleanupSelection,
+  toggleCleanupSelection,
   type CleanupExclusion,
   type CleanupRule,
   type CleanupSettings,
@@ -96,7 +102,7 @@ type Report = {
   historyStart: string | null;
   rows: Row[];
   libraryTitles: number;
-  arrErrors: Array<{ service: string; instance: string; error: string }>;
+  arrErrors: Array<{ service: string; instance: string; error: string; kind?: string }>;
   protected: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV"; title: string | null; reason: string | null; createdAt: string }>;
   totals: { candidates: number; held: number; reclaimableBytes: number };
 };
@@ -130,33 +136,64 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
   const [vs, setVs] = useState<CleanupViewState>(initialView);
   const patchView = (p: Partial<CleanupViewState>) => setVs((prev) => ({ ...prev, ...p }));
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [busyKey, setBusyKey] = useState<string | null>(null);
+  // One entry per Protect/Unprotect in flight (a single key let a second
+  // row's click re-enable the first row's button mid-request).
+  const [busyKeys, setBusyKeys] = useState<Set<string>>(() => new Set());
+  // Protect/unprotect, a rules save and a delete each reload the report, and
+  // two can overlap: only the newest load's answer is shown (an older one
+  // landing last would put back a title's pre-protect state).
+  const loadSeq = useRef(0);
+  // The settings the draft was taken from — what "unsaved edits" are judged
+  // against — and whether a rules save asked the next answer to reset the draft.
+  const draftBase = useRef<CleanupSettings | null>(null);
+  const resetDraftNext = useRef(false);
+  // The one reload a burst of Protect / Unprotect clicks shares.
+  const [protectReload] = useState(() => createCoalescedReload());
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts?: { resetDraft?: boolean }) => {
+    const seq = ++loadSeq.current;
+    // Any load answers for the clicks a pending coalesced reload was waiting on.
+    protectReload.cancel();
+    if (opts?.resetDraft) resetDraftNext.current = true;
     setLoading(true);
     setError("");
     try {
       const res = await fetch(withBasePath("/api/admin/cleanup"));
+      if (seq !== loadSeq.current) return;
       if (!res.ok) {
-        setError(await readError(res, t("adminManage.cleanup.error.load")));
+        const msg = await readError(res, t("adminManage.cleanup.error.load"));
+        if (seq === loadSeq.current) setError(msg);
         return;
       }
       const data = (await res.json()) as Report;
+      if (seq !== loadSeq.current) return;
       setReport(data);
-      setDraft(data.settings);
+      // A reload keeps the admin's unsaved rule edits; only their own save
+      // (or an unedited draft) takes the fresh settings.
+      const base = draftBase.current;
+      const reset = resetDraftNext.current;
+      draftBase.current = data.settings;
+      setDraft((d) => nextCleanupDraft(d, base, data.settings, reset));
       // Drop selections that are no longer deletable candidates.
       const live = new Set(data.rows.filter((r) => r.candidate).map(keyOf));
       setSelected((prev) => new Set([...prev].filter((k) => live.has(k))));
     } catch {
-      setError(t("adminManage.cleanup.error.loadNetwork"));
+      if (seq === loadSeq.current) setError(t("adminManage.cleanup.error.loadNetwork"));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) {
+        setLoading(false);
+        // A failed reload consumes a save's reset too, rather than leaving it
+        // armed to discard edits the admin makes afterwards.
+        resetDraftNext.current = false;
+      }
     }
-  }, [t]);
+  }, [t, protectReload]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => () => protectReload.cancel(), [protectReload]);
 
   // A filtered view survives a reload and can be shared (house style: URL state).
   useEffect(() => {
@@ -195,28 +232,20 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
     },
   });
 
+  // The selection never grows past what one delete takes (CLEANUP_MAX_ITEMS,
+  // the route's own cap): select-all on a large view ticks the first ones in
+  // the view's order, and the page says the rest wait for the next delete.
+  const selectableKeys = selectableVisible.map(keyOf);
+  const selectionFull = selected.size >= CLEANUP_MAX_ITEMS;
+
   function toggle(k: string) {
     del.clearPlan();
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(k)) next.delete(k);
-      else next.add(k);
-      return next;
-    });
+    setSelected((prev) => toggleCleanupSelection(prev, k));
   }
 
   function toggleAllVisible() {
     del.clearPlan();
-    const keys = selectableVisible.map(keyOf);
-    const allOn = keys.length > 0 && keys.every((k) => selected.has(k));
-    setSelected((prev) => {
-      const next = new Set(prev);
-      for (const k of keys) {
-        if (allOn) next.delete(k);
-        else next.add(k);
-      }
-      return next;
-    });
+    setSelected((prev) => toggleAllCleanupSelection(prev, selectableKeys));
   }
 
   async function saveRules() {
@@ -234,7 +263,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
         return;
       }
       del.clearPlan();
-      await load();
+      await load({ resetDraft: true });
     } catch {
       setError(t("adminManage.cleanup.error.saveNetwork"));
     } finally {
@@ -244,7 +273,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
 
   async function setProtected(row: { tmdbId: number; mediaType: "MOVIE" | "TV"; title: string | null }, on: boolean) {
     const k = keyOf(row);
-    setBusyKey(k);
+    setBusyKeys((prev) => new Set(prev).add(k));
     setError("");
     try {
       const res = on
@@ -259,11 +288,28 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
         return;
       }
       del.clearPlan();
-      await load();
+      // Shown at once, reloaded once the clicks stop: one report GET per burst,
+      // not per click (the GET allows 30 a minute — createCoalescedReload). A
+      // load already in flight read the pre-click state, so it is superseded.
+      loadSeq.current++;
+      setReport((r) => (r ? applyLocalProtection(r, row, on, new Date().toISOString()) : r));
+      if (on) {
+        setSelected((prev) => {
+          const next = new Set(prev);
+          next.delete(k);
+          return next;
+        });
+      }
+      protectReload.schedule(() => void load());
     } catch {
       setError(t("adminManage.cleanup.error.network"));
     } finally {
-      setBusyKey(null);
+      // Only this row's entry: another row's request may still be running.
+      setBusyKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(k);
+        return next;
+      });
     }
   }
 
@@ -319,7 +365,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
       )}
       {report.arrErrors.length > 0 && (
         <p role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          {t("adminManage.cleanup.arrErrors", { list: report.arrErrors.map((e) => `${instanceLabel(e.service, e.instance)} (${e.error})`).join(", ") })}
+          {t("adminManage.cleanup.arrErrorsList", { list: report.arrErrors.map((e) => arrFailureText(t, instanceLabel(e.service, e.instance), e)).join("; ") })}
         </p>
       )}
 
@@ -485,6 +531,9 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
       </div>
 
       {(error || del.error) && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error || del.error}</p>}
+      {selectionFull && (
+        <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.cleanup.selectionFull", { max: CLEANUP_MAX_ITEMS })}</p>
+      )}
 
       {/* ── dry run → confirm ──────────────────────────────────────── */}
       <CleanupPlanPanel del={del} formatBytes={formatBytes} />
@@ -506,7 +555,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
                   <input
                     type="checkbox"
                     aria-label={t("adminManage.cleanup.selectAll")}
-                    checked={selectableVisible.length > 0 && selectableVisible.every((r) => selected.has(keyOf(r)))}
+                    checked={cleanupSelectAllOn(selected, selectableKeys)}
                     onChange={toggleAllVisible}
                     disabled={selectableVisible.length === 0}
                   />
@@ -534,8 +583,12 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
                         type="checkbox"
                         aria-label={t("adminManage.cleanup.select", { title: r.title })}
                         checked={selected.has(k)}
-                        disabled={!deletable}
-                        title={deletable ? undefined : r.candidate ? t("adminManage.cleanup.notManaged") : t("adminManage.cleanup.heldByExclusion")}
+                        disabled={!deletable || (selectionFull && !selected.has(k))}
+                        title={
+                          !deletable
+                            ? r.candidate ? t("adminManage.cleanup.notManaged") : t("adminManage.cleanup.heldByExclusion")
+                            : selectionFull && !selected.has(k) ? t("adminManage.cleanup.selectionFull", { max: CLEANUP_MAX_ITEMS }) : undefined
+                        }
                         onChange={() => toggle(k)}
                       />
                     </td>
@@ -577,10 +630,10 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
                         size="xs"
                         variant="ghost"
                         onClick={() => setProtected(r, !isProtected)}
-                        disabled={busyKey === k}
+                        disabled={busyKeys.has(k)}
                         aria-label={isProtected ? t("adminManage.cleanup.unprotectTitle", { title: r.title }) : t("adminManage.cleanup.protectTitle", { title: r.title })}
                       >
-                        {busyKey === k ? <Loader2 className="animate-spin" /> : isProtected ? <ShieldOff /> : <Shield />}
+                        {busyKeys.has(k) ? <Loader2 className="animate-spin" /> : isProtected ? <ShieldOff /> : <Shield />}
                         {isProtected ? t("adminManage.cleanup.unprotect") : t("adminManage.cleanup.protect")}
                       </Button>
                     </td>
@@ -604,8 +657,8 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
                 {p.title ?? `${p.mediaType} ${p.tmdbId}`}
                 <span style={{ color: "var(--ds-fg-subtle)" }}> · {p.mediaType === "MOVIE" ? t("adminManage.cleanup.movie") : t("adminManage.cleanup.tv")} · {t("adminManage.cleanup.since", { date: day(p.createdAt) })}</span>
               </span>
-              <Button size="xs" variant="ghost" onClick={() => setProtected(p, false)} disabled={busyKey === keyOf(p)}>
-                {busyKey === keyOf(p) ? <Loader2 className="animate-spin" /> : <ShieldOff />}
+              <Button size="xs" variant="ghost" onClick={() => setProtected(p, false)} disabled={busyKeys.has(keyOf(p))}>
+                {busyKeys.has(keyOf(p)) ? <Loader2 className="animate-spin" /> : <ShieldOff />}
                 {t("adminManage.cleanup.unprotect")}
               </Button>
             </div>

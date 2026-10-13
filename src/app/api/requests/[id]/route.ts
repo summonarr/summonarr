@@ -3,7 +3,8 @@ import { withAuth, withPermission } from "@/lib/api-auth";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage } from "@/lib/arr";
-import { addSeriesToSonarr, searchSeriesInSonarr, listQualityProfiles } from "@/lib/arr";
+import { addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
+import { MissingInstanceError, NothingMissingError, SeriesNotOnInstanceError, findSeriesIdOnInstance, searchMissing } from "@/lib/arr-missing-data";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
@@ -97,11 +98,37 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       if (existing.mediaType === "MOVIE") {
         await searchMovieInRadarr(existing.tmdbId, variant);
       } else {
-        await searchSeriesInSonarr(existing.tvdbId as number, variant);
+        // NEVER SeriesSearch: it searches every monitored season, files on disk
+        // included, so a partly downloaded series also gets upgrade grabs and a
+        // season search per COMPLETE season. Queue the Missing page's plan
+        // instead (planSeriesSearch — SeasonSearch for a season with nothing on
+        // disk, one EpisodeSearch for the rest), judged live on the request's
+        // own instance (guardrail 32).
+        const seriesId = await findSeriesIdOnInstance(variant, existing.tvdbId as number);
+        const result = await searchMissing("sonarr", variant, seriesId, new Date());
+        // Sonarr refused a command part-way: what was queued IS running, but
+        // the rest wasn't — a bare success would say the whole plan started.
+        if (result.partial) arrError = t("apiUser.requests.searchPartial");
       }
     } catch (err) {
-      console.error("[arr] Search failed:", err);
-      arrError = arrErrorMessage(err);
+      if (err instanceof NothingMissingError) {
+        // An answer, not a failure: no aired, monitored episode is missing —
+        // every one is on disk, OR none is monitored (a series added with
+        // "Monitor: Future"), so the wording claims neither. An upgrade search
+        // is the title manager's, never this button's.
+        arrError = t("apiUser.requests.searchNothingMissing");
+      } else if (err instanceof MissingInstanceError) {
+        // Its message is the bare slug ("" for the default instance) — relayed
+        // through arrErrorMessage it would read as an empty, i.e. successful, answer.
+        arrError = t("apiUser.requests.searchInstanceUnavailable");
+      } else if (err instanceof SeriesNotOnInstanceError) {
+        // Removed in Sonarr since the push (or pushed elsewhere): Re-push
+        // adds it back — an answer, translated, not a logged failure.
+        arrError = t("apiUser.requests.searchSeriesNotInSonarr");
+      } else {
+        console.error("[arr] Search failed:", err);
+        arrError = arrErrorMessage(err);
+      }
     }
     return NextResponse.json({ ...existing, adminNote: searchedNote, arrError });
   }

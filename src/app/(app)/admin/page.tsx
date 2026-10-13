@@ -7,6 +7,7 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getArrInstances } from "@/lib/arr-instance-registry";
+import { isFeatureEnabled } from "@/lib/features";
 import { SyncButton } from "@/components/admin/request-actions";
 import { AdminRequestList, type GroupedRequestRow, type Requester, type MediaRatings } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
@@ -215,12 +216,16 @@ export default async function AdminPage({
   // of both services' registries; a slug defined on both keeps the Radarr name
   // (sonarr is applied first, radarr second, so radarr overwrites).
   const instanceNames: Record<string, string> = {};
-  const [sonarrInstances, radarrInstances, watchGrades] = await Promise.all([
+  const [sonarrInstances, radarrInstances, watchGrades, radarrOn, sonarrOn] = await Promise.all([
     getArrInstances("sonarr"),
     getArrInstances("radarr"),
     // Watch grade of every requester on this page, in one batch (null when the
     // feature or play history tracking is off).
     getWatchGradeSummaries(requests.map((r) => r.requestedBy)),
+    // The Open in / Manage icons lead to routes that 404 while the integration
+    // is switched off (arrGate).
+    isFeatureEnabled("feature.integration.radarr").catch(() => false),
+    isFeatureEnabled("feature.integration.sonarr").catch(() => false),
   ]);
   for (const instances of [sonarrInstances, radarrInstances]) {
     for (const inst of instances) {
@@ -311,7 +316,10 @@ export default async function AdminPage({
           typeFilter={typeFilter}
           sort={sort}
           instanceNames={instanceNames}
-          canOpenArr={hasPermission(session.user.permissions, Permission.ADMIN)}
+          // The viewer gate; `arrServices` then hides a movie's icons while
+          // Radarr is off and a show's while Sonarr is.
+          canOpenArr={hasPermission(session.user.permissions, Permission.ADMIN) && (radarrOn || sonarrOn)}
+          arrServices={{ radarr: radarrOn, sonarr: sonarrOn }}
         />
       )}
     </div>

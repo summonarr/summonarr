@@ -128,6 +128,9 @@ type Ev = { source: string; serverInstance: string; itemKey: string; seasonNumbe
 let evidence: Ev[] = [];
 let txLog: Array<{ opts: unknown; ops: string[] }> = [];
 let createManyFails = false;
+// Runs when a transaction locks a registry row — a test removes an instance here
+// to play a removal that commits while the refresh was reading.
+let onRegistryLock: ((key: string) => void | Promise<void>) | null = null;
 shadowPrismaModel(prisma, "upstreamWatchEvidence", {
   // Outside a transaction these are forbidden: the replace must be atomic.
   deleteMany: async () => { forbidden.push("upstreamWatchEvidence.deleteMany (outside tx)"); return { count: 0 }; },
@@ -139,7 +142,24 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: unknown, opts: unkno
   const entry = { opts, ops: [] as string[] };
   txLog.push(entry);
   let staged = [...evidence];
+  const stagedSettings = new Map<string, string>();
   const tx = {
+    // The registry-row lock stillRegisteredInTx takes: SELECT "value" … FOR UPDATE.
+    $queryRaw: async (q: { sql?: string; values?: unknown[] }) => {
+      const key = String(q.values?.[0]);
+      entry.ops.push(`lock ${key}${/FOR UPDATE/.test(q.sql ?? "") ? "" : " (NOT FOR UPDATE)"}`);
+      await onRegistryLock?.(key);
+      const v = settings.get(key);
+      return v === undefined ? [] : [{ value: v }];
+    },
+    setting: {
+      upsert: async (args: { where: { key: string }; update: { value: string } }) => {
+        entry.ops.push(`upsert ${args.where.key}`);
+        if (settingUpsertFails) throw new Error("simulated setting write failure");
+        stagedSettings.set(args.where.key, args.update.value);
+        return { key: args.where.key, value: args.update.value };
+      },
+    },
     upstreamWatchEvidence: {
       deleteMany: async (args: { where: { source: string; serverInstance: string } }) => {
         entry.ops.push(`deleteMany ${JSON.stringify(args.where)}`);
@@ -157,10 +177,11 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: unknown, opts: unkno
   };
   const out = await (fn as (t: unknown) => Promise<unknown>)(tx);
   evidence = staged; // commit only when the callback resolved
+  for (const [k, v] of stagedSettings) { statusWrites.push(k); settings.set(k, v); }
   return out;
 });
 
-const { refreshUpstreamWatch, upstreamRefreshProblems } = await import("../src/lib/upstream-watch-data.ts");
+const { refreshUpstreamWatch, upstreamRefreshProblems, upstreamServerReserve, upstreamServerShare, UPSTREAM_RUN_BUDGET_MS, UPSTREAM_SERVER_RESERVE_MS } = await import("../src/lib/upstream-watch-data.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -208,6 +229,7 @@ beforeEach(() => {
   forbidden.length = 0;
   settingUpsertFails = false;
   createManyFails = false;
+  onRegistryLock = null;
   plexLib = [
     { mediaType: "MOVIE", serverInstance: "", plexRatingKey: "100", plexRatingKeys: [] },
     // The show's canonical key is 450; 500 is a duplicate copy's key — matched
@@ -351,6 +373,93 @@ test("servers are isolated: the default Plex failing doesn't stop the named Plex
   assert.deepEqual(evidence.filter((e) => e.source === "plex").map((e) => [e.serverInstance, e.itemKey]), [["remote", "999"]]);
   assert.equal(status("plex", "remote").matched, 1, "999 IS in the remote server's library");
   assert.deepEqual(evidence.filter((e) => e.source === "jellyfin").map((e) => e.itemKey), ["jm"]);
+});
+
+// ── a named server removed while its refresh is in flight (R2-nw#4) ─────────
+
+// What /api/admin/media-instances' removal transaction does to a slug's
+// upstream state: the registry entry goes, its status row and evidence too.
+function removeRemote() {
+  settings.set("plexInstances", JSON.stringify([]));
+  settings.delete("plexRemoteServerUrl");
+  settings.delete("plexRemoteAdminToken");
+  settings.delete("upstreamWatch:status:plex:remote");
+  evidence = evidence.filter((e) => !(e.source === "plex" && e.serverInstance === "remote"));
+}
+
+test("a named server removed WHILE it is being read writes neither evidence nor a status afterwards (R2-nw#4)", async () => {
+  configurePlex("remote", PLEX_REMOTE);
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  evidence = [oldRow("plex", "remote")];
+  respond = (url) => {
+    if (url.origin === PLEX_REMOTE) {
+      removeRemote(); // the removal commits mid-walk
+      return plexPage([{ type: "movie", ratingKey: "999", viewedAt: secs(ago(2)) }]);
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const result = await refreshUpstreamWatch();
+  assert.deepEqual(result.servers.map((s) => [s.source, s.instance]), [], "the removed server is skipped, not reported");
+  assert.deepEqual(evidence.filter((e) => e.serverInstance === "remote"), [], "no evidence re-created for the removed slug");
+  assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined, "no status re-created for the removed slug");
+  assert.ok(txLog.every((t) => t.ops.every((op) => !op.includes("NOT FOR UPDATE"))), "the registry row is LOCKED, not just read");
+  assert.ok(txLog.some((t) => t.ops[0] === "lock plexInstances"), "the evidence replace checked the registry first");
+});
+
+test("a named server whose read FAILS while it is removed records no failure status for the removed slug (R2-nw#4)", async () => {
+  configurePlex("remote", PLEX_REMOTE);
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = (url) => {
+    if (url.origin === PLEX_REMOTE) {
+      removeRemote();
+      return new Response("down", { status: 404 });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  await refreshUpstreamWatch();
+  assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined);
+});
+
+test("a removal landing between the evidence replace and the status write leaves no status either (R2-nw#4)", async () => {
+  configurePlex("remote", PLEX_REMOTE);
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  let locks = 0;
+  onRegistryLock = () => {
+    // The 2nd lock is the status write's: the removal committed just before it
+    // (and deleted the evidence the replace had written).
+    if (++locks === 2) removeRemote();
+  };
+  respond = (url) => {
+    if (url.origin === PLEX_REMOTE) return plexPage([{ type: "movie", ratingKey: "999", viewedAt: secs(ago(2)) }]);
+    throw new Error(`unexpected ${url}`);
+  };
+  await refreshUpstreamWatch();
+  assert.equal(locks, 2);
+  assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined, "the status write re-checked the registry under its lock");
+});
+
+test("a named server still registered is refreshed exactly as before, status included (R2-nw#4)", async () => {
+  configurePlex("remote", PLEX_REMOTE);
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = (url) => {
+    if (url.origin === PLEX_REMOTE) return plexPage([{ type: "movie", ratingKey: "999", viewedAt: secs(ago(2)) }]);
+    throw new Error(`unexpected ${url}`);
+  };
+  const result = await refreshUpstreamWatch();
+  assert.deepEqual(result.servers.map((s) => [s.instance, s.ok]), [["remote", true]]);
+  assert.equal(status("plex", "remote").ok, true);
+  assert.deepEqual(evidence.filter((e) => e.serverInstance === "remote").map((e) => e.itemKey), ["999"]);
+});
+
+test("the instance removal writes the registry row FIRST in its transaction — the lock the refresh orders on (R2-nw#4)", () => {
+  const src = readFileSync(new URL("../src/app/api/admin/media-instances/route.ts", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("await prisma.$transaction(async (tx) => {"));
+  const firstWrite = body.match(/await tx\.[a-zA-Z]+\.[a-zA-Z]+\(\{\s*where: \{ key: ([a-zA-Z.]+) \}/);
+  assert.ok(firstWrite, "the transaction's first statement is a keyed Setting write");
+  assert.equal(firstWrite[1], "registryWrite.key");
+  const registry = body.indexOf("where: { key: registryWrite.key }");
+  const evidenceDelete = body.indexOf("tx.upstreamWatchEvidence.deleteMany");
+  assert.ok(registry >= 0 && evidenceDelete > registry, "the registry write precedes the slug's evidence delete");
 });
 
 // ── 4: abort ─────────────────────────────────────────────────────────────────
@@ -553,4 +662,171 @@ test("a failed status write never throws out of the job — the snapshot is stil
   assert.equal(result.servers[0].ok, true);
   assert.equal(evidence.length, 4);
   assert.ok(warns.some((w) => w.includes("could not record the refresh status")));
+});
+
+// ── an empty answer from a server Summonarr saw completed plays on ───────────
+
+test("an EMPTY answer while Summonarr recorded completed plays here keeps the previous rows and fails the server", async () => {
+  configurePlex();
+  evidence = [oldRow("plex", "")];
+  const prevFetched = ago(1).toISOString();
+  settings.set("upstreamWatch:status:plex:", JSON.stringify({
+    fetchedAt: prevFetched, attemptedAt: prevFetched, ok: true, entries: 7, matched: 6, samples: 4, agreed: 4, error: null,
+  }));
+  respond = () => plexPage([]);
+  plays = [{ source: "plex", serverInstance: "", completed: true, startedAt: ago(3), sourceItemId: "100" }];
+  const result = await refreshUpstreamWatch();
+  assert.equal(txLog.length, 0, "an empty degraded read never replaces the snapshot");
+  assert.deepEqual(evidence, [oldRow("plex", "")]);
+  const s = status("plex", "");
+  assert.equal(s.ok, false);
+  assert.equal(s.error, "the server returned no watch records");
+  assert.equal(s.fetchedAt, prevFetched, "the previous snapshot's date is kept with its rows");
+  assert.equal(result.servers[0].health, "failed");
+  assert.equal(upstreamRefreshProblems(result), 1, "the run is degraded");
+});
+
+test("an empty answer with NO recorded completed plays is still a valid (empty) snapshot", async () => {
+  configurePlex();
+  evidence = [oldRow("plex", "")];
+  respond = () => plexPage([]);
+  const result = await refreshUpstreamWatch();
+  assert.equal(txLog.length, 1);
+  assert.deepEqual(evidence, []);
+  assert.equal(result.servers[0].ok, true);
+  assert.equal(result.servers[0].health, "ok");
+});
+
+// ── the per-server run budget ────────────────────────────────────────────────
+
+// A bounded test: a regression that drops the per-server budget walks forever,
+// and must FAIL here rather than hang the suite.
+test("a server that outlasts its share of the run budget is recorded 'timed out', keeps its rows, and the NEXT server still runs", { timeout: 10_000 }, async () => {
+  configurePlex();
+  configureJellyfin();
+  evidence = [oldRow("plex", ""), oldRow("jellyfin", "")];
+  jfLib = [{ mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "jm", jellyfinItemIds: [] }];
+  let plexPages = 0;
+  respond = async (url) => {
+    if (url.origin === PLEX) {
+      plexPages++;
+      // A history that never ends: always another page, a little later.
+      await new Promise((r) => setTimeout(r, 5));
+      return json({ MediaContainer: { Metadata: [{ type: "movie", ratingKey: "100", viewedAt: secs(ago(1)) }], totalSize: 1e9, size: 1 } });
+    }
+    if (url.pathname === "/Users") return json([{ Id: "u1", Name: "One" }]);
+    return json({ Items: [{ Type: "Movie", Id: "jm" }], TotalRecordCount: 1 });
+  };
+  const started = Date.now();
+  const result = await refreshUpstreamWatch({ runBudgetMs: 300 });
+  assert.ok(Date.now() - started < 5_000, "the budget bounded the walk");
+  assert.ok(plexPages > 1, "the Plex walk really was cut short mid-walk");
+  assert.equal(result.aborted, false, "a budget expiry is a failed server, never a lock abort");
+  assert.deepEqual(result.servers.map((s) => [s.source, s.ok, s.error]), [["plex", false, "timed out"], ["jellyfin", true, null]]);
+  assert.deepEqual(evidence.filter((e) => e.source === "plex"), [oldRow("plex", "")], "the partial Plex walk is never written");
+  assert.deepEqual(evidence.filter((e) => e.source === "jellyfin").map((e) => e.itemKey), ["jm"], "Jellyfin was refreshed");
+  assert.equal(upstreamRefreshProblems(result), 1);
+});
+
+test("the budget is not pre-split evenly: the first server may use all of it but a small reserve per later server (R2-nw#1)", () => {
+  const MIN = 60_000;
+  // Production: 25 minutes, one Plex + one Jellyfin. An even split gave Plex 12.5.
+  const reserve2 = upstreamServerReserve(UPSTREAM_RUN_BUDGET_MS, 2);
+  assert.equal(reserve2, UPSTREAM_SERVER_RESERVE_MS);
+  assert.equal(upstreamServerShare(UPSTREAM_RUN_BUDGET_MS, 0, 2, reserve2), 22 * MIN);
+  // The last server gets everything left.
+  assert.equal(upstreamServerShare(7 * MIN, 1, 2, reserve2), 7 * MIN);
+  // Two Plex + one Jellyfin: the first gets 19 minutes, not 8.3.
+  const reserve3 = upstreamServerReserve(UPSTREAM_RUN_BUDGET_MS, 3);
+  assert.equal(upstreamServerShare(UPSTREAM_RUN_BUDGET_MS, 0, 3, reserve3), 19 * MIN);
+  // A lone server keeps the whole budget; a tiny budget scales the reserve so
+  // the first server still gets at least half.
+  assert.equal(upstreamServerReserve(UPSTREAM_RUN_BUDGET_MS, 1), 0);
+  assert.equal(upstreamServerReserve(300, 2), 75);
+  assert.ok(upstreamServerShare(300, 0, 2, upstreamServerReserve(300, 2)) >= 150);
+  assert.equal(upstreamServerShare(10, 0, 3, 100), 0, "never negative");
+});
+
+test("a first server that needs MORE than an even share (but less than budget minus the reserve) still finishes, and so does the next (R2-nw#1)", { timeout: 15_000 }, async () => {
+  configurePlex();
+  configureJellyfin();
+  evidence = [oldRow("plex", ""), oldRow("jellyfin", "")];
+  jfLib = [{ mediaType: "MOVIE", serverInstance: "", jellyfinItemId: "jm", jellyfinItemIds: [] }];
+  // Budget 4.4 s over two servers: reserve 1.1 s, so Plex may spend ~3.3 s; an
+  // even split would have cut it at 2.2 s. The walk takes ~2.6 s: 50 pages of 50 ms.
+  const PAGES = 50;
+  let plexPages = 0;
+  respond = async (url) => {
+    if (url.origin === PLEX) {
+      plexPages++;
+      await new Promise((r) => setTimeout(r, 50));
+      return json({ MediaContainer: { Metadata: [{ type: "movie", ratingKey: "100", viewedAt: secs(ago(1)) }], totalSize: PAGES, size: 1 } });
+    }
+    if (url.pathname === "/Users") return json([{ Id: "u1", Name: "One" }]);
+    return json({ Items: [{ Type: "Movie", Id: "jm" }], TotalRecordCount: 1 });
+  };
+  const result = await refreshUpstreamWatch({ runBudgetMs: 4_400 });
+  assert.equal(plexPages, PAGES, "the whole Plex history was read");
+  assert.deepEqual(result.servers.map((s) => [s.source, s.ok, s.error]), [["plex", true, null], ["jellyfin", true, null]]);
+  assert.equal(upstreamRefreshProblems(result), 0);
+});
+
+// ── a TRUNCATED read and episodes with no show id (audit C159 / C160) ────────
+
+test("a Plex history cut off at its read cap is stored truncated: health 'incomplete', the run degraded, warned ONCE (C159)", async () => {
+  configurePlex();
+  respond = () => plexPage(plexHistory());
+  // Cap 3: the 4th watch record (502) exists past it — the oldest records are unread.
+  const first = await refreshUpstreamWatch({ plexMaxItems: 3 });
+  const s = status("plex", "");
+  assert.equal(s.ok, true, "every record it holds is real, so the partial snapshot IS written");
+  assert.equal(s.truncated, true, "the status must say so — otherwise it reads 'ok'");
+  assert.equal(first.servers[0].health, "incomplete");
+  assert.equal(upstreamRefreshProblems(first), 1, "the cron degrades on it");
+  assert.equal(warns.filter((w) => w.includes("read cap")).length, 1);
+  await refreshUpstreamWatch({ plexMaxItems: 3 });
+  assert.equal(warns.filter((w) => w.includes("read cap")).length, 1, "an unchanged condition is not re-logged (7b)");
+
+  // A complete read clears it.
+  const full = await refreshUpstreamWatch();
+  assert.equal(status("plex", "").truncated, false);
+  assert.equal(full.servers[0].health, "ok");
+  assert.equal(upstreamRefreshProblems(full), 0);
+});
+
+test("a failed refresh carries the previous snapshot's truncated flag — its rows are still the partial ones (C159)", async () => {
+  configurePlex();
+  settings.set("upstreamWatch:status:plex:", JSON.stringify({
+    fetchedAt: ago(1).toISOString(), attemptedAt: ago(1).toISOString(), ok: true, entries: 7, matched: 6, samples: 0, agreed: 0, error: null, truncated: true,
+  }));
+  respond = () => new Response("nope", { status: 401 });
+  await refreshUpstreamWatch();
+  assert.equal(status("plex", "").truncated, true);
+});
+
+test("episodes whose show id can't be read are counted: most of them unplaced reads 'failed' on a MIXED server, warned once (C160)", async () => {
+  configurePlex();
+  const episodes = Array.from({ length: 25 }, (_, i) => ({
+    type: "episode", ratingKey: String(600 + i), grandparentKey: "/not/a/metadata/path", parentIndex: 1, index: i + 1, viewedAt: secs(ago(3)), accountID: 1,
+  }));
+  // The movie matches the library, so `matched` alone would read this server healthy.
+  respond = () => plexPage([{ type: "movie", ratingKey: "100", viewedAt: secs(ago(2)), accountID: 1 }, ...episodes]);
+  const result = await refreshUpstreamWatch();
+  const s = status("plex", "");
+  assert.equal(s.matched, 1);
+  assert.equal(s.episodeRecords, 25, "counted from the parsed records, not the aggregated rows (which drop them)");
+  assert.equal(s.unplacedEpisodes, 25);
+  assert.equal(result.servers[0].health, "failed");
+  assert.equal(upstreamRefreshProblems(result), 1);
+  assert.equal(warns.filter((w) => w.includes("no show id")).length, 1, "its own message, not 'none matched a library title'");
+  assert.equal(warns.filter((w) => w.includes("none matched")).length, 0);
+});
+
+test("the default history's episodes all carry a show id: nothing unplaced (C160)", async () => {
+  configurePlex();
+  respond = () => plexPage(plexHistory());
+  await refreshUpstreamWatch();
+  const s = status("plex", "");
+  assert.equal(s.episodeRecords, 2);
+  assert.equal(s.unplacedEpisodes, 0);
 });

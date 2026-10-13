@@ -225,7 +225,7 @@
   "adminQueue.issueActions.replaceFileUnmarked_one": "{count} Release konnte nicht als fehlgeschlagen markiert werden – stattdessen wird gesucht",
   "adminQueue.issueActions.replaceFileUnmarked_other": "{count} Releases konnten nicht als fehlgeschlagen markiert werden – stattdessen wird gesucht",
   "adminQueue.issueActions.replaceFileNothingMissing": "{service} meldet nichts Fehlendes, daher wurde keine Suche eingereiht – prüfen, ob die Folgen noch überwacht werden",
-  "adminQueue.issueActions.replaceFileRemonitored": "{service} hat das Gelöschte nicht mehr überwacht (Unmonitor Deleted) – es wird wieder überwacht und deshalb gesucht",
+  "adminQueue.issueActions.replaceFileRemonitored": "{service} hat das Gelöschte nicht mehr überwacht („Gelöschte nicht mehr überwachen“) – es wird wieder überwacht und deshalb gesucht",
   "adminQueue.issueActions.replaceFileRemonitorFailed": "{service} hat das Gelöschte nicht mehr überwacht, und die Überwachung ließ sich nicht wiederherstellen – stattdessen wurde per Name gesucht. Überwachen Sie es in {service} wieder, sonst überspringen spätere Suchen es.",
   "adminQueue.issueActions.replaceFileAnimeNumbering": "Eine Anime-Serie: {service} nummeriert Episoden möglicherweise anders als der Medienserver, auf dem das Problem gemeldet wurde. Prüfen Sie vor dem Löschen die Episodentitel jeder Datei.",
   "adminQueue.fixMatch.level.exact": "Exakt",
@@ -394,5 +394,10 @@
   "adminQueue.releases.seasonMissing_one": "Staffel {number} · {count} fehlt",
   "adminQueue.releases.seasonMissing_other": "Staffel {number} · {count} fehlen",
   "adminQueue.releases.seeders_one": "{count} Seeder",
-  "adminQueue.releases.seeders_other": "{count} Seeder"
+  "adminQueue.releases.seeders_other": "{count} Seeder",
+  "adminQueue.arrStatus.verdict.waitingForLibrary": "Wartet auf die Bibliothek",
+  "adminQueue.arrStatus.why.waitingForLibrary": "{service} hat es – die Anfrage wird verfügbar, sobald der Medienserver des Anfragenden es in einer Bibliothek hat, die er sehen kann. Bleibt sie hier stehen, prüfen Sie, ob der Server die Datei gescannt hat.",
+  "adminQueue.arrStatus.why.unmonitoredEpisodes": "{service} überwacht die Serie, aber keine ihrer Folgen, daher sucht nichts danach. Überwachen Sie ihre Staffeln oder Folgen in {service}.",
+  "adminQueue.issueActions.searchAgain": "Erneut suchen",
+  "adminQueue.issueActions.replaceFileNoAnswer": "Keine Antwort vom Server – das Ersetzen läuft möglicherweise noch, und einige Dateien könnten bereits gelöscht sein. Laden Sie das Problem neu und prüfen Sie, was übrig ist, bevor Sie es erneut ausführen."
 }

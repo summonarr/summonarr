@@ -10,14 +10,15 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { sanitizeForLog } from "@/lib/sanitize";
 
 const MAX_BODY_BYTES = 64 * 1024;
-// A Sonarr pack is one queue record per episode, and a complete-series pack of
-// a long-running anime or daily show runs into the thousands. It all goes in
-// ONE bulk call (guardrail 5c); the bound only keeps a body from being absurd.
+// The page sends ONE record id per download (`removalIds` — any record of a
+// Sonarr pack resolves the whole download, and Sonarr v3 blocklists once per
+// id sent); an API caller may still send several, and they all go in ONE bulk
+// call (guardrail 5c). The bound only keeps a body from being absurd.
 const MAX_IDS = 5_000;
 const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 
 // Admin → Download Queue, one row's Remove (ADMIN). Sends Radarr/Sonarr's own
-// bulk queue DELETE for every record id of the download, on that instance —
+// bulk queue DELETE for the record id(s) it is given, on that instance —
 // both halves of the arr's own "Remove from queue" dialog:
 //   action "remove"          — drop it from the queue (no blocklist)
 //   action "blocklist"       — remove and blocklist the release

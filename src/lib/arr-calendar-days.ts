@@ -58,8 +58,8 @@ export function entryMs(e: Pick<CalendarEntry, "kind" | "date">): number {
 
 /**
  * The entries inside the window's own days, [start, start + days). The server
- * pads Radarr's window by a day either side (calendarFetchWindow), so movie
- * dates just outside it come back and are dropped here.
+ * pads both arrs' windows (calendarFetchWindow — Radarr a day either side,
+ * Sonarr 14 h), so entries just outside it come back and are dropped here.
  */
 export function entriesInWindow<T extends Pick<CalendarEntry, "kind" | "date">>(entries: readonly T[], startMs: number, days = CALENDAR_DAYS): T[] {
   const end = addDays(startMs, days);
@@ -67,6 +67,24 @@ export function entriesInWindow<T extends Pick<CalendarEntry, "kind" | "date">>(
     const ms = entryMs(e);
     return ms >= startMs && ms < end;
   });
+}
+
+// Statuses the server gives a date that has passed in UTC. On the viewer's
+// clock the date may still be ahead (a movie's date sits on local midnight,
+// which is AFTER midnight UTC everywhere west of UTC), and then it is upcoming.
+const PAST_DATE_STATUSES: ReadonlySet<CalendarStatus> = new Set<CalendarStatus>(["missing", "released", "unmonitored", "aired"]);
+
+/**
+ * An entry's status as of the viewer's day. The server judges a movie's date
+ * against midnight UTC (Radarr's rule, and the Missing search's — a Search
+ * offered before it would 409); the page places it on local midnight
+ * (entryMs). So a release is upcoming until the LATER of the two: nothing on a
+ * future local day reads missing. `downloaded`/`downloading`/`airing`/
+ * `upcoming` are never changed, and an episode — placed at its real instant,
+ * which the server already compared — never changes.
+ */
+export function localEntryStatus(e: Pick<CalendarEntry, "kind" | "date" | "status">, nowMs: number): CalendarStatus {
+  return PAST_DATE_STATUSES.has(e.status) && entryMs(e) > nowMs ? "upcoming" : e.status;
 }
 
 type WeekInfo = { firstDay?: unknown };
@@ -159,6 +177,20 @@ export function matchesStatusFilter(status: CalendarStatus, filter: CalendarStat
   return filter === "all" || STATUS_FILTER[filter].includes(status);
 }
 
+/**
+ * Whether an instance the view includes couldn't be read — the instance filter
+ * ("all" or `${service}:${slug}`) and the type filter ("all" or the service)
+ * both admit it. While one does, "nothing on the calendar" is a claim nobody
+ * can make: that instance's schedule is unknown, not empty.
+ */
+export function failedInView(
+  errors: ReadonlyArray<{ service: string; instance: string }>,
+  instance: string,
+  type: CalendarTypeFilter,
+): boolean {
+  return errors.some((e) => (instance === "all" || `${e.service}:${e.instance}` === instance) && (type === "all" || e.service === type));
+}
+
 // ── labels ──────────────────────────────────────────────────────────────────
 
 /** S01E01 opens the series, SnnE01 a season; a special's E01 opens nothing. */
@@ -186,6 +218,8 @@ export interface CalendarCell {
   episodeId: number | null;
   status: CalendarStatus;
   progress: number | null;
+  /** Radarr/Sonarr flag a download of it as needing attention — any of the instance's entries for it that day. */
+  attention: boolean;
 }
 
 /** One title on one local day: every release kind of it that day, every instance that has it. */
@@ -257,10 +291,14 @@ export function calendarDays(entries: readonly CalendarEntry[]): CalendarDay[] {
     const cellKey = `${e.service}:${e.instance}:${e.arrId}:${e.episodeId ?? ""}`;
     const cell = row.cells.find((c) => c.key === cellKey);
     if (!cell) {
-      row.cells.push({ key: cellKey, service: e.service, instance: e.instance, arrId: e.arrId, episodeId: e.episodeId, status: e.status, progress: e.progress });
-    } else if (CELL_RANK[e.status] < CELL_RANK[cell.status]) {
-      cell.status = e.status;
-      cell.progress = e.progress;
+      row.cells.push({ key: cellKey, service: e.service, instance: e.instance, arrId: e.arrId, episodeId: e.episodeId, status: e.status, progress: e.progress, attention: e.attention });
+    } else {
+      // The flag is the download's, whichever status the cell shows.
+      cell.attention ||= e.attention;
+      if (CELL_RANK[e.status] < CELL_RANK[cell.status]) {
+        cell.status = e.status;
+        cell.progress = e.progress;
+      }
     }
   }
   const out = [...days.values()].sort((a, b) => a.ms - b.ms);

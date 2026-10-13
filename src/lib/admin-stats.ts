@@ -129,3 +129,33 @@ export function diskUsedPct(totalSpace: number, freeSpace: number): number {
 export function utcMonthKey(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
+
+// ─── Never watched ──────────────────────────────────────────────────────────
+
+// What the Storage section's "Never watched" line may say. Zero never-watched
+// titles and seasons is ALSO what the report gives when nothing could be
+// judged — tracking off, a fresh install, a server with no recorded history
+// (every such title is `unobservable`), or only soft "possibly watched"
+// matches — so "everything has been played" is claimed only when every title
+// and season was judged (guardrail 14d: a missing verdict is never "watched").
+// Each clause of the value line is shown only when it has something to count.
+export interface NeverWatchedLineInput {
+  titles: number;
+  seasons: number;
+  // Titles and seasons the verdict could not judge, and soft matches.
+  unknown: number;
+  possible: number;
+  trackingOn: boolean;
+}
+export type NeverWatchedLine =
+  | { kind: "value"; showTitles: boolean; showSeasons: boolean }
+  | { kind: "none" }
+  | { kind: "unjudged" }
+  | { kind: "trackingOff" };
+
+export function neverWatchedLine(nw: NeverWatchedLineInput): NeverWatchedLine {
+  if (nw.titles > 0 || nw.seasons > 0) return { kind: "value", showTitles: nw.titles > 0, showSeasons: nw.seasons > 0 };
+  if (!nw.trackingOn) return { kind: "trackingOff" };
+  if (nw.unknown > 0 || nw.possible > 0) return { kind: "unjudged" };
+  return { kind: "none" };
+}

@@ -16,6 +16,8 @@
 //   2. A PRESENT, non-string onBehalfOfUserId is a 400, never "no target".
 //   3. The per-call limit reads the admin's rateLimitRequests Setting, and a
 //      zero-row batch answers 200 (201 only when something was created).
+//   4. A peer stamped `cleanedUpAt` (a deliberate removal, guardrail 14b) is
+//      never mirrored — here, in request-create.ts and on the Discord path.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -37,6 +39,25 @@ test("bulk: the create tx never writes availableAt — a mirrored peer is APPROV
   const availableLiterals = CODE.match(/"AVAILABLE"/g) ?? [];
   assert.equal(availableLiterals.length, 1, `expected the lone in-predicate literal, got ${availableLiterals.length}`);
   assert.match(CODE, /status: \{ in: \["APPROVED", "AVAILABLE"\] \}/);
+});
+
+test("bulk: a peer stamped cleanedUpAt is a removal, never a greenlight to mirror (guardrail 14b)", () => {
+  // Without the term, "Request all" on a collection copies a deliberately
+  // removed title's stamped AVAILABLE row as APPROVED, and the sync re-pushes it.
+  assert.match(CODE, /const greenlit = await tx\.mediaRequest\.findMany\(\{\s*where: \{ status: \{ in: \["APPROVED", "AVAILABLE"\] \}, cleanedUpAt: null, OR: createPairs \}/);
+});
+
+test("every 'already greenlit' mirror lookup in src/ excludes stamped (cleanedUpAt) rows", () => {
+  // request-create.ts (web + watchlist auto-request), the Discord /request
+  // path and bulk each copy a greenlit peer's status. One copy without the
+  // term re-opens the re-download path for a removed title.
+  const files = ["src/lib/request-create.ts", "src/app/api/interactions/route.ts", "src/app/api/requests/bulk/route.ts"];
+  for (const f of files) {
+    const code = readFileSync(join(ROOT, f), "utf8").split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+    const lookups = code.split("\n").filter((l) => l.includes('status: { in: ["APPROVED", "AVAILABLE"] }'));
+    assert.ok(lookups.length >= 1, `${f}: the mirror lookup moved — update this pin`);
+    for (const l of lookups) assert.match(l, /cleanedUpAt: null/, `${f}: ${l.trim()}`);
+  }
 });
 
 test("bulk: 'already-available' is produced ONLY by the pre-create gate; a mirrored row reads 'auto-approved'", () => {

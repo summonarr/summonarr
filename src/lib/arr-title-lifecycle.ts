@@ -15,12 +15,26 @@
 //     the sync re-pushes an APPROVED title the arr doesn't know, so the title
 //     would come straight back — the admin declines or deletes the request first;
 //   - every AVAILABLE request on this instance is stamped `cleanedUpAt` BEFORE
-//     the delete (only rows not already stamped), so the sync never reads the
-//     title's disappearance as a lost file and re-adds it; the stamps this call
-//     wrote are removed again when the delete fails. Status and approvedAt are
-//     never touched (guardrail 34a).
+//     the delete (only rows not already stamped, in one conditional write), so
+//     the sync never reads the title's disappearance as a lost file and re-adds
+//     it; the stamps this call wrote are removed again only when the arr
+//     definitely refused the delete AND a re-read shows the title still there,
+//     and a removal that went through re-asserts them with its own time, so a
+//     concurrent removal whose delete was refused can't unstamp a gone title.
+//     An unknown outcome — a timeout, a network failure, a 502/504 from a
+//     proxy — KEEPS them: the arr may have taken the delete.
+//     Status and approvedAt are never touched (guardrail 34a).
 import { prisma } from "./prisma";
-import { ArrResponseError, arrFetch, arrFetchNoContent, getArrAddDefaults, lookupSeriesByTmdbId, type ArrCfg } from "./arr";
+import {
+  ArrResponseError,
+  arrFetch,
+  arrFetchNoContent,
+  arrWriteOutcomeUnknown,
+  getArrAddDefaults,
+  lookupSeriesByTmdbId,
+  resolveSingleTvdbToTmdb,
+  type ArrCfg,
+} from "./arr";
 import { configuredArrCfg, type ArrService } from "./arr-admin";
 import { findTitle } from "./arr-title-data";
 import {
@@ -85,9 +99,27 @@ export function requestIdentity(ids: { tmdbId: number | null; tvdbId: number | n
   return or.length > 0 ? { OR: or } : null;
 }
 
+type RequestIds = { tmdbId: number | null; tvdbId: number | null };
+
+/**
+ * The ids a removal matches requests by. A Sonarr series with no tmdbId (v3
+ * sends none; v4 reports 0 when TVDB has no TMDB link) would otherwise match
+ * on its tvdb id alone — but `MediaRequest.tvdbId` is written only by a
+ * successful Sonarr push, so a request that was never pushed (a mirror copy, a
+ * PENDING row the library marking pass flipped AVAILABLE) carries none. The
+ * sync's Sonarr cache keys such a series by the tmdb id `resolveTvdbToTmdb`
+ * maps it to (cache → MediaRequest → TMDB), and the demote and re-push act on
+ * THAT key, so the removal counts and stamps by it too (guardrail 14b).
+ * Unresolvable (a TMDB outage) ⇒ the tvdb id alone, as before.
+ */
+async function requestIds(service: ArrService, title: ArrTitle): Promise<RequestIds> {
+  if (title.tmdbId !== null || service !== "sonarr" || title.tvdbId === null) return { tmdbId: title.tmdbId, tvdbId: title.tvdbId };
+  return { tmdbId: await resolveSingleTvdbToTmdb(title.tvdbId), tvdbId: title.tvdbId };
+}
+
 /** The requests for this title routed to THIS instance, by status. */
-async function requestCounts(service: ArrService, instance: string, title: ArrTitle): Promise<RequestCounts> {
-  const identity = requestIdentity(title);
+async function requestCounts(service: ArrService, instance: string, ids: RequestIds): Promise<RequestCounts> {
+  const identity = requestIdentity(ids);
   if (!identity) return { pending: 0, approved: 0, available: 0 };
   const rows = await prisma.mediaRequest.groupBy({
     by: ["status"],
@@ -108,7 +140,7 @@ export async function planTitleRemoval(service: ArrService, instance: string, ar
   const cfg = await configuredArrCfg(service, instance);
   const title = await readTitle(cfg, service, instance, arrId);
   if (!title) return null;
-  return { title, requests: await requestCounts(service, instance, title) };
+  return { title, requests: await requestCounts(service, instance, await requestIds(service, title)) };
 }
 
 export interface RemovalResult {
@@ -135,37 +167,79 @@ export async function removeTitle(
   const cfg = await configuredArrCfg(service, instance);
   const title = await readTitle(cfg, service, instance, arrId);
   if (!title) return null;
-  const counts = await requestCounts(service, instance, title);
+  const ids = await requestIds(service, title);
+  const counts = await requestCounts(service, instance, ids);
   if (counts.approved > 0) throw new RequestsActiveError(counts.approved);
 
   // Stamp FIRST: without it, the next sync reads the title's disappearance as a
-  // lost file and re-adds it. Only rows not already stamped, so an unstamp
-  // below never clears an older stamp.
-  const identity = requestIdentity(title);
-  const toStamp = identity
-    ? await prisma.mediaRequest.findMany({
+  // lost file and re-adds it. ONE conditional write, and the rows it returns are
+  // the stamps this call owns: only rows not already stamped, so a concurrent
+  // removal's stamps are never counted, audited or unstamped here, and an
+  // unstamp below never clears an older stamp.
+  const identity = requestIdentity(ids);
+  const stamped = identity
+    ? await prisma.mediaRequest.updateManyAndReturn({
       where: { ...identity, mediaType: mediaTypeOf(service), arrInstance: instance, status: "AVAILABLE", cleanedUpAt: null },
+      data: { cleanedUpAt: now },
       select: { id: true },
     })
     : [];
-  const stampedIds = toStamp.map((r) => r.id);
-  if (stampedIds.length > 0) {
-    await prisma.mediaRequest.updateMany({ where: { id: { in: stampedIds }, cleanedUpAt: null }, data: { cleanedUpAt: now } });
-  }
+  const stampedIds = stamped.map((r) => r.id);
 
   const flags = service === "radarr"
     ? `deleteFiles=${opts.deleteFiles}&addImportExclusion=${opts.addImportExclusion}`
     : `deleteFiles=${opts.deleteFiles}&addImportListExclusion=${opts.addImportExclusion}`;
+  // The title is gone from the instance: this call now OWNS the stamp on every
+  // AVAILABLE request routed there. A concurrent removal (or a cleanup execute)
+  // that stamped first and then saw its own delete refused unstamps by ITS time
+  // — re-asserted with this call's, its unstamp misses the rows, and if it
+  // already ran this writes them back (14b). Only null vs set is ever read.
+  // Best-effort: the delete is durable, so a failed write is logged, not thrown.
+  const reassertStamp = async () => {
+    if (!identity) return;
+    try {
+      await prisma.mediaRequest.updateMany({
+        where: { ...identity, mediaType: mediaTypeOf(service), arrInstance: instance, status: "AVAILABLE" },
+        data: { cleanedUpAt: now },
+      });
+    } catch (err) {
+      console.error(`[arr-title] re-asserting the cleanup stamp after removing ${service}:${instance || "default"}:${arrId} failed:`, err instanceof Error ? err.message : err);
+    }
+  };
   try {
     await arrFetchNoContent(cfg, `${resourcePath(service, arrId)}?${flags}`, { method: "DELETE" });
   } catch (err) {
     // Gone already: the goal is met, and the stamps are right.
-    if (err instanceof ArrResponseError && err.status === 404) return { title, alreadyGone: true, requestsStamped: stampedIds.length };
-    if (stampedIds.length > 0) {
+    if (err instanceof ArrResponseError && err.status === 404) {
+      await reassertStamp();
+      return { title, alreadyGone: true, requestsStamped: stampedIds.length };
+    }
+    // Any other failure may still have deleted it — a timeout or a dropped
+    // connection after the arr acted, or a concurrent removal that won. Only a
+    // re-read showing the title STILL on the instance proves the delete didn't
+    // happen; an unstamp on a deleted title re-downloads it (14b), whereas a
+    // stamp left on a present one costs at most one automatic re-push later.
+    // An UNKNOWN outcome (timeout, network, a gateway's 502/504) keeps the
+    // stamps even then: the arr may still be holding the DELETE — behind its
+    // database lock, while a GET answers "still there" — and finish it later.
+    let stillThere: boolean | null;
+    try {
+      stillThere = (await readTitle(cfg, service, instance, arrId)) !== null;
+    } catch {
+      stillThere = null;
+    }
+    if (stillThere === false) {
+      // Removed after all — by this call, most likely, so it reads as removed
+      // here (alreadyGone: false keeps the route's library rescan).
+      await reassertStamp();
+      return { title, alreadyGone: false, requestsStamped: stampedIds.length };
+    }
+    if (stillThere && stampedIds.length > 0 && !arrWriteOutcomeUnknown(err)) {
       await prisma.mediaRequest.updateMany({ where: { id: { in: stampedIds }, cleanedUpAt: now }, data: { cleanedUpAt: null } });
     }
     throw err;
   }
+  await reassertStamp();
   return { title, alreadyGone: false, requestsStamped: stampedIds.length };
 }
 
@@ -262,6 +336,56 @@ async function clearRemovalStamps(service: ArrService, instance: string, ids: { 
   }
 }
 
+/** The title's arr id on the instance now, or null (a failed read included). */
+async function presentArrId(service: ArrService, instance: string, tmdbId: number): Promise<number | null> {
+  try {
+    return (await findTitle(service, instance, tmdbId))?.arrId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The series Sonarr holds under the tvdbId an add was just POSTed with, or null
+ * (a failed read included). That id is what Sonarr keys the series on, so it
+ * confirms the add by itself — findTitle's tmdb route can't: on Sonarr v3 (no
+ * tmdbId on any row) it needs TMDB's TVDB cross-reference, which is missing or
+ * failing exactly when the add resolved the series through a lone lookup row.
+ */
+async function seriesIdByTvdb(cfg: ArrCfg, tvdbId: number): Promise<number | null> {
+  try {
+    const library = await arrFetch<unknown>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
+    const row = Array.isArray(library) ? (library as Array<{ id?: unknown; tvdbId?: unknown }>).find((s) => s?.tvdbId === tvdbId) : undefined;
+    return typeof row?.id === "number" && row.id > 0 ? row.id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POST the add and answer the new arr id. A definite refusal (a 4xx) stays the
+ * arr's error. An UNKNOWN outcome — a timeout, a dropped connection, a 5xx (a
+ * reverse proxy's 504), a body that won't parse — may have been accepted: the
+ * arr would then hold a title nobody audited and whose removal stamps were
+ * never withdrawn, and the retry only hits "already there" (409). So the title
+ * is re-read (`reread`: Radarr by tmdbId, Sonarr by the tvdbId it was sent —
+ * seriesIdByTvdb), and found there it is treated as added. A created resource
+ * with no id is resolved the same way rather than recorded as 0.
+ */
+async function postAdd(cfg: ArrCfg, service: ArrService, body: string, reread: () => Promise<number | null>): Promise<number> {
+  let created: { id?: unknown } | null;
+  try {
+    created = await arrFetch<{ id?: unknown }>(cfg, service === "radarr" ? "/api/v3/movie" : "/api/v3/series", { method: "POST", body });
+  } catch (err) {
+    if (err instanceof ArrResponseError && err.status < 500) throw err;
+    const arrId = await reread();
+    if (arrId === null) throw err;
+    return arrId;
+  }
+  if (typeof created?.id === "number" && created.id > 0) return created.id;
+  return (await reread()) ?? 0;
+}
+
 /**
  * Add a title with the admin's choices. The profile, root folder and tags must
  * be the instance's own (TitleEditError otherwise — nothing is written); a
@@ -291,23 +415,19 @@ export async function addTitle(service: ArrService, instance: string, add: Title
     const movie = await lookupMovie(cfg, add.tmdbId);
     if (!movie || typeof movie.title !== "string") throw new TitleLookupError();
     // Only the listed fields, never the whole lookup row (the request add's rule).
-    const created = await arrFetch<{ id?: unknown }>(cfg, "/api/v3/movie", {
-      method: "POST",
-      body: JSON.stringify({
-        tmdbId: add.tmdbId,
-        title: movie.title,
-        year: movie.year,
-        titleSlug: movie.titleSlug,
-        images: movie.images,
-        rootFolderPath: add.rootFolderPath,
-        qualityProfileId: add.qualityProfileId,
-        ...(add.minimumAvailability ? { minimumAvailability: add.minimumAvailability } : {}),
-        tags: add.tags,
-        monitored: add.monitored === true,
-        addOptions: { searchForMovie: add.search },
-      }),
-    });
-    const arrId = typeof created?.id === "number" ? created.id : 0;
+    const arrId = await postAdd(cfg, service, JSON.stringify({
+      tmdbId: add.tmdbId,
+      title: movie.title,
+      year: movie.year,
+      titleSlug: movie.titleSlug,
+      images: movie.images,
+      rootFolderPath: add.rootFolderPath,
+      qualityProfileId: add.qualityProfileId,
+      ...(add.minimumAvailability ? { minimumAvailability: add.minimumAvailability } : {}),
+      tags: add.tags,
+      monitored: add.monitored === true,
+      addOptions: { searchForMovie: add.search },
+    }), () => presentArrId(service, instance, add.tmdbId));
     await clearRemovalStamps(service, instance, { tmdbId: add.tmdbId, tvdbId: null });
     return { arrId, title: movie.title };
   }
@@ -318,31 +438,28 @@ export async function addTitle(service: ArrService, instance: string, add: Title
   // Sonarr v3 refuses an add without a language profile; v4 has none (404).
   const languageProfileId = defaults?.languageProfileId ?? (await firstLanguageProfile(cfg));
   const monitor = add.monitor ?? "all";
-  const created = await arrFetch<{ id?: unknown }>(cfg, "/api/v3/series", {
-    method: "POST",
-    body: JSON.stringify({
-      tvdbId: series.tvdbId,
-      title: series.title,
-      year: series.year,
-      titleSlug: series.titleSlug,
-      images: series.images,
-      // Sonarr sets each season's and episode's monitoring from addOptions.monitor;
-      // the seasons only need to be listed.
-      seasons: (series.seasons ?? [])
-        .filter((s) => typeof s?.seasonNumber === "number")
-        .map((s) => ({ seasonNumber: s.seasonNumber, monitored: monitor !== "none" && (s.seasonNumber as number) > 0 })),
-      rootFolderPath: add.rootFolderPath,
-      qualityProfileId: add.qualityProfileId,
-      // Sonarr v3 only (v4 has no language profiles).
-      ...(languageProfileId ? { languageProfileId } : {}),
-      ...(add.seriesType ? { seriesType: add.seriesType } : {}),
-      ...(add.seasonFolder !== undefined ? { seasonFolder: add.seasonFolder } : {}),
-      tags: add.tags,
-      monitored: monitor !== "none",
-      addOptions: { monitor, searchForMissingEpisodes: add.search },
-    }),
-  });
-  const arrId = typeof created?.id === "number" ? created.id : 0;
-  await clearRemovalStamps(service, instance, { tmdbId: add.tmdbId, tvdbId: series.tvdbId });
+  const tvdbId = series.tvdbId;
+  const arrId = await postAdd(cfg, service, JSON.stringify({
+    tvdbId,
+    title: series.title,
+    year: series.year,
+    titleSlug: series.titleSlug,
+    images: series.images,
+    // Sonarr sets each season's and episode's monitoring from addOptions.monitor;
+    // the seasons only need to be listed.
+    seasons: (series.seasons ?? [])
+      .filter((s) => typeof s?.seasonNumber === "number")
+      .map((s) => ({ seasonNumber: s.seasonNumber, monitored: monitor !== "none" && (s.seasonNumber as number) > 0 })),
+    rootFolderPath: add.rootFolderPath,
+    qualityProfileId: add.qualityProfileId,
+    // Sonarr v3 only (v4 has no language profiles).
+    ...(languageProfileId ? { languageProfileId } : {}),
+    ...(add.seriesType ? { seriesType: add.seriesType } : {}),
+    ...(add.seasonFolder !== undefined ? { seasonFolder: add.seasonFolder } : {}),
+    tags: add.tags,
+    monitored: monitor !== "none",
+    addOptions: { monitor, searchForMissingEpisodes: add.search },
+  }), () => seriesIdByTvdb(cfg, tvdbId));
+  await clearRemovalStamps(service, instance, { tmdbId: add.tmdbId, tvdbId });
   return { arrId, title: series.title };
 }

@@ -384,7 +384,7 @@
   "settings.form.agents.event.arr.disk_low": "Espace disque Radarr/Sonarr faible",
   "settings.form.agents.event.arr.disk_ok": "Espace disque Radarr/Sonarr rétabli",
   "settings.form.agents.event.arr.download_failed": "Échec de téléchargement Radarr/Sonarr",
-  "settings.form.agents.event.arr.queue_attention": "Téléchargement à surveiller",
+  "settings.form.agents.event.arr.queue_attention": "Téléchargement à traiter",
   "settings.form.announce.sentWithFailures_one": "Envoyé à {sent} appareil, {failed} en échec",
   "settings.form.announce.sentWithFailures_other": "Envoyé à {sent} appareils, {failed} en échec",
   "settings.form.apiKey.removed": "Clé supprimée",

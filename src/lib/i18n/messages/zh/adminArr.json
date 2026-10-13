@@ -9,7 +9,7 @@
   "adminArr.error.timeout": "{name} 未及时响应",
   "adminArr.error.unreachable": "无法连接 {name}——请检查它是否正在运行，以及“设置 → 媒体”中的地址",
   "adminArr.error.server": "{name} 发生内部错误——请查看其日志",
-  "adminArr.error.notFound": "{name} 返回“未找到”——需要更新的版本",
+  "adminArr.error.notFound": "{name} 返回“未找到”——请检查“设置 → 媒体”中的地址，包括它使用的 URL 基础路径（也可能是版本太旧，不支持此页面）",
   "adminArr.error.other": "无法读取 {name}",
   "adminArr.common.noneConfigured": "未配置 Radarr 或 Sonarr",
   "adminArr.common.noneConfiguredHint": "在“设置 → 媒体”中连接 Radarr 或 Sonarr（并保持其集成开启），即可在此管理它们。",
@@ -402,5 +402,14 @@
   "adminArr.missingBulk.confirmTitleCutoff": "为 {count} 部作品搜索升级版本？",
   "adminArr.missingBulk.confirmBody": "每部作品都会在其实例使用的所有索引器上搜索，因此至少会消耗 {count} 次搜索的索引器 API 调用——许多索引器限制每日调用次数。{service} 会在几分钟内将它们全部排队。",
   "adminArr.missingBulk.confirmUnmonitored_one": "其中 {count} 部未受监控——{service} 不会自行搜索它们。",
-  "adminArr.missingBulk.confirmUnmonitored_other": "其中 {count} 部未受监控——{service} 不会自行搜索它们。"
+  "adminArr.missingBulk.confirmUnmonitored_other": "其中 {count} 部未受监控——{service} 不会自行搜索它们。",
+  "adminArr.system.useUnsupported": "不支持",
+  "adminArr.system.useUnsupportedHint": "{service} 表示此索引器无法执行此操作，因此该选项永远不会被使用",
+  "adminArr.missingBulk.selectedOffPage_one": "（其中 {count} 个在其他页面上）",
+  "adminArr.missingBulk.selectedOffPage_other": "（其中 {count} 个在其他页面上）",
+  "adminArr.calendar.emptyHintAll": "这两周内没有剧集播出，也没有电影发行。",
+  "adminArr.history.stateUnknown": "此列表无法显示此下载自被抓取以来发生的所有情况——它可能已被导入。将其标记为失败仍会将该发布加入黑名单并重新搜索；若该下载已失败，Summonarr 会在发送任何内容之前拒绝。",
+  "adminArr.add.searchNeedsMonitor": "没有任何内容受监控，因此 Radarr/Sonarr 不会搜索它。",
+  "adminArr.notice.searchMissingPartial": "搜索只启动了一部分——Sonarr 拒绝了其余部分。请再次运行“搜索缺失”以处理剩余内容。",
+  "adminArr.files.deleteStillRunning": "删除仍在进行中——请一分钟后重新加载文件，查看剩余内容。"
 }

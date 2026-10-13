@@ -140,3 +140,28 @@ test("every parameter is whitelisted: junk falls back to the default", () => {
   assert.equal(parseCleanupView(new URLSearchParams("sort=title")).dir, "asc", "title defaults to A→Z");
   assert.equal(parseCleanupView(new URLSearchParams(`q=${"x".repeat(500)}`)).q.length, 200);
 });
+
+test("a non-default direction round-trips for EVERY sort's own default — title's is A→Z, the rest newest/biggest first", () => {
+  for (const s of [
+    { ...CLEANUP_VIEW_DEFAULTS, sort: "title", dir: "desc" },
+    { ...CLEANUP_VIEW_DEFAULTS, sort: "size", dir: "asc" },
+    { ...CLEANUP_VIEW_DEFAULTS, sort: "title", dir: "asc" },
+  ] satisfies CleanupViewState[]) {
+    assert.deepEqual(parseCleanupView(new URLSearchParams(serializeCleanupView(s))), s, `${s.sort}/${s.dir}`);
+  }
+  assert.equal(serializeCleanupView({ ...CLEANUP_VIEW_DEFAULTS, sort: "title", dir: "asc" }), "sort=title", "title's own default direction is not written");
+  assert.equal(serializeCleanupView({ ...CLEANUP_VIEW_DEFAULTS, sort: "title", dir: "desc" }), "sort=title&dir=desc");
+});
+
+test("each filter alone shows Reset; sort, direction and a blank search do not", () => {
+  const overrides: Array<Partial<CleanupViewState>> = [
+    { view: "all" }, { type: "MOVIE" }, { rule: "votes" }, { excl: "none" }, { server: "plex" },
+    { arr: "radarr:" }, { size: "10g" }, { deletable: true }, { q: "foo" },
+  ];
+  for (const o of overrides) {
+    assert.equal(cleanupFiltersActive({ ...CLEANUP_VIEW_DEFAULTS, ...o }), true, JSON.stringify(o));
+  }
+  for (const o of [{ sort: "title", dir: "asc" }, { dir: "asc" }, { q: "   " }] satisfies Array<Partial<CleanupViewState>>) {
+    assert.equal(cleanupFiltersActive({ ...CLEANUP_VIEW_DEFAULTS, ...o }), false, JSON.stringify(o));
+  }
+});

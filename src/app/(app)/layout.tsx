@@ -21,6 +21,7 @@ import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
 import { RatingsVisibilityProvider } from "@/components/media/ratings-visibility";
 import { DetailTitleProvider } from "@/components/layout/detail-title";
 import { NotificationStoreProvider } from "@/components/notifications/notification-store";
+import { NavBadgesProvider } from "@/components/layout/admin-nav-groups";
 
 // One settings read per request, shared by generateMetadata and the layout
 // body. Next only de-duplicates `fetch()` calls between those two, not Prisma
@@ -116,6 +117,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         mobile badge are both mounted at every viewport and used to fetch
         independently. Must wrap Header and MobileNav, not just {children}. */}
     <NotificationStoreProvider>
+    {/* One badge poll for both nav surfaces: this layout renders the first
+        value, but it does not re-render on client navigation, so the provider
+        re-reads the admin badge (GET /api/admin/arr-watch) while the app is open. */}
+    <NavBadgesProvider initial={navBadges} enabled={isAdmin}>
     <div
       className="flex h-screen overflow-hidden"
       style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
@@ -132,10 +137,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           "never stored" and overwrite a real choice. */}
       {localeKnown && <LocaleSync stored={storedLocale} />}
       <NavigationProgress />
-      <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} navBadges={navBadges} />
+      <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <Header />
-        <MobileNav featureFlags={featureFlags} navBadges={navBadges} />
+        <MobileNav featureFlags={featureFlags} />
         {maintenanceEnabled && isAdmin && (
           <MaintenanceBanner message={maintenanceMessage} />
         )}
@@ -148,6 +153,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       </div>
       {motdBody && <MotdModal title={motdTitle} body={motdBody} />}
     </div>
+    </NavBadgesProvider>
     </NotificationStoreProvider>
     </DetailTitleProvider>
     </RatingsVisibilityProvider>

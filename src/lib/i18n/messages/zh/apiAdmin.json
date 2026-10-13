@@ -345,5 +345,10 @@
   "apiAdmin.arr.taskBodyInvalid": "需要一个计划任务名称或搜索操作",
   "apiAdmin.arr.commandIdsInvalid": "需要 service、instance 以及最多 {max} 个命令 id",
   "apiAdmin.arr.providerBodyInvalid": "需要 kind（indexer 或 downloadClient）、一个数字 id 以及要更改的开关",
-  "apiAdmin.arrWatch.diskLowPercent": "磁盘空间不足提醒必须是 {min} 到 {max} 之间的整数百分比。"
+  "apiAdmin.arrWatch.diskLowPercent": "磁盘空间不足提醒必须是 {min} 到 {max} 之间的整数百分比。",
+  "apiAdmin.arr.providerRssUnsupported": "{service} 表示此索引器不支持 RSS，因此未开启 RSS",
+  "apiAdmin.arr.providerSearchUnsupported": "{service} 表示此索引器不支持搜索，因此未开启搜索",
+  "apiAdmin.neverWatched.refreshJobGone": "该观看记录检查已不再被跟踪——Summonarr 可能已重启。请刷新查看最新结果。",
+  "apiAdmin.arr.filesJobGone": "该删除操作已不可用——请重新加载文件以查看已删除的内容，不要盲目再次执行。",
+  "apiAdmin.arr.markInProgress": "该下载仍在标记为失败的过程中——请一分钟后重试"
 }

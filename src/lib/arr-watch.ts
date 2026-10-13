@@ -27,7 +27,7 @@ import type { ArrService } from "./arr-instances";
 import type { ArrHistoryEvent } from "./arr-history";
 import type { QueueItem } from "./arr-queue";
 import type { NotifyEvent } from "./notify-events";
-import { diskFor, type ArrDisk, type ArrRootFolder } from "./arr-system";
+import { diskFor, rootDisk, type ArrDisk, type ArrRootFolder } from "./arr-system";
 import { safeMessage } from "./arr-parse";
 
 // ── settings ─────────────────────────────────────────────────────────────────
@@ -82,11 +82,28 @@ const instanceNameOf = (inst: WatchInstance): string | null => (inst.slug === ""
 // ── free text from upstream ──────────────────────────────────────────────────
 
 const URL_RE = /\bhttps?:\/\/[^\s"'<>]+/gi;
-const UNC_PATH_RE = /\\\\[^\s"'<>]+/g;
-const WINDOWS_PATH_RE = /\b[A-Za-z]:[\\/][^\s"'<>]*/g;
+// A path runs to the END OF ITS CLAUSE, never to its first space: media folders
+// and file names contain spaces ("Movie Name (2020)/Movie Name (2020).mkv"),
+// and cutting there sent the rest of the path to the channel. They also contain
+// clause punctuation — "Ocean's Eleven", "Crouching Tiger, Hidden Dragon",
+// "Mr. Robot" — so a terminator is read in context:
+//   - `"`, `<`, `>`, `]` always end it, and so does "; " (or ";" at the end);
+//   - `'` ends it only as a CLOSING quote — not followed by a letter or digit,
+//     so the apostrophe in "Ocean's" never does;
+//   - ", " / ". " end it only when the NEXT clause doesn't carry on the path:
+//     no "/" or "\" and no file extension before the clause after it ends
+//     ("Hidden Dragon (2000)/…", "Hidden Dragon (2000).mkv", "Robot/Season 01").
+// A clause after the path that happens to hold a slash ("…/x.mkv. Ensure …
+// this file/folder") goes with it: removing too much is the safe direction
+// (guardrail 7c). Known residual: a trailing-apostrophe name before a space
+// ("The Boys' Club/…") still ends there.
+const PATH_CLAUSE_GOES_ON = String.raw`(?:(?![;,.](?:\s|$))[^"<>\]\r\n])*?(?:[\\/]|\.[A-Za-z0-9]{2,4}(?![A-Za-z0-9]))`;
+const PATH_END = String.raw`(?=["<>\]]|'(?![A-Za-z0-9])|;(?:\s|$)|[,.](?:\s+|$)(?!` + PATH_CLAUSE_GOES_ON + String.raw`)|$)`;
+const UNC_PATH_RE = new RegExp(String.raw`\\\\[^"<>\]\r\n]*?` + PATH_END, "g");
+const WINDOWS_PATH_RE = new RegExp(String.raw`\b[A-Za-z]:[\\/][^"<>\]\r\n]*?` + PATH_END, "g");
 // An absolute POSIX path: a "/" at the start of the text or after a space,
 // quote, bracket, colon or equals sign ("1/2" and "and/or" are not paths).
-const POSIX_PATH_RE = /(^|[\s"'([=:])\/[^\s"'<>)\]]+/g;
+const POSIX_PATH_RE = new RegExp(String.raw`(^|[\s"'([=:])\/[^"<>\]\r\n]*?` + PATH_END, "g");
 
 /**
  * Radarr/Sonarr (or a download client, quoted by them) wrote this: one line,
@@ -118,28 +135,10 @@ export const WATCH_GRACE_MS = 24 * 60 * 60_000;
 
 export type DiskState = "low" | "ok";
 
-/**
- * A root folder's free space and its disk's agree within the larger of these —
- * the two are read moments apart, and an import in flight moves both.
- */
-export const DISK_MATCH_TOLERANCE_BYTES = 1000 ** 3;
-export const DISK_MATCH_TOLERANCE_RATIO = 0.01;
-
-/**
- * The /diskspace entry a root folder is on, or null when none can be believed.
- * diskFor takes the longest disk path holding the folder's — and "/" holds
- * every path, so a root folder on a mount /diskspace doesn't list (mergerfs,
- * Unraid's shfs, an rclone mount) is matched to the container root and judged
- * against ITS size. The match is believed only when the root folder's own free
- * space (Radarr/Sonarr measure the folder itself) agrees with that disk's; a
- * root folder or disk that reports none can't be checked and keeps the match.
- */
-export function rootDisk(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks: readonly ArrDisk[]): ArrDisk | null {
-  const disk = diskFor(root.path, disks);
-  if (!disk || root.freeSpace === null || disk.freeSpace === null) return disk;
-  const tolerance = Math.max(DISK_MATCH_TOLERANCE_BYTES, disk.freeSpace * DISK_MATCH_TOLERANCE_RATIO);
-  return Math.abs(root.freeSpace - disk.freeSpace) <= tolerance ? disk : null;
-}
+// rootDisk — which /diskspace entry a root folder can be believed to sit on —
+// lives beside diskFor in arr-system.ts, so the Storage tab's sizes and this
+// monitor's verdicts come from one rule. Re-exported for this module's callers.
+export { DISK_MATCH_TOLERANCE_BYTES, DISK_MATCH_TOLERANCE_RATIO, rootDisk } from "./arr-system";
 
 export interface DiskReading {
   /** The disk's path, or the root folder's own when no /diskspace entry holds it. */
@@ -162,7 +161,9 @@ const MAX_DISKS = 200;
  * on one disk are one reading, so one alert. An inaccessible root folder is
  * skipped — that is Radarr/Sonarr's own RootFolder health check (arr.health).
  * A root folder whose disk can't be believed (rootDisk) is its own reading,
- * keyed by its own path, with no size: the 10 GB floor alone judges it.
+ * keyed by its own path, with no size: the 10 GB floor alone judges it — or,
+ * reporting no free space of its own either, it is skipped (nothing to judge;
+ * never "/"'s free space in its place).
  */
 export function readDisks(roots: readonly ArrRootFolder[], disks: readonly ArrDisk[]): DiskReading[] {
   const byPath = new Map<string, DiskReading>();
@@ -173,8 +174,8 @@ export function readDisks(roots: readonly ArrRootFolder[], disks: readonly ArrDi
     const free = root.freeSpace ?? disk?.freeSpace ?? null;
     if (free === null) continue;
     const path = disk?.path ?? root.path;
-    // projectRootFolders copies diskFor's disk size onto the root folder; when
-    // that match was refused, the copy is the wrong disk's size too.
+    // projectRootFolders lends a root folder only a believed disk's size now;
+    // kept as defence for a root built elsewhere with the refused disk's size.
     const ownTotal = refused !== null && root.totalSpace === refused.totalSpace ? null : root.totalSpace;
     const total = disk?.totalSpace ?? ownTotal ?? null;
     const existing = byPath.get(path);
@@ -273,7 +274,9 @@ export function diskEvent(inst: WatchInstance, t: DiskTransition, thresholdPerce
 /**
  * How far into the arr's history a run reads: the position (date, then id —
  * ids grow with every write) of the last failure record already handled. The
- * dates are the arr's own, so Summonarr's clock only matters for the seed.
+ * dates are the arr's own, so Summonarr's clock matters for the seed and for
+ * one bound: a run never consumes a record dated after its own clock, so the
+ * cursor it stores never passes it (selectNewFailures).
  */
 export interface HistoryCursor { at: string; lastId: number }
 
@@ -309,39 +312,79 @@ export const MAX_FAILURES_PER_RUN = 25;
  */
 export const FAILURE_FOLD_WINDOW_MS = 60 * 60_000;
 const MAX_RECENT_FAILURES = 200;
+/**
+ * How far past Summonarr's clock a STORED cursor may sit before
+ * `effectiveCursor` restarts it at now (Summonarr's own clock stepped back, or
+ * a cursor written by an older build). A tolerance only for the stored value:
+ * a run never CONSUMES a record dated after its own clock (selectNewFailures).
+ */
+export const MAX_FUTURE_SKEW_MS = 60 * 60_000;
 
-/** The cursor a run reads from: the stored one, clamped to the lookback; a first run seeds "now" and reads nothing. */
+/**
+ * The cursor a run reads from: the stored one, clamped to the lookback; a first
+ * run seeds "now" and reads nothing. A stored cursor further than
+ * MAX_FUTURE_SKEW_MS in the future (written before records were held back, or
+ * Summonarr's own clock went back) restarts at now — not a day back, which
+ * would re-announce failures `recent` no longer remembers.
+ */
 export function effectiveCursor(stored: HistoryCursor | null, nowMs: number): { cursor: HistoryCursor; seeded: boolean } {
   if (!stored) return { cursor: { at: new Date(nowMs).toISOString(), lastId: 0 }, seeded: true };
   const floor = nowMs - MAX_HISTORY_LOOKBACK_MS;
   const at = Date.parse(stored.at);
   if (!Number.isFinite(at) || at < floor) return { cursor: { at: new Date(floor).toISOString(), lastId: 0 }, seeded: false };
+  if (at > nowMs + MAX_FUTURE_SKEW_MS) return { cursor: { at: new Date(nowMs).toISOString(), lastId: 0 }, seeded: false };
   return { cursor: stored, seeded: false };
 }
 
 const after = (ms: number, id: number, c: { ms: number; id: number }) => ms > c.ms || (ms === c.ms && id > c.id);
 
 /**
+ * The message Radarr's and Sonarr's FailedDownloadService.MarkAsFailed writes
+ * on the DownloadFailed record of a MANUAL mark — Summonarr's Mark failed,
+ * Blocklist, Blocklist & search and Replace file, or the arr's own UI. That is
+ * an admin's action, not a failed download: it is consumed (the cursor passes
+ * it) but never announced or counted. An arr wording it differently is simply
+ * announced, as before.
+ */
+const ARR_MANUAL_FAIL_MESSAGE = "manually marked as failed";
+const isManualMark = (r: ArrHistoryEvent): boolean => r.message?.trim().toLowerCase() === ARR_MANUAL_FAIL_MESSAGE;
+
+/**
  * The failures past the cursor, folded by downloadId, oldest first, at most
  * `cap` downloads. Returns the cursor to store (the last record consumed) and
  * the remembered downloads. Only "failed" records are read — an arr that
- * ignored the eventType filter can't turn a grab into a failure.
+ * ignored the eventType filter can't turn a grab into a failure — and a
+ * manual mark (ARR_MANUAL_FAIL_MESSAGE) is consumed silently. A record dated
+ * after `nowMs` is HELD BACK — not consumed — until Summonarr's clock reaches
+ * it: the arr host's clock jumped forward while it wrote that failure, and
+ * consuming it would move the cursor ahead of real time, so every genuine
+ * failure the corrected arr writes before that moment would fall behind the
+ * cursor, unannounced. (Any tolerance here is a window of exactly that loss —
+ * a one-hour one lost up to an hour of failures.) Held back, it is delayed,
+ * never lost and never repeated; the cost is that an arr whose clock runs
+ * steadily ahead has each failure announced that much later.
+ * Records of one download fold within FAILURE_FOLD_WINDOW_MS of its first
+ * record, in one run exactly as across runs. `deferred` counts history RECORDS
+ * left for the next run once the cap was reached — a Sonarr pack counts once
+ * per episode, so it is not a count of downloads.
  */
 export function selectNewFailures(
   records: readonly ArrHistoryEvent[],
   cursor: HistoryCursor,
   recent: readonly RecentFailure[],
   cap = MAX_FAILURES_PER_RUN,
+  nowMs = Number.POSITIVE_INFINITY,
 ): { groups: FailureGroup[]; cursor: HistoryCursor; recent: RecentFailure[]; deferred: number } {
   const c = { ms: Date.parse(cursor.at), id: cursor.lastId };
+  const latest = nowMs;
   const fresh = records
     .filter((r) => r.kind === "failed" && r.date !== null)
     .map((r) => ({ r, ms: Date.parse(r.date as string) }))
-    .filter((x) => Number.isFinite(x.ms) && after(x.ms, x.r.id, c))
+    .filter((x) => Number.isFinite(x.ms) && x.ms <= latest && after(x.ms, x.r.id, c))
     .sort((a, b) => a.ms - b.ms || a.r.id - b.r.id);
 
   const groups: FailureGroup[] = [];
-  const byDownload = new Map<string, { group: FailureGroup; episodes: Set<string> }>();
+  const byDownload = new Map<string, { group: FailureGroup; episodes: Set<string>; ms: number }>();
   const remembered = new Map<string, number>();
   for (const f of recent) {
     const ms = Date.parse(f.at);
@@ -352,7 +395,9 @@ export function selectNewFailures(
   for (const { r, ms } of fresh) {
     const id = r.downloadId;
     const open = id ? byDownload.get(id) : undefined;
-    if (open) {
+    if (isManualMark(r)) {
+      // An admin's mark, not a failure: passed, never announced (before the cap, so it can't use up the budget).
+    } else if (open && ms - open.ms <= FAILURE_FOLD_WINDOW_MS) {
       if (r.episode) open.episodes.add(`${r.episode.seasonNumber}:${r.episode.episodeNumber}`);
       else if (r.episodeId !== null) open.episodes.add(`id:${r.episodeId}`);
       open.group.episodes = open.episodes.size;
@@ -375,7 +420,7 @@ export function selectNewFailures(
       group.episodes = episodes.size;
       groups.push(group);
       if (id) {
-        byDownload.set(id, { group, episodes });
+        byDownload.set(id, { group, episodes, ms });
         remembered.set(id, ms);
       }
     }
@@ -432,6 +477,28 @@ export interface AttentionMemory {
   keys?: readonly string[];
   /** Keys already announced (or seeded) → when each was last seen needing attention. */
   seen?: Readonly<Record<string, string>>;
+  /** When the queue was last read successfully (InstanceWatchState.attentionReadAt). */
+  readAt?: string;
+}
+
+/**
+ * A gap between two successful queue reads longer than this is UNOBSERVED
+ * time (the arr unreachable, Summonarr down) and does not age the attention
+ * memory: a download stuck through a 26-hour outage is not "newly stuck" on
+ * recovery. Well above the default 15-minute cadence and the 5-minute retry,
+ * so regular runs age exactly as before. The floor only — the gap the monitor
+ * uses scales with its configured cadence (`attentionReadGapMs`).
+ */
+export const ATTENTION_READ_GAP_MS = 60 * 60_000;
+
+/**
+ * The read gap for a cadence of `intervalSeconds` (ARR_WATCH_INTERVAL): twice
+ * the interval, never under ATTENTION_READ_GAP_MS. A FIXED hour made every
+ * regular gap of a slower cadence "unobserved" — at a daily interval each run
+ * moved the kept keys forward ~23 h, so the 24-hour memory lasted ~25 days.
+ */
+export function attentionReadGapMs(intervalSeconds: number): number {
+  return Math.max(ATTENTION_READ_GAP_MS, 2 * intervalSeconds * 1000);
 }
 
 /**
@@ -443,18 +510,28 @@ export interface AttentionMemory {
  * previous state (the first run for this instance) nothing is new: downloads
  * already stuck when the monitor started are on the queue page and the nav
  * badge, not announced as if they just happened. A state stored before the
- * memory existed knows its last set, and that set seeds it.
+ * memory existed knows its last set, and that set seeds it. The grace counts
+ * OBSERVED time only: the part of the gap since the last successful read
+ * (`readAt`) beyond `readGapMs` (the cadence's `attentionReadGapMs`) is not
+ * counted, and a key kept through it is stored moved forward by that much, so
+ * later runs don't count it either.
  */
 export function diffAttention(
   items: readonly QueueItem[],
   prev: AttentionMemory | null,
   nowMs: number,
   cap = MAX_ATTENTION_PER_RUN,
+  readGapMs = ATTENTION_READ_GAP_MS,
 ): { keys: string[]; newly: QueueItem[]; seen: Record<string, string>; deferred: number } {
   const nowIso = new Date(nowMs).toISOString();
-  const floor = nowMs - WATCH_GRACE_MS;
+  const lastRead = prev?.readAt ? Date.parse(prev.readAt) : NaN;
+  const unobserved = Number.isFinite(lastRead) ? Math.max(0, nowMs - lastRead - readGapMs) : 0;
+  const floor = nowMs - WATCH_GRACE_MS - unobserved;
   const known = new Map<string, string>();
-  for (const [key, at] of Object.entries(prev?.seen ?? {})) if (Date.parse(at) >= floor) known.set(key, at);
+  for (const [key, at] of Object.entries(prev?.seen ?? {})) {
+    const ms = Date.parse(at);
+    if (ms >= floor) known.set(key, unobserved > 0 ? new Date(Math.min(nowMs, ms + unobserved)).toISOString() : at);
+  }
   if (prev && !prev.seen) for (const key of prev.keys ?? []) known.set(key, nowIso);
   const keys: string[] = [];
   const newly: QueueItem[] = [];
@@ -506,6 +583,8 @@ export interface InstanceWatchState {
   attention?: string[];
   /** Announced attention keys → last seen needing attention (diffAttention). */
   attentionSeen?: Record<string, string>;
+  /** The last SUCCESSFUL queue read — a failed read keeps it, so the gap counts as unobserved (diffAttention). */
+  attentionReadAt?: string;
   /** When each announced failed download failed, for the last 24 hours (the summary's count). */
   failures?: string[];
 }
@@ -561,6 +640,7 @@ function parseInstanceState(v: unknown): InstanceWatchState | null {
       if (key.length <= 600 && isIso(at) && Object.keys(out.attentionSeen).length < MAX_ATTENTION_KEYS) out.attentionSeen[key] = at;
     }
   }
+  if (isIso(r.attentionReadAt)) out.attentionReadAt = r.attentionReadAt;
   if (Array.isArray(r.failures)) out.failures = strings(r.failures, MAX_FAILURE_TIMES).filter(isIso);
   return out;
 }

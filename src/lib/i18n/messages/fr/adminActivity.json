@@ -409,5 +409,7 @@
   "adminActivity.trackingOff.description": "Rien n'est enregistré, ce tableau de bord n'a donc ni lectures, ni temps de visionnage, ni spectateurs à afficher. Activez le suivi dans Paramètres → Médias → Historique de lecture pour commencer à le remplir.",
   "adminActivity.trackingOff.cta": "Ouvrir les paramètres de l'historique de lecture",
   "adminActivity.common.hoursShort": "{n} h",
-  "adminActivity.detail.openPlay": "Ouvrir la lecture →"
+  "adminActivity.detail.openPlay": "Ouvrir la lecture →",
+  "adminActivity.stats.noReasonReportedTop": "{pct} % des transcodages ont été signalés sans raison — le serveur n'a pas indiqué pourquoi il a transcodé.",
+  "adminActivity.stats.movieDecadesTvFiltered": "Films uniquement — non affiché tant que le filtre Séries est actif."
 }

@@ -20,6 +20,7 @@ import { CommandWatchLine, useArrCommandWatch } from "@/components/admin/arr-com
 import { ReleaseSearchDialog, type TitleReleaseTarget } from "@/components/admin/release-search-dialog";
 import { queueFormatters } from "@/components/admin/queue-format";
 import type { ArrTitle, Choice, RootFolderChoice } from "@/lib/arr-title";
+import { closeVerdict } from "@/lib/arr-title-ui";
 import { SettingsTab } from "./settings-tab";
 import { SeasonsTab, type ReleaseScope } from "./seasons-tab";
 import { FilesTab } from "./files-tab";
@@ -90,6 +91,9 @@ export function ArrTitleManager({
   const [tab, setTab] = useState<Tab>("settings");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
+  // Search missing that Sonarr refused part-way (202 `partial: true`): what it
+  // did queue is followed as usual; this says the rest never started.
+  const [partialNote, setPartialNote] = useState("");
   const [error, setError] = useState("");
   // Bumped by the OPEN-time read only: a background re-read (after a refresh or
   // a file delete) must not reset settings the admin is still editing.
@@ -99,9 +103,14 @@ export function ArrTitleManager({
   // never throws away an unsaved Settings edit or reloads a list.
   const [visited, setVisited] = useState<ReadonlySet<Tab>>(new Set(["settings"]));
   const [settingsDirty, setSettingsDirty] = useState(false);
+  // A Settings save whose PATCH is in flight: nothing it sent can be discarded.
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [removed, setRemoved] = useState(false);
   const loadSeq = useRef(0);
+  // Reads still waiting for their answer (dropped ones included): a write that
+  // answers meanwhile reads the title once more (supersedeReads).
+  const loadsInFlight = useRef(0);
   // The title's commands, followed live (GET /api/admin/arr/commands) under
   // their button's key; the notice line shows the newest one.
   const { watch, stop: stopWatches, watches } = useArrCommandWatch();
@@ -115,7 +124,11 @@ export function ArrTitleManager({
     const q = new URLSearchParams({ service, instance });
     if ("tmdbId" in by) q.set("tmdbId", String(by.tmdbId));
     else q.set("id", String(by.arrId));
-    const res = await arrApi<TitleState>(`/api/admin/arr/title?${q.toString()}`, undefined, tRef.current("adminArr.manage.loadFailed"));
+    const fallback = tRef.current("adminArr.manage.loadFailed");
+    // arrApi never throws: a failure is its answer.
+    loadsInFlight.current++;
+    const res = await arrApi<TitleState>(`/api/admin/arr/title?${q.toString()}`, undefined, fallback);
+    loadsInFlight.current--;
     if (seq !== loadSeq.current) return;
     if (res.ok) {
       setState((prev) => (prev && !initial ? { ...res.data, title: mergeTitle(prev.title, res.data.title) } : res.data));
@@ -129,16 +142,27 @@ export function ArrTitleManager({
   // Effects key on the target's VALUE: a parent re-render hands a new object.
   const targetKey = "tmdbId" in target ? `tmdb:${target.tmdbId}` : `arr:${target.arrId}`;
   const firstTab: Tab = initialTab === "seasons" && service !== "sonarr" ? "settings" : initialTab ?? "settings";
+  // The tab is chosen at OPEN time only. A host re-rendering with another
+  // initialTab (the request list's follows the row's live status) must not
+  // re-run the open-time reset below — it would throw away unsaved Settings
+  // edits without asking. Declared before that effect, so it is current when
+  // the dialog opens in the same commit.
+  const firstTabRef = useRef(firstTab);
+  useEffect(() => {
+    firstTabRef.current = firstTab;
+  });
 
   useEffect(() => {
     if (!open) return;
+    const openTab = firstTabRef.current;
     setState(null);
     setLoadError("");
     setNotice("");
     setError("");
-    setTab(firstTab);
-    setVisited(new Set(["settings", firstTab]));
+    setTab(openTab);
+    setVisited(new Set(["settings", openTab]));
     setSettingsDirty(false);
+    setSettingsSaving(false);
     setConfirmDiscard(false);
     setRemoved(false);
     setWatchKey(null);
@@ -151,23 +175,37 @@ export function ArrTitleManager({
       counter.current++;
       stopWatches();
     };
-  }, [open, targetKey, firstTab, load, stopWatches]);
+  }, [open, targetKey, load, stopWatches]);
+
+  // The banner asks about edits that would be lost: once there are none (saved,
+  // reset), it goes — or it would keep offering Discard, and the next close of
+  // a fresh edit would skip the question (closeVerdict reads it as answered).
+  const onDirtyChange = useCallback((dirty: boolean) => {
+    setSettingsDirty(dirty);
+    if (!dirty) setConfirmDiscard(false);
+  }, []);
 
   function selectTab(next: Tab) {
     setTab(next);
     setVisited((v) => (v.has(next) ? v : new Set([...v, next])));
   }
 
-  // Closing with unsaved Settings edits asks first — the edits would be lost.
+  // Closing with unsaved Settings edits asks first — the edits would be lost;
+  // closing during a save waits for it (closeVerdict). True when it closed.
+  function leave(): boolean {
+    const verdict = closeVerdict({ removed, saving: settingsSaving, dirty: settingsDirty, confirming: confirmDiscard });
+    if (verdict === "close") {
+      onOpenChange(false);
+      return true;
+    }
+    // The Settings tab shows why: the banner, or the save's spinner.
+    if (verdict === "confirm") setConfirmDiscard(true);
+    selectTab("settings");
+    return false;
+  }
   function requestClose(nextOpen: boolean) {
     if (nextOpen) return onOpenChange(true);
-    // A removed title has no edits left to lose.
-    if (settingsDirty && !confirmDiscard && !removed) {
-      setConfirmDiscard(true);
-      selectTab("settings");
-      return;
-    }
-    onOpenChange(false);
+    leave();
   }
 
   // Stable per title: the tabs key their reads on it.
@@ -176,6 +214,18 @@ export function ArrTitleManager({
   const reload = useCallback(() => {
     if (arrId !== null) void load({ arrId });
   }, [arrId, load]);
+
+  // A write's answer (a Settings save, a season/episode flip) carries the title
+  // as the arr holds it AFTER the write. A read still in flight may have been
+  // answered before it, so it is dropped (loadSeq) rather than merged over the
+  // write. True when one was: it may also have carried what the write's answer
+  // can't (a refresh's re-read, the choice lists), so the caller reads again
+  // once the write's title is in.
+  function supersedeReads(): boolean {
+    const overlapped = loadsInFlight.current > 0;
+    loadSeq.current++;
+    return overlapped;
+  }
 
   // Queue one title command and follow it: `done` (the "started" notice) shows
   // until the arr's first status, then its own progress and how it ended.
@@ -188,8 +238,9 @@ export function ArrTitleManager({
   ) => {
     if (!state) return;
     setNotice("");
+    setPartialNote("");
     setError("");
-    const res = await arrApi<{ commands: number; commandIds?: number[] }>(
+    const res = await arrApi<{ commands: number; commandIds?: number[]; partial?: boolean }>(
       "/api/admin/arr/title/command",
       { method: "POST", body: { service, instance, id: state.title.arrId, ...body } },
       t("adminArr.manage.commandFailed"),
@@ -198,6 +249,7 @@ export function ArrTitleManager({
       setError(res.error);
       return;
     }
+    if (res.data.partial === true) setPartialNote(t("adminArr.notice.searchMissingPartial"));
     const key = opts.key ?? "search";
     const ids = Array.isArray(res.data.commandIds) ? res.data.commandIds : [];
     if (ids.length === 0) {
@@ -314,13 +366,16 @@ export function ArrTitleManager({
                   <Check className="h-3.5 w-3.5 shrink-0" /> {notice}
                 </p>
               ) : null}
+              {partialNote && !error && !loadError && (
+                <p role="status" className="m-0 text-xs text-zinc-400">{partialNote}</p>
+              )}
 
               {confirmDiscard && (
                 <div role="alertdialog" aria-label={t("adminArr.settings.discardTitle")} className="flex flex-wrap items-center gap-3 rounded-lg px-3 py-2.5 text-sm" style={{ background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)", border: "1px solid var(--ds-warning)" }}>
                   <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
                   <span className="min-w-0 flex-1 text-zinc-100">{t("adminArr.settings.discardTitle")}</span>
                   <Button variant="ghost" size="sm" onClick={() => setConfirmDiscard(false)}>{t("adminArr.settings.keepEditing")}</Button>
-                  <Button size="sm" className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" onClick={() => onOpenChange(false)}>
+                  <Button size="sm" disabled={settingsSaving} className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" onClick={() => onOpenChange(false)}>
                     {t("adminArr.settings.discard")}
                   </Button>
                 </div>
@@ -340,9 +395,12 @@ export function ArrTitleManager({
                     onSaved={(next) => {
                       // The write landed but its re-read failed: read it again.
                       if (!next) return reload();
+                      const reread = supersedeReads();
                       setState((s) => (s ? { ...s, title: mergeTitle(s.title, next) } : s));
+                      if (reread) reload();
                     }}
-                    onDirtyChange={setSettingsDirty}
+                    onDirtyChange={onDirtyChange}
+                    onSavingChange={setSettingsSaving}
                   />
                   <div className="mt-5">
                     <RemovePanel
@@ -363,14 +421,20 @@ export function ArrTitleManager({
                   <SeasonsTab
                     titleRef={ref}
                     title={state.title}
-                    onTitle={(next) => setState((s) => (s ? { ...s, title: mergeTitle(s.title, next) } : s))}
+                    onTitle={(next) => {
+                      // The write landed but its re-read failed: read it again.
+                      if (!next) return reload();
+                      const reread = supersedeReads();
+                      setState((s) => (s ? { ...s, title: mergeTitle(s.title, next) } : s));
+                      if (reread) reload();
+                    }}
                     runCommand={runCommand}
                     pickRelease={(scope, subtitle) => pickRelease(scope, subtitle)}
                   />
                 </div>
               )}
               {ref && visited.has("files") && <div hidden={tab !== "files"}><FilesTab titleRef={ref} onChanged={reload} /></div>}
-              {ref && visited.has("history") && <div hidden={tab !== "history"}><HistoryTab titleRef={ref} /></div>}
+              {ref && visited.has("history") && <div hidden={tab !== "history"}><HistoryTab titleRef={ref} onLeave={leave} /></div>}
             </DialogContent>
           )}
 
@@ -403,6 +467,7 @@ export function ManageTitleButton({
   initialTab,
   autoOpen = false,
   onRemoved,
+  onActiveChange,
 }: {
   service: ArrServiceName;
   instance: string;
@@ -414,9 +479,27 @@ export function ManageTitleButton({
   /** Open on first render — a deep link (`?manage=` on the detail pages). */
   autoOpen?: boolean;
   onRemoved?: () => void;
+  /**
+   * Told `true` when the dialog opens and `false` when it closes (or the button
+   * unmounts with it open). A live list holds its refresh meanwhile: a refresh
+   * can drop the row — and the dialog with it, unsaved edits and all.
+   */
+  onActiveChange?: (open: boolean) => void;
 }) {
   const t = useT();
   const [open, setOpen] = useState(autoOpen);
+  // The latest callback, so a parent's new function each render never reads as
+  // a close and a re-open.
+  const activeRef = useRef(onActiveChange);
+  useEffect(() => {
+    activeRef.current = onActiveChange;
+  });
+  useEffect(() => {
+    if (!open) return;
+    activeRef.current?.(true);
+    const active = activeRef;
+    return () => active.current?.(false);
+  }, [open]);
   const label = t("adminArr.manage.button", { name: instanceLabel });
   // The button usually sits IN a row of the list that re-reads on a removal,
   // and that re-read unmounts the row — dialog and its "Removed" confirmation

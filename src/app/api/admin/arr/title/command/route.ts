@@ -23,7 +23,9 @@ const LIMIT_PER_MIN = 30;
 //           search when it has a file) or "refresh" (RefreshMovie).
 //   Sonarr: "refresh" (RefreshSeries); "searchMissing" — exactly what the
 //           series is missing, re-judged live (the Missing page's plan, never
-//           SeriesSearch; 409 when nothing is); "searchSeason" + seasonNumber
+//           SeriesSearch; 409 `{ nothingMissing: true }` when nothing is, 404 when the instance no
+//           longer has the series; 202 with `partial: true` and the ids it
+//           did queue when Sonarr refused a later command); "searchSeason" + seasonNumber
 //           (SeasonSearch); "searchEpisodes" + episodeIds (one EpisodeSearch —
 //           every id must be one of the series' episodes; with
 //           `missingOnly: true` only the ones that have aired and still have no
@@ -61,6 +63,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         return NextResponse.json(await searchEpisodes(instance, arrId, episodeIds as number[], { missingOnly: body.missingOnly === true }), { status: 202 });
       case "searchMissing": {
         // { commands, seasons, episodes, commandIds } — one id per season searched whole, plus one.
+        // Refused part-way: still 202, counting only what was queued, plus `partial: true`.
         const result = await searchMissingTracked("sonarr", instance, arrId, new Date());
         return NextResponse.json(result, { status: 202 });
       }
@@ -69,8 +72,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     if (err instanceof MissingInstanceError) {
       return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service: ARR_SERVICE_LABEL[service] }) }, { status: 404 });
     }
+    // `nothingMissing` tells this 409 apart from the route's other 409s (an
+    // episode id no longer on the series, the arr's own refusal): only this one
+    // is "nothing left to search" — the Arr Calendar reads the flag, never the status alone.
     if (err instanceof NothingMissingError) {
-      return NextResponse.json({ error: t("apiAdmin.missing.nothingMissing") }, { status: 409 });
+      return NextResponse.json({ error: t("apiAdmin.missing.nothingMissing"), nothingMissing: true }, { status: 409 });
     }
     if (err instanceof ArrResponseError && err.status === 404 && action === "searchMissing") {
       return NextResponse.json({ error: t("apiAdmin.arr.titleNotFound", { service: ARR_SERVICE_LABEL[service] }) }, { status: 404 });

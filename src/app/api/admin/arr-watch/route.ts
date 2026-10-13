@@ -10,12 +10,16 @@ import {
   MIN_DISK_LOW_PERCENT,
   validateDiskLowPercent,
 } from "@/lib/arr-watch";
-import { loadDiskLowPercent, readArrWatchSummary } from "@/lib/arr-watch-data";
+import { arrWatchNavBadgesFor, loadDiskLowPercent, readArrWatchSummary } from "@/lib/arr-watch-data";
 
 // The Radarr/Sonarr monitor's setting and its last run's counts (ADMIN).
 // GET: { settings: { diskLowPercent }, summary: { at, attention, lowDisks,
-// failed24h } | null }. PATCH { diskLowPercent }: a whole number of percent,
-// 1–50; anything else is refused whole — nothing is repaired on write.
+// failed24h } | null, navBadges: { [href]: count } } — navBadges is what the
+// admin nav shows, by the layout's own rule (arrWatchNavBadgesFor: no badge
+// for a zero count or a stale snapshot), so the browser can keep the badge
+// fresh between full page loads (NavBadgesProvider); `{}` is no badge.
+// PATCH { diskLowPercent }: a whole number of percent, 1–50; anything else is
+// refused whole — nothing is repaired on write.
 
 async function settings() {
   return { diskLowPercent: await loadDiskLowPercent() };
@@ -23,7 +27,8 @@ async function settings() {
 
 export const GET = withAdmin(async () => {
   const [s, summary] = await Promise.all([settings(), readArrWatchSummary()]);
-  return NextResponse.json({ settings: s, summary });
+  // Additive (the settings card reads only the first two fields).
+  return NextResponse.json({ settings: s, summary, navBadges: arrWatchNavBadgesFor(summary, Date.now()) ?? {} });
 });
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {

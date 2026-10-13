@@ -88,6 +88,7 @@ const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { _resetReleaseHandlesForTests } = await import("../src/lib/release-handles.ts");
+const { _resetMarkClaimsForTests } = await import("../src/lib/arr-title-data.ts");
 
 // ── auth fixture ─────────────────────────────────────────────────────────────
 const usersById = new Map<string, Record<string, unknown>>();
@@ -274,6 +275,7 @@ beforeEach(() => {
   audits.length = 0;
   warnLines = [];
   _resetReleaseHandlesForTests();
+  _resetMarkClaimsForTests();
   responder = both(radarrBase, sonarrBase);
   tmdbCacheRows.clear();
   tmdbCacheRows.set("tmdb-to-tvdb:1396", JSON.stringify({ tvdbId: 81189 }));
@@ -539,6 +541,31 @@ test("a rename only renames files the arr's preview, re-read now, still lists", 
   assert.equal(audits[0].action, "ARR_FILE_RENAME");
 });
 
+test("C048: a long show's rename preview (every file pre-ticked) is renamed in ONE command — the cap is the delete's, not 2,000", async () => {
+  const token = await mintSession();
+  // 9,000 seven-digit ids: past the old 2,000-id cap AND the old 64 KB body cap.
+  const ids = Array.from({ length: 9_000 }, (_, i) => 1_000_000 + i);
+  responder = both((c) => {
+    if (c.method === "GET" && c.path === "/api/v3/rename") {
+      return json(ids.map((id) => ({ seriesId: 21, episodeFileId: id, seasonNumber: 1, episodeNumbers: [1], existingPath: `e${id}.mkv`, newPath: `E${id}.mkv` })));
+    }
+    if (c.method === "POST" && c.path === "/api/v3/command") return json({ id: 5 }, 201);
+    return undefined;
+  }, sonarrBase);
+  const preview = (await (await call(renameRoute.GET, token, "/admin/arr/title/rename?service=sonarr&id=21")).json()) as { files: Array<{ fileId: number }> };
+  assert.equal(preview.files.length, ids.length);
+  const res = await call(renameRoute.POST, token, "/admin/arr/title/rename", { method: "POST", body: { service: "sonarr", id: 21, fileIds: preview.files.map((f) => f.fileId) } });
+  assert.equal(res.status, 202);
+  const sent = writes();
+  assert.equal(sent.length, 1);
+  assert.deepEqual((sent[0].body as { files: number[] }).files, ids);
+  // Still capped (guardrail 30): one id past the shared limit is refused, nothing sent.
+  calls = [];
+  const over = await call(renameRoute.POST, token, "/admin/arr/title/rename", { method: "POST", body: { service: "sonarr", id: 21, fileIds: Array.from({ length: 10_001 }, (_, i) => i + 1) } });
+  assert.equal(over.status, 400);
+  assert.deepEqual(writes(), []);
+});
+
 const APIKEY = "s3cr3t-indexer-apikey";
 const HISTORY = [
   {
@@ -739,8 +766,9 @@ test("the calendar reads every instance, names a failed one, and judges each ent
   assert.ok(Number.isFinite(Date.parse(body.now)), "the report carries the server's clock");
 
   // The window asked of each arr: Radarr's padded a day either side (a release
-  // DATE is midnight UTC, the page's window is local days); Sonarr's as given,
-  // with the series (title, runtime, monitored) included.
+  // DATE is midnight UTC, the page's window is local days); Sonarr's padded 14 h
+  // either side (v3 parses the query date as the host's LOCAL time), with the
+  // series (title, runtime, monitored) included.
   const calendarQuery = (origin: string) => {
     const c = calls.find((x) => x.path === "/api/v3/calendar" && x.origin === origin);
     assert.ok(c, origin);
@@ -748,7 +776,7 @@ test("the calendar reads every instance, names a failed one, and judges each ent
   };
   assert.deepEqual(calendarQuery(RADARR), { start: "2026-09-30T00:00:00.000Z", end: "2026-12-01T00:00:00.000Z", unmonitored: "false" });
   assert.deepEqual(calendarQuery(SONARR), {
-    start: "2026-10-01T00:00:00.000Z", end: "2026-11-30T00:00:00.000Z", unmonitored: "false",
+    start: "2026-09-30T10:00:00.000Z", end: "2026-11-30T14:00:00.000Z", unmonitored: "false",
     includeSeries: "true", includeEpisodeFile: "false", includeEpisodeImages: "false",
   });
 
@@ -904,6 +932,9 @@ test("mark failed falls back to the body forms older v3 builds use (form field, 
   assert.deepEqual(writes().map((c) => [c.path, c.body]), [["/api/v3/history/failed/900", undefined], ["/api/v3/history/failed", "id=900"]]);
   calls = [];
   formAccepted = false;
+  // The same grab again, as a fresh arr would see it: the first mark's claim
+  // (C095) would otherwise refuse it.
+  _resetMarkClaimsForTests();
   assert.equal((await mark()).status, 200);
   assert.deepEqual(writes().map((c) => [c.path, c.body]), [["/api/v3/history/failed/900", undefined], ["/api/v3/history/failed", "id=900"], ["/api/v3/history/failed", 900]]);
 });
@@ -924,6 +955,155 @@ test("a season pack is marked failed ONCE — another episode's grab of the same
   assert.equal(res.status, 409);
   assert.deepEqual(writes(), []);
   assert.equal(audits.length, 0);
+});
+
+// C095: two marks of one download at once (two tabs, two admins, the History
+// page beside an issue's Replace file) both read a history with no failure yet.
+const PACK_GRABS = [
+  { id: 70, seriesId: 21, eventType: "grabbed", date: "2026-10-01T10:00:00Z", sourceTitle: "Breaking.Bad.S02.1080p", downloadId: "PACK", episodeId: 201 },
+  { id: 71, seriesId: 21, eventType: "grabbed", date: "2026-10-01T10:00:00Z", sourceTitle: "Breaking.Bad.S02.1080p", downloadId: "PACK", episodeId: 202 },
+];
+const markSonarr = (token: string, historyId: number) =>
+  call(failedRoute.POST, token, "/admin/arr/history/failed", { method: "POST", body: { service: "sonarr", arrId: 21, historyId } });
+const markPosts = () => writes().filter((c) => c.path.startsWith("/api/v3/history/failed"));
+
+test("C095: two marks of one pack racing each other send ONE mark — the second is 409 with nothing sent", async () => {
+  const token = await mintSession();
+  let open: (() => void) | null = null;
+  const gate = new Promise<void>((r) => { open = r; });
+  responder = both(((c: Call) => {
+    if (c.path === "/api/v3/history/series") return json(PACK_GRABS);
+    if (c.method === "POST" && c.path.startsWith("/api/v3/history/failed")) return gate.then(() => json({}));
+    return undefined;
+  }) as unknown as Responder, sonarrBase);
+  const first = markSonarr(token, 70);
+  for (let i = 0; i < 50 && markPosts().length === 0; i++) await new Promise((r) => setTimeout(r, 2));
+  assert.equal(markPosts().length, 1, "the first mark is in flight");
+  // The racing mark must answer at once; open the gate whatever happened, so
+  // one that reached the arr fails the test instead of parking it forever.
+  const racing = markSonarr(token, 71);
+  const second = await Promise.race([racing, new Promise<"parked">((r) => setTimeout(() => r("parked"), 1_000))]);
+  (open as unknown as () => void)();
+  assert.notEqual(second, "parked", "the racing mark reached the arr");
+  assert.equal((second as Response).status, 409);
+  assert.equal((await first).status, 200);
+  assert.equal(markPosts().length, 1, "the download was failed once");
+  assert.equal(audits.filter((a) => a.action === "ARR_MARK_FAILED").length, 1);
+});
+
+test("C095: a definite refusal hands the mark's claim back; no answer keeps it; a re-grab of the same download after the failure is a new mark", async () => {
+  const token = await mintSession();
+  let history: unknown[] = PACK_GRABS;
+  let markStatus: number | "network" = 400;
+  responder = both((c) => {
+    if (c.path === "/api/v3/history/series") return json(history);
+    if (c.method === "POST" && c.path.startsWith("/api/v3/history/failed")) {
+      if (markStatus === "network") throw new TypeError("fetch failed");
+      return markStatus === 200 ? json({}) : json({ message: "refused" }, markStatus);
+    }
+    return undefined;
+  }, sonarrBase);
+  assert.notEqual((await markSonarr(token, 70)).status, 200);
+  markStatus = 200;
+  assert.equal((await markSonarr(token, 70)).status, 200, "the arr refused it outright — the same mark may be tried again");
+  assert.equal(markPosts().length, 2);
+
+  // The arr wrote its failure; the same torrent (same info hash) was grabbed
+  // again later — marking THAT grab is a new mark, not the old download's.
+  history = [...PACK_GRABS, { id: 72, seriesId: 21, eventType: "downloadFailed", sourceTitle: "Breaking.Bad.S02.1080p", downloadId: "PACK", episodeId: 201 },
+    { id: 73, seriesId: 21, eventType: "grabbed", sourceTitle: "Breaking.Bad.S02.1080p", downloadId: "PACK", episodeId: 201 }];
+  calls = [];
+  assert.equal((await markSonarr(token, 73)).status, 200);
+  assert.equal(markPosts().length, 1);
+
+  // No answer at all (the arr may have taken it): the claim holds, so a second
+  // mark of that download sends nothing even before the arr's record shows up.
+  _resetMarkClaimsForTests();
+  history = PACK_GRABS;
+  markStatus = "network";
+  calls = [];
+  assert.notEqual((await markSonarr(token, 70)).status, 200);
+  markStatus = 200;
+  assert.equal((await markSonarr(token, 71)).status, 409);
+  assert.equal(markPosts().length, 1);
+});
+
+test("a mark whose outcome is unknown holds its claim only briefly — after it, the fresh history decides, so a mark that never landed is sent", async () => {
+  const token = await mintSession();
+  let history: unknown[] = PACK_GRABS;
+  let markStatus: number | "network" = "network";
+  responder = both((c) => {
+    if (c.path === "/api/v3/history/series") return json(history);
+    if (c.method === "POST" && c.path.startsWith("/api/v3/history/failed")) {
+      if (markStatus === "network") throw new TypeError("fetch failed");
+      return markStatus === 200 ? json({}) : json({ message: "unavailable" }, markStatus);
+    }
+    return undefined;
+  }, sonarrBase);
+  const realNow = Date.now;
+  let offset = 0;
+  Date.now = () => realNow() + offset;
+  try {
+    for (const failure of ["network", 503] as const) {
+      _resetMarkClaimsForTests();
+      history = PACK_GRABS;
+      calls = [];
+      offset = 0;
+      markStatus = failure;
+      assert.notEqual((await markSonarr(token, 70)).status, 200);
+      markStatus = 200;
+      // Straight after: the first mark may still be landing — nothing sent.
+      assert.equal((await markSonarr(token, 71)).status, 409, `${failure}: inside the hold`);
+      assert.equal(markPosts().length, 1);
+      // Two minutes on, the history still shows no failure: the first mark
+      // never reached the arr, and this one is sent.
+      offset = 2 * 60_000;
+      assert.equal((await markSonarr(token, 71)).status, 200, `${failure}: the history decides after the hold`);
+      assert.equal(markPosts().length, 2);
+    }
+    // A mark that DID land is refused by the history itself, hold or not.
+    _resetMarkClaimsForTests();
+    history = PACK_GRABS;
+    calls = [];
+    offset = 0;
+    markStatus = "network";
+    assert.notEqual((await markSonarr(token, 70)).status, 200);
+    history = [...PACK_GRABS, { id: 72, seriesId: 21, eventType: "downloadFailed", sourceTitle: "Breaking.Bad.S02.1080p", downloadId: "PACK", episodeId: 201 }];
+    offset = 2 * 60_000;
+    markStatus = 200;
+    assert.equal((await markSonarr(token, 71)).status, 409);
+    assert.equal(markPosts().length, 1);
+    // An ACCEPTED mark keeps its claim for the full TTL, history or not.
+    _resetMarkClaimsForTests();
+    history = PACK_GRABS;
+    calls = [];
+    offset = 0;
+    assert.equal((await markSonarr(token, 70)).status, 200);
+    offset = 2 * 60_000;
+    assert.equal((await markSonarr(token, 71)).status, 409);
+    assert.equal(markPosts().length, 1);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("C095: a grab with no downloadId (a Blackhole client) is already failed by a newer failure naming the same release and episode", async () => {
+  const token = await mintSession();
+  const grabs = [
+    // One pack, recorded per episode with no download id: each record is its own download to the arr.
+    { id: 80, seriesId: 21, eventType: "grabbed", sourceTitle: "Breaking.Bad.S02.1080p", episodeId: 201 },
+    { id: 81, seriesId: 21, eventType: "grabbed", sourceTitle: "Breaking.Bad.S02.1080p", episodeId: 202 },
+    { id: 82, seriesId: 21, eventType: "downloadFailed", sourceTitle: "Breaking.Bad.S02.1080p", episodeId: 201, data: { message: "Manually marked as failed" } },
+  ];
+  responder = both((c) => {
+    if (c.path === "/api/v3/history/series") return json(grabs);
+    if (c.method === "POST" && c.path.startsWith("/api/v3/history/failed")) return json({});
+    return undefined;
+  }, sonarrBase);
+  assert.equal((await markSonarr(token, 80)).status, 409);
+  assert.deepEqual(writes(), [], "nothing sent: blocklisting and searching it twice is the 5c/5e trap");
+  assert.equal((await markSonarr(token, 81)).status, 200, "another episode's record is its own download (the arr fails one record when there is no id)");
+  assert.equal(markPosts().length, 1);
 });
 
 test("storage lists root folders (free space, unmapped folders) and disks for every instance", async () => {
@@ -1217,6 +1397,37 @@ test("a handle grabs ONCE: a second grab racing the first is 409 with nothing se
   assert.equal(posts, 1);
 });
 
+test("C010: a grab that failed BEFORE the release was sent (the title read) hands the handle back; the retry reaches the arr", async () => {
+  const token = await mintSession();
+  // The title read before the grab: no answer at all, then a gateway 503 —
+  // neither is a definite refusal of the GRAB, but nothing was sent.
+  let titleRead: "network" | "503" | "ok" = "ok";
+  let posts = 0;
+  responder = both((c) => {
+    if (c.path === "/api/v3/release" && c.method === "GET") return json([RELEASE]);
+    if (c.path === "/api/v3/release" && c.method === "POST") {
+      posts++;
+      return json({});
+    }
+    if (c.path === "/api/v3/movie/11" && titleRead === "network") throw new TypeError("fetch failed");
+    if (c.path === "/api/v3/movie/11" && titleRead === "503") return json({ message: "busy" }, 503);
+    return undefined;
+  }, radarrBase);
+  const search = async () => ((await (await call(releasesRoute.GET, token, "/admin/arr/title/releases?service=radarr&id=11")).json()) as { releases: Array<{ guid: string }> }).releases[0].guid;
+  const grab = (release: string) => call(releasesRoute.POST, token, "/admin/arr/title/releases", { method: "POST", body: { service: "radarr", id: 11, release } });
+
+  const handle = await search();
+  titleRead = "network";
+  assert.notEqual((await grab(handle)).status, 200);
+  titleRead = "503";
+  assert.notEqual((await grab(handle)).status, 200);
+  assert.equal(posts, 0, "nothing reached the arr's grab");
+  titleRead = "ok";
+  assert.equal((await grab(handle)).status, 200, "the handle was handed back, not spent — no second indexer search");
+  assert.equal(posts, 1);
+  assert.equal((await grab(handle)).status, 410, "spent once the grab was accepted");
+});
+
 test("a background interactive search answers 202 with a job, joins a running one, and only its owner can read it", async () => {
   const token = await mintSession();
   const other = await mintSession();
@@ -1254,4 +1465,250 @@ test("a background interactive search answers 202 with a job, joins a running on
   }
   assert.equal(searches, 1, "joining cost no second indexer search");
   assert.equal((await call(releasesRoute.GET, token, `/admin/arr/title/releases?job=${"0".repeat(32)}`)).status, 404);
+});
+
+// ── audit fixes (title-lib) ──────────────────────────────────────────────────
+
+// A delete that THROWS may still have deleted files (Sonarr's bulk delete stops
+// at the first file it can't delete; any delete can outlast the timeout). The
+// title's files are re-read, and what is gone is audited — never nothing.
+const timeoutError = () => new DOMException("The operation was aborted due to timeout", "TimeoutError");
+function deletingFiles(service: "sonarr" | "radarr", onDelete: (c: Call, files: Array<{ id: number }>) => Response | "throw") {
+  const files: Array<Record<string, unknown> & { id: number }> = service === "sonarr"
+    ? EPISODE_FILES.map((f) => ({ ...f, seriesId: 21 }))
+    : [{ id: 7, movieId: 11, relativePath: "a.mkv", size: 1 }, { id: 8, movieId: 11, relativePath: "b.mkv", size: 1 }];
+  return both((c) => {
+    if (c.method === "GET" && (c.path === "/api/v3/episodefile" || c.path === "/api/v3/moviefile")) return json(files);
+    if (c.method === "DELETE") {
+      const res = onDelete(c, files);
+      if (res === "throw") throw timeoutError();
+      return res;
+    }
+    return undefined;
+  }, service === "sonarr" ? sonarrBase : radarrBase);
+}
+const dropFile = (files: Array<{ id: number }>, id: number) => {
+  const i = files.findIndex((f) => f.id === id);
+  if (i >= 0) files.splice(i, 1);
+};
+const auditedFileIds = () => audits.filter((a) => a.action === "ARR_FILE_DELETE").map((a) => (JSON.parse(a.details as string) as { fileIds: number[] }).fileIds);
+
+test("a Sonarr bulk delete that fails part-way audits exactly the files it removed and answers 502", async () => {
+  const token = await mintSession();
+  responder = deletingFiles("sonarr", (c, files) => {
+    // Sonarr deletes file by file: 501 and 502 go, then 503 fails.
+    dropFile(files, 501);
+    dropFile(files, 502);
+    return json({ message: "recycle bin unavailable" }, 500);
+  });
+  const res = await call(filesRoute.DELETE, token, "/admin/arr/title/files?service=sonarr&id=21", { method: "DELETE", body: { fileIds: [501, 502, 503] } });
+  assert.equal(res.status, 502);
+  assert.equal(((await res.json()) as { deleted: number }).deleted, 2);
+  assert.deepEqual(auditedFileIds(), [[501, 502]], "the removed files are audited, the one still on disk is not");
+});
+
+test("the browser's file delete runs as a background job: 202 { job } at once, the DELETE's own answer on the poll, audited once; the same delete again joins it", async () => {
+  const token = await mintSession();
+  const files = EPISODE_FILES.map((f) => ({ ...f, seriesId: 21 }));
+  let open: () => void = () => {};
+  const gate = new Promise<void>((r) => { open = r; });
+  responder = both(((c: Call) => {
+    if (c.method === "GET" && c.path === "/api/v3/episodefile") return json(files);
+    if (c.method === "DELETE") {
+      // A recycle bin on another disk: the arr answers only once the copy is done.
+      return gate.then(() => {
+        dropFile(files, 501);
+        dropFile(files, 503);
+        return new Response("", { status: 200 });
+      });
+    }
+    return undefined;
+  }) as unknown as Responder, sonarrBase);
+  const path = "/admin/arr/title/files?service=sonarr&id=21";
+  const starting = call(filesRoute.DELETE, token, path, { method: "DELETE", body: { fileIds: [503, 501], async: true } });
+  const parked = await Promise.race([starting, new Promise<"parked">((r) => setTimeout(() => r("parked"), 1_000))]);
+  if (parked === "parked") {
+    open();
+    await starting;
+    assert.fail("the browser's delete was held open until the arr finished");
+  }
+  const started = parked;
+  assert.equal(started.status, 202, "answered while the arr is still deleting");
+  const { job } = (await started.json()) as { job: string };
+  assert.match(job, /^[0-9a-f]{32}$/);
+  const again = await call(filesRoute.DELETE, token, path, { method: "DELETE", body: { fileIds: [501, 503], async: true } });
+  assert.equal(((await again.json()) as { job: string }).job, job, "the same delete joins the running job");
+  assert.equal((await call(filesRoute.GET, token, `${path}&job=${job}`)).status, 202);
+  open();
+  let poll: Response | null = null;
+  for (let i = 0; i < 50; i++) {
+    poll = await call(filesRoute.GET, token, `${path}&job=${job}`);
+    if (poll.status !== 202) break;
+    await new Promise((r) => setTimeout(r, 2));
+  }
+  assert.equal(poll?.status, 200);
+  assert.deepEqual(await poll!.json(), { deleted: 2 });
+  assert.equal(writes().filter((c) => c.method === "DELETE").length, 1, "one delete reached the arr");
+  assert.deepEqual(auditedFileIds().map((ids) => [...ids].sort((a, b) => a - b)), [[501, 503]], "audited once, by the job");
+  const gone = await call(filesRoute.GET, token, `${path}&job=${"0".repeat(32)}`);
+  assert.equal(gone.status, 404);
+  assert.match(((await gone.json()) as { error: string }).error, /reload the files/);
+});
+
+test("a Sonarr bulk delete that times out after removing every file is a success, audited", async () => {
+  const token = await mintSession();
+  responder = deletingFiles("sonarr", (_c, files) => {
+    dropFile(files, 501);
+    dropFile(files, 503);
+    return "throw";
+  });
+  const res = await call(filesRoute.DELETE, token, "/admin/arr/title/files?service=sonarr&id=21", { method: "DELETE", body: { fileIds: [501, 503] } });
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { deleted: number }).deleted, 2);
+  assert.deepEqual(auditedFileIds(), [[501, 503]]);
+});
+
+test("a Radarr delete whose FIRST call times out after removing the file audits it, and stops there", async () => {
+  const token = await mintSession();
+  responder = deletingFiles("radarr", (c, files) => {
+    if (c.path === "/api/v3/moviefile/7") {
+      dropFile(files, 7);
+      return "throw";
+    }
+    return new Response("", { status: 200 });
+  });
+  const res = await call(filesRoute.DELETE, token, "/admin/arr/title/files?service=radarr&id=11", { method: "DELETE", body: { fileIds: [7, 8] } });
+  assert.equal(res.status, 502);
+  assert.equal(((await res.json()) as { deleted: number }).deleted, 1);
+  assert.deepEqual(auditedFileIds(), [[7]]);
+  assert.deepEqual(writes().map((c) => c.path), ["/api/v3/moviefile/7"], "nothing past the failed call is attempted");
+});
+
+test("a delete refused with nothing removed is still the arr's failure — no audit", async () => {
+  const token = await mintSession();
+  responder = deletingFiles("sonarr", () => json({ message: "Episode file is locked" }, 409));
+  const res = await call(filesRoute.DELETE, token, "/admin/arr/title/files?service=sonarr&id=21", { method: "DELETE", body: { fileIds: [501] } });
+  assert.equal(res.status, 409);
+  assert.equal(audits.length, 0);
+  responder = deletingFiles("radarr", () => "throw");
+  const timedOut = await call(filesRoute.DELETE, token, "/admin/arr/title/files?service=radarr&id=11", { method: "DELETE", body: { fileIds: [7] } });
+  assert.equal(timedOut.status, 504);
+  assert.equal(audits.length, 0);
+});
+
+test("more than 10 episode ids read the series' list, and a row there naming ANOTHER series is not this one's (409, nothing written)", async () => {
+  const token = await mintSession();
+  const own = Array.from({ length: 10 }, (_, i) => ({ id: 1_000 + i, seriesId: 21, seasonNumber: 3, episodeNumber: i + 1, title: `E${i + 1}`, monitored: true, hasFile: false, episodeFileId: 0 }));
+  const foreign = { id: 1_010, seriesId: 99, seasonNumber: 1, episodeNumber: 1, title: "Elsewhere", monitored: true, hasFile: false, episodeFileId: 0 };
+  responder = both((c) => {
+    // An arr that ignored the seriesId filter answers another series' episode too.
+    if (c.method === "GET" && c.path === "/api/v3/episode" && c.query.get("seriesId") === "21" && c.query.get("seasonNumber") === null) return json([...own, foreign]);
+    if (c.method === "PUT" && c.path === "/api/v3/episode/monitor") return json([]);
+    return undefined;
+  }, sonarrBase);
+  const ids = [...own.map((e) => e.id), foreign.id];
+  const res = await call(episodesRoute.PATCH, token, "/admin/arr/title/episodes", { method: "PATCH", body: { service: "sonarr", id: 21, episodeIds: ids, monitored: false } });
+  assert.equal(res.status, 409);
+  assert.deepEqual(writes(), []);
+  assert.ok(!calls.some((c) => /^\/api\/v3\/episode\/\d+$/.test(c.path)), "the bulk path, not one read per id");
+
+  const ok = await call(episodesRoute.PATCH, token, "/admin/arr/title/episodes", { method: "PATCH", body: { service: "sonarr", id: 21, episodeIds: [...own.map((e) => e.id), 101], monitored: false } });
+  assert.equal(ok.status, 409, "101 is not in this list either");
+});
+
+test("a Sonarr lookup's lone UNTAGGED row is never taken as the title — it picks what deletes and edits act on", async () => {
+  const token = await mintSession();
+  // No TVDB cross-reference for 84503; Sonarr v3 degrades `term=tmdb:84503`
+  // into a search that answers with the library series whose tvdbId is 84503.
+  let lookupRows: unknown[] = [{ id: 21, tvdbId: 84503, title: "Breaking Bad" }];
+  responder = both((c) => (c.path === "/api/v3/series/lookup" && c.query.get("term") === "tmdb:84503" ? json(lookupRows) : undefined), sonarrBase);
+  const miss = await call(titleRoute.GET, token, "/admin/arr/title?service=sonarr&tmdbId=84503");
+  assert.equal(miss.status, 404);
+  assert.ok(!calls.some((c) => c.path === "/api/v3/series/21"), "the other series is never opened");
+
+  // A row that NAMES the tmdbId is this title.
+  lookupRows = [{ id: 21, tvdbId: 81189, tmdbId: 84503, title: "Breaking Bad" }];
+  const hit = await call(titleRoute.GET, token, "/admin/arr/title?service=sonarr&tmdbId=84503");
+  assert.equal(hit.status, 200);
+  assert.equal(((await hit.json()) as { title: { arrId: number } }).title.arrId, 21);
+});
+
+test("mark failed reads only what its checks need: no embedded episodes, no episode-list join that could fail the write", async () => {
+  const token = await mintSession();
+  responder = both((c) => {
+    // Sonarr v4: the records name their episode by id only.
+    if (c.path === "/api/v3/history/series") {
+      return json([{ id: 80, seriesId: 21, episodeId: 202, eventType: "grabbed", date: "2026-10-02T10:00:00Z", sourceTitle: "Breaking.Bad.S02E02", downloadId: "X" }]);
+    }
+    // Sonarr under import load: the episode list is unavailable.
+    if (c.path === "/api/v3/episode") return new Response("busy", { status: 503 });
+    if (c.method === "POST" && c.path === "/api/v3/history/failed/80") return json({});
+    return undefined;
+  }, sonarrBase);
+  const res = await call(failedRoute.POST, token, "/admin/arr/history/failed", { method: "POST", body: { service: "sonarr", arrId: 21, historyId: 80 } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(writes().map((c) => c.path), ["/api/v3/history/failed/80"]);
+  assert.ok(!calls.some((c) => c.path === "/api/v3/episode"), "no episode-list read on the write path");
+  const read = calls.find((c) => c.path === "/api/v3/history/series");
+  assert.equal(read?.query.get("includeEpisode"), "false", "no embedded episodes on the mark's history read");
+  assert.equal((JSON.parse(audits[0].details as string) as { release: string }).release, "Breaking.Bad.S02E02");
+
+  // The History tab still joins the S/E.
+  calls = [];
+  responder = both((c) => (c.path === "/api/v3/history/series"
+    ? json([{ id: 80, seriesId: 21, episodeId: 202, eventType: "grabbed", date: "2026-10-02T10:00:00Z", sourceTitle: "Breaking.Bad.S02E02", downloadId: "X" }])
+    : undefined), sonarrBase);
+  const tab = await call(titleHistoryRoute.GET, token, "/admin/arr/title/history?service=sonarr&id=21");
+  assert.equal(((await tab.json()) as { events: Array<{ episode: { episodeNumber: number } | null }> }).events[0].episode?.episodeNumber, 2);
+  assert.equal(calls.find((c) => c.path === "/api/v3/history/series")?.query.get("includeEpisode"), "true");
+});
+
+test("edits of one title are serialized: a season flip never PUTs back a series read before another edit's editor PUT", async () => {
+  const token = await mintSession();
+  let state: Record<string, unknown> = series();
+  let seriesReads = 0;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const order: string[] = [];
+  responder = both(((c: Call) => {
+    if (c.origin !== SONARR) return undefined;
+    if (c.method === "GET" && c.path === "/api/v3/series/21") {
+      // The arr reads the series when the request ARRIVES; the second read's
+      // answer is held until the editor PUT has landed.
+      seriesReads++;
+      order.push(`GET#${seriesReads}`);
+      const snap = structuredClone(state);
+      return seriesReads === 2 ? gate.then(() => json(snap)) : json(snap);
+    }
+    // A slow root-folder scan holds the Settings save before its editor PUT.
+    if (c.method === "GET" && c.path === "/api/v3/rootfolder") return new Promise((r) => setTimeout(() => r(json(TV_ROOTS)), 10));
+    if (c.method === "PUT" && c.path === "/api/v3/series/editor") {
+      order.push("editor");
+      state = { ...state, qualityProfileId: (c.body as { qualityProfileId: number }).qualityProfileId };
+      setTimeout(release, 10);
+      return json([]);
+    }
+    if (c.method === "PUT" && c.path === "/api/v3/series/21") {
+      order.push("seasons");
+      state = c.body as Record<string, unknown>;
+      return json(state);
+    }
+    return undefined;
+  }) as unknown as Responder, sonarrBase);
+  const settingsSave = call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", instance: "", id: 21, qualityProfileId: 2 } });
+  const seasonFlip = call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", instance: "", id: 21, seasons: [{ seasonNumber: 2, monitored: false }] } });
+  const [a, b] = await Promise.all([settingsSave, seasonFlip]);
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  const seasonPut = writes().find((c) => c.path === "/api/v3/series/21");
+  assert.equal((seasonPut?.body as { qualityProfileId: number }).qualityProfileId, 2, `the season PUT carries the profile the editor set (order: ${order.join(", ")})`);
+  assert.equal(state.qualityProfileId, 2, "the Settings save is not reverted");
+  assert.ok(order.indexOf("editor") < order.lastIndexOf("seasons"));
+
+  // A failed edit doesn't block the next one.
+  calls = [];
+  responder = both((c) => (c.method === "PUT" && c.path === "/api/v3/series/editor" ? json({ message: "boom" }, 500) : undefined), sonarrBase);
+  assert.equal((await call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", id: 21, qualityProfileId: 2 } })).status, 502);
+  responder = both((c) => (c.method === "PUT" && c.path === "/api/v3/series/21" ? json(series()) : undefined), sonarrBase);
+  assert.equal((await call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", id: 21, seasons: [{ seasonNumber: 2, monitored: false }] } })).status, 200);
 });

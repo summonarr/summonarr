@@ -3,11 +3,11 @@
 // admin's attention. Zero imports, zero I/O; the data half is arr-queue-data.ts.
 //
 //   • Sonarr reports one queue record PER EPISODE, so a season pack is N records
-//     sharing one downloadId. They fold into one row carrying every record id —
-//     a removal must send all of them in ONE bulk call, or the first DELETE
-//     removes the download and blocklists it and the rest 404 (or blocklist the
-//     same release again). Size/progress are the download's, not a sum: every
-//     episode record repeats the whole release's size.
+//     sharing one downloadId. They fold into one row carrying every record id;
+//     a removal sends ONE of them in ONE bulk call (`removalIds`) — any record
+//     resolves the whole download, and Sonarr v3 blocklists once per id sent.
+//     Size/progress are the download's, not a sum: every episode record
+//     repeats the whole release's size.
 //   • A row needs attention when Radarr/Sonarr say so — a tracked-download
 //     status of warning/error, an import that is blocked or failed, or a queue
 //     status of failed/warning/client-unavailable. Nothing here guesses from
@@ -41,7 +41,7 @@ export interface QueueEpisode {
 export interface QueueItem {
   service: QueueService;
   instance: string;
-  /** Every queue record id this row covers (one per episode for a Sonarr pack). Removal sends them all. */
+  /** Every queue record id this row covers (one per episode for a Sonarr pack). Removal sends one per download (`removalIds`). */
   ids: number[];
   downloadId: string | null;
   /** The release name. */
@@ -134,6 +134,8 @@ export type QueueRecord = {
   seasonNumber?: unknown;
   quality?: { quality?: { name?: unknown } | null; revision?: { version?: unknown; real?: unknown; isRepack?: unknown } | null } | null;
   languages?: unknown;
+  /** Sonarr v3's shape: ONE language object, no `languages` array. */
+  language?: unknown;
   customFormats?: unknown;
   customFormatScore?: unknown;
   outputPath?: unknown;
@@ -231,6 +233,15 @@ function namesOf(v: unknown): string[] {
   return out;
 }
 
+// A record's languages: its `languages` list, or Sonarr v3's ONE `language`
+// object (QueueResource has no list there). arr-parse.ts's languageNamesOf,
+// repeated: this module has no imports.
+function languageNamesOf(r: { languages?: unknown; language?: unknown }): string[] {
+  const list = namesOf(r.languages);
+  const single = r.language;
+  return list.length > 0 || !single || typeof single !== "object" || Array.isArray(single) ? list : namesOf([single]);
+}
+
 function qualityTagsOf(revision: unknown): QualityTag[] {
   if (!revision || typeof revision !== "object") return [];
   const r = revision as { version?: unknown; real?: unknown; isRepack?: unknown };
@@ -273,7 +284,7 @@ function toItem(service: QueueService, instance: string, r: QueueRecord, id: num
     episodes,
     quality: textOrNull(r.quality?.quality?.name, 100),
     qualityTags: qualityTagsOf(r.quality?.revision),
-    languages: namesOf(r.languages),
+    languages: languageNamesOf(r),
     customFormats: namesOf(r.customFormats),
     customFormatScore: scoreOf(r.customFormatScore),
     size,
@@ -417,6 +428,62 @@ export function queueRemoveQuery(action: QueueRemoveAction, method: QueueRemoveM
   }).toString();
 }
 
+/**
+ * The record ids a removal sends: ONE per download. A folded Sonarr pack
+ * carries one record id per episode, but any one of them resolves the whole
+ * tracked download on v3 and v4 (MarkAsFailed, RemoveItem and StopTracking
+ * act per download). Sonarr v3's bulk remove loops over the ids with no
+ * dedupe and stops tracking only after the loop, so N ids blocklisted the
+ * release N times and asked the client to remove it N times (Deluge errors on
+ * the repeat); v4 dedupes by downloadId anyway. A pending row has one id.
+ */
+export function removalIds(row: Pick<QueueItem, "ids">): number[] {
+  return row.ids.slice(0, 1);
+}
+
+/**
+ * Whether a "Blocklist" (skipRedownload=true) on this instance can promise "no
+ * new search". Sonarr v3 reads only removeFromClient and blocklist
+ * (skipRedownload and changeCategory are ignored), so a blocklist there always
+ * runs its redownload-failed search when that setting is on: `"searches"`.
+ * Sonarr v4+ and Radarr (not gated — unverified against its source) honour it:
+ * `"skipped"`. A Sonarr whose version is not known — the health read still
+ * running, failed, no version reported, or unparseable — is `"unknown"`: the
+ * dialog must neither promise "no new search" nor call the instance v3.
+ */
+export type BlocklistRedownload = "skipped" | "searches" | "unknown";
+
+export function blocklistRedownload(service: QueueService, version: string | null | undefined): BlocklistRedownload {
+  if (service !== "sonarr") return "skipped";
+  const major = typeof version === "string" ? /^\s*(\d+)\./.exec(version) : null;
+  if (major === null) return "unknown";
+  return Number(major[1]) >= 4 ? "skipped" : "searches";
+}
+
+export type RecheckError = { service: QueueService; instance: string; kind?: unknown };
+
+/**
+ * What a Re-check downloads answer means for the page: how many instances
+ * were asked, which refused, and whether every one did — the route answers
+ * 202 even then, so a 2xx alone is not success.
+ */
+export function recheckOutcome(answer: { instances?: unknown; errors?: unknown } | null | undefined): {
+  asked: number;
+  failed: RecheckError[];
+  allFailed: boolean;
+} {
+  const instances = typeof answer?.instances === "number" && Number.isSafeInteger(answer.instances) && answer.instances > 0 ? answer.instances : 0;
+  const failed: RecheckError[] = [];
+  if (Array.isArray(answer?.errors)) {
+    for (const e of answer.errors as Array<{ service?: unknown; instance?: unknown; kind?: unknown } | null>) {
+      if (!e || (e.service !== "radarr" && e.service !== "sonarr") || typeof e.instance !== "string") continue;
+      failed.push({ service: e.service, instance: e.instance, kind: e.kind });
+    }
+  }
+  const asked = Math.max(0, instances - failed.length);
+  return { asked, failed, allFailed: failed.length > 0 && asked === 0 };
+}
+
 // ── importing a blocked download ("Manual Import") ─────────────────────────
 //
 // A download Radarr/Sonarr refused to import on their own (import blocked:
@@ -469,6 +536,8 @@ export type ManualImportRow = {
   size?: unknown;
   quality?: unknown;
   languages?: unknown;
+  /** Sonarr v3's shape: ONE language object, no `languages` array. */
+  language?: unknown;
   releaseGroup?: unknown;
   indexerFlags?: unknown;
   releaseType?: unknown;
@@ -499,6 +568,23 @@ function isMapped(service: QueueService, row: ManualImportRow): boolean {
   return posInt(row.series?.id) !== null && eps.length > 0 && eps.every((e) => e.id !== null);
 }
 
+// Sonarr v3's manualimport rows carry ONE `language` object and no
+// `languages` array (v4 and Radarr carry the array). v3's ManualImportFile
+// reads only `language`, and a command without it stores the file as
+// Language Unknown, so the singular object is carried back as the arr gave it.
+function singleLanguage(row: ManualImportRow): Record<string, unknown> | null {
+  if (Array.isArray(row.languages)) return null;
+  const l = row.language;
+  return l && typeof l === "object" && !Array.isArray(l) ? (l as Record<string, unknown>) : null;
+}
+
+/** The language field(s) a command/reprocess item carries back: the arr's own, in its own shape. */
+function languageFields(row: ManualImportRow): { languages: unknown[] } | { language: Record<string, unknown> } {
+  if (Array.isArray(row.languages)) return { languages: row.languages };
+  const single = singleLanguage(row);
+  return single ? { language: single } : { languages: [] };
+}
+
 function validPath(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 && v.length <= MAX_PATH ? v : null;
 }
@@ -519,9 +605,14 @@ export function importCandidates(service: QueueService, raw: unknown): ImportCan
     } else if (service === "sonarr" && r.series && typeof r.series.title === "string" && r.series.title) {
       target = r.series.title;
     }
-    const languages = Array.isArray(r.languages)
-      ? (r.languages as Array<{ name?: unknown } | null>).map((l) => (typeof l?.name === "string" ? l.name : "")).filter(Boolean).slice(0, 10)
-      : [];
+    const single = singleLanguage(r);
+    // A v3 row's one language is shown; its id is not offered for correction
+    // (v3 has no /api/v3/language catalog to correct it against).
+    const languageList = Array.isArray(r.languages) ? r.languages : single ? [single] : [];
+    const languages = (languageList as Array<{ name?: unknown } | null>)
+      .map((l) => (typeof l?.name === "string" ? l.name : ""))
+      .filter(Boolean)
+      .slice(0, 10);
     const rejections = Array.isArray(r.rejections)
       ? (r.rejections as Array<{ reason?: unknown } | null>)
           .map((x) => (typeof x?.reason === "string" ? x.reason.slice(0, MAX_MESSAGE_LEN) : ""))
@@ -707,6 +798,10 @@ export function applyImportOverride(service: QueueService, row: ManualImportRow,
     out.quality = { quality, revision: { version: 1, real: 0, isRepack: false } };
   }
   if (override.languageIds !== undefined) {
+    // Sonarr v3 reads only its single `language`: a `languages` array written
+    // here would be ignored and the file stored as Language Unknown. Refused
+    // (400, nothing sent) rather than silently dropped.
+    if (singleLanguage(row)) throw new ImportOverrideError("languages");
     out.languages = override.languageIds.map((id) => {
       const l = catalog.languages.get(id);
       if (!l) throw new ImportOverrideError("languages");
@@ -757,7 +852,7 @@ const commonFields = (path: string, r: ManualImportRow, downloadId: string) => (
   path,
   folderName: typeof r.folderName === "string" ? r.folderName : undefined,
   quality: r.quality,
-  languages: Array.isArray(r.languages) ? r.languages : [],
+  ...languageFields(r),
   releaseGroup: typeof r.releaseGroup === "string" ? r.releaseGroup : undefined,
   indexerFlags: typeof r.indexerFlags === "number" ? r.indexerFlags : 0,
   downloadId,

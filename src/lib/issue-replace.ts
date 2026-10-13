@@ -99,6 +99,17 @@ export interface ReplaceableFile extends TitleFile {
 }
 
 /**
+ * Whether an import's absolute path ends with the file's path relative to its
+ * title folder, on a separator boundary (`/old/Show/Season 01/S01E01.mkv` vs
+ * `Season 01/S01E01.mkv`) — the same file in a folder that has moved since.
+ */
+function sameRelativeFile(importedPath: string, relativePath: string): boolean {
+  const rel = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (rel === "") return false;
+  return importedPath.replace(/\\/g, "/").endsWith(`/${rel}`);
+}
+
+/**
  * The import that put this file on disk, or null when history can't tell.
  *
  * Per unit the file holds — the movie, or each S/E of an episode file (Sonarr
@@ -108,8 +119,16 @@ export interface ReplaceableFile extends TitleFile {
  * has more than one file (otherwise which import made which file is a guess).
  * A deletion of the unit's file after that import — other than the upgrade
  * deletion that makes room for an import — means the file on disk came from
- * somewhere else (a rescan, a manual copy), so its grab is unknown. Every unit
- * of a multi-episode file must point at the same download.
+ * somewhere else (a rescan, a manual copy), so its grab is unknown. So does an
+ * import that names a DIFFERENT file than the file's with no rename record of
+ * the unit after it naming the file: a manual import of a file already in the
+ * title's folder writes no history, and the newest import on record is then
+ * the PREVIOUS download — marking it would blocklist a release the file never
+ * came from (searched for, never guessed). A different FOLDER alone is not a
+ * different file: the arrs record no history when a title's folder moves, so
+ * an import whose path ends with the file's relative path still stands. An
+ * import with no path on record still stands for the unit. Every unit of a
+ * multi-episode file must point at the same download.
  */
 export function importForFile(
   service: ArrService,
@@ -130,6 +149,17 @@ export function importForFile(
     const pool = byPath.length > 0 ? byPath : imports;
     if (pool.length === 0) return null;
     const newest = pool.reduce((a, b) => (b.id > a.id ? b : a));
+    if (byPath.length === 0 && newest.importedPath !== null && file.path !== null && newest.importedPath !== file.path) {
+      // The same file whose title folder moved since (a series/movie path change, or the title
+      // manager's root-folder move): the arrs record no history for a move, so the import still
+      // names the old folder — but the same relative path inside it.
+      const folderMoved = sameRelativeFile(newest.importedPath, file.relativePath);
+      // The rename's `path` is the file's relative path (an older arr sends the full one).
+      const renamedTo = history.some(
+        (e) => e.kind === "renamed" && onUnit(e, unit) && e.id > newest.id && e.path !== null && (e.path === file.relativePath || e.path === file.path),
+      );
+      if (!folderMoved && !renamedTo) return null;
+    }
     const replacedSince = history.some(
       (e) => e.kind === "deleted" && onUnit(e, unit) && e.id > newest.id && (e.reason ?? "").toLowerCase() !== "upgrade",
     );
@@ -280,6 +310,9 @@ export type ReplaceSearch =
   | { kind: "movie" }
   | { kind: "season"; seasonNumber: number }
   | { kind: "episodes"; episodes: EpisodeRef[] }
+  /** A series: a SeasonSearch per season in `seasons`, and one EpisodeSearch for `episodes` (either may be empty, never both). */
+  | { kind: "plan"; seasons: number[]; episodes: EpisodeRef[] }
+  /** A series whose deleted files named no episodes: the Missing page's own plan, re-judged live. */
   | { kind: "missing" };
 
 /** The distinct episodes a set of files held, in S/E order. */
@@ -308,8 +341,14 @@ export function episodesOf(files: readonly TitleFile[]): EpisodeRef[] {
  *   of the season is left and 2+ episodes went; otherwise EpisodeSearch — a
  *   SeasonSearch beside files still on disk hunts upgrades for every one of
  *   them. The Missing page's plan, the same rule (planSeriesSearch).
- * - A series: the Missing page's own plan, re-judged live (searchMissing) —
- *   never SeriesSearch.
+ * - A series: that season-pack rule applied to the DELETED episodes only — a
+ *   SeasonSearch per regular season emptied with 2+ of them gone, one
+ *   EpisodeSearch for the rest. Never SeriesSearch, and never the series'
+ *   whole missing backlog: the Missing page's plan (aired regular-season
+ *   episodes only) would also search gaps nobody deleted, and could not reach
+ *   a deleted special or an undated episode at all. Specials are never a
+ *   season pack (the Missing plan's rule; they are named instead). Only a
+ *   deletion whose files named no episodes falls back to the Missing plan.
  * - `unmonitored` (an uncovered episode is still unmonitored once the delete's
  *   unmonitoring was undone — the admin had unmonitored it, or the re-monitor
  *   failed): an EpisodeSearch naming them. A SeasonSearch and the Missing plan
@@ -337,7 +376,16 @@ export function followUpSearch(
       ? { kind: "season", seasonNumber: scope.seasonNumber }
       : { kind: "episodes", episodes };
   }
-  return { kind: "missing" };
+  if (episodes.length === 0) return { kind: "missing" };
+  const seasons: number[] = [];
+  const rest: EpisodeRef[] = [];
+  for (const seasonNumber of [...new Set(episodes.map((e) => e.seasonNumber))]) {
+    const inSeason = episodes.filter((e) => e.seasonNumber === seasonNumber);
+    const seasonLeft = remaining.some((f) => fileInScope(f, { kind: "season", seasonNumber }));
+    if (seasonNumber > 0 && inSeason.length >= 2 && !seasonLeft) seasons.push(seasonNumber);
+    else rest.push(...inSeason);
+  }
+  return { kind: "plan", seasons, episodes: rest };
 }
 
 /**
@@ -372,9 +420,15 @@ export function redownloadSettings(raw: unknown): RedownloadSettings {
  * on, and for an interactive grab the interactive switch on too (absent ⇒ the
  * main switch decides, as it does on an arr without one). Off or unreadable ⇒
  * we search ourselves.
+ *
+ * `available` is Radarr's movie `isAvailable` (true for Sonarr, and when the
+ * movie doesn't say). Radarr's redownload is an AUTOMATIC MoviesSearch, and an
+ * automatic search applies Minimum Availability: for a movie not yet
+ * "available" (an early release picked by hand) it rejects every release, so
+ * it covers nothing — our manual MoviesSearch, which ignores availability, runs.
  */
-export function redownloadCovers(settings: RedownloadSettings, interactiveGrab: boolean): boolean {
-  if (settings.failed !== true) return false;
+export function redownloadCovers(settings: RedownloadSettings, interactiveGrab: boolean, available = true): boolean {
+  if (settings.failed !== true || !available) return false;
   return !interactiveGrab || (settings.interactive ?? settings.failed) === true;
 }
 

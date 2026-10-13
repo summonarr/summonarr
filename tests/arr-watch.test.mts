@@ -92,6 +92,12 @@ interface ArrFixture {
   down: Set<string>;
   /** Answer /history/since with 404 (an arr without the endpoint). */
   noSince: boolean;
+  /** The queue's reported totalRecords (default: the records' length) — more than a page makes the reader page on. */
+  queueTotal?: number;
+  /** Runs as each queue page is served. */
+  onQueuePage?: (page: number) => void;
+  /** This queue page never answers — it waits for the request's signal to abort. */
+  queueHangPage?: number;
 }
 const fixtures = new Map<string, ArrFixture>();
 function fixture(origin: string): ArrFixture {
@@ -122,7 +128,17 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const sorted = [...f.history].sort((a, b) => Date.parse(String(b.date)) - Date.parse(String(a.date)));
       return json({ page: 1, pageSize: 200, totalRecords: sorted.length, records: sorted });
     }
-    case "/api/v3/queue": return json({ page: 1, pageSize: 250, totalRecords: f.queue.length, records: f.queue });
+    case "/api/v3/queue": {
+      const page = Number(url.searchParams.get("page") ?? "1");
+      f.onQueuePage?.(page);
+      if (f.queueHangPage === page) {
+        const signal = init?.signal;
+        return new Promise<Response>((_, reject) => {
+          signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+      }
+      return json({ page, pageSize: 250, totalRecords: f.queueTotal ?? f.queue.length, records: f.queue });
+    }
   }
   throw new Error(`unscripted ${url.pathname}`);
 }) as typeof fetch;
@@ -276,6 +292,22 @@ test("a root folder on a mount /diskspace doesn't list is not filed under \"/\" 
   assert.equal(W.rootDisk(ROOT("/data/x", null), [DISK("/data", 40 * GB, 1000 * GB)])?.path, "/data", "no free space to compare: the match stands");
 });
 
+test("nothing to compare never makes the catch-all \"/\" believable — no reading keyed \"/\" with \"/\"'s numbers", () => {
+  // Audit fix C103: an accessible root folder with no free space (a slow statfs
+  // on a network mount) was matched to "/" unchecked and judged as the container root.
+  const root = DISK("/", 5 * GB, 100 * GB);
+  assert.equal(W.rootDisk(ROOT("/mnt/share/movies", null), [root]), null);
+  assert.equal(W.rootDisk(ROOT("/mnt/share/movies", null), [root, DISK("/config", 1 * GB, 10 * GB)]), null);
+  assert.deepEqual(W.readDisks([ROOT("/mnt/share/movies", null)], [root]), [], "no free space of its own: skipped, not judged on \"/\"'s");
+  // "/" reporting no free space: the folder's own reading, on the floor rule alone.
+  const blind = { path: "/", label: null, freeSpace: null, totalSpace: 100 * GB };
+  assert.equal(W.rootDisk(ROOT("/mnt/share/movies", 8 * GB), [blind]), null);
+  assert.deepEqual(W.readDisks([ROOT("/mnt/share/movies", 8 * GB)], [blind]).map((r) => [r.path, r.totalBytes]), [["/mnt/share/movies", null]]);
+  // A folder that IS "/" (either separator, trailing ones trimmed) still sits on it; a nearer disk keeps its match.
+  assert.equal(W.rootDisk(ROOT("/", null), [root])?.path, "/");
+  assert.equal(W.rootDisk(ROOT("/mnt/share/movies", null), [root, DISK("/mnt/share", 30 * GB, 900 * GB)])?.path, "/mnt/share");
+});
+
 test("a root folder no disk holds is judged on the absolute floor alone", () => {
   const [r] = W.readDisks([ROOT("//nas/movies", 8 * GB)], []);
   assert.equal(r.totalBytes, null);
@@ -392,6 +424,90 @@ test("a backlog past the per-run cap is DEFERRED to the next run, never dropped"
   assert.equal(third.deferred, 0);
 });
 
+test("the cap BREAKS: a later record of an announced download can't carry the cursor past a download that didn't fit", () => {
+  // dl3 is over the cap; the dl1 record after it would fold into the announced
+  // dl1 — consuming it (a `continue` past dl3) moved the cursor past dl3 for good.
+  const records = [H(1, T0 + MIN), H(2, T0 + 2 * MIN), H(3, T0 + 3 * MIN), H(4, T0 + 4 * MIN, { downloadId: "dl1" })];
+  const first = W.selectNewFailures(records, { at: iso(T0), lastId: 0 }, [], 2);
+  assert.deepEqual(first.groups.map((g) => g.downloadId), ["dl1", "dl2"]);
+  assert.deepEqual(first.cursor, { at: iso(T0 + 2 * MIN), lastId: 2 });
+  assert.equal(first.deferred, 2);
+  // The late dl1 record folds through `recent`; dl3 is announced, not lost.
+  assert.deepEqual(W.selectNewFailures(records, first.cursor, first.recent, 2).groups.map((g) => g.downloadId), ["dl3"]);
+});
+
+test("in one run, a download's records fold only within the hour of its first — the same verdict as split across runs", () => {
+  const one = W.selectNewFailures([H(10, T0 + MIN, { downloadId: "HASH" }), H(11, T0 + 5 * 60 * MIN, { downloadId: "HASH" })], { at: iso(T0), lastId: 0 }, []);
+  assert.deepEqual(one.groups.map((g) => g.at), [iso(T0 + MIN), iso(T0 + 5 * 60 * MIN)], "a re-failure 5 h later was folded into the first (a catch-up run merged two events)");
+  const a = W.selectNewFailures([H(10, T0 + MIN, { downloadId: "HASH" })], { at: iso(T0), lastId: 0 }, []);
+  const b = W.selectNewFailures([H(11, T0 + 5 * 60 * MIN, { downloadId: "HASH" })], a.cursor, a.recent);
+  assert.equal(a.groups.length + b.groups.length, one.groups.length);
+  // Records written together still fold (the pack test above, inside the window).
+  assert.equal(W.selectNewFailures([H(10, T0 + MIN, { downloadId: "HASH" }), H(11, T0 + 50 * MIN, { downloadId: "HASH" })], { at: iso(T0), lastId: 0 }, []).groups.length, 1);
+});
+
+test("a MANUAL mark (\"Manually marked as failed\") is consumed silently — an admin's action, not a failed download", () => {
+  const manual = { message: "Manually marked as failed" };
+  const mixed = W.selectNewFailures([H(5, T0 + MIN, manual), H(6, T0 + 2 * MIN)], { at: iso(T0), lastId: 0 }, []);
+  assert.deepEqual(mixed.groups.map((g) => g.downloadId), ["dl6"]);
+  assert.deepEqual(mixed.cursor, { at: iso(T0 + 2 * MIN), lastId: 6 });
+  // Alone: nothing announced, but the cursor still passes it (never re-read).
+  const only = W.selectNewFailures([H(7, T0 + 3 * MIN, manual)], mixed.cursor, mixed.recent);
+  assert.deepEqual(only.groups, []);
+  assert.deepEqual(only.cursor, { at: iso(T0 + 3 * MIN), lastId: 7 });
+  assert.equal(only.deferred, 0);
+  // A Sonarr pack marked by hand: one record per episode, no group.
+  const ep = (id: number, n: number) => H(id, T0 + MIN, { downloadId: "PACK", message: " Manually marked as failed", episode: { seasonNumber: 1, episodeNumber: n, title: "" } });
+  assert.deepEqual(W.selectNewFailures([ep(21, 1), ep(22, 2)], { at: iso(T0), lastId: 0 }, []).groups, []);
+  // Before the cap: a burst of manual marks can't use up the budget.
+  const burst = W.selectNewFailures([H(30, T0 + MIN, manual), H(31, T0 + 2 * MIN, manual), H(32, T0 + 3 * MIN)], { at: iso(T0), lastId: 0 }, [], 1);
+  assert.deepEqual(burst.groups.map((g) => g.downloadId), ["dl32"]);
+});
+
+test("a record dated in the FUTURE is held back, not consumed — one bad arr clock can't blind the cursor", () => {
+  const records = [H(1, T0 + 3 * 24 * 60 * MIN), H(2, T0 + 10 * MIN)];
+  const now = T0 + 15 * MIN;
+  const first = W.selectNewFailures(records, { at: iso(T0), lastId: 0 }, [], W.MAX_FAILURES_PER_RUN, now);
+  assert.deepEqual(first.groups.map((g) => g.downloadId), ["dl2"], "a genuine failure was dropped behind a future cursor");
+  assert.deepEqual(first.cursor, { at: iso(T0 + 10 * MIN), lastId: 2 });
+  // Announced once the clock reaches it — delayed, never lost, never repeated.
+  const later = T0 + 3 * 24 * 60 * MIN + MIN;
+  const second = W.selectNewFailures(records, first.cursor, first.recent, W.MAX_FAILURES_PER_RUN, later);
+  assert.deepEqual(second.groups.map((g) => g.downloadId), ["dl1"]);
+  assert.deepEqual(W.selectNewFailures(records, second.cursor, second.recent, W.MAX_FAILURES_PER_RUN, later).groups, []);
+  // Even a little ahead is held: any tolerance is a window of lost failures (below).
+  const near = W.selectNewFailures([H(3, now + 30 * MIN)], { at: iso(T0), lastId: 0 }, [], W.MAX_FAILURES_PER_RUN, now);
+  assert.deepEqual(near.groups, []);
+  assert.deepEqual(near.cursor, { at: iso(T0), lastId: 0 });
+});
+
+test("a TRANSIENT arr clock jump loses nothing: the cursor never passes Summonarr's clock, so failures written after the correction are announced", () => {
+  const HOUR = 60 * MIN;
+  const jumped = H(1, T0 + 5 * HOUR); // written while the arr host's clock ran 5 h ahead, then corrected
+  let state = { cursor: { at: iso(T0), lastId: 0 }, recent: [] as ReturnType<typeof W.selectNewFailures>["recent"] };
+  const run = (records: ReturnType<typeof H>[], now: number) => {
+    const out = W.selectNewFailures(records, state.cursor, state.recent, W.MAX_FAILURES_PER_RUN, now);
+    assert.ok(Date.parse(out.cursor.at) <= now, `the cursor ${out.cursor.at} passed the run's clock ${iso(now)}`);
+    state = { cursor: out.cursor, recent: out.recent };
+    return out.groups.map((g) => g.downloadId);
+  };
+  assert.deepEqual(run([jumped], T0 + 15 * MIN), []);
+  // 4 h 30 later: with a one-hour tolerance the jumped record was consumed here and the cursor moved to T0+5h.
+  assert.deepEqual(run([jumped], T0 + 4.5 * HOUR), []);
+  // A genuine failure the corrected arr writes 20 minutes later, dated before the jumped record.
+  const genuine = H(2, T0 + 4.5 * HOUR + 20 * MIN);
+  assert.deepEqual(run([jumped, genuine], T0 + 4.5 * HOUR + 25 * MIN), ["dl2"], "a genuine failure fell behind a cursor moved ahead by the jumped record");
+  // The jumped record is announced once the clock reaches it — once.
+  assert.deepEqual(run([jumped, genuine], T0 + 5 * HOUR), ["dl1"]);
+  assert.deepEqual(run([jumped, genuine], T0 + 5 * HOUR + 15 * MIN), []);
+});
+
+test("a stored cursor far in the future restarts at NOW; one inside the tolerance is kept", () => {
+  assert.deepEqual(W.effectiveCursor({ at: iso(T0 + 3 * 24 * 60 * MIN), lastId: 9 }, T0), { cursor: { at: iso(T0), lastId: 0 }, seeded: false });
+  const near = { at: iso(T0 + 30 * MIN), lastId: 9 };
+  assert.deepEqual(W.effectiveCursor(near, T0), { cursor: near, seeded: false });
+});
+
 test("only DownloadFailed records count — an arr that ignored the filter can't turn a grab into a failure", () => {
   const out = W.selectNewFailures([H(5, T0 + MIN, { kind: "grabbed" }), H(6, T0 + MIN)], { at: iso(T0), lastId: 0 }, []);
   assert.deepEqual(out.groups.map((g) => g.downloadId), ["dl6"]);
@@ -402,12 +518,56 @@ test("only DownloadFailed records count — an arr that ignored the filter can't
 test("upstream text loses paths and URLs (a URL keeps its host) and stays one bounded line", () => {
   const s = W.scrubArrText("Import failed:\n'/downloads/complete/Movie (2020)/x.mkv' via https://idx.example/api?apikey=ABC123&t=get on C:\\Downloads\\x and \\\\nas\\share\\y; 1/2 parts and/or more");
   assert.ok(s);
-  for (const leak of ["/downloads", "ABC123", "apikey", "C:\\", "\\\\nas", "Movie (2020)"]) assert.ok(!s.includes(leak), `${leak} leaked: ${s}`);
+  for (const leak of ["/downloads", "ABC123", "apikey", "C:\\", "\\\\nas", "(2020)", "x.mkv", "/x"]) assert.ok(!s.includes(leak), `${leak} leaked: ${s}`);
   assert.ok(s.includes("idx.example/…"), s);
   assert.ok(s.includes("1/2 parts and/or more"), `ordinary slashes were mangled: ${s}`);
   assert.ok(!s.includes("\n"));
   assert.equal(W.scrubArrText("x".repeat(1000))?.length, 300);
   assert.equal(W.scrubArrText(42), null);
+});
+
+test("a path with SPACES is removed to the end of its clause, never cut at its first space (media folders have spaces)", () => {
+  const cases: Array<{ in: string; leaks: string[]; keeps?: string }> = [
+    // Unquoted POSIX path ending the message.
+    { in: "No files found are eligible for import in /downloads/complete/Movie Name (2020)", leaks: ["Name", "(2020)", "/downloads"], keeps: "eligible for import in …" },
+    // …followed by another sentence, which survives.
+    { in: "Folder is not accessible by Radarr: /mnt/user/data/torrents/My Show S01/My Show S01E01.mkv. Ensure the path exists", leaks: ["Show", "S01E01", "/mnt"], keeps: "Ensure the path exists" },
+    // Windows, UNC, bracketed.
+    { in: "C:\\Users\\John Doe\\Downloads\\ep.mkv", leaks: ["Doe", "ep.mkv", "Users"] },
+    { in: "D:\\Downloads\\Movie Name (2020)\\movie.mkv is locked", leaks: ["Name", "(2020)", "movie.mkv"] },
+    { in: "copy from \\\\nas\\share\\John Doe\\x.mkv failed", leaks: ["Doe", "x.mkv", "share"] },
+    { in: "Destination already exists [/movies/A Film (2019)/A Film (2019).mkv]", leaks: ["Film", "(2019)", "/movies"], keeps: "Destination already exists […]" },
+    // A clause break (", ") ends the path; the rest of the sentence stays.
+    { in: "Path: /a/b c/d.mkv, quality unknown", leaks: ["/a", "d.mkv", " c/"], keeps: "quality unknown" },
+  ];
+  for (const c of cases) {
+    const s = W.scrubArrText(c.in);
+    assert.ok(s, c.in);
+    for (const leak of c.leaks) assert.ok(!s.includes(leak), `${leak} leaked from ${JSON.stringify(c.in)}: ${s}`);
+    if (c.keeps) assert.ok(s.includes(c.keeps), `the rest of the sentence was lost: ${s}`);
+  }
+});
+
+test("a path is not cut at an apostrophe, \", \" or \". \" inside a folder or file name (Ocean's Eleven, Crouching Tiger, Mr. Robot)", () => {
+  const cases: Array<{ in: string; leaks: string[]; keeps?: string }> = [
+    {
+      in: "Import failed, path does not exist or is not accessible by Radarr: /data/media/movies/Ocean's Eleven (2001)/Ocean's Eleven (2001) Bluray-1080p.mkv",
+      leaks: ["Eleven", "(2001)", "Bluray", ".mkv", "/data"],
+      keeps: "Import failed, path does not exist or is not accessible by Radarr: …",
+    },
+    { in: "Destination: /movies/Crouching Tiger, Hidden Dragon (2000)/Crouching Tiger, Hidden Dragon (2000).mkv", leaks: ["Hidden", "Dragon", "(2000)", ".mkv", "Tiger"] },
+    { in: "Not found: /mnt/user/tv/Mr. Robot/Season 01/Mr. Robot - S01E01.mkv. Ensure the path exists", leaks: ["Robot", "Season", "S01E01", ".mkv"], keeps: "Ensure the path exists" },
+    { in: "C:\\Movies\\Ocean's Eleven (2001)\\file.mkv failed", leaks: ["Eleven", "(2001)", "file.mkv", "Movies"] },
+    { in: "Could not move '/data/Ocean's Eleven/x.mkv' to the library", leaks: ["Eleven", "x.mkv", "/data"], keeps: "'…' to the library" },
+    // A clause break after a complete path still ends it.
+    { in: "Path: /a/Mr. Robot/d.mkv, quality unknown", leaks: ["Robot", "d.mkv"], keeps: "quality unknown" },
+  ];
+  for (const c of cases) {
+    const s = W.scrubArrText(c.in);
+    assert.ok(s, c.in);
+    for (const leak of c.leaks) assert.ok(!s.includes(leak), `${leak} leaked from ${JSON.stringify(c.in)}: ${s}`);
+    if (c.keeps) assert.ok(s.includes(c.keeps), `the rest of the sentence was lost: ${s}`);
+  }
 });
 
 // ── 3: attention ─────────────────────────────────────────────────────────────
@@ -458,6 +618,52 @@ test("attention: at most 25 per instance per run — the rest are announced by t
   assert.deepEqual(second.newly.map((i) => i.downloadId), ["K26", "K27", "K28", "K29", "K30"]);
   assert.equal(second.deferred, 0);
   assert.deepEqual(W.diffAttention(stuck, mem(second), T0 + 45 * MIN).newly, []);
+});
+
+test("attention: a queue read gap longer than the grace does NOT re-announce a download that stayed stuck (an outage is unobserved time)", () => {
+  const seeded = W.diffAttention([QI("A", true)], null, T0);
+  const read = W.diffAttention([QI("A", true)], mem(seeded), T0 + 15 * MIN);
+  const readAt = iso(T0 + 15 * MIN);
+  // 26 h with no successful read, A still stuck: not news; B is.
+  const back = W.diffAttention([QI("A", true), QI("B", true)], { ...mem(read), readAt }, T0 + 15 * MIN + 26 * 60 * MIN);
+  assert.deepEqual(back.newly.map((i) => i.downloadId), ["B"]);
+  // A key that dropped off before the outage keeps its OBSERVED remainder after it, too.
+  const dropped = W.diffAttention([], { ...mem(read), readAt }, T0 + 30 * MIN);
+  const afterOutage = W.diffAttention([], { ...mem(dropped), readAt: iso(T0 + 30 * MIN) }, T0 + 30 * MIN + 26 * 60 * MIN);
+  const next = W.diffAttention([QI("A", true)], { ...mem(afterOutage), readAt: iso(T0 + 30 * MIN + 26 * 60 * MIN) }, T0 + 45 * MIN + 26 * 60 * MIN);
+  assert.deepEqual(next.newly, [], "the outage was counted on the run after it");
+  // Regular reads age exactly as before: last seen 24h10m ago, read 15 min ago ⇒ news again.
+  const now = T0 + 48 * 60 * MIN;
+  const aged = W.diffAttention([QI("A", true)], { keys: [], seen: { "d:A:5": iso(now - 24 * 60 * MIN - 10 * MIN) }, readAt: iso(now - 15 * MIN) }, now);
+  assert.deepEqual(aged.newly.map((i) => i.downloadId), ["A"]);
+  // The stamp round-trips through the stored state; junk is dropped.
+  assert.equal(W.parseArrWatchState(JSON.stringify({ instances: { "radarr:": { attentionReadAt: readAt } } })).instances["radarr:"].attentionReadAt, readAt);
+  assert.equal(W.parseArrWatchState(JSON.stringify({ instances: { "radarr:": { attentionReadAt: "soon" } } })).instances["radarr:"].attentionReadAt, undefined);
+});
+
+test("attention: the read gap follows the cadence — a DAILY monitor's regular gap is observed time, so a key is forgotten a day after it was last seen", () => {
+  assert.equal(W.attentionReadGapMs(900), W.ATTENTION_READ_GAP_MS, "the default 15-minute cadence keeps the 1 h floor");
+  assert.equal(W.attentionReadGapMs(86400), 48 * 60 * MIN);
+  const gap = W.attentionReadGapMs(86400);
+  const DAY = 24 * 60 * MIN;
+  const seen = W.diffAttention([QI("A", true)], { keys: [], seen: {}, readAt: iso(T0 - DAY) }, T0, W.MAX_ATTENTION_PER_RUN, gap);
+  // Day 1: A dropped off; last seen exactly a day ago — still remembered.
+  const day1 = W.diffAttention([], { ...mem(seen), readAt: iso(T0) }, T0 + DAY, W.MAX_ATTENTION_PER_RUN, gap);
+  assert.equal(day1.seen["d:A:5"], iso(T0), "a regular daily gap must not move the last-seen time forward");
+  // Day 2: stuck again, 48 h after it was last seen — that is news.
+  const day2 = W.diffAttention([QI("A", true)], { ...mem(day1), readAt: iso(T0 + DAY) }, T0 + 2 * DAY, W.MAX_ATTENTION_PER_RUN, gap);
+  assert.deepEqual(day2.newly.map((i) => i.downloadId), ["A"], "a fixed 1 h gap kept A for ~25 days at a daily cadence");
+  // At a 2-hour cadence a 26-hour outage is still unobserved time: a download
+  // stuck through it is not news (only the gap past 4 h is discounted).
+  const gap2h = W.attentionReadGapMs(7200);
+  const outage = W.diffAttention([QI("A", true)], { keys: [], seen: { "d:A:5": iso(T0) }, readAt: iso(T0) }, T0 + 26 * 60 * MIN, W.MAX_ATTENTION_PER_RUN, gap2h);
+  assert.deepEqual(outage.newly, []);
+  // …and its regular 2-hour gaps age the memory exactly: forgotten a day after last seen.
+  let m: { keys: string[]; seen: Record<string, string> } = { keys: [], seen: { "d:A:5": iso(T0) } };
+  for (let h = 2; h <= 24; h += 2) m = W.diffAttention([], { ...m, readAt: iso(T0 + (h - 2) * 60 * MIN) }, T0 + h * 60 * MIN, W.MAX_ATTENTION_PER_RUN, gap2h);
+  assert.ok(m.seen["d:A:5"], "remembered through a day of regular reads");
+  const after = W.diffAttention([QI("A", true)], { ...m, readAt: iso(T0 + 24 * 60 * MIN) }, T0 + 26 * 60 * MIN, W.MAX_ATTENTION_PER_RUN, gap2h);
+  assert.deepEqual(after.newly.map((i) => i.downloadId), ["A"], "a 2 h cadence with a fixed 1 h gap remembered it ~50 h");
 });
 
 test("attention: a state stored before the memory existed (keys only) seeds it — no replay on upgrade", () => {
@@ -620,6 +826,59 @@ test("a failed read keeps that part's previous state — a dark run is not 'noth
   assert.equal(back.events.queueAttention, 0);
 });
 
+test("run: a failure the arr dated days ahead waits; the genuine failures around it are announced on time", async () => {
+  const f = configureRadarr();
+  await runArrWatch({ now: T0 });
+  f.history = [radarrFailure(1, T0 + 3 * 24 * 60 * MIN), radarrFailure(2, T0 + 5 * MIN)];
+  const first = await runArrWatch({ now: T0 + 15 * MIN });
+  assert.equal(first.events.downloadFailed, 1, "the future-dated record was consumed");
+  const cursor = W.parseArrWatchState(settings.get(ARR_WATCH_STATE_KEY)).instances["radarr:"].history?.cursor;
+  assert.deepEqual(cursor, { at: iso(T0 + 5 * MIN), lastId: 2 });
+  f.history.push(radarrFailure(3, T0 + 20 * MIN));
+  assert.equal((await runArrWatch({ now: T0 + 30 * MIN })).events.downloadFailed, 1, "a later genuine failure fell behind a future cursor");
+  await settle();
+});
+
+test("run: a queue outage longer than a day does not re-announce a download stuck through it — a failed read keeps the last-read stamp", async () => {
+  const f = configureRadarr();
+  await runArrWatch({ now: T0 });
+  f.queue = [queueRecord(1, "A", true)];
+  assert.equal((await runArrWatch({ now: T0 + 15 * MIN })).events.queueAttention, 1);
+  const stamp = () => W.parseArrWatchState(settings.get(ARR_WATCH_STATE_KEY)).instances["radarr:"].attentionReadAt;
+  assert.equal(stamp(), iso(T0 + 15 * MIN));
+  f.down = new Set(["/api/v3/queue"]);
+  for (let h = 1; h <= 26; h++) await runArrWatch({ now: T0 + 15 * MIN + h * 60 * MIN });
+  assert.equal(stamp(), iso(T0 + 15 * MIN), "a failed queue read moved the last-read stamp");
+  f.down = new Set();
+  await settle();
+  calls = [];
+  const back = await runArrWatch({ now: T0 + 15 * MIN + 27 * 60 * MIN });
+  await settle();
+  assert.equal(back.events.queueAttention, 0, "a download stuck through the outage was announced as newly stuck");
+  assert.equal(stamp(), iso(T0 + 15 * MIN + 27 * 60 * MIN));
+});
+
+test("run: at ARR_WATCH_INTERVAL=86400 the attention memory is a day, not ~25 — the route passes the cadence's read gap", async () => {
+  process.env.ARR_WATCH_INTERVAL = "86400";
+  try {
+    const DAY = 24 * 60 * MIN;
+    const f = configureRadarr();
+    await runArrWatch({ now: T0 });
+    f.queue = [queueRecord(1, "A", true)];
+    assert.equal((await runArrWatch({ now: T0 + 15 * MIN })).events.queueAttention, 1);
+    f.queue = [];
+    await runArrWatch({ now: T0 + 15 * MIN + DAY });
+    f.queue = [queueRecord(1, "A", true)];
+    await settle();
+    calls = [];
+    const back = await runArrWatch({ now: T0 + 15 * MIN + 2 * DAY });
+    await settle();
+    assert.equal(back.events.queueAttention, 1, "stuck again two days after it was last seen is news at a daily cadence");
+  } finally {
+    delete process.env.ARR_WATCH_INTERVAL;
+  }
+});
+
 test("run: a stuck download that drops off ONE successful queue read and comes back is not announced again", async () => {
   const f = configureRadarr();
   await runArrWatch({ now: T0 });
@@ -719,6 +978,58 @@ test("guardrail 41: a run whose AbortSignal fired stores nothing and sends nothi
   const r2 = await runArrWatch({ now: T0, signal: pre.signal });
   assert.equal(r2.notReached, 1);
   assert.deepEqual(arrCalls(RADARR), []);
+});
+
+test("C101 guardrail 41: the queue walk observes the lock's signal — no page is read after the abort", async () => {
+  const f = configureRadarr();
+  radarrDisk(f, 30);
+  f.queue = [queueRecord(1, "A", true)];
+  f.queueTotal = 600; // three pages of 250
+  const controller = new AbortController();
+  f.onQueuePage = (page) => { if (page === 1) controller.abort(new Error("lock timeout")); };
+  const r = await runArrWatch({ now: T0, signal: controller.signal });
+  await settle();
+  const pages = arrCalls(RADARR, "/api/v3/queue").map((c) => c.query.get("page"));
+  assert.deepEqual(pages, ["1"], "page 2 was read after the lock was released");
+  assert.equal(r.aborted, true);
+  assert.deepEqual(settingWrites, []);
+  assert.deepEqual(deliveries(), []);
+});
+
+test("C101 guardrail 41: readQueuePages RETURNS what it has on an abort — it never throws for one", async () => {
+  const { readQueuePages } = await import("../src/lib/arr-queue-data.ts");
+  const f = configureRadarr();
+  f.queue = [queueRecord(1, "A", true)];
+  f.queueTotal = 600;
+  const controller = new AbortController();
+  f.onQueuePage = (page) => { if (page === 1) controller.abort(new Error("lock timeout")); };
+  const records = await readQueuePages("radarr", "", controller.signal);
+  assert.equal(records.length, 1, "page 1's records, and no page after the abort");
+  assert.deepEqual(arrCalls(RADARR, "/api/v3/queue").map((c) => c.query.get("page")), ["1"]);
+});
+
+test("C101 guardrail 41: a queue page IN FLIGHT when the lock aborts is cancelled, and the walk returns rather than throws", async () => {
+  const { readQueuePages } = await import("../src/lib/arr-queue-data.ts");
+  const f = configureRadarr();
+  f.queue = [queueRecord(1, "A", true)];
+  f.queueTotal = 600;
+  f.queueHangPage = 2;
+  const controller = new AbortController();
+  const walk = readQueuePages("radarr", "", controller.signal);
+  for (let i = 0; i < 200 && arrCalls(RADARR, "/api/v3/queue").length < 2; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(arrCalls(RADARR, "/api/v3/queue").length, 2, "page 2 is in flight");
+  controller.abort(new Error("lock timeout"));
+  const records = await walk;
+  assert.equal(records.length, 1, "page 1's records — the cancelled page adds nothing, and nothing is thrown");
+});
+
+test("C101: without an abort the monitor's queue walk still reads every page", async () => {
+  const f = configureRadarr();
+  radarrDisk(f, 30);
+  f.queue = [queueRecord(1, "A", true)];
+  f.queueTotal = 600;
+  await runArrWatch({ now: T0, signal: new AbortController().signal });
+  assert.deepEqual(arrCalls(RADARR, "/api/v3/queue").map((c) => c.query.get("page")), ["1", "2", "3"]);
 });
 
 test("an instance no longer configured is dropped from the state, so coming back re-seeds instead of replaying", async () => {

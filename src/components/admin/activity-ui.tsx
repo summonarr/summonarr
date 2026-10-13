@@ -18,6 +18,7 @@ import {
 import { createPortal } from "react-dom";
 import Image from "next/image";
 import Link from "next/link";
+import { foldBarItems } from "@/lib/activity-bars";
 import { bitrateToKbps } from "@/lib/bitrate";
 import { formatDurationHM } from "@/lib/format-duration";
 import { Chip, SectionHeader as DsSectionHeader } from "@/components/ui/design";
@@ -1254,7 +1255,7 @@ export function UtcTag({ title }: { title: string }) {
 /* ── Bars / distribution ──────────────────────────────────────── */
 
 export function HorizontalBars({
-  items,
+  items: rawItems,
   color = "var(--ds-accent)",
   labelWidth = 110,
 }: {
@@ -1264,6 +1265,10 @@ export function HorizontalBars({
 }) {
   const t = useT();
   const locale = useLocale();
+  // Two stored values can share a display label ('Unknown' and an upstream
+  // literal 'unknown' both read "Unknown"); the label is the row key, so they
+  // are merged here, once, for every caller.
+  const items = foldBarItems(rawItems);
   const max = Math.max(...items.map((i) => i.count), 1);
   if (items.length === 0)
     return (

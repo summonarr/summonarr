@@ -16,12 +16,14 @@ interface RequestActionsProps {
   mediaType: string;
   /** Instance slug this request targets ("" = default, "4k", or a named slug) — picks which instance's profiles to list. */
   arrInstance: string;
+  /** That instance's display name — the "Why?" panel names the instance it checked. */
+  arrInstanceName?: string | null;
   existingAdminNote?: string | null;
   /** When set, approve/decline apply to all of these PENDING request IDs via the batch endpoint. */
   groupPendingIds?: string[];
 }
 
-export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, existingAdminNote, groupPendingIds }: RequestActionsProps) {
+export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, arrInstanceName, existingAdminNote, groupPendingIds }: RequestActionsProps) {
   const router = useRouter();
   const t = useT();
   const [loading, setLoading] = useState<"APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE" | null>(null);
@@ -45,6 +47,13 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
   // "Why?" — the inline Radarr/Sonarr status panel, loaded on click only.
   const [showStatus, setShowStatus] = useState(false);
   const statusPanelId = useId();
+  // The panel reads Radarr/Sonarr when it MOUNTS, so it must never re-mount
+  // without a click. Leaving the APPROVED branch (a sync marking the row
+  // AVAILABLE, a decline elsewhere) unmounts it; close it then, or its return
+  // would read again on its own. The delete confirm closes it the same way.
+  useEffect(() => {
+    if (status !== "APPROVED") setShowStatus(false);
+  }, [status]);
   const [arrError, setArrError] = useState<string | null>(null);
   const [retryOk, setRetryOk] = useState(false);
   const [showDeclineNote, setShowDeclineNote] = useState(false);
@@ -402,7 +411,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           <Button
             size="sm"
             variant="outline"
-            onClick={() => setShowDeleteConfirm(true)}
+            onClick={() => { setShowStatus(false); setShowDeleteConfirm(true); }}
             disabled={loading !== null}
             className="h-7 px-3 text-xs border-red-500/50 text-red-400 hover:bg-red-500/10 hover:text-red-400 gap-1"
           >
@@ -412,9 +421,14 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         </div>
         {showStatus && (
           <RequestArrStatusPanel
+            // A new representative request starts from no verdict: the old
+            // one's buttons would act on the new request.
+            key={requestId}
             id={statusPanelId}
             requestId={requestId}
             mediaType={mediaType}
+            arrInstance={arrInstance}
+            arrInstanceName={arrInstanceName}
             busy={loading !== null}
             onSearch={triggerSearch}
             onPickRelease={() => { setArrError(null); setShowReleases(true); }}

@@ -16,37 +16,108 @@
 //   deleteMany + batchCreateMany inside ONE transaction (guardrails 4/13/35). A
 //   failed or aborted server keeps its previous rows — a partial snapshot would
 //   silently DROP evidence, and dropped evidence is how a watched title ends up
-//   offered for deletion.
+//   offered for deletion. The one partial read that IS written is a Plex history
+//   that reached its read cap (every record it holds is real), and it is stored
+//   `truncated` — health "incomplete", never "ok" — so the cleanup still holds
+//   back what its dropped OLDEST records might have proved watched.
 // - A self-check makes a broken parser loud instead of silent: `matched` (how
 //   many rows land on a library title) and the AGREEMENT between the server's
 //   records and the plays Summonarr itself recorded as completed. Both feed
 //   upstreamHealth(), which the report shows beside every server.
 // - Observes the AbortSignal between servers, between Jellyfin users and while
 //   paging, and RETURNS on abort (guardrail 41).
+// - Each server is cut off inside a RUN BUDGET below the lock's 30-minute work
+//   timeout. A server that runs out is recorded FAILED ("timed out") and keeps
+//   its previous snapshot, and the run moves on: one slow server must not blow
+//   the lock (which the entrypoint answers by retrying the whole walk every few
+//   minutes) or starve the servers after it. The budget is NOT pre-split evenly:
+//   a server may use everything left minus a small RESERVE held for each server
+//   after it (UPSTREAM_SERVER_RESERVE_MS). An even split capped the first server
+//   (always Plex) at a fraction of the run, so a big history that finished in
+//   15 minutes failed every day while the servers after it took seconds.
+// - A NAMED server removed while its refresh is in flight writes NOTHING after
+//   the removal: the evidence replace and the status write each lock the
+//   registry row (FOR UPDATE) and re-check the slug is still listed
+//   (stillRegisteredInTx). The removal (/api/admin/media-instances) writes that
+//   row first in its own transaction, so the two are ordered either way — a
+//   removal that commits first is seen and skipped; a refresh that commits
+//   first is deleted by the removal. Otherwise a server registered later under
+//   the same slug would inherit this one's evidence and "ok" status (14d).
+import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
 import { BATCH_TX_TIMEOUT, batchCreateMany } from "./cron-auth";
 import { mapLimit } from "./concurrency";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
-import { getMediaInstances, getSyncableMediaInstances } from "./media-instance-registry";
-import { mediaInstanceLabel } from "./media-instances";
+import { buildMediaInstanceRegistryWrite, getMediaInstances, getSyncableMediaInstances } from "./media-instance-registry";
+import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "./media-instances";
 import { getPlexConfig } from "./plex-config";
 import { getJellyfinConfig } from "./jellyfin-config";
 import { getPlexWatchHistory } from "./plex";
 import { getJellyfinAllUsers, getJellyfinUserPlayedItems } from "./jellyfin";
 import { parseUpstreamStatus, upstreamStatusKey } from "./never-watched-data";
-import { upstreamHealth, type NwSource, type NwUpstreamHealth, type NwUpstreamStatus } from "./never-watched";
+import {
+  isUnhealthyUpstreamCheck,
+  upstreamEpisodesUnplaced,
+  upstreamHealth,
+  type NwSource,
+  type NwUpstreamHealth,
+  type NwUpstreamStatus,
+} from "./never-watched";
 import {
   aggregateUpstream,
   agreementSince,
   computeAgreement,
   earliestViewed,
   safeUpstreamError,
+  UPSTREAM_ERROR_TEXT,
   type JellyfinPlayedItem,
   type UpstreamEvidenceRow,
 } from "./upstream-watch";
 
 // Jellyfin users read at once (guardrail 31): each is two sequential page walks.
 const JELLYFIN_USER_CONCURRENCY = 3;
+
+// The whole run's budget, kept below withAdvisoryLock's 30-minute work timeout
+// (advisory-lock.ts) so a slow server is cut short HERE — recorded failed, the
+// run still answering 200 — instead of the lock expiring under it (non-2xx →
+// the entrypoint's 5-minute retry, every later server unreached).
+export const UPSTREAM_RUN_BUDGET_MS = 25 * 60_000;
+
+// The time held back for EACH server still to come when one starts: what it may
+// spend is the rest of the budget minus this per later server. Generous for a
+// typical Jellyfin walk or a skipped (unconfigured) server, and whatever a server
+// leaves unused flows on to the next. A small budget scales it down
+// (upstreamServerReserve).
+export const UPSTREAM_SERVER_RESERVE_MS = 3 * 60_000;
+
+// The reserve per later server for a run of `servers` servers: the constant,
+// but never more than half the run spread over them, so the first server always
+// gets at least half of the budget.
+export function upstreamServerReserve(runBudgetMs: number, servers: number): number {
+  if (servers <= 1) return 0;
+  return Math.min(UPSTREAM_SERVER_RESERVE_MS, Math.floor(runBudgetMs / (2 * servers)));
+}
+
+// What server `index` (0-based) of `servers` may spend when `remainingMs` of the
+// run is left: everything except the reserve for each server after it.
+export function upstreamServerShare(remainingMs: number, index: number, servers: number, reserveMs: number): number {
+  return Math.max(0, Math.floor(remainingMs - reserveMs * (servers - index - 1)));
+}
+
+// A server's share of the run budget ran out. What its fetch returned is a
+// PARTIAL walk (the page readers stop on the signal rather than throw), and a
+// partial snapshot drops evidence — so it is never written.
+class UpstreamBudgetError extends Error {
+  name = "UpstreamBudgetError";
+}
+
+// A server whose answer holds no records at all while Summonarr itself recorded
+// completed plays there: a degraded read (a truncating proxy, a de-elevated
+// token, a changed shape that parses to nothing), never "nobody watched
+// anything" — replacing the previous snapshot with it would drop every row.
+class UpstreamEmptyAnswerError extends Error {
+  name = "UpstreamEmptyAnswerError";
+}
 
 export interface UpstreamServerResult {
   source: NwSource;
@@ -68,10 +139,10 @@ export interface UpstreamRefreshResult {
   aborted: boolean;
 }
 
-// Servers that failed, or whose snapshot the self-check marks failed/unreliable
-// — the count the cron route degrades the run on.
+// Servers that failed, or whose snapshot the self-check refuses (failed /
+// unreliable / incomplete) — the count the cron route degrades the run on.
 export function upstreamRefreshProblems(result: UpstreamRefreshResult): number {
-  return result.servers.filter((s) => !s.ok || s.health === "failed" || s.health === "unreliable").length;
+  return result.servers.filter((s) => !s.ok || isUnhealthyUpstreamCheck(s)).length;
 }
 
 interface Snapshot {
@@ -82,30 +153,44 @@ interface Snapshot {
   rawItemKeys: Set<string>;
   // How far back the fetched records reach (Plex); null = no floor.
   floor: Date | null;
+  // The read stopped at its cap; the oldest records were not read.
+  truncated: boolean;
+  // Episode records, and those with no show id — counted from the PARSED
+  // records, before aggregation (which silently skips an unplaced episode).
+  episodeRecords: number;
+  unplacedEpisodes: number;
+}
+
+function episodeCounts(items: Iterable<{ kind: string; showKey: string | null }>): { episodeRecords: number; unplacedEpisodes: number } {
+  let episodeRecords = 0;
+  let unplacedEpisodes = 0;
+  for (const it of items) {
+    if (it.kind !== "episode") continue;
+    episodeRecords++;
+    if (!it.showKey) unplacedEpisodes++;
+  }
+  return { episodeRecords, unplacedEpisodes };
 }
 
 type FetchOutcome = Snapshot | "unconfigured";
 
-async function plexSnapshot(slug: string, signal: AbortSignal | undefined): Promise<FetchOutcome> {
+async function plexSnapshot(slug: string, signal: AbortSignal | undefined, maxItems: number | undefined): Promise<FetchOutcome> {
   const cfg = await getPlexConfig(slug);
   const url = cfg.url?.trim();
   const token = cfg.token?.trim();
   if (!url || !token) return "unconfigured";
-  const history = await getPlexWatchHistory(url, token, { signal });
-  if (history.truncated) {
-    warnOnChange(
-      `upstream-watch-truncated:${mediaInstanceLabel("plex", slug)}`,
-      "truncated",
-      `[upstream-watch] ${mediaInstanceLabel("plex", slug)}: watch history is longer than the read cap; only the most recent records were read`,
-    );
-  }
+  const history = await getPlexWatchHistory(url, token, maxItems === undefined ? { signal } : { signal, maxItems });
+  // A truncated history is logged once by logHealth (its "incomplete" health).
   return {
     records: history.records,
     rows: aggregateUpstream(history.entries),
     rawItemKeys: new Set(history.entries.map((e) => e.itemKey)),
     floor: earliestViewed(history.entries),
+    truncated: history.truncated,
+    ...episodeCounts(history.entries),
   };
 }
+
 
 // The same item in both lists (played, and now being re-watched) is ONE item for
 // that user: the larger play count and the later date.
@@ -169,6 +254,9 @@ async function jellyfinSnapshot(slug: string, signal: AbortSignal | undefined): 
     rawItemKeys: new Set(items.map((i) => i.itemKey)),
     // Played flags are current state, not a dated log: no floor.
     floor: null,
+    // Every page is read: a user's walk that can't finish fails the server.
+    truncated: false,
+    ...episodeCounts(items),
   };
 }
 
@@ -221,13 +309,48 @@ async function readStatus(source: NwSource, slug: string): Promise<NwUpstreamSta
   }
 }
 
+// The interactive-tx client of the EXTENDED prisma (account-lifecycle.ts's shape).
+type TxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+
+// Whether a NAMED instance is still registered, read with its service's registry
+// row LOCKED, so a concurrent removal (which writes that row first, in the same
+// transaction as its cleanup) is ordered against this write. The default
+// instance is synthesized and can never be removed. A missing or unreadable
+// registry lists nothing.
+async function stillRegisteredInTx(tx: TxClient, source: NwSource, slug: string): Promise<boolean> {
+  if (slug === DEFAULT_MEDIA_INSTANCE) return true;
+  const { key } = buildMediaInstanceRegistryWrite(source, []);
+  const rows = await tx.$queryRaw<Array<{ value: string }>>(
+    Prisma.sql`SELECT "value" FROM "Setting" WHERE "key" = ${key} FOR UPDATE`,
+  );
+  const raw = rows[0]?.value;
+  if (!raw) return false;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.some((e) => !!e && typeof e === "object" && (e as { slug?: unknown }).slug === slug);
+  } catch {
+    return false;
+  }
+}
+
 // Never throws: the status is observability, and a failed write must not turn a
-// refreshed snapshot into a failed run (or abort the servers after it).
+// refreshed snapshot into a failed run (or abort the servers after it). A named
+// server is written only while still registered (the header's removal rule);
+// the default's write is the plain upsert it always was.
 async function writeStatus(source: NwSource, slug: string, status: NwUpstreamStatus): Promise<void> {
   const key = upstreamStatusKey(source, slug);
   const value = JSON.stringify(status);
   try {
-    await prisma.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
+    if (slug === DEFAULT_MEDIA_INSTANCE) {
+      await prisma.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
+    } else {
+      // Guardrail 23: nothing caught in here — a failure propagates out of the
+      // transaction to the catch below.
+      await prisma.$transaction(async (tx) => {
+        if (!(await stillRegisteredInTx(tx, source, slug))) return;
+        await tx.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
+      });
+    }
   } catch (err) {
     console.warn(
       `[upstream-watch] ${mediaInstanceLabel(source, slug)}: could not record the refresh status:`,
@@ -252,7 +375,7 @@ function resultOf(source: NwSource, slug: string, status: NwUpstreamStatus, now:
 
 // An unhealthy server is a CONDITION recomputed every run — repeat-suppressed
 // (guardrail 7b), and forgotten once it clears so a recurrence logs again.
-function logHealth(source: NwSource, slug: string, result: UpstreamServerResult): void {
+function logHealth(source: NwSource, slug: string, result: UpstreamServerResult, status: NwUpstreamStatus): void {
   const label = mediaInstanceLabel(source, slug);
   const key = `upstream-watch:${label}`;
   if (!result.ok) {
@@ -260,6 +383,12 @@ function logHealth(source: NwSource, slug: string, result: UpstreamServerResult)
       key,
       `failed|${result.error ?? ""}`,
       `[upstream-watch] ${label}: could not read the server's own watch records (${result.error ?? "unknown error"}); keeping the previous snapshot`,
+    );
+  } else if (result.health === "failed" && upstreamEpisodesUnplaced(status) && !(status.entries > 0 && status.matched === 0)) {
+    warnOnChange(
+      key,
+      "unplaced-episodes",
+      `[upstream-watch] ${label}: most episode records carry no show id, so TV evidence can't be placed on a title — the response shape may have changed`,
     );
   } else if (result.health === "failed") {
     warnOnChange(
@@ -273,6 +402,12 @@ function logHealth(source: NwSource, slug: string, result: UpstreamServerResult)
       "unreliable",
       `[upstream-watch] ${label}: fewer than half of the items Summonarr recorded as watched appear in the server's own watch records — they may be misread or incomplete`,
     );
+  } else if (result.health === "incomplete") {
+    warnOnChange(
+      key,
+      "incomplete",
+      `[upstream-watch] ${label}: watch history is longer than the read cap; only the most recent records were read, so its titles stay held back from cleanup`,
+    );
   } else {
     forgetWarnOnChange(key);
   }
@@ -280,26 +415,51 @@ function logHealth(source: NwSource, slug: string, result: UpstreamServerResult)
 
 type ServerOutcome = UpstreamServerResult | "skipped" | "aborted";
 
+// The failure text a status row records — client-safe (safeUpstreamError), with
+// our own two refusals named.
+// The words come from UPSTREAM_ERROR_TEXT, so the page can translate them back
+// to a code (upstreamErrorCode).
+function failureText(err: unknown): string {
+  if (err instanceof UpstreamBudgetError) return UPSTREAM_ERROR_TEXT.timeout;
+  if (err instanceof UpstreamEmptyAnswerError) return UPSTREAM_ERROR_TEXT.noRecords;
+  return safeUpstreamError(err);
+}
+
+// `signal` is the LOCK's (guardrail 41: aborted → write nothing, return);
+// `serverSignal` also fires when this server's share of the run budget runs out
+// (→ a failed server, and the run goes on).
 async function refreshServer(
   source: NwSource,
   slug: string,
   signal: AbortSignal | undefined,
-  fetchSnapshot: () => Promise<FetchOutcome>,
+  serverSignal: AbortSignal,
+  fetchSnapshot: (signal: AbortSignal) => Promise<FetchOutcome>,
 ): Promise<ServerOutcome> {
   const now = new Date();
   let status: NwUpstreamStatus;
   try {
-    const snapshot = await fetchSnapshot();
+    const snapshot = await fetchSnapshot(serverSignal);
     if (snapshot === "unconfigured") return "skipped";
+    // The lock first: a lock abort also fires serverSignal, and must stay an
+    // abort (nothing written, no later server), not a "timed out" server.
     if (signal?.aborted) return "aborted";
+    if (serverSignal.aborted) throw new UpstreamBudgetError(`${mediaInstanceLabel(source, slug)}: out of run budget`);
     const matched = await countMatched(source, slug, snapshot.rows);
     const recorded = await recordedItemKeys(source, slug, agreementSince(now, snapshot.floor));
     const { samples, agreed } = computeAgreement(recorded, snapshot.rawItemKeys);
     // Last check before the write: an aborted run writes nothing for the
     // server in progress (guardrail 41).
     if (signal?.aborted) return "aborted";
-    await prisma.$transaction(
+    // Nothing at all from a server Summonarr saw completed plays on: keep the
+    // previous snapshot rather than replace it with nothing (upstreamHealth
+    // reads such a status as unreliable too, should one ever be stored).
+    if (snapshot.records === 0 && samples > 0) {
+      throw new UpstreamEmptyAnswerError(`${mediaInstanceLabel(source, slug)}: no watch records`);
+    }
+    const written = await prisma.$transaction(
       async (tx) => {
+        // Removed while this server was being read: write nothing (header).
+        if (!(await stillRegisteredInTx(tx, source, slug))) return false;
         await tx.upstreamWatchEvidence.deleteMany({ where: { source, serverInstance: slug } });
         await batchCreateMany(
           tx.upstreamWatchEvidence,
@@ -314,9 +474,11 @@ async function refreshServer(
             fetchedAt: now,
           })),
         );
+        return true;
       },
       { timeout: BATCH_TX_TIMEOUT },
     );
+    if (!written) return "skipped";
     status = {
       fetchedAt: now.toISOString(),
       attemptedAt: now.toISOString(),
@@ -326,6 +488,9 @@ async function refreshServer(
       samples,
       agreed,
       error: null,
+      truncated: snapshot.truncated,
+      episodeRecords: snapshot.episodeRecords,
+      unplacedEpisodes: snapshot.unplacedEpisodes,
     };
   } catch (err) {
     if (signal?.aborted) return "aborted";
@@ -338,33 +503,51 @@ async function refreshServer(
       matched: prev?.matched ?? 0,
       samples: prev?.samples ?? 0,
       agreed: prev?.agreed ?? 0,
-      error: safeUpstreamError(err),
+      error: failureText(err),
+      // The previous snapshot's rows are kept, so its facts are too.
+      truncated: prev?.truncated ?? false,
+      episodeRecords: prev?.episodeRecords ?? 0,
+      unplacedEpisodes: prev?.unplacedEpisodes ?? 0,
     };
   }
   await writeStatus(source, slug, status);
   const result = resultOf(source, slug, status, now);
-  logHealth(source, slug, result);
+  logHealth(source, slug, result, status);
   return result;
 }
 
-export async function refreshUpstreamWatch({ signal }: { signal?: AbortSignal } = {}): Promise<UpstreamRefreshResult> {
+// `runBudgetMs` and `plexMaxItems` are test seams; production always runs on
+// UPSTREAM_RUN_BUDGET_MS and getPlexWatchHistory's own read cap.
+export async function refreshUpstreamWatch(
+  { signal, runBudgetMs = UPSTREAM_RUN_BUDGET_MS, plexMaxItems }: { signal?: AbortSignal; runBudgetMs?: number; plexMaxItems?: number } = {},
+): Promise<UpstreamRefreshResult> {
   const servers: UpstreamServerResult[] = [];
-  const run = async (source: NwSource, slug: string, fetchSnapshot: () => Promise<FetchOutcome>): Promise<boolean> => {
-    if (signal?.aborted) return false;
-    const outcome = await refreshServer(source, slug, signal, fetchSnapshot);
-    if (outcome === "aborted") return false;
-    if (outcome !== "skipped") servers.push(outcome);
-    return true;
-  };
+  if (signal?.aborted) return { servers, aborted: true };
+  const deadline = Date.now() + runBudgetMs;
 
   // Plex: the registry + getPlexConfig's findUnique reads and a skip-if-
   // unconfigured, never getSyncableMediaInstances (guardrail 35's Plex note).
-  for (const instance of await getMediaInstances("plex")) {
-    if (!(await run("plex", instance.slug, () => plexSnapshot(instance.slug, signal)))) return { servers, aborted: true };
-  }
-  if (signal?.aborted) return { servers, aborted: true };
-  for (const instance of await getSyncableMediaInstances("jellyfin")) {
-    if (!(await run("jellyfin", instance.slug, () => jellyfinSnapshot(instance.slug, signal)))) return { servers, aborted: true };
+  // Both lists are read up front so every server's share of the budget is known.
+  const plan: Array<{ source: NwSource; slug: string }> = [
+    ...(await getMediaInstances("plex")).map((i) => ({ source: "plex" as const, slug: i.slug })),
+    ...(await getSyncableMediaInstances("jellyfin")).map((i) => ({ source: "jellyfin" as const, slug: i.slug })),
+  ];
+
+  const reserve = upstreamServerReserve(runBudgetMs, plan.length);
+  for (let i = 0; i < plan.length; i++) {
+    if (signal?.aborted) return { servers, aborted: true };
+    const { source, slug } = plan[i];
+    // Everything LEFT minus a reserve per later server, recomputed per server:
+    // a slow server takes from the tail, never from a pre-split even share, and
+    // a fast (or skipped) server hands its unused time to the ones after it.
+    const share = upstreamServerShare(deadline - Date.now(), i, plan.length, reserve);
+    const budget = AbortSignal.timeout(share);
+    const serverSignal = signal ? AbortSignal.any([signal, budget]) : budget;
+    const outcome = await refreshServer(source, slug, signal, serverSignal, (s) =>
+      source === "plex" ? plexSnapshot(slug, s, plexMaxItems) : jellyfinSnapshot(slug, s),
+    );
+    if (outcome === "aborted") return { servers, aborted: true };
+    if (outcome !== "skipped") servers.push(outcome);
   }
   return { servers, aborted: false };
 }

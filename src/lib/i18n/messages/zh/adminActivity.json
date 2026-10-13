@@ -409,5 +409,7 @@
   "adminActivity.trackingOff.description": "当前没有记录任何内容，因此此仪表板没有可显示的播放、观看时长或观众。请在 设置 → 媒体 → 播放历史 中开启跟踪以开始填充数据。",
   "adminActivity.trackingOff.cta": "打开播放历史设置",
   "adminActivity.common.hoursShort": "{n} 小时",
-  "adminActivity.detail.openPlay": "打开播放 →"
+  "adminActivity.detail.openPlay": "打开播放 →",
+  "adminActivity.stats.noReasonReportedTop": "{pct}% 的转码未报告原因——服务器没有说明为何转码。",
+  "adminActivity.stats.movieDecadesTvFiltered": "仅限电影——开启“剧集”筛选时不显示。"
 }

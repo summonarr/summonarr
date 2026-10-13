@@ -22,6 +22,9 @@
 //   8. NARROWED-READ PARITY: re-judging one title (what the delete route does)
 //      reaches the same verdict as the full report. A tmdb-id-only narrowed read
 //      used to miss 1–4 entirely.
+//   9. A fulfilled request's availableAt is an ARRIVAL date (the earliest of
+//      every arrival source opens the window) — AVAILABLE requests only, and the
+//      EARLIEST of them.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { shadowPrismaClientMethod, shadowPrismaModel } from "./_helpers.mts";
@@ -39,6 +42,7 @@ function matchField(v: unknown, cond: unknown): boolean {
   if (cond === null || typeof cond !== "object" || cond instanceof Date) return v === cond;
   const c = cond as Record<string, unknown>;
   if ("in" in c) return (c.in as unknown[]).includes(v);
+  if ("hasSome" in c) return Array.isArray(v) && (c.hasSome as unknown[]).some((x) => (v as unknown[]).includes(x));
   if ("not" in c && c.not === null) return v !== null && v !== undefined;
   if ("equals" in c) {
     return c.mode === "insensitive"
@@ -95,6 +99,7 @@ let jfLib: Row[] = [];
 let plays: Row[] = [];
 let sessions: Row[] = [];
 let upstream: Row[] = [];
+let requests: Row[] = [];
 let episodes: Array<{ tmdbId: number; seasonNumber: number; episodeNumber: number; addedAt: Date | null }> = [];
 const groupByWheres: Where[] = [];
 
@@ -117,7 +122,7 @@ shadowPrismaModel(prisma, "playHistory", {
 });
 shadowPrismaModel(prisma, "activeSession", { findMany: async () => sessions });
 shadowPrismaModel(prisma, "upstreamWatchEvidence", { findMany: async (args: { where?: Where }) => upstream.filter((r) => matchWhere(r, args.where)) });
-shadowPrismaModel(prisma, "mediaRequest", { groupBy: async () => [] });
+shadowPrismaModel(prisma, "mediaRequest", { groupBy: async (args: Parameters<typeof groupBy>[1]) => groupBy(requests, args) });
 shadowPrismaModel(prisma, "setting", {
   findMany: async (args: { where?: Where }) =>
     [...settings.entries()].map(([key, value]) => ({ key, value })).filter((r) => matchWhere(r, args.where)),
@@ -170,6 +175,8 @@ beforeEach(() => {
     plex(800, "MOVIE", "Hotel", { key: "rk800" }),
     plex(900, "MOVIE", "India", { key: "rk900" }),
     plex(610, "TV", "Juliet", { key: "rk610" }),
+    plex(630, "TV", "Mike", { key: "rk630" }),
+    plex(640, "MOVIE", "November", { key: "rk640" }),
   ];
   jfLib = [
     {
@@ -201,6 +208,12 @@ beforeEach(() => {
   sessions = [
     // 5. playing now, matched by item key only.
     { source: "plex", serverInstance: "", tmdbId: null, mediaType: "MOVIE", title: "Hotel", seasonNumber: null, sourceItemId: "rk800", sourceShowId: null, lastSeenAt: d("2026-09-30") },
+    // 5. playing now, matched by the SHOW's key only: the episode's own key and
+    //    its title match nothing, so neither the item-key nor the soft path can
+    //    rescue it.
+    { source: "plex", serverInstance: "", tmdbId: null, mediaType: "TV", title: "Mike (episode title)", seasonNumber: 1, sourceItemId: "ep-631", sourceShowId: "rk630", lastSeenAt: d("2026-09-30") },
+    // 5. playing now, matched by tmdb id only (a key and a title that match nothing).
+    { source: "plex", serverInstance: "", tmdbId: 640, mediaType: "MOVIE", title: "zzz", seasonNumber: null, sourceItemId: "no-such-key", sourceShowId: null, lastSeenAt: d("2026-09-30") },
   ];
   upstream = [
     // 4. Plex's own record of India.
@@ -213,7 +226,9 @@ beforeEach(() => {
     { tmdbId: 600, seasonNumber: 3, episodeNumber: 1, addedAt: null }, // undated → unobservable
     { tmdbId: 610, seasonNumber: 1, episodeNumber: 1, addedAt: d("2025-03-01") },
     { tmdbId: 610, seasonNumber: 2, episodeNumber: 1, addedAt: d("2025-03-01") },
+    { tmdbId: 630, seasonNumber: 1, episodeNumber: 1, addedAt: d("2025-03-01") },
   ];
+  requests = [];
 });
 
 const byId = (facts: Awaited<ReturnType<typeof loadLibraryWatchFacts>>) => new Map(facts.titles.map((t) => [t.tmdbId, t]));
@@ -254,6 +269,18 @@ test("4 + 5. the media server's own record and a session playing now each clear 
   assert.equal(t.get(800)!.playingNow, true);
 });
 
+test("5. a session playing now clears a SHOW by its show key (and its season), and a title by tmdb id", async () => {
+  const t = byId(await loadLibraryWatchFacts(null, { now: NOW, seasons: true }));
+  const mike = t.get(630)!;
+  assert.equal(mike.verdict.state, "watched", "playing now, matched by show key");
+  assert.equal(mike.playingNow, true, "the cleanup playingNow exclusion reads this for a show too");
+  assert.deepEqual((mike.seasons ?? []).map((s) => [s.seasonNumber, s.state]), [[1, "watched"]]);
+  assert.equal(mike.evidence.softPlays, 0, "hard evidence, not a title match");
+  const november = t.get(640)!;
+  assert.equal(november.verdict.state, "watched", "playing now, matched by tmdb id");
+  assert.equal(november.playingNow, true);
+});
+
 test("6. a title-only match is 'possibly watched'; a play matching nothing is counted, not dropped", async () => {
   const facts = await loadLibraryWatchFacts(null, { now: NOW });
   const t = byId(facts);
@@ -280,7 +307,13 @@ test("7. evidence reads are never filtered by user, status, the watched flag, so
 });
 
 test("8. narrowed-read parity: re-judging one title reaches the full report's verdict, evidence and seasons", async () => {
+  // A show whose ONLY evidence is the media server's own record by SHOW key:
+  // the narrowed upstream read must ask for show keys too, not movie keys alone.
+  plexLib.push(plex(620, "TV", "Kilo", { key: "rk620" }));
+  episodes.push({ tmdbId: 620, seasonNumber: 1, episodeNumber: 1, addedAt: d("2025-03-01") });
+  upstream.push({ source: "plex", serverInstance: "", itemKey: "rk620", seasonNumber: 1, mediaType: "TV", playCount: 1, lastPlayedAt: d("2025-06-01") });
   const full = byId(await loadLibraryWatchFacts(null, { now: NOW, seasons: true }));
+  assert.equal(full.get(620)!.verdict.state, "watched", "the full read sees Kilo's upstream show record");
   for (const [tmdbId, t] of full) {
     const one = await loadLibraryWatchFacts(null, { now: NOW, seasons: true, only: [{ tmdbId, mediaType: t.mediaType }] });
     assert.equal(one.titles.length, 1, `${tmdbId}`);
@@ -295,10 +328,97 @@ test("8. narrowed-read parity: re-judging one title reaches the full report's ve
   }
 });
 
+test("9. a fulfilled request's availableAt opens the window — the EARLIEST AVAILABLE one, never a declined request's date", async () => {
+  requests.push(
+    { tmdbId: 500, mediaType: "MOVIE", status: "AVAILABLE", availableAt: d("2024-06-01") },
+    { tmdbId: 500, mediaType: "MOVIE", status: "AVAILABLE", availableAt: d("2024-09-01") }, // a later fulfilment: not the arrival
+    { tmdbId: 500, mediaType: "MOVIE", status: "DECLINED", availableAt: d("2023-01-01") }, // never fulfilled
+    { tmdbId: 500, mediaType: "MOVIE", status: "AVAILABLE", availableAt: null },
+  );
+  const echo = byId(await loadLibraryWatchFacts(null, { now: NOW })).get(500)!;
+  assert.equal(echo.shelfStart?.toISOString(), d("2024-06-01").toISOString(), "earlier than the media server's addedAt (2025-03-01)");
+  const one = await loadLibraryWatchFacts(null, { now: NOW, only: [{ tmdbId: 500, mediaType: "MOVIE" }] });
+  assert.equal(one.titles[0].shelfStart?.toISOString(), d("2024-06-01").toISOString(), "the narrowed read reaches the same arrival");
+  // No request: the media server's own date.
+  requests.length = 0;
+  const bare = byId(await loadLibraryWatchFacts(null, { now: NOW })).get(500)!;
+  assert.equal(bare.shelfStart?.toISOString(), d("2025-03-01").toISOString());
+});
+
 test("a holder on an untracked source is unobservable, naming the server", async () => {
   jfLib.push({ tmdbId: 500, mediaType: "MOVIE", serverInstance: "remote", title: "Echo", year: "2020", addedAt: d("2025-03-01"), jellyfinItemId: "jf-500", jellyfinItemIds: [] });
   const echo = byId(await loadLibraryWatchFacts(null, { now: NOW })).get(500)!;
   assert.equal(echo.verdict.state, "unobservable");
   assert.equal(echo.verdict.reason, "noHistory", "jellyfin:remote has recorded nothing");
   assert.deepEqual(echo.verdict.reasonServers, ["jellyfin:remote"]);
+});
+
+// ── upstreamUnchecked: the loader's half of the 14d hold-back ───────────────
+// Audit C132: the pure cleanup rule was pinned with a hand-built
+// `upstreamUnchecked`, but the LOADER computing it (holders whose upstream
+// health isn't "ok") was not — `!== "ok"` → `=== "failed"`, or `[]`, left every
+// test green. C159: a truncated read is "incomplete" and holds too. C016: a
+// server that holds no title is listed for coverage but `holds: false`.
+const STATUS_PLEX = "upstreamWatch:status:plex:";
+const STATUS_JF = "upstreamWatch:status:jellyfin:";
+const upstreamStatus = (over: Record<string, unknown> = {}) => JSON.stringify({
+  fetchedAt: d("2026-09-30").toISOString(), attemptedAt: d("2026-09-30").toISOString(), ok: true,
+  entries: 10, matched: 10, samples: 0, agreed: 0, error: null, ...over,
+});
+async function withStatuses<T>(rows: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  for (const [k, v] of Object.entries(rows)) settings.set(k, v);
+  try {
+    return await fn();
+  } finally {
+    for (const k of Object.keys(rows)) settings.delete(k);
+  }
+}
+
+test("C132 upstreamUnchecked: a STALE holder is named; a fresh ok one is not (Charlie: plex + jellyfin; Alpha: plex only)", async () => {
+  await withStatuses({ [STATUS_PLEX]: upstreamStatus(), [STATUS_JF]: upstreamStatus({ fetchedAt: d("2026-09-01").toISOString() }) }, async () => {
+    const t = byId(await loadLibraryWatchFacts(null, { now: NOW }));
+    assert.deepEqual(t.get(300)!.upstreamUnchecked, ["jellyfin"], "stale (30 days) is not a check");
+    assert.deepEqual(t.get(100)!.upstreamUnchecked, [], "a fresh ok check holds nothing back");
+  });
+});
+
+test("C132 upstreamUnchecked: a FAILED refresh and a parser that matched nothing both hold", async () => {
+  await withStatuses({ [STATUS_PLEX]: upstreamStatus(), [STATUS_JF]: upstreamStatus({ ok: false, error: "HTTP 401" }) }, async () => {
+    assert.deepEqual(byId(await loadLibraryWatchFacts(null, { now: NOW })).get(300)!.upstreamUnchecked, ["jellyfin"], "failed");
+  });
+  await withStatuses({ [STATUS_PLEX]: upstreamStatus(), [STATUS_JF]: upstreamStatus({ entries: 5, matched: 0 }) }, async () => {
+    assert.deepEqual(byId(await loadLibraryWatchFacts(null, { now: NOW })).get(300)!.upstreamUnchecked, ["jellyfin"], "matched nothing");
+  });
+});
+
+test("C132 upstreamUnchecked: NO status row at all is 'never' — the holder is named", async () => {
+  const t = byId(await loadLibraryWatchFacts(null, { now: NOW }));
+  assert.deepEqual(t.get(100)!.upstreamUnchecked, ["plex"]);
+  assert.deepEqual(t.get(300)!.upstreamUnchecked, ["jellyfin", "plex"]);
+});
+
+test("C159 a TRUNCATED read parses as truncated and holds its titles back as 'incomplete'; a pre-field row reads complete", async () => {
+  await withStatuses({ [STATUS_PLEX]: upstreamStatus({ truncated: true }) }, async () => {
+    const facts = await loadLibraryWatchFacts(null, { now: NOW });
+    const plexCov = facts.coverage.find((c) => c.server === "plex")!;
+    assert.equal(plexCov.upstream?.truncated, true, "the parser keeps the field");
+    assert.equal(plexCov.upstreamHealth, "incomplete");
+    assert.deepEqual(byId(facts).get(100)!.upstreamUnchecked, ["plex"], "a partial snapshot is never zero plays (14d)");
+  });
+  await withStatuses({ [STATUS_PLEX]: upstreamStatus() }, async () => {
+    const plexCov = (await loadLibraryWatchFacts(null, { now: NOW })).coverage.find((c) => c.server === "plex")!;
+    assert.equal(plexCov.upstream?.truncated, false, "a row written before the field is a complete read");
+    assert.equal(plexCov.upstreamHealth, "ok");
+  });
+});
+
+test("C016 coverage marks which servers HOLD titles: a status-only or history-only server is listed with holds=false", async () => {
+  plays.push(play({ source: "jellyfin", serverInstance: "gone", tmdbId: 999997, mediaType: "MOVIE", startedAt: d("2025-02-01") }));
+  await withStatuses({ "upstreamWatch:status:plex:removed": upstreamStatus({ fetchedAt: d("2026-01-01").toISOString() }) }, async () => {
+    const cov = new Map((await loadLibraryWatchFacts(null, { now: NOW })).coverage.map((c) => [c.server, c]));
+    assert.equal(cov.get("plex")!.holds, true);
+    assert.equal(cov.get("jellyfin")!.holds, true);
+    assert.equal(cov.get("plex:removed")!.holds, false, "a de-registered slug's leftover status");
+    assert.equal(cov.get("jellyfin:gone")?.holds ?? false, false, "history kept for a server that holds nothing (19/28)");
+  });
 });

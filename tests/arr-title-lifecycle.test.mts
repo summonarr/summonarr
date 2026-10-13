@@ -7,7 +7,14 @@
 //     make the sync put it back, stamps the AVAILABLE requests on that
 //     instance (guardrail 14b) BEFORE the delete and unstamps on failure,
 //     sends both flags explicitly, and needs the dry run's id echoed;
-//   - both are audited after the arr accepted them.
+//   - both are audited after the arr accepted them;
+//   - a tmdb-less Sonarr series matches requests through the tvdb→tmdb mapping
+//     the sync keys by (a never-pushed request carries no tvdb id);
+//   - the stamp is ONE conditional write whose rows are this call's, and a
+//     failed delete unstamps only when a re-read shows the title still there;
+//   - an add whose outcome is unknown (timeout, dropped connection, 5xx) is an
+//     add when a re-read finds the title; a search that can do nothing
+//     (nothing monitored) is sent and audited as none.
 //
 // Harness: the same as tests/arr-manage-routes.test.mts.
 import { test, beforeEach } from "node:test";
@@ -147,17 +154,38 @@ type Req = { id: string; tmdbId: number; tvdbId: number | null; mediaType: strin
 let requests: Req[] = [];
 const matches = (r: Req, where: Record<string, unknown>): boolean => Object.entries(where).every(([k, v]) => {
   if (k === "OR") return (v as Array<Record<string, unknown>>).some((w) => matches(r, w));
-  if (k === "id" && v && typeof v === "object" && "in" in (v as object)) return ((v as { in: string[] }).in).includes(r.id);
+  if (v && typeof v === "object" && !(v instanceof Date) && "in" in (v as object)) return ((v as { in: unknown[] }).in).includes((r as unknown as Record<string, unknown>)[k]);
   if (v && typeof v === "object" && !(v instanceof Date) && "not" in (v as object)) return (r as unknown as Record<string, unknown>)[k] !== (v as { not: unknown }).not;
   return (r as unknown as Record<string, unknown>)[k] === v;
 });
+// A concurrent removal's stamp, landing the moment before this call writes
+// its own (a test sets it; it fires once). Applied after a pre-read and before
+// a conditional write, so a count taken from a pre-read is caught out.
+let concurrentStamp: Date | null = null;
+const raceIn = () => {
+  if (!concurrentStamp) return;
+  for (const r of requests) if (r.status === "AVAILABLE" && r.cleanedUpAt === null) r.cleanedUpAt = concurrentStamp;
+  concurrentStamp = null;
+};
 shadowPrismaModel(prisma, "mediaRequest", {
+  updateManyAndReturn: async (args: { where: Record<string, unknown>; data: { cleanedUpAt: Date | null } }) => {
+    raceIn();
+    const hit = requests.filter((x) => matches(x, args.where));
+    for (const r of hit) r.cleanedUpAt = args.data.cleanedUpAt;
+    return hit.map((r) => ({ id: r.id }));
+  },
   groupBy: async (args: { where: Record<string, unknown> }) => {
     const by = new Map<string, number>();
     for (const r of requests.filter((x) => matches(x, args.where))) by.set(r.status, (by.get(r.status) ?? 0) + 1);
     return [...by].map(([status, n]) => ({ status, _count: { _all: n } }));
   },
-  findMany: async (args: { where: Record<string, unknown> }) => requests.filter((x) => matches(x, args.where)).map((r) => ({ id: r.id })),
+  // Honours `select` — resolveTvdbToTmdb's MediaRequest step reads { tvdbId, tmdbId }.
+  findMany: async (args: { where: Record<string, unknown>; select?: Record<string, boolean> }) => {
+    const rows = requests.filter((x) => matches(x, args.where)).map((r) =>
+      Object.fromEntries(Object.keys(args.select ?? { id: true }).map((k) => [k, (r as unknown as Record<string, unknown>)[k]])));
+    raceIn();
+    return rows;
+  },
   updateMany: async (args: { where: Record<string, unknown>; data: { cleanedUpAt: Date | null } }) => {
     const hit = requests.filter((x) => matches(x, args.where));
     for (const r of hit) r.cleanedUpAt = args.data.cleanedUpAt;
@@ -281,6 +309,7 @@ beforeEach(() => {
 
 beforeEach(() => {
   requests = [];
+  concurrentStamp = null;
 });
 
 const LOOKUP_MOVIE = [
@@ -493,4 +522,261 @@ test("remove: a failed delete removes the stamps it wrote; the execute needs the
   assert.equal((await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { service: "sonarr", id: 21, deleteFiles: true, addImportExclusion: true, execute: true, confirm: 21 } })).status, 200);
   const del = writes().find((c) => c.method === "DELETE")!;
   assert.deepEqual([del.query.get("deleteFiles"), del.query.get("addImportListExclusion")], ["true", "true"]);
+});
+
+// ── a Sonarr series with no tmdbId (v3, or v4's 0) ───────────────────────────
+// MediaRequest.tvdbId is written only by a successful Sonarr push, so a mirror
+// copy or a library-marked row carries none. The sync keys such a series by the
+// tmdb id resolved from its tvdb id, and so must the removal (guardrail 14b).
+const v3Sonarr: Responder = (c) => {
+  if (c.origin !== SONARR || c.method !== "GET" || c.path !== "/api/v3/series/21") return undefined;
+  const s = series();
+  delete (s as Record<string, unknown>).tmdbId;
+  return json(s);
+};
+
+test("remove (Sonarr, no tmdbId): a never-pushed request is still counted and stamped, through the tvdb→tmdb mapping the sync keys by", async () => {
+  const token = await mintSession();
+  requests = [
+    // A was pushed (carries the tvdb id); B is a mirror copy that never was.
+    { id: "A", tmdbId: 1396, tvdbId: 81189, mediaType: "TV", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null },
+    { id: "B", tmdbId: 1396, tvdbId: null, mediaType: "TV", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null },
+    { id: "other", tmdbId: 1397, tvdbId: null, mediaType: "TV", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null },
+  ];
+  responder = both(v3Sonarr, (c) => (c.method === "DELETE" && c.path === "/api/v3/series/21" ? new Response("", { status: 200 }) : undefined), sonarrBase);
+  const body = { service: "sonarr", id: 21, deleteFiles: true, addImportExclusion: false };
+  const dry = await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body });
+  assert.equal(dry.status, 200);
+  assert.equal(((await dry.json()) as { requests: { available: number } }).requests.available, 2, "the dry run counts the never-pushed copy");
+
+  const res = await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { ...body, execute: true, confirm: 21 } });
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { requestsStamped: number }).requestsStamped, 2);
+  assert.ok(requests.find((r) => r.id === "A")!.cleanedUpAt instanceof Date);
+  assert.ok(requests.find((r) => r.id === "B")!.cleanedUpAt instanceof Date, "stamped — or the demote re-pushes the series");
+  assert.equal(requests.find((r) => r.id === "other")!.cleanedUpAt, null);
+});
+
+test("remove (Sonarr, no tmdbId): an APPROVED request with no tvdb id still refuses it (resolved through the tvdb→tmdb cache)", async () => {
+  const token = await mintSession();
+  tmdbCacheRows.set("tvdb-to-tmdb:81189", JSON.stringify({ tmdbId: 1396 }));
+  requests = [{ id: "B", tmdbId: 1396, tvdbId: null, mediaType: "TV", arrInstance: "", status: "APPROVED", cleanedUpAt: null }];
+  responder = both(v3Sonarr, sonarrBase);
+  const res = await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { service: "sonarr", id: 21, deleteFiles: true, addImportExclusion: false, execute: true, confirm: 21 } });
+  assert.equal(res.status, 409, "the sync would re-push it");
+  assert.deepEqual(writes(), []);
+});
+
+// ── a delete whose outcome is unknown ────────────────────────────────────────
+test("remove: a failed delete whose re-read shows the title GONE keeps the stamps — an unstamp would re-download it (14b)", async () => {
+  const token = await mintSession();
+  requests = [{ id: "a", tmdbId: 603, tvdbId: null, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null }];
+  let deleted = false;
+  responder = both((c) => {
+    if (c.origin !== RADARR) return undefined;
+    if (c.method === "DELETE" && c.path === "/api/v3/movie/11") {
+      deleted = true; // Radarr acted, then the connection dropped before the answer.
+      throw new Error("socket hang up");
+    }
+    if (deleted && c.method === "GET" && c.path === "/api/v3/movie/11") return json({ message: "NotFound" }, 404);
+    return undefined;
+  }, radarrBase);
+  const res = await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { service: "radarr", id: 11, deleteFiles: true, addImportExclusion: false, execute: true, confirm: 11 } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { removed: boolean; requestsStamped: number };
+  assert.deepEqual([body.removed, body.requestsStamped], [true, 1]);
+  assert.ok(requests[0].cleanedUpAt instanceof Date, "the title is gone: its stamp must stay");
+  assert.equal(audits[0]?.action, "ARR_TITLE_DELETE", "audited — the arr no longer has it");
+});
+
+test("remove: a failed delete whose re-read ALSO fails keeps the stamps and reports the failure", async () => {
+  const token = await mintSession();
+  requests = [{ id: "a", tmdbId: 603, tvdbId: null, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null }];
+  let down = false;
+  responder = both((c) => {
+    if (c.origin !== RADARR) return undefined;
+    if (c.method === "DELETE") { down = true; throw new Error("connect ETIMEDOUT"); }
+    if (down) throw new Error("connect ETIMEDOUT");
+    return undefined;
+  }, radarrBase);
+  const res = await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { service: "radarr", id: 11, deleteFiles: true, addImportExclusion: false, execute: true, confirm: 11 } });
+  assert.notEqual(res.status, 200);
+  assert.ok(requests[0].cleanedUpAt instanceof Date, "unknown outcome ⇒ the stamp stays");
+  assert.equal(audits.length, 0);
+});
+
+test("remove: stamps a concurrent removal wrote first are not this call's — not counted, and not unstamped by its failure", async () => {
+  const token = await mintSession();
+  const theirs = new Date("2026-10-01T00:00:00Z");
+  requests = [{ id: "a", tmdbId: 603, tvdbId: null, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: null }];
+  concurrentStamp = theirs; // lands between this call's count and its stamp
+  responder = both((c) => (c.method === "DELETE" ? new Response("", { status: 200 }) : undefined), radarrBase);
+  const res = await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { service: "radarr", id: 11, deleteFiles: false, addImportExclusion: false, execute: true, confirm: 11 } });
+  assert.equal(res.status, 200);
+  assert.equal(((await res.json()) as { requestsStamped: number }).requestsStamped, 0, "the other removal's stamp, not ours");
+  const details = audits[0].details;
+  assert.equal(((typeof details === "string" ? JSON.parse(details) : details) as { requestsStamped: number }).requestsStamped, 0, "nor audited as ours");
+  // The removal went through, so it re-asserts the stamp with its OWN time: the
+  // other removal's unstamp (keyed on ITS time) can then never clear it (C014).
+  assert.ok(requests[0].cleanedUpAt instanceof Date, "still stamped — the removal that went through re-asserts it as its own");
+  assert.notEqual(requests[0].cleanedUpAt.getTime(), theirs.getTime(), "re-asserted with this call's time, not the other removal's");
+
+  // And this call's failure (title still listed) never unstamps them.
+  audits.length = 0;
+  requests[0].cleanedUpAt = null;
+  concurrentStamp = theirs;
+  responder = both((c) => (c.method === "DELETE" ? json({ message: "boom" }, 500) : undefined), radarrBase);
+  const bad = await call(removeRoute.POST, token, "/admin/arr/title/remove", { method: "POST", body: { service: "radarr", id: 11, deleteFiles: false, addImportExclusion: false, execute: true, confirm: 11 } });
+  assert.equal(bad.status, 502);
+  assert.equal(requests[0].cleanedUpAt, theirs);
+});
+
+// ── an add whose outcome is unknown ──────────────────────────────────────────
+const statefulAdd = (post: () => Response): Responder => {
+  let created = false;
+  return (c) => {
+    if (c.origin !== RADARR) return undefined;
+    if (c.method === "GET" && c.path === "/api/v3/movie" && c.query.get("tmdbId") === "27205") {
+      return json(created ? [{ id: 88, tmdbId: 27205, title: "Inception" }] : []);
+    }
+    if (c.method === "POST" && c.path === "/api/v3/movie") {
+      created = true; // Radarr created it, whatever the answer says
+      return post();
+    }
+    return undefined;
+  };
+};
+
+test("add: an unknown outcome the re-read shows LANDED is an add — audited, and this instance's removal stamps withdrawn", async () => {
+  const token = await mintSession();
+  const stamp = new Date("2026-09-01T00:00:00Z");
+  requests = [{ id: "a", tmdbId: 27205, tvdbId: null, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: stamp }];
+  responder = both(statefulAdd(() => { throw new Error("socket hang up"); }), addResponder, radarrBase);
+  const res = await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: {
+    service: "radarr", tmdbId: 27205, qualityProfileId: 1, rootFolderPath: "/movies/", tags: [], monitored: true, search: false,
+  } });
+  assert.equal(res.status, 201);
+  assert.deepEqual(await res.json(), { arrId: 88, title: "Inception" });
+  assert.equal(requests[0].cleanedUpAt, null, "the title is back: the removal is withdrawn");
+  assert.equal(audits[0]?.action, "ARR_TITLE_ADD");
+});
+
+test("add: a 5xx the re-read shows did NOT land stays an error — no audit, no stamp cleared", async () => {
+  const token = await mintSession();
+  const stamp = new Date("2026-09-01T00:00:00Z");
+  requests = [{ id: "a", tmdbId: 27205, tvdbId: null, mediaType: "MOVIE", arrInstance: "", status: "AVAILABLE", cleanedUpAt: stamp }];
+  responder = both((c) => (c.method === "POST" && c.path === "/api/v3/movie" ? json({ message: "Bad gateway" }, 504) : undefined), addResponder, radarrBase);
+  const res = await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: {
+    service: "radarr", tmdbId: 27205, qualityProfileId: 1, rootFolderPath: "/movies/", tags: [], monitored: true, search: false,
+  } });
+  assert.notEqual(res.status, 201);
+  assert.equal(requests[0].cleanedUpAt, stamp);
+  assert.equal(audits.length, 0);
+});
+
+test("add: a created resource with no id is resolved by a re-read, never recorded as arr id 0", async () => {
+  const token = await mintSession();
+  responder = both(statefulAdd(() => json({}, 201)), addResponder, radarrBase);
+  const res = await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: {
+    service: "radarr", tmdbId: 27205, qualityProfileId: 1, rootFolderPath: "/movies/", tags: [], monitored: true, search: false,
+  } });
+  assert.equal(res.status, 201);
+  assert.equal(((await res.json()) as { arrId: number }).arrId, 88);
+});
+
+test("add: a proxy's 504 on an add Radarr DID create is an add (the 5xx is an unknown outcome, not a refusal)", async () => {
+  const token = await mintSession();
+  responder = both(statefulAdd(() => json({ message: "Gateway Timeout" }, 504)), addResponder, radarrBase);
+  const res = await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: {
+    service: "radarr", tmdbId: 27205, qualityProfileId: 1, rootFolderPath: "/movies/", tags: [], monitored: true, search: false,
+  } });
+  assert.equal(res.status, 201);
+  assert.equal(((await res.json()) as { arrId: number }).arrId, 88);
+  assert.equal(audits[0]?.action, "ARR_TITLE_ADD");
+});
+
+test("add (Sonarr v3): a 504 on an add Sonarr DID create is confirmed by the tvdbId it was sent — not by TMDB's cross-reference, which is missing here", async () => {
+  const token = await mintSession();
+  const stamp = new Date("2026-09-01T00:00:00Z");
+  requests = [{ id: "a", tmdbId: 4242, tvdbId: null, mediaType: "TV", arrInstance: "", status: "AVAILABLE", cleanedUpAt: stamp }];
+  // TMDB has no tvdb_id for the show, so findTitle can't reach the series; the
+  // add resolves it through Sonarr v3's lone untagged lookup row.
+  tmdbCacheRows.set("tmdb-to-tvdb:4242", JSON.stringify({ tvdbId: null }));
+  let created = false;
+  responder = both((c) => {
+    if (c.origin !== SONARR) return undefined;
+    if (c.method === "GET" && c.path === "/api/v3/series" && c.query.get("tvdbId") === "434343") {
+      return json(created ? [{ id: 55, tvdbId: 434343, title: "Lone Show" }] : []);
+    }
+    if (c.method === "GET" && c.path === "/api/v3/series/lookup" && c.query.get("term") === "tmdb:4242") {
+      return json([{ tvdbId: 434343, title: "Lone Show", year: 2026, titleSlug: "lone-show", images: [], seasons: [{ seasonNumber: 1 }], ...(created ? { id: 55 } : {}) }]);
+    }
+    if (c.method === "GET" && c.path === "/api/v3/languageprofile") return json([{ id: 1, name: "English" }]);
+    if (c.method === "POST" && c.path === "/api/v3/series") {
+      created = true; // Sonarr created it, whatever the proxy says
+      return json({ message: "Gateway Timeout" }, 504);
+    }
+    return undefined;
+  }, sonarrBase);
+  const res = await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: {
+    service: "sonarr", tmdbId: 4242, qualityProfileId: 1, rootFolderPath: "/tv/", tags: [], monitor: "all", search: false,
+  } });
+  assert.equal(res.status, 201);
+  assert.deepEqual(await res.json(), { arrId: 55, title: "Lone Show" });
+  assert.equal(requests[0].cleanedUpAt, null, "the title is back: the removal is withdrawn");
+  assert.equal(audits[0]?.action, "ARR_TITLE_ADD");
+});
+
+// ── a search that can do nothing is sent (and audited) as none ───────────────
+const auditDetails = (i = 0) => {
+  const d = audits[i].details;
+  return (typeof d === "string" ? JSON.parse(d) : d) as Record<string, unknown>;
+};
+
+test("add: an UNMONITORED Radarr add sends and audits search: false — the arr's add-time search skips it", async () => {
+  const token = await mintSession();
+  responder = both(addResponder, radarrBase);
+  const res = await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: {
+    service: "radarr", tmdbId: 27205, qualityProfileId: 1, rootFolderPath: "/movies/", tags: [], monitored: false, search: true,
+  } });
+  assert.equal(res.status, 201);
+  const post = writes().find((c) => c.path === "/api/v3/movie")!.body as Record<string, unknown>;
+  assert.deepEqual([post.monitored, post.addOptions], [false, { searchForMovie: false }]);
+  assert.equal(auditDetails().search, false, "the audit never claims a search that did nothing");
+});
+
+test("add: a Sonarr add monitoring NOTHING sends and audits search: false; another monitor mode keeps the admin's choice", async () => {
+  const token = await mintSession();
+  const sonarrAdd: Responder = (c) => {
+    if (c.origin !== SONARR) return undefined;
+    if (c.method === "GET" && c.path === "/api/v3/series" && c.query.get("tvdbId") === "121361") return json([]);
+    if (c.method === "GET" && c.path === "/api/v3/series/lookup" && c.query.get("term") === "tmdb:1399") {
+      return json([{ tmdbId: 1399, tvdbId: 121361, title: "Game of Thrones", year: 2011, titleSlug: "got", images: [], seasons: [{ seasonNumber: 1 }] }]);
+    }
+    if (c.method === "GET" && c.path === "/api/v3/languageprofile") return json({}, 404);
+    if (c.method === "POST" && c.path === "/api/v3/series") return json({ id: 31 }, 201);
+    return undefined;
+  };
+  responder = both(sonarrAdd, sonarrBase);
+  tmdbCacheRows.set("tmdb-to-tvdb:1399", JSON.stringify({ tvdbId: 121361 }));
+  const body = { service: "sonarr", tmdbId: 1399, qualityProfileId: 1, rootFolderPath: "/tv/", tags: [], search: true };
+  assert.equal((await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: { ...body, monitor: "none" } })).status, 201);
+  const none = writes().find((c) => c.path === "/api/v3/series")!.body as Record<string, unknown>;
+  assert.deepEqual(none.addOptions, { monitor: "none", searchForMissingEpisodes: false });
+  assert.equal(auditDetails().search, false);
+
+  calls = [];
+  audits.length = 0;
+  assert.equal((await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: { ...body, monitor: "future" } })).status, 201);
+  const future = writes().find((c) => c.path === "/api/v3/series")!.body as Record<string, unknown>;
+  assert.deepEqual(future.addOptions, { monitor: "future", searchForMissingEpisodes: true }, "the arr's own semantics for the other modes");
+});
+
+test("add dialog: the search box is disabled and sends no search while nothing is monitored (structural)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/components/admin/arr-title/add-dialog.tsx", import.meta.url), "utf8");
+  assert.match(src, /const searchNoop = addSearchIsNoop\(service, service === "radarr" \? \{ monitored \} : \{ monitor \}\);/);
+  assert.match(src, /search: search && !searchNoop/);
+  assert.match(src, /disabled=\{searchNoop\}/);
+  assert.match(src, /t\("adminArr\.add\.searchNeedsMonitor"\)/);
 });

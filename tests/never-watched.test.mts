@@ -9,14 +9,18 @@ import {
   EMPTY_EVIDENCE,
   idleAnchor,
   isNeverWatchedState,
+  isUnhealthyUpstreamCheck,
   judgeSeason,
   judgeTitle,
+  lastValidPage,
   normalizeTitleKey,
   observedWindow,
   parseNwQuery,
   seasonSizeIfAgreed,
   stateMatchesFilter,
   trackingStampsFor,
+  upstreamCheckCounts,
+  upstreamChipKey,
   upstreamHealth,
   UPSTREAM_MIN_SAMPLES,
   type NwContext,
@@ -189,6 +193,69 @@ test("upstream health: ok / failed / unreliable / stale / never", () => {
   assert.equal(upstreamHealth(status({ entries: 0, matched: 0, samples: 0, agreed: 0 }), NOW), "ok", "an empty history is a valid answer");
 });
 
+test("upstream health: an EMPTY answer next to recorded completed plays is unreliable however few the samples", () => {
+  assert.equal(upstreamHealth(status({ entries: 0, matched: 0, samples: 1, agreed: 0 }), NOW), "unreliable", "one completed play Summonarr saw, none upstream");
+  assert.equal(
+    upstreamHealth(status({ entries: 0, matched: 0, samples: UPSTREAM_MIN_SAMPLES - 1, agreed: 0 }), NOW),
+    "unreliable",
+    "the sample floor is for the agreement ratio, not for 'the server returned nothing'",
+  );
+  // Unchanged: a non-empty answer below the floor still says nothing either way.
+  assert.equal(upstreamHealth(status({ entries: 100, samples: UPSTREAM_MIN_SAMPLES - 1, agreed: 0 }), NOW), "ok");
+});
+
+test("upstream health: a FIRST attempt that failed is 'failed' (its error is shown), a row with no attempt stays 'never' (audit C070)", () => {
+  assert.equal(upstreamHealth(status({ fetchedAt: null, ok: false, error: "HTTP 401" }), NOW), "failed", "the first refresh failed: say so");
+  assert.equal(upstreamHealth(status({ fetchedAt: null, attemptedAt: null, ok: false }), NOW), "never", "a malformed / never-run row is not a failure");
+  assert.equal(upstreamHealth(status({ fetchedAt: null }), NOW), "never", "ok but never fetched (unchanged)");
+});
+
+test("upstream health: a TRUNCATED read is 'incomplete', never 'ok' (audit C159)", () => {
+  assert.equal(upstreamHealth(status({ truncated: true }), NOW), "incomplete", "otherwise-perfect counts");
+  assert.equal(upstreamHealth(status({ truncated: false }), NOW), "ok");
+  assert.equal(upstreamHealth(status({ truncated: true, ok: false }), NOW), "failed", "an unread server is reported as unread");
+});
+
+test("upstream health: most episode records with NO show id is a broken parser — 'failed' (audit C160)", () => {
+  assert.equal(upstreamHealth(status({ episodeRecords: 40, unplacedEpisodes: 30 }), NOW), "failed", "75% of episodes can't be placed on a show");
+  assert.equal(upstreamHealth(status({ episodeRecords: 40, unplacedEpisodes: 10 }), NOW), "ok", "a few orphans are not a broken parser");
+  assert.equal(upstreamHealth(status({ episodeRecords: 40, unplacedEpisodes: 20 }), NOW), "ok", "exactly half is not MORE than half");
+  assert.equal(
+    upstreamHealth(status({ episodeRecords: UPSTREAM_MIN_SAMPLES - 1, unplacedEpisodes: UPSTREAM_MIN_SAMPLES - 1 }), NOW),
+    "ok",
+    "below the sample floor it is not judged",
+  );
+  assert.equal(upstreamHealth(status({ episodeRecords: UPSTREAM_MIN_SAMPLES, unplacedEpisodes: UPSTREAM_MIN_SAMPLES }), NOW), "failed", "at the floor it is");
+  assert.equal(upstreamHealth(status(), NOW), "ok", "a row without the fields reads 0 episodes");
+});
+
+test("isUnhealthyUpstreamCheck / upstreamCheckCounts: a READ server the self-check refuses vs an unread one (audit C068)", () => {
+  assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "failed" }), true);
+  assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "unreliable" }), true);
+  assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "incomplete" }), true);
+  assert.equal(isUnhealthyUpstreamCheck({ ok: true, health: "ok" }), false);
+  assert.equal(isUnhealthyUpstreamCheck({ ok: false, health: "failed" }), false, "unread keeps its previous snapshot and is reported as unread");
+  assert.deepEqual(
+    upstreamCheckCounts([
+      { ok: true, health: "ok" },
+      { ok: false, health: "failed" },
+      { ok: true, health: "unreliable" },
+      { ok: true, health: "failed" },
+    ]),
+    { unread: 1, unhealthy: 2 },
+  );
+  assert.deepEqual(upstreamCheckCounts([]), { unread: 0, unhealthy: 0 });
+});
+
+test("upstreamChipKey: 'ok' below the sample floor prints no agreement it never measured (audit C069)", () => {
+  assert.equal(upstreamChipKey({ health: "ok", samples: 0 }), "okUnmeasured", "a fresh install would read '0% agreement'");
+  assert.equal(upstreamChipKey({ health: "ok", samples: UPSTREAM_MIN_SAMPLES - 1 }), "okUnmeasured");
+  assert.equal(upstreamChipKey({ health: "ok", samples: UPSTREAM_MIN_SAMPLES }), "ok", "measured at the floor");
+  for (const h of ["unreliable", "failed", "incomplete", "stale", "never"] as const) {
+    assert.equal(upstreamChipKey({ health: h, samples: 0 }), h, `${h} passes through`);
+  }
+});
+
 // ── tracking stamps ─────────────────────────────────────────────────────────
 
 test("trackingStampsFor stamps only an off → on flip of a tracking switch", () => {
@@ -220,6 +287,27 @@ test("parseNwQuery whitelists every parameter and clamps the page", () => {
   assert.equal(injected.limit, 200);
   assert.equal(q("sortBy=title").sortDir, "asc", "titles sort A→Z by default");
   assert.equal(q(`q=${"x".repeat(300)}`).q.length, 100);
+});
+
+test("parseNwQuery: the Titles-only filters never apply to the Seasons tab, and 'added' sorts a season on Since (audit C065)", () => {
+  const q = (s: string) => parseNwQuery(new URLSearchParams(s));
+  const season = q("level=season&type=movie&eligible=1&sortBy=added");
+  assert.equal(season.type, "all", "a season is always TV — type=movie emptied the tab");
+  assert.equal(season.eligibleOnly, false, "a season is never deletable — eligible=1 emptied the tab");
+  assert.equal(season.sortBy, "since", "the season table has no Added column");
+  const title = q("level=title&type=movie&eligible=1&sortBy=added");
+  assert.equal(title.type, "movie");
+  assert.equal(title.eligibleOnly, true);
+  assert.equal(title.sortBy, "added");
+  assert.equal(q("level=season&sortBy=days").sortBy, "days", "other sorts are left alone");
+});
+
+test("lastValidPage: the last page holding a row, 1 when there are none (audit C071)", () => {
+  assert.equal(lastValidPage(50, 50), 1);
+  assert.equal(lastValidPage(51, 50), 2, "ceil, not floor");
+  assert.equal(lastValidPage(0, 50), 1, "never page 0");
+  assert.equal(lastValidPage(1, 50), 1);
+  assert.equal(lastValidPage(200, 50), 4);
 });
 
 test("state filter: 'never' is both never states, 'all' is everything but watched", () => {

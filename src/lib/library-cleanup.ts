@@ -270,3 +270,60 @@ export function sonarrStatusIsAiring(status: unknown): boolean | null {
 export function cleanupKey(tmdbId: number, mediaType: string): string {
   return `${mediaType}:${tmdbId}`;
 }
+
+// The most titles one cleanup delete takes — dry run and execute alike. ONE
+// definition: the route refuses a longer list (parseCleanupItems), and both
+// pages that build a selection for it (Library cleanup, Never watched) stop
+// adding at it, so "Delete selected" never offers a request that can only 400.
+export const CLEANUP_MAX_ITEMS = 500;
+
+// The delete route's body `items`: 1–CLEANUP_MAX_ITEMS `{ tmdbId, mediaType }`,
+// duplicates dropped. `null` for anything else (the route answers 400).
+export function parseCleanupItems(raw: unknown): Array<{ tmdbId: number; mediaType: CleanupMediaType }> | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > CLEANUP_MAX_ITEMS) return null;
+  const seen = new Set<string>();
+  const out: Array<{ tmdbId: number; mediaType: CleanupMediaType }> = [];
+  for (const it of raw) {
+    if (!it || typeof it !== "object") return null;
+    const { tmdbId, mediaType } = it as { tmdbId?: unknown; mediaType?: unknown };
+    if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) return null;
+    if (mediaType !== "MOVIE" && mediaType !== "TV") return null;
+    const key = cleanupKey(tmdbId, mediaType);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ tmdbId, mediaType });
+  }
+  return out;
+}
+
+// A page's selection, kept within CLEANUP_MAX_ITEMS. `toggleCleanupSelection`
+// ticks or unticks one key (a tick past the cap is ignored);
+// `cleanupSelectAllOn` is what the select-all box shows — every key ticked, or
+// the selection full with some of them in it (so the next click clears instead
+// of doing nothing); `toggleAllCleanupSelection` clears those keys when it is
+// on and otherwise adds them in order, up to the cap.
+export function toggleCleanupSelection(prev: ReadonlySet<string>, key: string, max = CLEANUP_MAX_ITEMS): Set<string> {
+  const next = new Set(prev);
+  if (next.has(key)) next.delete(key);
+  else if (next.size < max) next.add(key);
+  return next;
+}
+
+export function cleanupSelectAllOn(selected: ReadonlySet<string>, keys: readonly string[], max = CLEANUP_MAX_ITEMS): boolean {
+  if (keys.length === 0) return false;
+  if (keys.every((k) => selected.has(k))) return true;
+  return selected.size >= max && keys.some((k) => selected.has(k));
+}
+
+export function toggleAllCleanupSelection(prev: ReadonlySet<string>, keys: readonly string[], max = CLEANUP_MAX_ITEMS): Set<string> {
+  const next = new Set(prev);
+  if (cleanupSelectAllOn(prev, keys, max)) {
+    for (const k of keys) next.delete(k);
+    return next;
+  }
+  for (const k of keys) {
+    if (next.size >= max) break;
+    next.add(k);
+  }
+  return next;
+}

@@ -409,5 +409,7 @@
   "adminActivity.trackingOff.description": "No se está registrando nada, así que este panel no tiene reproducciones, tiempo de visionado ni espectadores que mostrar. Activa el seguimiento en Ajustes → Medios → Historial de reproducción para empezar a llenarlo.",
   "adminActivity.trackingOff.cta": "Abrir ajustes del historial de reproducción",
   "adminActivity.common.hoursShort": "{n} h",
-  "adminActivity.detail.openPlay": "Abrir reproducción →"
+  "adminActivity.detail.openPlay": "Abrir reproducción →",
+  "adminActivity.stats.noReasonReportedTop": "El {pct}% de las transcodificaciones se informó sin motivo: el servidor no indicó por qué transcodificaba.",
+  "adminActivity.stats.movieDecadesTvFiltered": "Solo películas: no se muestra mientras el filtro Series está activado."
 }

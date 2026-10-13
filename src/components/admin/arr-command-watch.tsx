@@ -9,7 +9,7 @@
 // command changed, instead of guessing with a fixed timer. It gives up after
 // WATCH_MAX_POLLS reads (~10 minutes, counted — never a clock read here,
 // guardrail 16), after WATCH_MAX_FAILED_READS failed reads in a row, at once on
-// a refusal, and on unmount. The loop and its decisions are the pure
+// a refusal, and on unmount (a watch() after the unmount follows nothing). The loop and its decisions are the pure
 // createCommandWatcher / watchStep / commandLine (lib/arr-command-status.ts);
 // this file supplies fetch, timers and React state.
 //
@@ -130,9 +130,15 @@ export function useArrCommandWatch() {
     setWatches((w) => (key === undefined ? (Object.keys(w).length === 0 ? w : {}) : without(w, key)));
   }, [watcher]);
 
-  // Unmount: every pending read is cancelled, and an answer already on its
-  // way is dropped by the watcher's token check.
-  useEffect(() => () => watcher.stop(), [watcher]);
+  // Unmount: every pending read is cancelled, an answer already on its way is
+  // dropped by the watcher's token check, and the watcher refuses new watches —
+  // a command POST still in flight at unmount resolves into a watch() that
+  // follows nothing (no polls behind a dead page, no onDone). The effect body
+  // resumes it: StrictMode's simulated remount keeps this same watcher.
+  useEffect(() => {
+    watcher.resume();
+    return () => watcher.dispose();
+  }, [watcher]);
 
   return { watch, stop, watches };
 }

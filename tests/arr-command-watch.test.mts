@@ -23,6 +23,13 @@
 //   5. The watch reads one at a time, from each answer; stops on all-terminal
 //      (calling onDone once), on a refusal, after consecutive failures, at the
 //      poll cap, and on stop — after which nothing it had in flight is acted on.
+//      The cap is only declared on an ANSWER (a tab hidden past it reads on
+//      return, and a failed or 429 read past the cap retries — at most
+//      WATCH_MAX_FAILED_READS of them), and each poll reads only the ids still
+//      queued or running.
+//   4a. A Sonarr "search missing" refused part-way answers 202 with the ids it
+//      did queue and `partial: true`; one on a series the instance no longer
+//      has is a 404, never "nothing missing".
 //   6. The four pages no longer guess completion with a fixed timer.
 //
 // Harness: the same as tests/arr-manage-routes.test.mts.
@@ -154,6 +161,7 @@ const commandsRoute = await import("../src/app/api/admin/arr/commands/route.ts")
 const commandRoute = await import("../src/app/api/admin/arr/title/command/route.ts");
 const renameRoute = await import("../src/app/api/admin/arr/title/rename/route.ts");
 const clearRoute = await import("../src/app/api/admin/arr/blocklist/clear/route.ts");
+const missingSearchRoute = await import("../src/app/api/admin/missing/search/route.ts");
 
 // ── request scope ────────────────────────────────────────────────────────────
 function inScope<T>(fn: () => Promise<T>): Promise<T> {
@@ -467,6 +475,76 @@ test("a long series' 'search missing' (a SeasonSearch per season, 30 of them) is
   assert.deepEqual(((await res.json()) as { commands: Array<{ id: number }> }).commands.map((c) => c.id), commandIds);
 });
 
+// Three fully missing seasons (each 2 episodes, none on disk), then the rest.
+const THREE_SEASONS = [1, 2, 3].flatMap((sn) => [1, 2].map((e) => (
+  { id: sn * 100 + e, seriesId: 21, seasonNumber: sn, episodeNumber: e, title: "x", monitored: true, hasFile: false, airDateUtc: "2001-01-01T02:00:00Z" }
+)));
+const threeSeasons: Responder = (c) =>
+  (c.method === "GET" && c.origin === SONARR && c.path === "/api/v3/episode" && c.query.get("seriesId") === "21" ? json(THREE_SEASONS) : undefined);
+// POST /api/v3/command: the first `accepted` ids are queued, every later POST is a 503.
+function queueingThen503(accepted: number[]): Responder {
+  let n = 0;
+  return (c) => {
+    if (c.method !== "POST" || c.path !== "/api/v3/command") return undefined;
+    const id = accepted[n++];
+    return id === undefined ? new Response("busy", { status: 503 }) : json({ id, name: (c.body as { name?: string }).name, status: "queued" }, 201);
+  };
+}
+const postMissingSearch = (token: string, body: Record<string, unknown>) =>
+  call(missingSearchRoute.POST, token, "/admin/missing/search", { method: "POST", body });
+
+test("Sonarr 'search missing' refused part-way answers 202 with the ids it DID queue and partial: true — never a failure that drops them", async () => {
+  const token = await mintSession();
+  responder = both(queueingThen503([11, 12]), threeSeasons);
+  const res = await postCommand(token, { service: "sonarr", id: 21, action: "searchMissing" });
+  assert.equal(res.status, 202);
+  assert.deepEqual(await res.json(), { commands: 2, seasons: [1, 2], episodes: 0, partial: true, commandIds: [11, 12] });
+  assert.deepEqual(writes().map((c) => (c.body as { seasonNumber?: number }).seasonNumber), [1, 2, 3], "it stopped at the refusal");
+  assert.ok(warnLines.some((l) => l.includes("stopped after 2 command(s)")), "the stop is logged");
+
+  // The Missing page's own search carries the same additive flag.
+  calls = [];
+  responder = both(queueingThen503([31]), threeSeasons);
+  const page = await postMissingSearch(token, { service: "sonarr", instance: "", arrId: 21 });
+  assert.equal(page.status, 202);
+  assert.deepEqual(await page.json(), { commands: 1, seasons: [1], episodes: 0, partial: true });
+});
+
+test("Sonarr 'search missing' refused on its FIRST command is still a failure, with no ids", async () => {
+  const token = await mintSession();
+  responder = both(queueingThen503([]), threeSeasons);
+  const res = await postCommand(token, { service: "sonarr", id: 21, action: "searchMissing" });
+  assert.equal(res.status, 502);
+  const body = (await res.json()) as Record<string, unknown>;
+  assert.equal("commandIds" in body, false);
+  assert.equal("partial" in body, false);
+  assert.equal((await postMissingSearch(token, { service: "sonarr", instance: "", arrId: 21 })).status, 502);
+});
+
+test("Sonarr 'search missing' on a series the instance no longer has is not found — never 'nothing missing'", async () => {
+  const token = await mintSession();
+  // Sonarr answers an unknown seriesId's episode list with 200 []; its series read 404s.
+  let seriesExists = false;
+  responder = (c) => {
+    if (c.method !== "GET" || c.origin !== SONARR) return undefined;
+    if (c.path === "/api/v3/episode" && c.query.get("seriesId") === "99") return json([]);
+    if (c.path === "/api/v3/series/99") return seriesExists ? json({ id: 99, title: "Empty", seasons: [] }) : new Response("{}", { status: 404 });
+    return undefined;
+  };
+  assert.equal((await postCommand(token, { service: "sonarr", id: 99, action: "searchMissing" })).status, 404);
+  assert.equal((await postMissingSearch(token, { service: "sonarr", instance: "", arrId: 99 })).status, 404);
+  assert.deepEqual(writes(), [], "nothing queued");
+  // A series that exists with no episodes is genuinely complete.
+  seriesExists = true;
+  assert.equal((await postCommand(token, { service: "sonarr", id: 99, action: "searchMissing" })).status, 409);
+  assert.equal((await postMissingSearch(token, { service: "sonarr", instance: "", arrId: 99 })).status, 409);
+  // A non-empty episode list never pays for the series read.
+  calls = [];
+  responder = both(queueing([41, 42]), library);
+  assert.equal((await postCommand(token, { service: "sonarr", id: 21, action: "searchMissing" })).status, 202);
+  assert.ok(!arrCalls().some((c) => c.path === "/api/v3/series/21"));
+});
+
 test("a duplicate push (the arr answering with the command already queued) is one id; an answer with no id is none", async () => {
   const token = await mintSession();
   responder = both(queueing([41, 41]), library);
@@ -580,9 +658,46 @@ test("pacing: the cap is a COUNT of polls (~10 minutes); a hidden tab's poll cou
   const running: WatchRead = { kind: "ok", states: [st(1, "started")] };
   assert.equal(status.watchStep(running, { polls: status.WATCH_MAX_POLLS - 2, failures: 0 }).step.next, "poll");
   assert.deepEqual(status.watchStep(running, { polls: status.WATCH_MAX_POLLS - 1, failures: 0 }).step, { next: "stop", stopped: "timeout", error: "" });
-  assert.equal(status.watchStep({ kind: "skipped" }, { polls: status.WATCH_MAX_POLLS - 1, failures: 0 }).step.next, "stop");
+  // A hidden poll counts, but it read nothing — the cap waits for one real read.
+  const hiddenAtCap = status.watchStep({ kind: "skipped" }, { polls: status.WATCH_MAX_POLLS - 1, failures: 0 });
+  assert.equal(hiddenAtCap.step.next, "poll", "a skipped poll never declares the timeout");
+  assert.equal(hiddenAtCap.counters.polls, status.WATCH_MAX_POLLS, "it still counts");
+  assert.equal(status.watchStep({ kind: "skipped" }, { polls: status.WATCH_MAX_POLLS + 50, failures: 0 }).step.next, "poll");
+  // Past the cap, the first real read decides: done if everything ended, else the timeout.
+  assert.deepEqual(status.watchStep(running, { polls: status.WATCH_MAX_POLLS, failures: 0 }).step, { next: "stop", stopped: "timeout", error: "" });
+  assert.equal(status.watchStep({ kind: "ok", states: [st(1, "completed")] }, { polls: status.WATCH_MAX_POLLS, failures: 0 }).step.next, "done");
   const limited = status.watchStep({ kind: "rateLimited" }, { polls: 0, failures: 0 });
-  assert.deepEqual(limited, { step: { next: "poll", delayMs: status.WATCH_RATE_LIMITED_POLLS * status.WATCH_POLL_MS, states: null }, counters: { polls: status.WATCH_RATE_LIMITED_POLLS, failures: 0 } });
+  assert.deepEqual(limited, { step: { next: "poll", delayMs: status.WATCH_RATE_LIMITED_POLLS * status.WATCH_POLL_MS, states: null }, counters: { polls: status.WATCH_RATE_LIMITED_POLLS, failures: 0, overrun: 0 } });
+});
+
+test("pacing: past the cap a failed or 429 read is no answer — it retries, on a budget of its own, and only an answer or that budget ends it", () => {
+  const atCap = { polls: status.WATCH_MAX_POLLS, failures: 0 };
+  const failed = status.watchStep({ kind: "failed", error: "e" }, atCap);
+  assert.deepEqual(failed.step, { next: "poll", delayMs: status.WATCH_POLL_MS, states: null }, "one failed read past the cap is not the timeout");
+  assert.equal(failed.counters.overrun, 1);
+  const limited = status.watchStep({ kind: "rateLimited" }, atCap);
+  assert.deepEqual(limited.step, { next: "poll", delayMs: status.WATCH_RATE_LIMITED_POLLS * status.WATCH_POLL_MS, states: null }, "nor is a 429");
+  assert.equal(limited.counters.overrun, 1);
+  // A read crossing the cap counts as past it.
+  assert.equal(status.watchStep({ kind: "failed", error: "e" }, { polls: status.WATCH_MAX_POLLS - 1, failures: 0 }).counters.overrun, 1);
+  assert.equal(status.watchStep({ kind: "failed", error: "e" }, { polls: 0, failures: 0 }).counters.overrun, 0, "before the cap nothing is overrun");
+  assert.equal(status.watchStep({ kind: "skipped" }, atCap).counters.overrun, 0, "a hidden poll spends none of it");
+  // The bound: WATCH_MAX_FAILED_READS reads past the cap without an answer.
+  let c: { polls: number; failures: number; overrun?: number } = atCap;
+  for (let i = 0; i < status.WATCH_MAX_FAILED_READS - 1; i++) {
+    const r = status.watchStep({ kind: "rateLimited" }, c);
+    assert.equal(r.step.next, "poll", `429 ${i + 1} past the cap`);
+    c = r.counters;
+  }
+  assert.deepEqual(status.watchStep({ kind: "rateLimited" }, c).step, { next: "stop", stopped: "timeout", error: "" });
+  // Consecutive failures past the cap still stop as the error they are.
+  c = atCap;
+  for (let i = 0; i < status.WATCH_MAX_FAILED_READS - 1; i++) c = status.watchStep({ kind: "failed", error: "e" }, c).counters;
+  assert.deepEqual(status.watchStep({ kind: "failed", error: "e" }, c).step, { next: "stop", stopped: "error", error: "e" });
+  // Then the first answer decides.
+  const afterBlip = status.watchStep({ kind: "failed", error: "e" }, atCap).counters;
+  assert.equal(status.watchStep({ kind: "ok", states: [st(1, "completed")] }, afterBlip).step.next, "done");
+  assert.deepEqual(status.watchStep({ kind: "ok", states: [st(1, "started")] }, afterBlip).step, { next: "stop", stopped: "timeout", error: "" });
 });
 
 test("a watch reads its ids COMMAND_READ_MAX_IDS at a time, one request after another, merged in order; the first non-answer ends the poll", async () => {
@@ -713,14 +828,107 @@ test("watcher: stop(key) cancels a scheduled poll; a newer watch under the same 
   assert.equal(h.watcher.isRunning("other"), true);
 });
 
-test("watcher: gives up at the poll cap with a timeout; a hidden tab reads nothing but its polls count", async () => {
+test("watcher: gives up at the poll cap with a timeout", async () => {
   const h = harness();
   h.watcher.start("k", target, [5]);
-  h.setHidden(true);
-  for (let i = 0; i < status.WATCH_MAX_POLLS; i++) await h.fire();
-  assert.equal(h.reads.length, 0, "nothing read while hidden");
+  for (let i = 0; i < status.WATCH_MAX_POLLS; i++) {
+    await h.fire();
+    await h.answer({ kind: "ok", states: [st(5, "started")] });
+  }
   assert.equal(h.pending().length, 0);
   assert.deepEqual(h.updates.at(-1), ["k", { stopped: "timeout", error: "" }]);
+});
+
+test("watcher: a tab hidden for the whole budget reads nothing and never times out unread — shown again, one read decides, and onDone runs", async () => {
+  const h = harness();
+  const done: unknown[] = [];
+  h.watcher.start("k", target, [5, 6], (states) => done.push(states));
+  h.setHidden(true);
+  for (let i = 0; i < status.WATCH_MAX_POLLS + 10; i++) await h.fire();
+  assert.equal(h.reads.length, 0, "nothing read while hidden");
+  assert.equal(h.pending().length, 1, "still waiting for the tab");
+  assert.ok(!h.updates.some(([, c]) => c.stopped === "timeout"), "no timeout the watch never checked");
+  h.setHidden(false);
+  await h.fire();
+  assert.deepEqual(h.reads.map((r) => r.ids), [[5, 6]], "one real read");
+  await h.answer({ kind: "ok", states: [st(5, "completed"), st(6, "failed", "No indexers")] });
+  assert.deepEqual(done, [[st(5, "completed"), st(6, "failed", "No indexers")]], "the page re-reads what the commands changed");
+  assert.deepEqual(h.updates.at(-1), ["k", { states: [st(5, "completed"), st(6, "failed", "No indexers")], error: "" }]);
+  assert.equal(h.pending().length, 0);
+
+  // Still running when it is finally read: that read is the timeout, with no second one.
+  const h2 = harness();
+  let done2 = 0;
+  h2.watcher.start("k", target, [7], () => done2++);
+  h2.setHidden(true);
+  for (let i = 0; i < status.WATCH_MAX_POLLS; i++) await h2.fire();
+  h2.setHidden(false);
+  await h2.fire();
+  await h2.answer({ kind: "ok", states: [st(7, "started")] });
+  assert.deepEqual(h2.updates.at(-1), ["k", { stopped: "timeout", error: "" }]);
+  assert.equal(done2, 0);
+  assert.equal(h2.pending().length, 0);
+});
+
+test("watcher: hidden past the cap, the first read back failing or rate-limited is retried — the answer after it decides, and onDone runs", async () => {
+  for (const blip of [{ kind: "failed", error: "Failed to fetch" }, { kind: "rateLimited" }] as WatchRead[]) {
+    const h = harness();
+    const done: unknown[] = [];
+    h.watcher.start("k", target, [5], (states) => done.push(states));
+    h.setHidden(true);
+    for (let i = 0; i < status.WATCH_MAX_POLLS + 10; i++) await h.fire();
+    h.setHidden(false);
+    await h.fire();
+    await h.answer(blip);
+    assert.ok(!h.updates.some(([, c]) => c.stopped), `${blip.kind}: no stop on a read that brought no answer`);
+    assert.equal(h.pending().length, 1, `${blip.kind}: it reads again`);
+    await h.fire();
+    await h.answer({ kind: "ok", states: [st(5, "completed")] });
+    assert.deepEqual(done, [[st(5, "completed")]], `${blip.kind}: the page re-reads what the command changed`);
+    assert.equal(h.pending().length, 0);
+  }
+
+  // Bounded: WATCH_MAX_FAILED_READS 429s past the cap end it as a timeout, no onDone.
+  const h = harness();
+  let done = 0;
+  h.watcher.start("k", target, [5], () => done++);
+  h.setHidden(true);
+  for (let i = 0; i < status.WATCH_MAX_POLLS; i++) await h.fire();
+  h.setHidden(false);
+  for (let i = 0; i < status.WATCH_MAX_FAILED_READS; i++) {
+    await h.fire();
+    await h.answer({ kind: "rateLimited" });
+  }
+  assert.deepEqual(h.updates.at(-1), ["k", { stopped: "timeout", error: "" }]);
+  assert.equal(h.pending().length, 0, "no read after the budget");
+  assert.equal(done, 0);
+});
+
+test("watcher: each poll reads only the ids still going — an ended command keeps its state and is never read again", async () => {
+  const h = harness();
+  const done: unknown[] = [];
+  h.watcher.start("k", target, [1, 2, 3], (states) => done.push(states));
+  await h.fire();
+  assert.deepEqual(h.reads.map((r) => r.ids), [[1, 2, 3]]);
+  await h.answer({ kind: "ok", states: [st(1, "completed", "1 report"), st(2, "started", "Searching"), st(3, "queued")] });
+  await h.fire();
+  assert.deepEqual(h.reads.map((r) => r.ids), [[2, 3]], "the completed command is not read again");
+  await h.answer({ kind: "ok", states: [st(2, "completed"), st(3, "started")] });
+  assert.deepEqual(h.updates.at(-1)?.[1].states, [st(1, "completed", "1 report"), st(2, "completed"), st(3, "started")],
+    "every id, in the order started, the ended one with the state it ended with");
+  await h.fire();
+  assert.deepEqual(h.reads.map((r) => r.ids), [[3]]);
+  await h.answer({ kind: "ok", states: [st(3, "completed")] });
+  assert.deepEqual(done, [[st(1, "completed", "1 report"), st(2, "completed"), st(3, "completed")]]);
+
+  // An answer that leaves out an id it was asked about is a failed read, never "ended".
+  const h2 = harness();
+  h2.watcher.start("k", target, [1, 2]);
+  await h2.fire();
+  await h2.answer({ kind: "ok", states: [st(1, "completed")] });
+  assert.equal(h2.updates.length, 0, "nothing reported from a partial answer");
+  await h2.fire();
+  assert.deepEqual(h2.reads.map((r) => r.ids), [[1, 2]], "and nothing was stored from it");
 });
 
 test("watcher: a refusal stops at once; a read that throws counts as a failure", async () => {

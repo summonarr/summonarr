@@ -16,7 +16,10 @@
 // view: blocklist ids are per-instance autoincrement and collide across
 // instances. A reload after a write goes through `loadRef` — the loader of the
 // view on screen NOW — so a slow write can never paint another instance's or
-// tab's data over the current one.
+// tab's data over the current one. Mark failed is a write too: while one is in
+// flight the tab, instance, kind and page stay put, or its refusal would land
+// on a list no longer on screen. While Clear blocklist's command is followed,
+// Clear and Remove wait for it — the list on screen is the one being cleared.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -24,7 +27,7 @@ import { Button } from "@/components/ui/button";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Chip, EmptyState, FilterBar } from "@/components/ui/design";
 import { ArrHistoryList, historyKindLabel } from "@/components/admin/arr-history-list";
-import { CommandWatchLine, useArrCommandWatch } from "@/components/admin/arr-command-watch";
+import { CommandWatchLine, isWatchActive, useArrCommandWatch } from "@/components/admin/arr-command-watch";
 import { useTRef } from "@/components/admin/arr-title/shared";
 import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
@@ -102,6 +105,8 @@ export function ArrDownloadHistory({
   const [kind, setKind] = useState<HistoryFilterKind | "all">(initialKind ?? "all");
   const [page, setPage] = useState(initialPage);
   const [history, setHistory] = useState<ArrPage<ArrHistoryEvent> | null>(null);
+  // The kind filter `history` was READ with — the one in `kind` may still be loading.
+  const [historyKind, setHistoryKind] = useState<HistoryFilterKind | "all">("all");
   const [blocklist, setBlocklist] = useState<ArrPage<BlocklistEntry> | null>(null);
   // The Blocklist tab's count before the tab is visited: a pageSize=1 read.
   const [blocklistCount, setBlocklistCount] = useState<{ inst: string; total: number } | null>(null);
@@ -110,7 +115,7 @@ export function ArrDownloadHistory({
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<ReadonlyMap<string, BlocklistEntry>>(new Map());
   const [confirmClear, setConfirmClear] = useState(false);
-  const [busy, setBusy] = useState<"remove" | "clear" | null>(null);
+  const [busy, setBusy] = useState<"remove" | "clear" | "mark" | null>(null);
   const seq = useRef(0);
   // Clear blocklist's command, followed live; the list is re-read once it ends.
   const { watch: watchCommand, stop: stopWatch, watches } = useArrCommandWatch();
@@ -139,6 +144,7 @@ export function ArrDownloadHistory({
           return;
         }
         setHistory(res.data);
+        setHistoryKind(kind);
       } else setError(res.error);
     } else {
       const res = await getJson<ArrPage<BlocklistEntry>>(`/api/admin/arr/blocklist?${q.toString()}`, tRef.current("adminArr.blocklist.loadFailed"));
@@ -230,6 +236,7 @@ export function ArrDownloadHistory({
   async function markFailed(e: ArrHistoryEvent): Promise<string | null> {
     const fallback = t("adminArr.history.markFailedError");
     if (e.arrMediaId === null) return fallback;
+    setBusy("mark");
     try {
       const res = await fetch(withBasePath("/api/admin/arr/history/failed"), {
         method: "POST",
@@ -245,6 +252,8 @@ export function ArrDownloadHistory({
       return data?.error ?? fallback;
     } catch {
       return fallback;
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -306,8 +315,10 @@ export function ArrDownloadHistory({
             onDone: () => void loadRef.current(),
           });
         } else {
+          // Nothing to follow: re-read once now (a clear is quick); Reload is there if it isn't done yet.
           cancelReload();
           setNotice(t("adminArr.blocklist.cleared"));
+          void loadRef.current();
         }
       }
     } catch {
@@ -329,6 +340,8 @@ export function ArrDownloadHistory({
   const allSelected = records.length > 0 && records.every((r) => selected.has(entryKey(r)));
   const blocklistTotal = blocklist?.totalRecords ?? (blocklistCount?.inst === current ? blocklistCount.total : undefined);
   const switching = busy !== null;
+  // Clear blocklist's command still running: the list on screen is being emptied.
+  const clearing = isWatchActive(watches.clear);
 
   return (
     <div className="grid gap-4">
@@ -371,6 +384,7 @@ export function ArrDownloadHistory({
                 key={k}
                 type="button"
                 aria-pressed={kind === k}
+                disabled={busy !== null}
                 onClick={() => { setKind(k); setPage(1); }}
                 className="ds-hover-tint rounded-full px-2.5 py-1 text-xs"
                 style={{
@@ -390,6 +404,7 @@ export function ArrDownloadHistory({
               <ArrHistoryList
                 events={history.records}
                 showTitle
+                filtered={historyKind !== "all"}
                 onMarkFailed={markFailed}
                 renderManage={(e) => (
                   <ManageTitleButton
@@ -405,7 +420,7 @@ export function ArrDownloadHistory({
                 )}
                 edges={{ hasPrevious: history.page > 1, hasNext: history.page * history.pageSize < history.totalRecords }}
               />
-              {history.totalRecords > 0 && <Pager page={page} pageSize={history.pageSize} total={history.totalRecords} onPage={setPage} disabled={loading} />}
+              {history.totalRecords > 0 && <Pager page={page} pageSize={history.pageSize} total={history.totalRecords} onPage={setPage} disabled={loading || busy !== null} />}
             </>
           )}
         </>
@@ -423,7 +438,7 @@ export function ArrDownloadHistory({
                 {t("adminArr.files.selectAll")}
               </label>
             )}
-            <Button variant="outline" size="sm" disabled={selected.size === 0 || busy !== null} onClick={() => void removeSelected()}>
+            <Button variant="outline" size="sm" disabled={selected.size === 0 || busy !== null || clearing} onClick={() => void removeSelected()}>
               {busy === "remove" ? <Loader2 className="animate-spin" /> : <Trash2 />} {t("adminArr.blocklist.remove", { count: selected.size })}
             </Button>
             <span className="flex-1" />
@@ -442,12 +457,12 @@ export function ArrDownloadHistory({
                 >
                   {t("adminArr.common.cancel")}
                 </Button>
-                <Button size="sm" className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" disabled={busy !== null} onClick={() => void clearAll()}>
+                <Button size="sm" className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" disabled={busy !== null || clearing} onClick={() => void clearAll()}>
                   {busy === "clear" && <Loader2 className="animate-spin" />} {t("adminArr.blocklist.clear")}
                 </Button>
               </span>
             ) : (
-              <Button ref={clearOpenRef} variant="outline" size="sm" disabled={!blocklist || blocklist.totalRecords === 0 || busy !== null} onClick={() => setConfirmClear(true)}>
+              <Button ref={clearOpenRef} variant="outline" size="sm" disabled={!blocklist || blocklist.totalRecords === 0 || busy !== null || clearing} onClick={() => setConfirmClear(true)}>
                 <Ban /> {t("adminArr.blocklist.clear")}
               </Button>
             )}
@@ -516,7 +531,7 @@ export function ArrDownloadHistory({
                   })}
                 </ul>
               )}
-              <Pager page={page} pageSize={blocklist.pageSize} total={blocklist.totalRecords} onPage={setPage} disabled={loading} />
+              <Pager page={page} pageSize={blocklist.pageSize} total={blocklist.totalRecords} onPage={setPage} disabled={loading || busy !== null} />
             </>
           )}
         </>

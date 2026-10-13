@@ -9,7 +9,7 @@
   "adminArr.error.timeout": "{name} didn't answer in time",
   "adminArr.error.unreachable": "{name} couldn't be reached — check that it's running and its address in Settings → Media",
   "adminArr.error.server": "{name} hit an internal error — check its logs",
-  "adminArr.error.notFound": "{name} answered \"not found\" — this needs a newer version",
+  "adminArr.error.notFound": "{name} answered \"not found\" — check its address in Settings → Media, including any URL base it uses (or it may be too old for this page)",
   "adminArr.error.other": "{name} could not be read",
   "adminArr.common.noneConfigured": "No Radarr or Sonarr configured",
   "adminArr.common.noneConfiguredHint": "Connect Radarr or Sonarr in Settings → Media (and leave their integration switched on) to manage them here.",
@@ -402,5 +402,14 @@
   "adminArr.missingBulk.confirmTitleCutoff": "Search {count} titles for upgrades?",
   "adminArr.missingBulk.confirmBody": "Each title is searched on every indexer its instance uses, so this spends at least {count} searches' worth of indexer API hits — many indexers cap those per day. {service} queues them all within minutes.",
   "adminArr.missingBulk.confirmUnmonitored_one": "{count} of them is unmonitored — {service} would not search it on its own.",
-  "adminArr.missingBulk.confirmUnmonitored_other": "{count} of them are unmonitored — {service} would not search them on its own."
+  "adminArr.missingBulk.confirmUnmonitored_other": "{count} of them are unmonitored — {service} would not search them on its own.",
+  "adminArr.system.useUnsupported": "not supported",
+  "adminArr.system.useUnsupportedHint": "{service} says this indexer can't do this, so this switch would never be used",
+  "adminArr.missingBulk.selectedOffPage_one": "({count} of them on another page)",
+  "adminArr.missingBulk.selectedOffPage_other": "({count} of them on other pages)",
+  "adminArr.calendar.emptyHintAll": "No episode airs and no movie releases in these two weeks.",
+  "adminArr.history.stateUnknown": "This list can't show everything that has happened to this download since it was grabbed — it may already be imported. Marking it failed still blocklists the release and searches again; if the download already failed, Summonarr refuses before sending anything.",
+  "adminArr.add.searchNeedsMonitor": "Nothing is monitored, so the arr won't search for it.",
+  "adminArr.notice.searchMissingPartial": "Only part of the search started — Sonarr refused the rest. Run Search missing again for what's left.",
+  "adminArr.files.deleteStillRunning": "The delete is still running — reload the files in a minute to see what's left."
 }

@@ -7,7 +7,7 @@
 // files chosen). The server re-checks every id against the title's files
 // (GET/DELETE /api/admin/arr/title/files, GET/POST …/rename).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/design";
 import { AlertTriangle, ArrowDown, Check, ChevronDown, ChevronRight, FileText, Loader2, RefreshCw, Trash2 } from "@/components/icons";
@@ -15,6 +15,7 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { CommandWatchLine, useArrCommandWatch } from "@/components/admin/arr-command-watch";
 import type { RenamePreview, TitleFile, TitleFileMedia } from "@/lib/arr-title";
+import { withBasePath } from "@/lib/base-path";
 import { arrApi, titleQuery, useTRef, type TitleRef } from "./shared";
 
 type T = ReturnType<typeof useT>;
@@ -50,6 +51,51 @@ function mediaDetails(m: TitleFileMedia | null, t: T, locale: string): Array<[st
   return rows.filter((r): r is [string, string] => r[1] !== null && r[1] !== "");
 }
 
+// A delete runs as a BACKGROUND job on the server — each delete may wait 120 s
+// (a recycle bin on another disk is a copy), past a reverse proxy's hold, and
+// the admin was shown "delete failed" while the arr finished it. Start it, then
+// poll `&job=` for the DELETE's own answer: counted, one poll per answer, never
+// a clock (guardrail 16). A few failed polls in a row (a network blip, a
+// proxy's own 5xx with no JSON) are retried — the delete keeps running there.
+const DELETE_POLL_MS = 1_500;
+const DELETE_MAX_POLLS = 600; // ~15 minutes
+const DELETE_FAILED_POLLS = 5;
+type DeleteAnswer = { ok: true; deleted: number } | { ok: false; error: string } | { ok: false; running: true };
+type PollBody = { deleted?: unknown; error?: unknown };
+
+async function runDelete(path: string, fileIds: number[], fallback: string, alive: () => boolean): Promise<DeleteAnswer | null> {
+  const start = await arrApi<{ deleted?: number; job?: unknown }>(path, { method: "DELETE", body: { fileIds, async: true } }, fallback);
+  if (!start.ok) return start;
+  if (typeof start.data.job !== "string") return { ok: true, deleted: start.data.deleted ?? 0 };
+  const pollUrl = withBasePath(`${path}&job=${encodeURIComponent(start.data.job)}`);
+  let failed = 0;
+  for (let i = 0; i < DELETE_MAX_POLLS; i++) {
+    await new Promise((r) => window.setTimeout(r, DELETE_POLL_MS));
+    if (!alive()) return null;
+    let status = 0;
+    let data: PollBody | null = null;
+    try {
+      const res = await fetch(pollUrl);
+      status = res.status;
+      data = (await res.json().catch(() => null)) as PollBody | null;
+    } catch {
+      // network: retried below
+    }
+    if (!alive()) return null;
+    if (status === 202) {
+      failed = 0;
+      continue;
+    }
+    if (data === null || typeof data !== "object") {
+      if (++failed >= DELETE_FAILED_POLLS) return { ok: false, running: true };
+      continue;
+    }
+    if (status >= 200 && status < 300) return { ok: true, deleted: typeof data.deleted === "number" ? data.deleted : 0 };
+    return { ok: false, error: typeof data.error === "string" ? data.error : fallback };
+  }
+  return { ok: false, running: true };
+}
+
 export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChanged: () => void }) {
   const t = useT();
   const tRef = useTRef();
@@ -70,6 +116,28 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   // Unmounting (the manager closing) stops it.
   const { watch, watches } = useArrCommandWatch();
   const isSeries = titleRef.service === "sonarr";
+  // The inline delete confirm is an alertdialog: focus moves to its Cancel when
+  // it opens, and back to Delete (n) when it closes unconfirmed (Cancel, or a
+  // delete that failed and left the selection). Closed by a change of
+  // selection, focus stays on the checkbox the admin just used.
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null);
+  const deleteRef = useRef<HTMLButtonElement>(null);
+  const refocusDelete = useRef(false);
+  // A background delete's polling stops when the manager closes.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (confirmDelete) cancelDeleteRef.current?.focus();
+    else if (refocusDelete.current) {
+      refocusDelete.current = false;
+      deleteRef.current?.focus();
+    }
+  }, [confirmDelete]);
 
   const load = useCallback(async () => {
     const res = await arrApi<{ files: TitleFile[] }>(`/api/admin/arr/title/files?${titleQuery(titleRef)}`, undefined, tRef.current("adminArr.files.loadFailed"));
@@ -109,23 +177,22 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
     setError("");
     // The ids go in the body: "select all" on a long-running series is more
     // than a query string holds.
-    const res = await arrApi<{ deleted: number }>(
-      `/api/admin/arr/title/files?${titleQuery(titleRef)}`,
-      { method: "DELETE", body: { fileIds: [...selected] } },
-      t("adminArr.files.deleteFailed"),
-    );
+    const res = await runDelete(`/api/admin/arr/title/files?${titleQuery(titleRef)}`, [...selected], t("adminArr.files.deleteFailed"), () => mounted.current);
+    if (res === null) return;
     setBusy(null);
+    // Set before the close renders: the button comes back with the selection.
+    refocusDelete.current = !res.ok;
     setConfirmDelete(false);
     // A rename preview lists the files as they were — never offer it after a delete.
     setRenames(null);
     if (!res.ok) {
-      setError(res.error);
+      setError("running" in res ? t("adminArr.files.deleteStillRunning") : res.error);
       // Some files may have gone before it failed: show what's left.
       await load();
       onChanged();
       return;
     }
-    setNotice(t("adminArr.files.deleted", { count: res.data.deleted }));
+    setNotice(t("adminArr.files.deleted", { count: res.deleted }));
     setSelected(new Set());
     await load();
     onChanged();
@@ -197,7 +264,7 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
             {t("adminArr.files.selectAll")}
           </label>
         )}
-        <Button variant="outline" size="sm" disabled={selected.size === 0 || busy !== null} onClick={() => setConfirmDelete(true)}>
+        <Button ref={deleteRef} variant="outline" size="sm" disabled={selected.size === 0 || busy !== null} onClick={() => setConfirmDelete(true)}>
           <Trash2 /> {t("adminArr.files.delete", { count: selected.size })}
         </Button>
         <Button variant="outline" size="sm" disabled={files.length === 0 || busy !== null} onClick={() => void preview()}>
@@ -220,7 +287,18 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
               {chosen.length > 4 && ` ${t("adminArr.files.andMore", { count: chosen.length - 4 })}`}
             </span>
           </span>
-          <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)} disabled={busy !== null}>{t("adminArr.common.cancel")}</Button>
+          <Button
+            ref={cancelDeleteRef}
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              refocusDelete.current = true;
+              setConfirmDelete(false);
+            }}
+            disabled={busy !== null}
+          >
+            {t("adminArr.common.cancel")}
+          </Button>
           <Button size="sm" className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" onClick={() => void remove()} disabled={busy !== null}>
             {busy === "delete" && <Loader2 className="animate-spin" />} {t("adminArr.files.confirmDelete")}
           </Button>
@@ -251,28 +329,41 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
           {renames.length === 0 ? (
             <p className="m-0 text-xs text-zinc-500">{t("adminArr.files.renameNone")}</p>
           ) : (
-            <ul className="m-0 grid list-none gap-2 p-0">
-              {renames.map((r) => (
-                <li key={r.fileId} className="flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={renameSelected.has(r.fileId)}
-                    onChange={(e) => setRenameSelected((prev) => {
-                      const next = new Set(prev);
-                      if (e.target.checked) next.add(r.fileId);
-                      else next.delete(r.fileId);
-                      return next;
-                    })}
-                    className="mt-1 accent-[var(--ds-accent)]"
-                    aria-label={r.existingPath}
-                  />
-                  <div className="min-w-0 text-xs">
-                    <div className="break-all text-zinc-500">{r.existingPath}</div>
-                    <div className="flex items-start gap-1 break-all text-zinc-200"><ArrowDown className="mt-0.5 h-3 w-3 shrink-0 text-zinc-500" aria-hidden /> {r.newPath}</div>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <>
+              {/* Every listed file starts ticked; a long show's preview lists thousands. */}
+              <label className="flex items-center gap-2 text-xs text-zinc-400">
+                <input
+                  type="checkbox"
+                  checked={renames.every((r) => renameSelected.has(r.fileId))}
+                  onChange={(e) => setRenameSelected(e.target.checked ? new Set(renames.map((r) => r.fileId)) : new Set())}
+                  disabled={busy !== null}
+                  className="accent-[var(--ds-accent)]"
+                />
+                {t("adminArr.files.selectAll")}
+              </label>
+              <ul className="m-0 grid list-none gap-2 p-0">
+                {renames.map((r) => (
+                  <li key={r.fileId} className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      checked={renameSelected.has(r.fileId)}
+                      onChange={(e) => setRenameSelected((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(r.fileId);
+                        else next.delete(r.fileId);
+                        return next;
+                      })}
+                      className="mt-1 accent-[var(--ds-accent)]"
+                      aria-label={r.existingPath}
+                    />
+                    <div className="min-w-0 text-xs">
+                      <div className="break-all text-zinc-500">{r.existingPath}</div>
+                      <div className="flex items-start gap-1 break-all text-zinc-200"><ArrowDown className="mt-0.5 h-3 w-3 shrink-0 text-zinc-500" aria-hidden /> {r.newPath}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </div>
       )}

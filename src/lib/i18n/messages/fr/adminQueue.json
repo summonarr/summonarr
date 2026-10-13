@@ -225,7 +225,7 @@
   "adminQueue.issueActions.replaceFileUnmarked_one": "{count} version n'a pas pu être marquée en échec — recherchée à la place",
   "adminQueue.issueActions.replaceFileUnmarked_other": "{count} versions n'ont pas pu être marquées en échec — recherchées à la place",
   "adminQueue.issueActions.replaceFileNothingMissing": "{service} ne signale rien de manquant, aucune recherche n'a donc été mise en file d'attente — vérifiez que les épisodes sont toujours surveillés",
-  "adminQueue.issueActions.replaceFileRemonitored": "{service} a cessé de surveiller ce qui a été supprimé (Unmonitor Deleted) — il est de nouveau surveillé, la recherche est donc lancée",
+  "adminQueue.issueActions.replaceFileRemonitored": "{service} a cessé de surveiller ce qui a été supprimé (« Ne plus surveiller les éléments supprimés ») — il est de nouveau surveillé, la recherche est donc lancée",
   "adminQueue.issueActions.replaceFileRemonitorFailed": "{service} a cessé de surveiller ce qui a été supprimé et la surveillance n'a pas pu être rétablie — une recherche par nom a été lancée à la place. Surveillez-le de nouveau dans {service}, sinon les recherches suivantes l'ignoreront.",
   "adminQueue.issueActions.replaceFileAnimeNumbering": "Série d'anime : {service} peut numéroter les épisodes différemment du serveur multimédia sur lequel le problème a été signalé. Vérifiez les titres d'épisode de chaque fichier avant de le supprimer.",
   "adminQueue.fixMatch.level.exact": "Exacte",
@@ -345,7 +345,7 @@
   "adminQueue.arrStatus.verdict.notInArr": "Absent de {service}",
   "adminQueue.arrStatus.verdict.ready": "Prêt",
   "adminQueue.arrStatus.verdict.inArrNotInLibrary": "En attente de synchronisation",
-  "adminQueue.arrStatus.verdict.importBlocked": "À surveiller",
+  "adminQueue.arrStatus.verdict.importBlocked": "À traiter",
   "adminQueue.arrStatus.verdict.downloading": "En téléchargement",
   "adminQueue.arrStatus.verdict.unmonitored": "Non surveillé",
   "adminQueue.arrStatus.verdict.notReleased": "Non sorti",
@@ -394,5 +394,10 @@
   "adminQueue.releases.seasonMissing_one": "Saison {number} · {count} manquant",
   "adminQueue.releases.seasonMissing_other": "Saison {number} · {count} manquants",
   "adminQueue.releases.seeders_one": "{count} seeder",
-  "adminQueue.releases.seeders_other": "{count} seeders"
+  "adminQueue.releases.seeders_other": "{count} seeders",
+  "adminQueue.arrStatus.verdict.waitingForLibrary": "En attente de la bibliothèque",
+  "adminQueue.arrStatus.why.waitingForLibrary": "{service} l'a — la demande passera à disponible dès que le serveur multimédia du demandeur l'aura dans une bibliothèque qu'il peut voir. Si elle reste ici, vérifiez que le serveur a bien analysé le fichier.",
+  "adminQueue.arrStatus.why.unmonitoredEpisodes": "{service} surveille la série mais aucun de ses épisodes, donc rien ne les recherche. Surveillez ses saisons ou ses épisodes dans {service}.",
+  "adminQueue.issueActions.searchAgain": "Relancer la recherche",
+  "adminQueue.issueActions.replaceFileNoAnswer": "Aucune réponse du serveur — le remplacement est peut-être encore en cours et certains fichiers ont peut-être déjà été supprimés. Rechargez le signalement pour voir ce qui reste avant de le relancer."
 }

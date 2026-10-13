@@ -345,5 +345,10 @@
   "apiAdmin.arr.taskBodyInvalid": "Erwartet wird der Name einer geplanten Aufgabe oder eine Suchaktion",
   "apiAdmin.arr.commandIdsInvalid": "Erwartet: service, instance und bis zu {max} Befehls-IDs",
   "apiAdmin.arr.providerBodyInvalid": "Erwartet: kind (indexer oder downloadClient), eine numerische ID und die zu ändernden Schalter",
-  "apiAdmin.arrWatch.diskLowPercent": "Die Warnung bei wenig Speicherplatz muss eine ganze Prozentzahl von {min} bis {max} sein."
+  "apiAdmin.arrWatch.diskLowPercent": "Die Warnung bei wenig Speicherplatz muss eine ganze Prozentzahl von {min} bis {max} sein.",
+  "apiAdmin.arr.providerRssUnsupported": "Laut {service} unterstützt dieser Indexer kein RSS, daher wurde RSS nicht eingeschaltet",
+  "apiAdmin.arr.providerSearchUnsupported": "Laut {service} unterstützt dieser Indexer keine Suche, daher wurde die Suche nicht eingeschaltet",
+  "apiAdmin.neverWatched.refreshJobGone": "Diese Prüfung des Wiedergabeverlaufs wird nicht mehr verfolgt – Summonarr wurde möglicherweise neu gestartet. Laden Sie neu, um die neuesten Ergebnisse zu sehen.",
+  "apiAdmin.arr.filesJobGone": "Dieser Löschvorgang ist nicht mehr verfügbar – lade die Dateien neu, um zu sehen, was gelöscht wurde, und führe ihn nicht blind erneut aus.",
+  "apiAdmin.arr.markInProgress": "Dieser Download wird gerade noch als fehlgeschlagen markiert – versuchen Sie es in einer Minute erneut"
 }

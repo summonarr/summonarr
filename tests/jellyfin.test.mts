@@ -848,22 +848,25 @@ test("episodes-for-show scopes to ParentId=<seriesId>, stamps the caller's tmdbI
   const B = nextBase();
   respond = () => okJson({
     Items: [
-      { ParentIndexNumber: 1, IndexNumber: 1 },
+      { ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-03-01T12:00:00.0000000Z" },
       { ParentIndexNumber: 0, IndexNumber: 2 },  // specials → skipped
-      { ParentIndexNumber: 3, IndexNumber: 7 },
+      { ParentIndexNumber: 3, IndexNumber: 7 },  // undated → addedAt null
       { IndexNumber: 4 },                        // no season → skipped
     ],
     TotalRecordCount: 4,
   });
 
   const episodes = await getJellyfinEpisodesForShow(B, "k", "ser-77", 4242);
+  // DateCreated is requested and parsed (fix-match rebuilds the show's
+  // TVEpisodeCache rows from here; an undated row makes its season
+  // unobservable on the never-watched report — 14d).
   assert.equal(
     sent[0].url,
-    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
+    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(episodes, [
-    { tmdbId: 4242, seasonNumber: 1, episodeNumber: 1 },
-    { tmdbId: 4242, seasonNumber: 3, episodeNumber: 7 },
+    { tmdbId: 4242, seasonNumber: 1, episodeNumber: 1, addedAt: new Date("2024-03-01T12:00:00Z") },
+    { tmdbId: 4242, seasonNumber: 3, episodeNumber: 7, addedAt: null },
   ]);
 });
 
@@ -1371,6 +1374,57 @@ test("getJellyfinUserPlayedItems pages sequentially by StartIndex until a short 
   assert.equal(sent.length, 2);
   assert.equal(res.items.length, 1500);
   assert.equal(res.records, 1500);
+});
+
+test("getJellyfinUserPlayedItems re-reads a list that SHRANK mid-walk (fewer records than page 0's total) and returns the complete second read", async () => {
+  // Offset paging over a shrinking filter skips the item at the next page
+  // boundary, and the walk still ends on a short page. 1001 promised, 1000 read.
+  const B = nextBase();
+  const page = (n: number, from: number) => Array.from({ length: n }, (_, i) => ({ Type: "Movie", Id: `m${from + i}` }));
+  let walk = 0;
+  respond = (url) => {
+    const start = Number(new URL(url).searchParams.get("StartIndex"));
+    if (start === 0) walk++;
+    if (walk === 1) {
+      if (start === 0) return okJson({ Items: page(1000, 0), TotalRecordCount: 1001 });
+      return okJson({ Items: [], TotalRecordCount: 1000 }); // the skipped item shifted under the offset
+    }
+    if (start === 0) return okJson({ Items: page(1000, 0), TotalRecordCount: 1001 });
+    if (start === 1000) return okJson({ Items: page(1, 1000), TotalRecordCount: 1001 });
+    throw new Error(`unexpected StartIndex ${start}`);
+  };
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed");
+  assert.equal(walk, 2, "a short walk is read again");
+  assert.equal(res.records, 1001);
+  assert.ok(res.items.some((i) => i.itemKey === "m1000"), "the item the first walk skipped is in the answer");
+});
+
+test("getJellyfinUserPlayedItems THROWS when the re-read is short too and the count MOVED — a list changing under the read must not become a healthy snapshot", async () => {
+  const B = nextBase();
+  const page = (n: number, from: number) => Array.from({ length: n }, (_, i) => ({ Type: "Movie", Id: `m${from + i}` }));
+  let walk = 0;
+  respond = (url) => {
+    const start = Number(new URL(url).searchParams.get("StartIndex"));
+    if (start === 0) walk++;
+    const total = walk === 1 ? 1001 : 1003;
+    if (start === 0) return okJson({ Items: page(1000, 0), TotalRecordCount: total });
+    return okJson({ Items: [], TotalRecordCount: total });
+  };
+  await assert.rejects(() => getJellyfinUserPlayedItems(B, "k", "u", "IsResumable"), /IsResumable list changed while it was read/);
+  assert.equal(walk, 2, "exactly one re-read, then the failure");
+});
+
+test("getJellyfinUserPlayedItems reads a CONSTANT shortfall as served (one warning) — a server that overcounts must not fail every refresh", async () => {
+  const B = nextBase();
+  let walk = 0;
+  respond = (url) => {
+    if (new URL(url).searchParams.get("StartIndex") === "0") walk++;
+    return okJson({ Items: [{ Type: "Movie", Id: "m1" }], TotalRecordCount: 3 });
+  };
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed");
+  assert.equal(walk, 2);
+  assert.equal(res.records, 1);
+  assert.ok(warns.some((w) => w.includes("[jellyfin] IsPlayed list for user u reports 3 item(s) but serves 1")));
 });
 
 test("getJellyfinUserPlayedItems stops paging when its AbortSignal fires and does nothing when already aborted (guardrail 41)", async () => {

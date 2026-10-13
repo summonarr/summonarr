@@ -19,10 +19,11 @@ import { Chip, type ChipTone } from "@/components/ui/design";
 import { AlertTriangle, Download, ExternalLink, Loader2, RefreshCw, RotateCcw, Search, X } from "@/components/icons";
 import { queueFormatters } from "@/components/admin/queue-format";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { withBasePath } from "@/lib/base-path";
 import { ARR_ERROR_KIND_KEYS, isArrErrorKind } from "@/lib/arr-error-kind";
 import type { QueuePhase } from "@/lib/arr-queue";
-import type { ArrStatusVerdict, RequestArrStatus } from "@/lib/request-arr-status";
+import { unmonitoredEpisodesOnly, type ArrStatusVerdict, type RequestArrStatus } from "@/lib/request-arr-status";
 
 type Loaded = RequestArrStatus & { canOpenQueue?: boolean };
 
@@ -33,6 +34,7 @@ const VERDICT_KEYS = {
   notInArr: "adminQueue.arrStatus.verdict.notInArr",
   ready: "adminQueue.arrStatus.verdict.ready",
   inArrNotInLibrary: "adminQueue.arrStatus.verdict.inArrNotInLibrary",
+  waitingForLibrary: "adminQueue.arrStatus.verdict.waitingForLibrary",
   importBlocked: "adminQueue.arrStatus.verdict.importBlocked",
   downloading: "adminQueue.arrStatus.verdict.downloading",
   unmonitored: "adminQueue.arrStatus.verdict.unmonitored",
@@ -62,6 +64,7 @@ const VERDICT_TONE: Record<ArrStatusVerdict, ChipTone> = {
   notInArr: "pending",
   ready: "approved",
   inArrNotInLibrary: "approved",
+  waitingForLibrary: "neutral",
   importBlocked: "pending",
   downloading: "accent",
   unmonitored: "pending",
@@ -77,6 +80,7 @@ const NEXT_ACTIONS: Record<ArrStatusVerdict, readonly NextAction[]> = {
   notInArr: ["repush"],
   ready: [],
   inArrNotInLibrary: [],
+  waitingForLibrary: [],
   importBlocked: [],
   downloading: [],
   // Re-push re-monitors a title the arr already has (addMovieToRadarr / addSeriesToSonarr).
@@ -87,22 +91,28 @@ const NEXT_ACTIONS: Record<ArrStatusVerdict, readonly NextAction[]> = {
   waiting: ["search", "pick"],
 };
 
-const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
+// A series monitored at the series level only: Re-push re-monitors an
+// UNMONITORED series and returns early for a monitored one, so it can't help.
+const actionsFor = (s: Loaded): readonly NextAction[] => (unmonitoredEpisodesOnly(s) ? [] : NEXT_ACTIONS[s.verdict]);
 
 interface RequestArrStatusPanelProps {
   requestId: string;
   /** "MOVIE" | "TV" — names the service while the first check runs. */
   mediaType: string;
+  /** The request's instance slug ("" = default) — the route judges THAT instance (guardrail 32). */
+  arrInstance: string;
+  /** The instance's display name; the default instance is a bare "Radarr"/"Sonarr". */
+  arrInstanceName?: string | null;
   id?: string;
   /** A row action is running — the next-action buttons wait for it. */
   busy: boolean;
-  onSearch: () => void;
+  onSearch: () => Promise<void>;
   onPickRelease: () => void;
-  onRepush: () => void;
+  onRepush: () => Promise<void>;
   onClose: () => void;
 }
 
-export function RequestArrStatusPanel({ requestId, mediaType, id, busy, onSearch, onPickRelease, onRepush, onClose }: RequestArrStatusPanelProps) {
+export function RequestArrStatusPanel({ requestId, mediaType, arrInstance, arrInstanceName, id, busy, onSearch, onPickRelease, onRepush, onClose }: RequestArrStatusPanelProps) {
   const t = useT();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
@@ -114,6 +124,14 @@ export function RequestArrStatusPanel({ requestId, mediaType, id, busy, onSearch
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const seq = useRef(0);
+  // The translator through a ref: the request queue router.refresh()es on every
+  // request:* event, which hands the provider a new catalog object and so a new
+  // `t`. As a `load` dependency that re-ran the mount read — four Radarr/Sonarr
+  // calls and the action buttons disabled — with nobody clicking.
+  const tRef = useRef(t);
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
@@ -124,25 +142,44 @@ export function RequestArrStatusPanel({ requestId, mediaType, id, busy, onSearch
       const data = (await res.json().catch(() => ({}))) as Loaded & { error?: string };
       if (mine !== seq.current) return;
       if (!res.ok) {
-        setError(data.error ?? t("adminQueue.arrStatus.loadFailed"));
+        setError(data.error ?? tRef.current("adminQueue.arrStatus.loadFailed"));
         return;
       }
       setStatus(data);
     } catch {
-      if (mine === seq.current) setError(t("adminQueue.arrStatus.loadFailed"));
+      if (mine === seq.current) setError(tRef.current("adminQueue.arrStatus.loadFailed"));
     } finally {
       if (mine === seq.current) setLoading(false);
     }
-  }, [requestId, t]);
+  }, [requestId]);
 
-  // The panel is mounted by the click, so this IS the click's read.
+  // The panel is mounted by the click, so this IS the click's read. The row
+  // closes the panel whenever it would unmount it (the delete confirm, a status
+  // other than APPROVED) and keys it on the request, so a re-mount or a new
+  // representative request never reads without a click.
   useEffect(() => {
     void load();
     const counter = seq;
     return () => { counter.current++; };
   }, [load]);
 
-  const service = status ? SERVICE_LABEL[status.service] : mediaType === "MOVIE" ? "Radarr" : "Sonarr";
+  // A verdict that could not be re-confirmed (a re-check running or failed)
+  // offers no action: its buttons would act on what it no longer describes.
+  const stale = loading || error !== null;
+  // The panel's own Search / Re-push re-read the verdict once they finish — a
+  // click, so the read-on-click design holds — unless a re-check or an unmount
+  // happened meanwhile.
+  const thenRecheck = (action: () => Promise<void>) => {
+    const at = seq.current;
+    void action().then(() => {
+      if (seq.current === at) void load();
+    });
+  };
+
+  // Named per instance: the route judges the request's own instance, and a
+  // down 4K Radarr read as "Radarr couldn't be reached" sent the admin to the
+  // healthy default one.
+  const service = arrInstanceLabel(status?.service ?? (mediaType === "MOVIE" ? "radarr" : "sonarr"), arrInstanceName, arrInstance);
   const calendarDay = (iso: string | null) => {
     const ms = iso === null ? Number.NaN : Date.parse(iso);
     return Number.isFinite(ms) ? calendarDate.format(ms) : null;
@@ -155,12 +192,16 @@ export function RequestArrStatusPanel({ requestId, mediaType, id, busy, onSearch
       case "notInArr": return t("adminQueue.arrStatus.why.notInArr", { service });
       case "ready": return t("adminQueue.arrStatus.why.ready");
       case "inArrNotInLibrary": return t("adminQueue.arrStatus.why.inArrNotInLibrary", { service });
+      case "waitingForLibrary": return t("adminQueue.arrStatus.why.waitingForLibrary", { service });
       case "importBlocked": return t("adminQueue.arrStatus.why.importBlocked", { service });
       case "downloading":
         return s.downloads.length > 0 && s.downloads.every((d) => d.pending)
           ? t("adminQueue.arrStatus.why.held", { service })
           : t("adminQueue.arrStatus.why.downloading", { service });
-      case "unmonitored": return t("adminQueue.arrStatus.why.unmonitored", { service });
+      case "unmonitored":
+        return unmonitoredEpisodesOnly(s)
+          ? t("adminQueue.arrStatus.why.unmonitoredEpisodes", { service })
+          : t("adminQueue.arrStatus.why.unmonitored", { service });
       case "notReleased": {
         if (s.service === "radarr") {
           const date = calendarDay(s.expectedAt);
@@ -310,20 +351,20 @@ export function RequestArrStatusPanel({ requestId, mediaType, id, busy, onSearch
               </p>
             )}
 
-            {NEXT_ACTIONS[status.verdict].length > 0 && (
+            {actionsFor(status).length > 0 && (
               <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
-                {NEXT_ACTIONS[status.verdict].includes("search") && (
-                  <Button size="sm" variant="outline" onClick={onSearch} disabled={busy} className={actionButton}>
+                {actionsFor(status).includes("search") && (
+                  <Button size="sm" variant="outline" onClick={() => thenRecheck(onSearch)} disabled={busy || stale} className={actionButton}>
                     <Search className="w-3 h-3" />{t("adminQueue.actions.search")}
                   </Button>
                 )}
-                {NEXT_ACTIONS[status.verdict].includes("pick") && (
-                  <Button size="sm" variant="outline" onClick={onPickRelease} disabled={busy} className={actionButton}>
+                {actionsFor(status).includes("pick") && (
+                  <Button size="sm" variant="outline" onClick={onPickRelease} disabled={busy || stale} className={actionButton}>
                     <Download className="w-3 h-3" />{t("adminQueue.actions.pickRelease")}
                   </Button>
                 )}
-                {NEXT_ACTIONS[status.verdict].includes("repush") && (
-                  <Button size="sm" variant="outline" onClick={onRepush} disabled={busy} className={actionButton}>
+                {actionsFor(status).includes("repush") && (
+                  <Button size="sm" variant="outline" onClick={() => thenRecheck(onRepush)} disabled={busy || stale} className={actionButton}>
                     <RotateCcw className="w-3 h-3" />{t("adminQueue.actions.repush")}
                   </Button>
                 )}

@@ -152,6 +152,12 @@ function rowMatches(row: Record<string, unknown>, where: Record<string, unknown>
       if (!(cond as Record<string, unknown>[]).some((sub) => rowMatches(row, sub))) return false;
       continue;
     }
+    // IssueGrab → Issue relation filter (the webhooks never claim a grab whose
+    // issue is RESOLVED): a seeded grab carries its issue's status as issueStatus.
+    if (field === "issue") {
+      if (!rowMatches({ status: row.issueStatus ?? "OPEN" }, cond as Record<string, unknown>)) return false;
+      continue;
+    }
     const v = row[field];
     if (cond !== null && typeof cond === "object" && !(cond instanceof Date)) {
       const c = cond as Record<string, unknown>;
@@ -345,6 +351,13 @@ const radarrWantedStub = {
     radarrWantedDeletes.push(args.where);
     return { count: 0 };
   },
+  // A MovieFileDelete moves the title to wanted (skipDuplicates createMany).
+  createMany: async (args: { data: Record<string, unknown>[] }) => ({ count: args.data.length }),
+};
+// A verified Download marks the title available on its instance in the same tx.
+const radarrAvailableStub = {
+  deleteMany: async () => ({ count: 0 }),
+  createMany: async (args: { data: Record<string, unknown>[] }) => ({ count: args.data.length }),
 };
 const sonarrWantedStub = {
   deleteMany: async (args: { where: Record<string, unknown> }) => {
@@ -353,6 +366,7 @@ const sonarrWantedStub = {
   },
 };
 shadowPrismaModel(prisma, "radarrWantedItem", radarrWantedStub);
+shadowPrismaModel(prisma, "radarrAvailableItem", radarrAvailableStub);
 shadowPrismaModel(prisma, "sonarrWantedItem", sonarrWantedStub);
 
 // IssueGrab table.
@@ -369,6 +383,7 @@ type GrabRow = {
   seasonNumber: number | null;
   episodeNumber: number | null;
   issueId: string;
+  issueStatus?: "OPEN" | "IN_PROGRESS" | "RESOLVED";
 };
 const grabs: GrabRow[] = [];
 const grabUpdateManyCalls: UpdateManyCall[] = [];
@@ -450,6 +465,7 @@ const txDelegates = {
   },
   mediaRequest: mediaRequestStub,
   radarrWantedItem: radarrWantedStub,
+  radarrAvailableItem: radarrAvailableStub,
   sonarrWantedItem: sonarrWantedStub,
 };
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {

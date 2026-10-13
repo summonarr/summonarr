@@ -7,7 +7,9 @@ import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import { DELIVERED_KBPS_SQL } from "./bitrate";
 import { processSingleton } from "./process-singleton";
 import { coalesce } from "./concurrency";
+import { pickPlexRowForKey } from "./plex-dedupe";
 import { LEGACY_PLEX_REASON_LABELS, OTHER_REASONS, UNKNOWN_REASON } from "./transcode-reasons";
+import { TRACKING_STAMP_KEYS, parseStampDate } from "./never-watched";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 // Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
@@ -37,6 +39,11 @@ const SETTING_KEYS = [
   "playHistoryCompletionThreshold",
   "playHistoryArcGapDays",
   "playHistoryRetentionDays",
+  // The tracking switches' last off→on stamps (TRACKING_STAMP_KEYS, written by
+  // /api/settings): the Statistics delta's coverage check reads them.
+  "playHistoryTrackedSince",
+  "playHistoryPlexTrackedSince",
+  "playHistoryJellyfinTrackedSince",
 ] as const;
 type SettingKey = (typeof SETTING_KEYS)[number];
 
@@ -129,6 +136,11 @@ export async function getArcGapDays(): Promise<number> {
 // different shows — an unscoped lookup could attribute one server's watch to
 // another server's title. Jellyfin item ids are UUIDs (near-zero collision
 // risk) but are scoped identically for consistency.
+// Rows holding one ratingKey are 1 (normal) or a few (a conflated item's key
+// also rides the array of every title it claims — kept there on purpose, the
+// never-watched join credits each of them; `plex-dedupe.ts` header).
+const SHOW_KEY_HOLDERS_MAX = 25;
+
 export async function resolveShowTmdbId(
   source: "plex" | "jellyfin",
   showKey: string | null | undefined,
@@ -139,15 +151,26 @@ export async function resolveShowTmdbId(
     // ORed across both ratingKey columns (guardrail 37c): a show in two
     // sections has two ratingKeys and only one can be the stored plexRatingKey,
     // so episodes of the other copy used to be recorded with tmdbId null.
-    const item = await prisma.plexLibraryItem.findFirst({
+    //
+    // findMany + pickPlexRowForKey, never findFirst: the OR can match TWO rows
+    // (a conflated item's key is one row's canonical key and rides another's
+    // array), and an unordered findFirst then follows physical row order — a
+    // different show after any full-sync rewrite, PERSISTED onto every episode
+    // play. Canonical holder first, else lowest tmdbId (the 37b order). The
+    // bound only caps a pathological key; ordered, so it can't cut the owner
+    // out from under a pick among array holders (a canonical holder is cut
+    // only past SHOW_KEY_HOLDERS_MAX lower-id titles claiming the same item).
+    const rows = await prisma.plexLibraryItem.findMany({
       where: {
         mediaType: "TV",
         serverInstance,
         OR: [{ plexRatingKey: showKey }, { plexRatingKeys: { has: showKey } }],
       },
-      select: { tmdbId: true },
+      select: { tmdbId: true, plexRatingKey: true },
+      orderBy: { tmdbId: "asc" },
+      take: SHOW_KEY_HOLDERS_MAX,
     });
-    return item?.tmdbId ?? null;
+    return pickPlexRowForKey(rows, showKey)?.tmdbId ?? null;
   }
   // ORed across both id columns (guardrail 37): a show in two libraries has two
   // item ids and only one can be the stored `jellyfinItemId`, so a watch filed
@@ -1937,9 +1960,11 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   // began inside the window, or retention purged it, and a delta would measure
   // that gap ("+400%", or "new" on every tile) instead of a change. mediaType is
   // deliberately left out: a media type nobody watched is not an untracked one.
-  const { sql: observedFilterSql, params: observedParams } = appendPlayHistoryFilter([prevStart], {
-    source: filters.source,
-  });
+  // Two more parts of the same question are answered after the settings read:
+  // the tracking stamps (a gap in tracking leaves old rows behind) and, with no
+  // source filter, the per-source probe (one source's old rows must not vouch
+  // for a source tracked only recently).
+  const sourceFiltered = filters.source === "plex" || filters.source === "jellyfin";
 
   // Arc-grouped completion: three sittings of one movie should count as one completion, not
   // "one watched + two incomplete". Same arc definition as getMostPopularOnServer — consecutive
@@ -1958,6 +1983,47 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   // the previous one even if a few not-yet-purged rows survive past its start.
   const retentionDays = parseInt(settings.playHistoryRetentionDays ?? "", 10) || 0;
   const retentionCutsPrevious = retentionDays > 0 && retentionDays < days * 2;
+  // The probe's bound. With retention ≥ both windows the purge deletes exactly
+  // the rows older than now − retention — at retention = 2 × days, every row
+  // before the previous window's start, i.e. the evidence. A row within a day of
+  // the purge cutoff then shows history was clipped by the purge, not by
+  // tracking starting, so the bound moves to cutoff + 1 day. Accepted: up to one
+  // day of the previous window may be uncovered.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const probeBound =
+    retentionDays > 0 && retentionDays >= days * 2
+      ? new Date(Math.max(prevStart.getTime(), Date.now() - retentionDays * DAY_MS + DAY_MS))
+      : prevStart;
+  const { sql: observedFilterSql, params: observedParams } = appendPlayHistoryFilter([probeBound], {
+    source: filters.source,
+  });
+  // Unfiltered: EVERY source with plays since the bound must also have one
+  // before it — old Plex rows say nothing about a Jellyfin server added last
+  // week (one with tracking on by default never wrote a stamp). Index-shaped
+  // on (source, startedAt). Filtered, the probe above is already per source.
+  const perSourceObservedSql = sourceFiltered
+    ? ""
+    : ` AND NOT EXISTS (
+         SELECT 1 FROM (VALUES ('plex'), ('jellyfin')) AS s(src)
+         WHERE EXISTS (SELECT 1 FROM "PlayHistory" n WHERE n."source" = s.src AND n."startedAt" >= $1)
+           AND NOT EXISTS (SELECT 1 FROM "PlayHistory" o WHERE o."source" = s.src AND o."startedAt" < $1)
+       )`;
+  // Tracking stamps: a switch turned back on after the previous window began
+  // means a gap inside it, whatever older rows exist. The global switch always
+  // counts; the filtered source's, or both with no filter. No stamp keeps the
+  // old behaviour (installs from before the stamps existed).
+  const stampKeys = [
+    TRACKING_STAMP_KEYS.playHistoryEnabled,
+    ...(filters.source === "plex"
+      ? [TRACKING_STAMP_KEYS.playHistoryPlexEnabled]
+      : filters.source === "jellyfin"
+        ? [TRACKING_STAMP_KEYS.playHistoryJellyfinEnabled]
+        : [TRACKING_STAMP_KEYS.playHistoryPlexEnabled, TRACKING_STAMP_KEYS.playHistoryJellyfinEnabled]),
+  ];
+  const stampsCoverPrevious = stampKeys.every((key) => {
+    const stamp = parseStampDate(settings[key as SettingKey]);
+    return stamp === null || stamp.getTime() <= prevStart.getTime();
+  });
   const arcHistogramParams = [...params, arcGapDays * 24 * 60 * 60];
   const arcRateParams = [...arcHistogramParams, completionPct / 100];
   const arcGapIdx = params.length + 1;
@@ -2307,16 +2373,21 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     ),
     // Movies only, as the card says. An episode's "year" is its own air year and every
     // episode is a play, so without the filter a few binged shows outweighed every film.
-    prisma.$queryRawUnsafe<{ decade: string; count: bigint }[]>(
-      `SELECT CASE
-         WHEN "year" IS NULL OR "year" = '' THEN 'Unknown'
-         WHEN "year" ~ '^[0-9]{4}' THEN (SUBSTRING("year", 1, 3) || '0s')
-         ELSE 'Unknown'
-       END AS decade, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${wwhere} AND "mediaType"::text = 'MOVIE'
-       GROUP BY decade ORDER BY decade`,
-      ...params,
-    ),
+    // Under a TV filter the two predicates contradict — the answer is [] by construction,
+    // so it is not asked (one statement fewer on the five-connection pool; the wire
+    // shape is the same []).
+    filters.mediaType === "TV"
+      ? Promise.resolve([] as { decade: string; count: bigint }[])
+      : prisma.$queryRawUnsafe<{ decade: string; count: bigint }[]>(
+          `SELECT CASE
+             WHEN "year" IS NULL OR "year" = '' THEN 'Unknown'
+             WHEN "year" ~ '^[0-9]{4}' THEN (SUBSTRING("year", 1, 3) || '0s')
+             ELSE 'Unknown'
+           END AS decade, COUNT(*)::bigint AS count
+           FROM "PlayHistory" WHERE ${wwhere} AND "mediaType"::text = 'MOVIE'
+           GROUP BY decade ORDER BY decade`,
+          ...params,
+        ),
     prisma.$queryRawUnsafe<{
       tmdbId: number | null;
       title: string;
@@ -2369,15 +2440,22 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     // the same movie, or the same EPISODE. Matching per episode is the point — episode 2
     // after episode 1 is a new play, not a repeat; the old "plays per title" figure counted
     // it as one (the trap getMostRewatchedUncached documents). The earlier play may predate
-    // the window; plays retention has purged are not seen. An unmatched play (no tmdbId)
-    // falls back to the server's own item id, stable per server; a play with neither can't
-    // be judged and counts as a first watch. Each branch is shaped for an index:
+    // the window; plays retention has purged are not seen. The server's own item id is a
+    // SECOND match for every play, not only for unmatched ones: PlayHistory.tmdbId is
+    // write-once, so an earlier play recorded unmatched (watched before the next library
+    // sync) never meets a later matched rewatch through the tmdb branch — same item, same
+    // viewer, earlier, watched is a rewatch whatever tmdbId either row carries. The
+    // show-level tmdb match is MOVIES only: a TV play missing its season/episode numbers
+    // matched every other numberless episode of the show (IS NOT DISTINCT FROM NULL), so
+    // it is judged by its per-episode item id alone, and with none counts as a first
+    // watch. A play with no match at all can't be judged and counts as a first watch.
+    // Each branch is shaped for an index:
     // (mediaServerUserId, tmdbId, mediaType, seasonNumber, episodeNumber, startedAt) and
     // (source, sourceItemId, mediaServerUserId, startedAt). `plays` is counted here, over the
     // same rows, so the rate's two halves can't drift apart.
     prisma.$queryRawUnsafe<{ plays: bigint; rewatches: bigint }[]>(
       `SELECT COUNT(*)::bigint AS plays,
-              COUNT(*) FILTER (WHERE CASE
+              COUNT(*) FILTER (WHERE (CASE
                 WHEN p."tmdbId" IS NOT NULL AND p."mediaType" IS NOT NULL
                      AND p."seasonNumber" IS NOT NULL AND p."episodeNumber" IS NOT NULL THEN EXISTS (
                   SELECT 1 FROM "PlayHistory" q
@@ -2385,7 +2463,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
                     AND q."tmdbId" = p."tmdbId" AND q."mediaType" = p."mediaType"
                     AND q."seasonNumber" = p."seasonNumber" AND q."episodeNumber" = p."episodeNumber"
                     AND q."startedAt" < p."startedAt" AND q."watched" = true)
-                WHEN p."tmdbId" IS NOT NULL THEN EXISTS (
+                WHEN p."tmdbId" IS NOT NULL AND p."mediaType"::text = 'MOVIE' THEN EXISTS (
                   SELECT 1 FROM "PlayHistory" q
                   WHERE q."mediaServerUserId" = p."mediaServerUserId"
                     AND q."tmdbId" = p."tmdbId"
@@ -2393,21 +2471,20 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
                     AND q."seasonNumber" IS NOT DISTINCT FROM p."seasonNumber"
                     AND q."episodeNumber" IS NOT DISTINCT FROM p."episodeNumber"
                     AND q."startedAt" < p."startedAt" AND q."watched" = true)
-                WHEN p."sourceItemId" IS NOT NULL THEN EXISTS (
+                ELSE false
+              END) OR (p."sourceItemId" IS NOT NULL AND EXISTS (
                   SELECT 1 FROM "PlayHistory" q
                   WHERE q."source" = p."source" AND q."serverInstance" = p."serverInstance"
                     AND q."sourceItemId" = p."sourceItemId"
                     AND q."mediaServerUserId" = p."mediaServerUserId"
-                    AND q."startedAt" < p."startedAt" AND q."watched" = true)
-                ELSE false
-              END)::bigint AS rewatches
+                    AND q."startedAt" < p."startedAt" AND q."watched" = true)))::bigint AS rewatches
        FROM "PlayHistory" p WHERE ${joinWWhere}`,
       ...joinParams,
     ),
     prisma.$queryRawUnsafe<{ observed: boolean }[]>(
-      `SELECT EXISTS (
+      `SELECT (EXISTS (
          SELECT 1 FROM "PlayHistory" WHERE "startedAt" < $1${observedFilterSql}
-       ) AS observed`,
+       )${perSourceObservedSql}) AS observed`,
       ...observedParams,
     ),
   ]);
@@ -2495,7 +2572,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       totalPlays: Number(prev?.plays ?? 0),
       totalWatchTimeHours: Math.round(Number(prev?.hours ?? 0) * 10) / 10,
       uniqueViewers: Number(prev?.viewers ?? 0),
-      complete: observedRaw[0]?.observed === true && !retentionCutsPrevious,
+      complete: observedRaw[0]?.observed === true && !retentionCutsPrevious && stampsCoverPrevious,
     },
   };
 }

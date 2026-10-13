@@ -8,10 +8,10 @@
 // on this page is EXACTLY what the delete route's dry run will decide. Nothing
 // here deletes, and nothing here writes.
 import { isFeatureEnabled } from "./features";
-import { getCachedArrLibraryIndex, type ArrLibraryIndex } from "./library-cleanup-arr";
+import { failedArrInstances, getCachedArrLibraryIndex, peekCachedArrLibraryIndex, type ArrLibraryEntry, type ArrLibraryIndex } from "./library-cleanup-arr";
 import {
   CLEANUP_FEATURE_KEY,
-  fillTmdbAiring,
+  fillAiring,
   loadCleanupSettings,
   loadCleanupTitles,
   type CleanupTitle,
@@ -20,8 +20,9 @@ import { cleanupKey, evaluateCleanupTitle, type CleanupExclusion, type CleanupMe
 import { currentActivityGeneration } from "./play-history";
 import { processSingleton } from "./process-singleton";
 import { coalesce } from "./concurrency";
-import { loadLibraryWatchFacts, NEVER_WATCHED_FEATURE_KEY } from "./never-watched-data";
+import { loadLibraryWatchFacts, NEVER_WATCHED_FEATURE_KEY, type LibraryWatchTitle } from "./never-watched-data";
 import { hasPermission, Permission } from "./permissions";
+import { upstreamErrorCode, type UpstreamErrorCode } from "./upstream-watch";
 import {
   isNeverWatchedState,
   seasonSizeIfAgreed,
@@ -61,8 +62,8 @@ export interface NwTitleRow {
   protected: boolean;
   // What Library cleanup's engine says about it right now.
   cleanup: { matched: CleanupRule[]; excludedBy: CleanupExclusion[]; candidate: boolean };
-  // candidate AND something to delete AND cleanup switched on — exactly what a
-  // dry run would include.
+  // candidate AND something to delete AND cleanup switched on AND every
+  // instance of its service could be listed — exactly what a dry run would include.
   eligible: boolean;
 }
 
@@ -94,6 +95,9 @@ export interface NwCoverageRow {
   source: "plex" | "jellyfin";
   tracked: boolean;
   since: string | null;
+  // A library title sits on this server (ServerCoverage.holds) — only these can
+  // hold a title back, so only these are named as unchecked.
+  holds: boolean;
   upstream: {
     health: NwUpstreamHealth;
     fetchedAt: string | null;
@@ -102,7 +106,11 @@ export interface NwCoverageRow {
     matched: number;
     samples: number;
     agreed: number;
+    // The stored English failure text (logs, older pages) and its code — the
+    // page translates the code (upstreamErrorCode), never the text.
     error: string | null;
+    errorCode: UpstreamErrorCode | null;
+    httpStatus: number | null;
   };
 }
 
@@ -134,9 +142,23 @@ export interface NeverWatchedReport {
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
 
-function arrCopies(arr: ArrLibraryIndex | null, t: { tmdbId: number; mediaType: CleanupMediaType }) {
-  return arr?.byKey.get(cleanupKey(t.tmdbId, t.mediaType)) ?? [];
+// The delete route refuses every title of a service while ANY instance of it
+// failed to list (it may hold a copy nobody can see, and a partial removal
+// would half-delete the title), so the report can't call one eligible either.
+// One rule for both: failedArrInstances.
+export function arrServiceReadable(errors: ArrLibraryIndex["errors"], mediaType: CleanupMediaType): boolean {
+  return failedArrInstances({ errors }, mediaType).length === 0;
 }
+
+// The titles whose rows the report shapes — a title that isn't watched, and a
+// watched show with a season that isn't — get the delete route's own targets
+// (resolveArrTargets: tvdb-only Sonarr series included), resolved inside the
+// loader before the requests are read, so their sizes, season sizes and
+// "eligible" are the dry run's. A private byKey-only lookup was a second
+// definition: every Sonarr v3 show read "not in Radarr/Sonarr" here while the
+// dry run planned its delete.
+const needsTargets = (w: LibraryWatchTitle) =>
+  w.verdict.state !== "watched" || (w.seasons ?? []).some((s) => s.state !== "watched");
 
 export async function computeNeverWatchedReport(opts: { now?: Date; freshArr?: boolean } = {}): Promise<NeverWatchedReport> {
   const now = opts.now ?? new Date();
@@ -145,16 +167,22 @@ export async function computeNeverWatchedReport(opts: { now?: Date; freshArr?: b
     loadCleanupSettings(),
     isFeatureEnabled(CLEANUP_FEATURE_KEY),
   ]);
-  const { titles, ctx } = await loadCleanupTitles(arr, undefined, { seasons: true, now });
+  // "cached": a GET never waits on TMDB's tmdb→tvdb cross-reference (a miss is
+  // filled in the background for the next load — CrossRefMode). Resolving every
+  // unwatched show live made a cold report one TMDB call per show.
+  const { titles, ctx, targets } = await loadCleanupTitles(arr, undefined, { seasons: true, now, resolveTargets: needsTargets, crossRef: "cached" });
+  const copiesOf = (t: { tmdbId: number; mediaType: CleanupMediaType }): readonly ArrLibraryEntry[] =>
+    targets?.get(cleanupKey(t.tmdbId, t.mediaType)) ?? [];
 
-  // TMDB's cached status for shows Sonarr couldn't speak for — only the ones
-  // whose rows show it: never-watched shows (the airing exclusion) and watched
-  // shows with never-watched seasons (the latest season's airing chip).
+  // The still-airing status the first read left unknown (a tvdb-only Sonarr
+  // series, then TMDB's cached status — fillAiring, the dry run's own pass) —
+  // only for the rows that show it: never-watched shows (the airing exclusion)
+  // and watched shows with never-watched seasons (the latest season's chip).
   const needAiring = titles.filter((t) =>
     t.mediaType === "TV" && t.airing === null &&
     (t.watch.state !== "watched" || (t.seasons ?? []).some((s) => s.state !== "watched")),
   );
-  if (needAiring.length > 0) await fillTmdbAiring(needAiring);
+  if (needAiring.length > 0) await fillAiring(needAiring, arr, "cached");
 
   const titleRows: NwTitleRow[] = [];
   const seasonRows: NwSeasonRow[] = [];
@@ -169,7 +197,7 @@ export async function computeNeverWatchedReport(opts: { now?: Date; freshArr?: b
 
   for (const t of titles) {
     if (t.watch.state === "watched") {
-      for (const row of seasonRowsFor(t, arr)) {
+      for (const row of seasonRowsFor(t, copiesOf(t))) {
         seasonRows.push(row);
         if (isNeverWatchedState(row.state)) {
           totals.seasons.count++;
@@ -179,9 +207,9 @@ export async function computeNeverWatchedReport(opts: { now?: Date; freshArr?: b
       continue;
     }
     const verdict = evaluateCleanupTitle(t, settings, { now });
-    const copies = arrCopies(arr, t);
+    const copies = copiesOf(t);
     const sizeOnDisk = copies.length === 0 ? null : copies.reduce((n, e) => n + e.sizeOnDisk, 0);
-    const eligible = cleanupEnabled && verdict.candidate && copies.length > 0;
+    const eligible = cleanupEnabled && verdict.candidate && copies.length > 0 && arrServiceReadable(arr.errors, t.mediaType);
     titleRows.push({
       kind: "title",
       tmdbId: t.tmdbId,
@@ -227,6 +255,7 @@ export async function computeNeverWatchedReport(opts: { now?: Date; freshArr?: b
       source: c.source,
       tracked: c.tracked,
       since: iso(c.since),
+      holds: c.holds,
       upstream: {
         health: c.upstreamHealth,
         fetchedAt: c.upstream?.fetchedAt ?? null,
@@ -236,6 +265,8 @@ export async function computeNeverWatchedReport(opts: { now?: Date; freshArr?: b
         samples: c.upstream?.samples ?? 0,
         agreed: c.upstream?.agreed ?? 0,
         error: c.upstream?.error ?? null,
+        errorCode: upstreamErrorCode(c.upstream?.error)?.code ?? null,
+        httpStatus: upstreamErrorCode(c.upstream?.error)?.httpStatus ?? null,
       },
     })),
     trackingOn: ctx.playHistoryTracked,
@@ -251,10 +282,10 @@ export async function computeNeverWatchedReport(opts: { now?: Date; freshArr?: b
   };
 }
 
-function seasonRowsFor(t: CleanupTitle, arr: ArrLibraryIndex | null): NwSeasonRow[] {
+function seasonRowsFor(t: CleanupTitle, copies: readonly ArrLibraryEntry[]): NwSeasonRow[] {
   const seasons = t.seasons ?? [];
   if (seasons.length === 0) return [];
-  const sonarrSeasons = arrCopies(arr, t).filter((e) => e.service === "sonarr").map((e) => e.seasons ?? []);
+  const sonarrSeasons = copies.filter((e) => e.service === "sonarr").map((e) => e.seasons ?? []);
   const latest = Math.max(...seasons.map((s) => s.seasonNumber));
   const out: NwSeasonRow[] = [];
   for (const s of seasons) {
@@ -291,9 +322,15 @@ function seasonRowsFor(t: CleanupTitle, arr: ArrLibraryIndex | null): NwSeasonRo
 // cache) — far too much to repeat for every page flip of a server-paged table.
 // It is cached for a short TTL and dropped early by:
 //   - a new recorded play (the activity-cache generation moves on every finalize);
-//   - invalidateNeverWatchedReport(), which every route that changes an input
-//     calls: protect/unprotect, the cleanup settings, a cleanup delete, an
-//     upstream refresh.
+//   - invalidateNeverWatchedReport(), called by the Summonarr actions that change
+//     an input: protect/unprotect, the cleanup settings, a cleanup delete, an
+//     upstream refresh (the route and its cron), the title manager's Add and
+//     Remove, a media-server instance's removal, and a /api/settings write of a
+//     tracking switch, the retention or the cleanup / never-watched feature flag.
+// Every other input — a library sync, a fix-match, votes, requests, watchlists,
+// an edit made inside Radarr/Sonarr — is bounded by the TTL alone. That staleness never
+// reaches a delete: the cleanup dry run re-judges through its own narrowed read
+// and never reads this cache (14b).
 const REPORT_TTL_MS = 2 * 60 * 1000;
 // A report built while a Radarr/Sonarr instance couldn't be listed is kept only
 // as long as the shared index keeps a failed listing (library-cleanup-arr.ts),
@@ -381,9 +418,15 @@ export interface TitleNeverWatched {
 }
 
 // The narrowed read — the same evidence union as the report (guardrail 14d).
-// No Radarr/Sonarr listing: the chip shows the verdict, not a size.
+// The Radarr/Sonarr index feeds the verdict too, not just the size: a fulfilled
+// request's delivery date counts as the arrival only while its instance hasn't
+// re-added the title since (never-watched-data.ts). So the chip reads the SAME
+// shared index the report does — but only when it is already in memory
+// (peekCachedArrLibraryIndex): a page render never lists an arr. On a cold
+// cache the chip can count a delivery the report drops, so its "since" date can
+// be earlier than the report's until the index is warm again.
 export async function getTitleNeverWatched(tmdbId: number, mediaType: CleanupMediaType): Promise<TitleNeverWatched | null> {
-  const facts = await loadLibraryWatchFacts(null, { only: [{ tmdbId, mediaType }], seasons: mediaType === "TV" });
+  const facts = await loadLibraryWatchFacts(peekCachedArrLibraryIndex(), { only: [{ tmdbId, mediaType }], seasons: mediaType === "TV" });
   const t = facts.titles[0];
   if (!t) return null;
   return {

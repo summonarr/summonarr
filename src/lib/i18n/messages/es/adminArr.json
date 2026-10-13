@@ -9,7 +9,7 @@
   "adminArr.error.timeout": "{name} no respondió a tiempo",
   "adminArr.error.unreachable": "No se pudo contactar con {name} — comprueba que esté en ejecución y su dirección en Ajustes → Multimedia",
   "adminArr.error.server": "{name} tuvo un error interno — revisa sus registros",
-  "adminArr.error.notFound": "{name} respondió «no encontrado» — esto necesita una versión más reciente",
+  "adminArr.error.notFound": "{name} respondió «no encontrado» — comprueba su dirección en Ajustes → Multimedia, incluida la URL base si usa una (o puede que sea demasiado antiguo para esta página)",
   "adminArr.error.other": "No se pudo leer {name}",
   "adminArr.common.noneConfigured": "No hay Radarr ni Sonarr configurado",
   "adminArr.common.noneConfiguredHint": "Conecta Radarr o Sonarr en Ajustes → Multimedia (y deja su integración activada) para gestionarlos aquí.",
@@ -402,5 +402,14 @@
   "adminArr.missingBulk.confirmTitleCutoff": "¿Buscar mejoras para {count} títulos?",
   "adminArr.missingBulk.confirmBody": "Cada título se busca en todos los indexadores que usa su instancia, así que esto consume al menos el equivalente a {count} búsquedas en llamadas a la API de los indexadores — muchos indexadores las limitan por día. {service} las pone todas en cola en pocos minutos.",
   "adminArr.missingBulk.confirmUnmonitored_one": "{count} de ellos no está monitorizado — {service} no lo buscaría por su cuenta.",
-  "adminArr.missingBulk.confirmUnmonitored_other": "{count} de ellos no están monitorizados — {service} no los buscaría por su cuenta."
+  "adminArr.missingBulk.confirmUnmonitored_other": "{count} de ellos no están monitorizados — {service} no los buscaría por su cuenta.",
+  "adminArr.system.useUnsupported": "no admitido",
+  "adminArr.system.useUnsupportedHint": "{service} indica que este indexador no puede hacerlo, así que esta opción nunca se usaría",
+  "adminArr.missingBulk.selectedOffPage_one": "({count} de ellos en otra página)",
+  "adminArr.missingBulk.selectedOffPage_other": "({count} de ellos en otras páginas)",
+  "adminArr.calendar.emptyHintAll": "En estas dos semanas no se emite ningún episodio ni se estrena ninguna película.",
+  "adminArr.history.stateUnknown": "Esta lista no puede mostrar todo lo que le ha pasado a esta descarga desde que se capturó: puede que ya se haya importado. Marcarla como fallida igualmente bloquea la versión y vuelve a buscar; si la descarga ya falló, Summonarr lo rechaza antes de enviar nada.",
+  "adminArr.add.searchNeedsMonitor": "No hay nada monitorizado, así que Radarr/Sonarr no lo buscará.",
+  "adminArr.notice.searchMissingPartial": "Solo se inició parte de la búsqueda: Sonarr rechazó el resto. Vuelve a ejecutar Buscar faltantes para lo que queda.",
+  "adminArr.files.deleteStillRunning": "La eliminación sigue en curso: vuelve a cargar los archivos en un minuto para ver qué queda."
 }

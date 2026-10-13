@@ -283,7 +283,7 @@ function defaultCreate(args: { data: Record<string, unknown> }): Record<string, 
 let createImpls: Array<(args: { data: Record<string, unknown> }) => Record<string, unknown>> = [];
 let requestCounts: number[] = []; // shifted per mediaRequest.count call
 let existingRow: Record<string, unknown> | null = null; // the caller's own prior request
-let greenlitRow: { status: string } | null = null; // any APPROVED/AVAILABLE peer
+let greenlitRow: { status: string; cleanedUpAt?: Date | null } | null = null; // any APPROVED/AVAILABLE peer
 let earlierPendingRow: { id: string } | null = null; // an earlier pending peer (notify dedupe)
 let listRows: Array<Record<string, unknown>> = [];
 let statusGroups: Array<{ status: string; _count: { status: number } }> = [];
@@ -292,7 +292,11 @@ const mediaRequestModel = {
     rec("mediaRequest.findFirst", args);
     const w = args.where ?? {};
     if ("requestedBy" in w) return existingRow; // the pre-tx duplicate check
-    if (w.status && typeof w.status === "object" && "in" in (w.status as object)) return greenlitRow;
+    if (w.status && typeof w.status === "object" && "in" in (w.status as object)) {
+      // A lookup carrying `cleanedUpAt: null` never sees a stamped (removed) peer.
+      if (w.cleanedUpAt === null && greenlitRow?.cleanedUpAt) return null;
+      return greenlitRow;
+    }
     if (w.id && typeof w.id === "object" && "not" in (w.id as object)) return earlierPendingRow;
     return null;
   },
@@ -1003,6 +1007,25 @@ test("an AVAILABLE peer with no evidence the title is available to THIS requeste
   assert.equal(createdData().availableAt, undefined);
   assert.equal(createdData().approvedAt, undefined, "a copy records no approval of its own");
   assert.equal(afterTasks.length, 0, "still nothing to review ⇒ no admin alert");
+});
+
+test("a peer stamped cleanedUpAt is a REMOVAL, not a greenlight: the request goes PENDING and alerts admins (guardrail 14b)", async () => {
+  // An admin removed the title from this instance (title manager Remove or
+  // Library cleanup); the stamped AVAILABLE row is all that is left of it.
+  // Mirroring it would create an APPROVED row the sync re-pushes — the
+  // deleted title would download again with no admin decision.
+  greenlitRow = { status: "AVAILABLE", cleanedUpAt: new Date("2026-10-01T00:00:00Z") };
+  radarrHas = false;
+  const a = await mintSession();
+  const res = await post(a.token, requestBody(a.userId));
+  assert.equal(res.status, 201);
+  const lookup = opsOf("mediaRequest.findFirst").map((o) => (o.args as { where: Record<string, unknown> }).where)
+    .find((w) => w.status && typeof w.status === "object" && "in" in (w.status as object));
+  assert.ok(lookup && lookup.cleanedUpAt === null, "the greenlit lookup excludes stamped rows");
+  assert.equal(createdData().status, undefined, "the pending branch: the schema default, never a copied APPROVED");
+  assert.equal(((await res.json()) as { status: string }).status, "PENDING");
+  assert.equal(createdData().approvedAt, undefined);
+  assert.equal(afterTasks.length, 1, "a request for a removed title goes to the admins for review");
 });
 
 test("the pending branch: first pending request emits SSE, clears the caller's contradictory deletion vote, and enqueues ONE admin notify fan-out that completes offline; an earlier pending peer suppresses it", async () => {

@@ -1392,9 +1392,11 @@ async function handleComponent(interaction: any): Promise<void> {
                 await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
               }
               // No approvedAt on the copy, as in the web route: the watch grade
-              // counts it through the approval of the request it copied.
+              // counts it through the approval of the request it copied. A row
+              // stamped `cleanedUpAt` records a deliberate removal, not a
+              // greenlight (guardrail 14b) — never copied, or the sync re-pushes it.
               const alreadyGreenlit = await tx.mediaRequest.findFirst({
-                where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
+                where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null },
                 select: { status: true },
               });
               if (alreadyGreenlit) {

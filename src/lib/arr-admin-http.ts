@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 import { ArrResponseError, arrErrorKind, arrErrorMessage } from "./arr";
 import { ArrInstanceError, ARR_SERVICE_LABEL, parseArrService, type ArrService } from "./arr-admin";
 import { TitleEditError } from "./arr-title";
-import { AlreadyFailedError, NotAGrabError, NotOnTitleError, TitleNotFoundError } from "./arr-title-data";
+import { AlreadyFailedError, MarkInProgressError, NotAGrabError, NotOnTitleError, TitleNotFoundError } from "./arr-title-data";
 import { BlocklistGoneError } from "./arr-history-data";
 import { CommandNotQueuedError, ProviderNotFoundError, ProviderRejectedError, UnknownTaskError } from "./arr-system-data";
 import { validationMessagesFromBody } from "./arr-system";
@@ -89,6 +89,13 @@ export function arrFailure(err: unknown, target: ArrTarget, t: Translator, what:
   }
   if (err instanceof NotAGrabError) {
     return NextResponse.json({ error: t("apiAdmin.arr.notAGrab") }, { status: 409 });
+  }
+  // Before AlreadyFailedError, its parent: a claim held by another mark (in
+  // flight, or its outcome unknown for ~90 s) is not proof the download
+  // failed — "already failed" there sent the admin away from a mark that may
+  // never have reached the arr.
+  if (err instanceof MarkInProgressError) {
+    return NextResponse.json({ error: t("apiAdmin.arr.markInProgress") }, { status: 409 });
   }
   if (err instanceof AlreadyFailedError) {
     return NextResponse.json({ error: t("apiAdmin.arr.alreadyFailed") }, { status: 409 });

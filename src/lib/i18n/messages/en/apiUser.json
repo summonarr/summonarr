@@ -182,5 +182,12 @@
   "apiUser.requests.releases.grabRefused": "{service} couldn't grab that release: {reason}",
   "apiUser.requests.releases.jobGone": "That search is no longer available — search again.",
   "apiUser.requests.releases.grabInProgress": "That release is already being grabbed",
-  "apiUser.requests.arrStatus.invalidStatus": "Only approved or available requests can be checked"
+  "apiUser.requests.arrStatus.invalidStatus": "Only approved or available requests can be checked",
+  "apiUser.issues.replaceFile.alreadyRunning": "A Replace file is already running for this issue — wait for it to finish, then reload the issue.",
+  "apiUser.issues.replaceFile.jobGone": "That Replace file is no longer available — reload the issue to see what was deleted, and don't run it again blindly.",
+  "apiUser.issues.replaceNeedsSeason": "Sonarr can only search a season or an episode, not a whole series — use Refetch for this issue",
+  "apiUser.requests.searchNothingMissing": "Nothing to search — no aired, monitored episode of this series is missing",
+  "apiUser.requests.searchInstanceUnavailable": "This request's Sonarr instance isn't configured any more",
+  "apiUser.requests.searchPartial": "Only part of the search started — Sonarr refused the rest. Search again later for what is still missing.",
+  "apiUser.requests.searchSeriesNotInSonarr": "This series isn't in this request's Sonarr instance — re-push the request to add it again"
 }

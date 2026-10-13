@@ -27,6 +27,28 @@ function mfaStepUpBody(extra: Record<string, unknown> = {}, extraRequired: strin
   };
 }
 
+// The answers every /admin/arr/* operation shares through arrGate/arrTitleGate
+// and arrFailure (src/lib/arr-admin-http.ts): one error map, so one place to
+// document it. Spread FIRST into an operation's `responses`, so a route's own
+// description of the same status (title GET's 404, providers PATCH's 504) wins.
+// Inlined rather than `components.responses` $refs: the in-app viewer
+// (openapi-viewer.tsx) renders each response's own `description` and resolves
+// no $ref. The fan-out reports (calendar, tasks/storage/providers GET) never
+// answer these — a failed instance is named in their `errors[]` — so they don't
+// take it.
+const ARR_ERRORS = {
+  "400": { description: "Invalid service, instance or title id, or the arr refused the request ({ error, messages } — its reason, masked)" },
+  "404": { description: "Integration disabled, unknown instance, or the arr says the item is gone" },
+  "409": {
+    description:
+      "{ error } — a named season, episode, file or history record isn't this title's, the record isn't a grab, its " +
+      "download already failed, the release is no longer on the blocklist, or the command is no longer queued; or " +
+      "{ error, messages } — the arr refused it as a conflict (its reason, masked)",
+  },
+  "502": { description: "{ error } — the arr refused the API key, could not be reached, or failed (worded by the kind of failure)" },
+  "504": { description: "{ error } — the arr timed out" },
+};
+
 const spec = {
   openapi: "3.0.3",
   info: {
@@ -500,7 +522,7 @@ const spec = {
                   status: { $ref: "#/components/schemas/RequestStatus" },
                   adminNote: { type: "string", maxLength: 1000 },
                   retry: { type: "boolean", description: "Re-push to Radarr/Sonarr" },
-                  search: { type: "boolean", description: "Trigger search in ARR" },
+                  search: { type: "boolean", description: "Trigger search in ARR (APPROVED or AVAILABLE only). For a TV request this queues only what is missing (SeasonSearch for a season with nothing on disk and 2+ episodes missing, EpisodeSearch for the rest — never SeriesSearch); a series with nothing missing answers 200 with an `arrError` explaining so." },
                   permanent: { type: "boolean", description: "Permanently decline" },
                 },
               },
@@ -536,13 +558,13 @@ const spec = {
         summary: "Why an approved request isn't available yet (MANAGE_REQUESTS)",
         description:
           "Live read of the request's OWN Radarr/Sonarr instance (its tmdbId, mediaType and arrInstance — never a caller-supplied id): " +
-          "the title, its queue (`/api/v3/queue/details`), its DownloadFailed history since the request's approval (`approvedAt`, else " +
+          "the title, its queue (`/api/v3/queue/details`), its DownloadFailed and import history since the request's approval (`approvedAt`, else " +
           "`createdAt`), and whether a Plex/Jellyfin library the REQUESTER can see holds it. Answers ONE verdict, the first that holds: " +
           "`unreachable` (title read failed) → `ready` (a visible library row the next sync marks from: always for a movie or an untracked " +
           "title, for a series only once Sonarr calls it complete) → `notInArr` → `inArrNotInLibrary` (the arr has the file / the whole " +
-          "series, no library row yet — the sync's Radarr/Sonarr marking pass marks it available next run) → `unreachable` (queue read failed) → `importBlocked` (a download Radarr/Sonarr say needs attention) → " +
-          "`downloading` → `unmonitored` → `notReleased` (movie: no physical/digital date passed; series: no regular-season episode aired) → " +
-          "`unreachable` (history read failed) → `downloadFailed` → `incomplete` (Sonarr has some aired episodes) → `waiting`. A failed " +
+          "series, no library row yet — the sync's Radarr/Sonarr marking pass marks it available next run) → `waitingForLibrary` (the same, for a requester with a media-server preference — the ARR marking pass skips them, so the request waits for a library row they can see) → `unreachable` (queue read failed) → `importBlocked` (a download Radarr/Sonarr say needs attention) → " +
+          "`downloading` → `unmonitored` (also a Sonarr series monitored at the series level with no aired episode monitored or on disk and no monitored airing ahead — `monitored` is then true) → `notReleased` (movie: no physical/digital date passed; series: no regular-season episode aired) → " +
+          "`unreachable` (history read failed) → `downloadFailed` (a failure with no import of the title at or after it) → `incomplete` (Sonarr has some aired episodes) → `waiting`. A failed " +
           "Radarr/Sonarr read is the `unreachable` verdict with `errorKind`, not an error status. COARSE by design — MANAGE_REQUESTS delegates " +
           "read it: no output path, download id, download client or indexer name, release title or arr URL; the arr's status messages are " +
           "returned with credentials, URLs, paths and file names removed. Only APPROVED or AVAILABLE requests. Read-only, not audited, rate " +
@@ -556,7 +578,7 @@ const spec = {
                 schema: {
                   type: "object",
                   properties: {
-                    verdict: { type: "string", enum: ["unreachable", "notInArr", "ready", "inArrNotInLibrary", "importBlocked", "downloading", "unmonitored", "notReleased", "downloadFailed", "incomplete", "waiting"] },
+                    verdict: { type: "string", enum: ["unreachable", "notInArr", "ready", "inArrNotInLibrary", "waitingForLibrary", "importBlocked", "downloading", "unmonitored", "notReleased", "downloadFailed", "incomplete", "waiting"] },
                     service: { type: "string", enum: ["radarr", "sonarr"] },
                     errorKind: { type: "string", nullable: true, enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Set when the verdict is `unreachable`" },
                     monitored: { type: "boolean", nullable: true },
@@ -677,9 +699,16 @@ const spec = {
               },
             },
           },
+          "202": {
+            description: "{ job } — a background search started (`async=1`), or the same search already running was joined; polling `?job=` answers { job, running: true } while it runs",
+            content: { "application/json": { schema: { type: "object", required: ["job"], properties: {
+              job: { type: "string", pattern: "^[0-9a-f]{32}$" },
+              running: { type: "boolean", enum: [true], description: "Only on a `?job=` poll of a search still running" },
+            } } } },
+          },
           "400": { description: "Invalid season, or the request names an instance that no longer exists" },
           "403": { description: "Missing MANAGE_REQUESTS" },
-          "404": { description: "No such request" },
+          "404": { description: "No such request, or (with `?job=`) the job is gone — expired, another user's, or a restart; search again" },
           "409": { description: "Request not approved/available, or the title is not in the arr" },
           "422": { description: "Instance not configured, or the series' TVDB id can't be resolved" },
           "429": { description: "Rate limited" },
@@ -711,14 +740,15 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Grabbed" },
+          "200": { description: "{ ok: true } — grabbed" },
           "400": { description: "Invalid body, or the request names an instance that no longer exists" },
           "403": { description: "Missing MANAGE_REQUESTS" },
           "404": { description: "No such request" },
-          "409": { description: "Request not approved/available, the title is not in the arr, or the indexer/download client refused the release (the arr's reason, masked)" },
+          "409": { description: "Request not approved/available, the title is not in the arr, the indexer/download client refused the release (the arr's reason, masked), or a grab of this handle is already in progress (nothing was sent)" },
           "410": { description: "Unknown or expired handle, one from a different search, or the arr's own 30-minute search cache no longer has the release — search again" },
           "422": { description: "Instance not configured, or the series' TVDB id can't be resolved" },
           "502": { description: "The arr could not be reached or refused the grab" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -891,6 +921,7 @@ const spec = {
         parameters: [
           { name: "id", in: "path", required: true, schema: { type: "string" } },
           { name: "instance", in: "query", schema: { type: "string" }, description: "Arr instance slug; defaults to the default instance" },
+          { name: "job", in: "query", schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "A background replace's job id (from POST with async: true). When present the issue is not listed: 202 { job, running } while it runs, then the POST's own status and body; 404 when the job is gone (expired, another admin's, or a restart)" },
         ],
         responses: {
           "200": {
@@ -905,9 +936,10 @@ const spec = {
               otherFiles: { type: "integer", description: "The title's files outside the issue's scope (not listed)" },
             } } } },
           },
+          "202": { description: "With ?job=: the replace is still running — { job, running: true }" },
           "400": { description: "Invalid instance slug" },
           "403": { description: "Forbidden — ADMIN only" },
-          "404": { description: "Issue not found, the title isn't on that instance, the instance isn't configured, or the integration is off" },
+          "404": { description: "Issue not found, the title isn't on that instance, the instance isn't configured, or the integration is off; or (with ?job=) the job is gone" },
           "409": { description: "Issue is RESOLVED" },
           "422": { description: "A SEASON/EPISODE issue without its season/episode number" },
           "502": { description: "Radarr/Sonarr failed (worded by kind)" },
@@ -917,7 +949,7 @@ const spec = {
         tags: ["Issues"],
         summary: "Delete an issue's broken files, then blocklist their release or search again (ADMIN)",
         description:
-          "While a file is on disk Radarr/Sonarr only take an upgrade of it, so this deletes it first. The files and history are re-read; every id must be one of the issue's in-scope files (409, nothing deleted, otherwise). CAS-claims the issue to IN_PROGRESS BEFORE the delete. After the delete, whatever it UNMONITORED (Radarr/Sonarr's \"Unmonitor Deleted Movies/Episodes\" — the state is read before and after) is set back to monitored, before any mark or search: a SeasonSearch, the Missing plan and the arr's own redownload all search monitored items only. `markFailed` marks each deleted file's grab failed — one mark per download — and the arr's Redownload Failed searches again; when it reports that off or can't be read, when the grab was picked by hand and \"Redownload Failed from Interactive Search\" is off, or when a covered episode / the movie is still unmonitored, the search is queued here. Files with no known grab, or an already-failed one, are searched for instead. `search` queues a scoped search (Radarr MoviesSearch; Sonarr EpisodeSearch / SeasonSearch only when the whole season went / the Missing plan for a FULL issue — never SeriesSearch; an EpisodeSearch naming the episodes while any is still unmonitored). Records an instance-scoped IssueGrab. Audited ARR_FILE_DELETE, ARR_TITLE_EDIT (the re-monitor), ARR_MARK_FAILED and ISSUE_STATUS_CHANGE.",
+          "While a file is on disk Radarr/Sonarr only take an upgrade of it, so this deletes it first. The files and history are re-read; every id must be one of the issue's in-scope files (409, nothing deleted, otherwise). CAS-claims the issue to IN_PROGRESS BEFORE the delete. After the delete, whatever it UNMONITORED (Radarr/Sonarr's \"Unmonitor Deleted Movies/Episodes\" — the state is read before and after) is set back to monitored, before any mark or search: a SeasonSearch, the Missing plan and the arr's own redownload all search monitored items only. `markFailed` marks each deleted file's grab failed — one mark per download — and the arr's Redownload Failed searches again; when it reports that off or can't be read, when the grab was picked by hand and \"Redownload Failed from Interactive Search\" is off, or when a covered episode / the movie is still unmonitored, the search is queued here. Files with no known grab, or an already-failed one, are searched for instead. `search` queues a scoped search (Radarr MoviesSearch; Sonarr EpisodeSearch / SeasonSearch only when the whole season went; for a FULL issue the DELETED episodes only — a SeasonSearch per regular season emptied with 2+ of them, an EpisodeSearch for the rest, never the series' missing backlog — never SeriesSearch; an EpisodeSearch naming the episodes while any is still unmonitored). Records an instance-scoped IssueGrab. Audited ARR_FILE_DELETE, ARR_TITLE_EDIT (the re-monitor), ARR_MARK_FAILED and ISSUE_STATUS_CHANGE. One replace per issue at a time, process-wide (a second POST while one runs is 409, nothing written or sent). With `async: true` everything after the status CAS runs as a background job — 202 { job } at once, poll GET ?job= (a long series' marks outlast a reverse proxy's hold); the synchronous default stays for API callers.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           required: true,
@@ -928,6 +960,7 @@ const spec = {
               instance: { type: "string", description: "Arr instance slug; defaults to the default instance" },
               fileIds: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 5000 },
               then: { type: "string", enum: ["markFailed", "search"] },
+              async: { type: "boolean", description: "Run everything after the status CAS as a background job: 202 { job } at once, poll GET ?job=. The same admin posting for the same issue while it runs joins it (no rate token spent). Default (absent/false): synchronous." },
             },
           } } },
         },
@@ -946,10 +979,11 @@ const spec = {
               nothingMissing: { type: "boolean" },
             } } } },
           },
-          "400": { description: "Malformed body (fileIds / then) or an invalid instance slug" },
+          "202": { description: "async: true — { job }: the replace runs in the background; poll GET ?job=" },
+          "400": { description: "Malformed body (fileIds / then / async) or an invalid instance slug" },
           "403": { description: "Forbidden — ADMIN only" },
           "404": { description: "Issue not found, the title isn't on that instance, or the instance isn't configured" },
-          "409": { description: "Issue is RESOLVED (before or during), or a file isn't one of the issue's in-scope files — nothing deleted" },
+          "409": { description: "Issue is RESOLVED (before or during), a file isn't one of the issue's in-scope files, or a Replace file is already running for this issue — nothing deleted" },
           "413": { description: "Request body over the 64 KB cap" },
           "422": { description: "A SEASON/EPISODE issue without its season/episode number" },
           "429": { description: "Rate limited (10 per minute per admin)" },
@@ -964,7 +998,7 @@ const spec = {
         tags: ["Issues"],
         summary: "Grab a specific release for the issue's media (ADMIN / ISSUE_ADMIN)",
         description:
-          "CAS-claims the issue to IN_PROGRESS before the grab, then records an instance-scoped IssueGrab row. Routes to Radarr for a MOVIE issue and Sonarr for a TV one.",
+          "CAS-claims the issue to IN_PROGRESS before the grab, then records an instance-scoped IssueGrab row. Routes to Radarr for a MOVIE issue and Sonarr for a TV one. The `guid` is an opaque handle from the GET on this path (bound to this issue and instance, 30-minute TTL, single use) — never a raw indexer guid; `indexerId` is checked but the handle names the indexer. A TV issue must be searchable as a season or an episode (Sonarr has no whole-series release search): a FULL issue, or a SEASON/EPISODE one without its numbers, is 422 before the handle claim and the CAS.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           required: true,
@@ -974,7 +1008,7 @@ const spec = {
                 type: "object",
                 required: ["guid", "indexerId"],
                 properties: {
-                  guid: { type: "string", minLength: 1, maxLength: 500, description: "Release GUID from the GET on this path" },
+                  guid: { type: "string", minLength: 1, maxLength: 500, description: "Opaque release handle (32 hex) from the GET on this path" },
                   indexerId: { type: "integer", minimum: 1 },
                   instance: { type: "string", description: "Arr instance slug; defaults to the default instance" },
                 },
@@ -987,10 +1021,10 @@ const spec = {
           "400": { description: "Missing or malformed guid / indexerId, or an invalid instance slug" },
           "403": { description: "Forbidden — ADMIN or ISSUE_ADMIN only" },
           "404": { description: "Issue not found" },
-          "409": { description: "Issue is already RESOLVED, lost the claim race, or the indexer/download client refused the release (the arr's reason, masked)" },
-          "410": { description: "The arr's own 30-minute search cache no longer has the release — search again" },
+          "409": { description: "Issue is already RESOLVED (the handle is handed back), another grab with the same handle is in flight, or the indexer/download client refused the release (the arr's reason, masked)" },
+          "410": { description: "The handle is unknown, expired, spent or from another search (a raw guid included), or the arr's own 30-minute search cache no longer has the release — search again" },
           "413": { description: "Request body over the 64 KB cap" },
-          "422": { description: "Named instance not configured, TVDB resolution failed, or the issue scope is invalid" },
+          "422": { description: "Instance not configured, TVDB resolution failed, or the issue scope is invalid — a TV issue whose scope is FULL, or SEASON/EPISODE without its season/episode number (Sonarr can only search a season or an episode)" },
           "502": { description: "Radarr/Sonarr rejected the grab" },
           "503": { description: "Maintenance mode" },
         },
@@ -998,8 +1032,43 @@ const spec = {
       get: {
         tags: ["Issues"],
         summary: "Get Sonarr/Radarr releases for issue media (ADMIN / ISSUE_ADMIN)",
-        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Available releases from ARR" } },
+        description:
+          "Interactive search on one instance for the issue's scope: a MOVIE issue on Radarr; a TV issue on Sonarr for its SEASON or EPISODE " +
+          "(a FULL issue, or one missing its numbers, is 422 — Sonarr's series-only release query is the indexers' RSS feed). Answers the bare " +
+          "projected `ArrRelease` list (no download URL) — the wire shape the iOS app decodes — with each release's `guid` replaced by an " +
+          "OPAQUE handle (32 hex chars) bound to this issue, service and instance for 30 minutes; POST it back to grab. With `async=1` the " +
+          "search answers 202 `{ job }` at once and runs in the background (a Sonarr season search can outlast a reverse proxy's hold); " +
+          "GET `?job=<id>` answers 202 while it runs, then the search's own status and body, 404 once the job is gone. The same admin " +
+          "re-searching the same issue and instance while one runs joins it.",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Arr instance slug; defaults to the default instance" },
+          { name: "async", in: "query", schema: { type: "string", enum: ["1"] }, description: "Run the search as a background job" },
+          { name: "job", in: "query", schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "Poll a background search (when present the issue is not read)" },
+        ],
+        responses: {
+          "200": {
+            description: "The projected releases, each `guid` an opaque handle",
+            content: { "application/json": { schema: { type: "array", items: { type: "object", properties: {
+              guid: { type: "string", pattern: "^[0-9a-f]{32}$", description: "Opaque handle — POST it back to grab" },
+              title: { type: "string" },
+              indexerId: { type: "integer" },
+              indexer: { type: "string" },
+            } } } } },
+          },
+          "202": {
+            description: "{ job } — a background search started (`async=1`), or the same search already running was joined; polling `?job=` answers { job, running: true } while it runs",
+            content: { "application/json": { schema: { type: "object", required: ["job"], properties: {
+              job: { type: "string", pattern: "^[0-9a-f]{32}$" },
+              running: { type: "boolean", enum: [true], description: "Only on a `?job=` poll of a search still running" },
+            } } } },
+          },
+          "400": { description: "Invalid instance slug" },
+          "403": { description: "Forbidden — ADMIN or ISSUE_ADMIN only" },
+          "404": { description: "Issue not found, or (with `?job=`) the job is gone — expired, not the caller's, or a restart; search again" },
+          "422": { description: "Instance not configured, TVDB resolution failed, or a TV issue whose scope is FULL, or SEASON/EPISODE without its season/episode number (Sonarr can only search a season or an episode)" },
+          "502": { description: "Radarr/Sonarr could not be reached or failed" },
+        },
       },
     },
 
@@ -2557,7 +2626,7 @@ const spec = {
                         },
                       },
                     },
-                    arrErrors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" } } } },
+                    arrErrors: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, error: { type: "string" }, kind: { type: "string", enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Why the listing failed — translate this, not the English `error`" } } } },
                     protected: { type: "array", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { type: "string" }, title: { type: "string", nullable: true }, reason: { type: "string", nullable: true }, createdAt: { type: "string", format: "date-time" } } } },
                     totals: { type: "object", properties: { candidates: { type: "integer" }, held: { type: "integer" }, reclaimableBytes: { type: "number" } } },
                   },
@@ -2567,6 +2636,7 @@ const spec = {
           },
           "403": { description: "Not ADMIN" },
           "404": { description: "Library cleanup is disabled" },
+          "429": { description: "Too many cleanup report loads from this admin; 30 per minute", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } },
         },
       },
     },
@@ -2587,10 +2657,10 @@ const spec = {
         parameters: [
           { name: "level", in: "query", schema: { type: "string", enum: ["title", "season"], default: "title" } },
           { name: "state", in: "query", schema: { type: "string", enum: ["never", "possible", "unknown", "all"], default: "never" } },
-          { name: "type", in: "query", schema: { type: "string", enum: ["all", "movie", "tv"], default: "all" } },
+          { name: "type", in: "query", schema: { type: "string", enum: ["all", "movie", "tv"], default: "all" }, description: "Title level only — ignored for level=season" },
           { name: "q", in: "query", schema: { type: "string", maxLength: 100 } },
-          { name: "eligible", in: "query", schema: { type: "string", enum: ["1"] }, description: "Only titles Library cleanup could delete now" },
-          { name: "sortBy", in: "query", schema: { type: "string", enum: ["size", "days", "since", "added", "title"], default: "size" } },
+          { name: "eligible", in: "query", schema: { type: "string", enum: ["1"] }, description: "Only titles Library cleanup could delete now. Title level only — ignored for level=season" },
+          { name: "sortBy", in: "query", schema: { type: "string", enum: ["size", "days", "since", "added", "title"], default: "size" }, description: "`added` sorts seasons by `since`" },
           { name: "sortDir", in: "query", schema: { type: "string", enum: ["asc", "desc"] } },
           { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 } },
           { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
@@ -2618,12 +2688,30 @@ const spec = {
                         libraryTitles: { type: "integer" },
                       },
                     },
-                    coverage: { type: "array", items: { type: "object", properties: { server: { type: "string" }, source: { type: "string", enum: ["plex", "jellyfin"] }, tracked: { type: "boolean" }, since: { type: "string", format: "date-time", nullable: true }, upstream: { type: "object", properties: { health: { type: "string", enum: ["ok", "unreliable", "failed", "stale", "never"] }, fetchedAt: { type: "string", nullable: true }, entries: { type: "integer" }, matched: { type: "integer" }, samples: { type: "integer" }, agreed: { type: "integer" } } } } } },
+                    coverage: { type: "array", items: { type: "object", properties: {
+                      server: { type: "string" },
+                      source: { type: "string", enum: ["plex", "jellyfin"] },
+                      tracked: { type: "boolean" },
+                      since: { type: "string", format: "date-time", nullable: true },
+                      holds: { type: "boolean", description: "A library title sits on this server; only these can hold a title back (upstreamUnchecked)" },
+                      upstream: { type: "object", properties: {
+                        health: { type: "string", enum: ["ok", "unreliable", "failed", "incomplete", "stale", "never"], description: "`incomplete`: the read stopped at its cap — what it holds is real, but not the whole history" },
+                        fetchedAt: { type: "string", nullable: true },
+                        attemptedAt: { type: "string", nullable: true },
+                        entries: { type: "integer" },
+                        matched: { type: "integer" },
+                        samples: { type: "integer" },
+                        agreed: { type: "integer" },
+                        error: { type: "string", nullable: true, description: "The stored English failure text — translate `errorCode` instead" },
+                        errorCode: { type: "string", nullable: true, enum: ["timeout", "unreachable", "blocked", "tooLarge", "redirect", "http", "noUsers", "shape", "noRecords", "other"] },
+                        httpStatus: { type: "integer", nullable: true, description: "Set when errorCode is `http`" },
+                      } },
+                    } } },
                     trackingOn: { type: "boolean" },
                     historyStart: { type: "string", format: "date-time", nullable: true },
                     unplacedPlays: { type: "integer" },
                     softPlays: { type: "integer" },
-                    arrErrors: { type: "array", items: { type: "object" } },
+                    arrErrors: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, error: { type: "string" }, kind: { type: "string", enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Why the listing failed — translate this, not the English `error`" } } } },
                     sizesAsOf: { type: "string", format: "date-time", nullable: true },
                     cleanupEnabled: { type: "boolean" },
                     neverWatchedDays: { type: "integer" },
@@ -2648,13 +2736,51 @@ const spec = {
         description:
           "Runs the upstream watch-record snapshot (Plex all-account history, Jellyfin per-user played/resumable items) under the " +
           "same advisory lock as its daily cron. Read-only towards the media servers; never writes play history. A server that " +
-          "fails keeps its previous snapshot. 409 while a run is already in progress.",
+          "fails keeps its previous snapshot. 409 while a run is already in progress. No body is the synchronous walk; " +
+          "`{ async: true }` answers 202 `{ job }` at once and runs it in the background (a whole Plex history plus every " +
+          "Jellyfin user's played items outlasts a reverse proxy's hold) — poll GET `?job=`. The same admin asking again while " +
+          "theirs runs joins it (no second walk, no rate token). 3 runs per 10 minutes per admin.",
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", properties: {
+            async: { type: "boolean", description: "Run the walk as a background job: 202 { job }, poll GET ?job=. Default (absent/false): synchronous" },
+          } } } },
+        },
         responses: {
-          "200": { description: "Per-server outcome: { servers: [{ source, instance, ok, entries, matched, samples, agreed, error }], aborted }" },
+          "200": { description: "Per-server outcome: { servers: [{ source, instance, ok, entries, matched, samples, agreed, error, health }], aborted }" },
+          "202": {
+            description: "async: true — the walk runs in the background: { job } (the same admin's running walk is joined, no rate token spent); poll GET ?job=",
+            content: { "application/json": { schema: { type: "object", required: ["job"], properties: { job: { type: "string", pattern: "^[0-9a-f]{32}$" } } } } },
+          },
           "403": { description: "Not ADMIN" },
           "404": { description: "The Never Watched page is disabled" },
-          "409": { description: "A refresh is already running" },
-          "429": { description: "Rate limited" },
+          "409": { description: "A refresh is already running — { ok: false, error, retryAfter: 30 }", headers: { "Retry-After": { schema: { type: "integer" }, description: "Seconds (30)" } } },
+          "413": { description: "Request body over the 1 KB cap" },
+          "429": { description: "Rate limited (3 per 10 minutes per admin)" },
+        },
+      },
+      get: {
+        tags: ["Admin – Never watched"],
+        summary: "Poll a background watch-record refresh (ADMIN)",
+        description:
+          "The poll for a POST `{ async: true }` walk: 202 `{ job, running: true }` while it runs, then the walk's own answer — the same " +
+          "status and body the synchronous POST would have given (200 per-server outcome, or 409 when the lock was held). Readable by the " +
+          "admin who started it only.",
+        parameters: [
+          { name: "job", in: "query", required: true, schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "The job id from the POST's 202" },
+        ],
+        responses: {
+          "200": { description: "The walk finished: { servers, aborted } — the synchronous POST's 200 body" },
+          "202": {
+            description: "Still running: { job, running: true }",
+            content: { "application/json": { schema: { type: "object", required: ["job", "running"], properties: {
+              job: { type: "string", pattern: "^[0-9a-f]{32}$" },
+              running: { type: "boolean", enum: [true] },
+            } } } },
+          },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "The job is unknown — expired (10 minutes after it finished), another admin's, or dropped by a restart" },
+          "409": { description: "The walk found a refresh already running — the synchronous POST's 409 body" },
         },
       },
     },
@@ -2762,7 +2888,36 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Dry run: { dryRun: true, targetCount, reclaimableBytes, items, skipped }. Execute: { dryRun: false, deletedCount, partialCount, failedCount, results, skipped }" },
+          "200": {
+            description:
+              "Dry run: { dryRun: true, targetCount, reclaimableBytes, blacklist, items, skipped, hint }. Execute: { dryRun: false, " +
+              "deletedCount, partialCount, failedCount, results, skipped } — each results[] item is { tmdbId, mediaType, title, status: " +
+              "deleted | partial | failed, deleted: [target label], failed: [{ target, service, instance, error, kind }], blacklisted, " +
+              "uncertain?, bookkeepingError? }. `uncertain: true` when at least one target's delete had an unknown outcome (a timeout, " +
+              "a network failure, a 502/504) — the arr may have taken it, so that title's cleanup stamps are kept and re-asserted " +
+              "(except on an instance that definitely refused), even on a `failed` result; a failed re-assert there is reported as " +
+              "that result's `bookkeepingError`.",
+            content: { "application/json": { schema: { type: "object", properties: {
+              dryRun: { type: "boolean" },
+              results: { type: "array", description: "Execute only", items: { type: "object", properties: {
+                tmdbId: { type: "integer" },
+                mediaType: { type: "string", enum: ["MOVIE", "TV"] },
+                title: { type: "string" },
+                status: { type: "string", enum: ["deleted", "partial", "failed"] },
+                deleted: { type: "array", items: { type: "string" } },
+                failed: { type: "array", items: { type: "object", properties: {
+                  target: { type: "string" },
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string" },
+                  error: { type: "string", description: "English detail — translate `kind` instead" },
+                  kind: { type: "string", enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"] },
+                } } },
+                blacklisted: { type: "boolean" },
+                uncertain: { type: "boolean", enum: [true], description: "Present only when a target's delete had an unknown outcome (timeout, network, 502/504)" },
+                bookkeepingError: { type: "string", description: "Present only when the files went but a request stamp, vote clear or blacklist write failed — or, on a `status: \"failed\"` result with `uncertain: true`, when re-asserting the title's cleanup stamps failed" },
+              } } },
+            } } } },
+          },
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Library cleanup is disabled" },
@@ -2805,7 +2960,12 @@ const spec = {
                     service: { type: "string", enum: ["radarr", "sonarr"] },
                     enabled: { type: "boolean", description: "feature.integration.<service>; false ⇒ no instance was read" },
                     instances: { type: "array", items: { type: "object", properties: { slug: { type: "string" }, name: { type: "string" } } } },
-                    errors: { type: "array", items: { type: "object", properties: { instance: { type: "string" }, error: { type: "string" } } } },
+                    errors: { type: "array", items: { type: "object", properties: { instance: { type: "string" }, error: { type: "string" }, kind: { type: "string", enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Why the listing failed — translate this, not the English `error`" } } } },
+                    truncated: {
+                      type: "array",
+                      description: "mode=cutoff only, present only when non-empty: instances whose /wanted/cutoff listing ran past the 20,000-record read ceiling, so the list is incomplete",
+                      items: { type: "object", properties: { instance: { type: "string" }, read: { type: "integer" }, total: { type: "integer" } } },
+                    },
                     items: {
                       type: "array",
                       items: {
@@ -2969,7 +3129,9 @@ const spec = {
           "missing: Radarr `MoviesSearch` for the movie; for a series, Sonarr `SeasonSearch` per season with two or more " +
           "missing episodes and no file at all, plus one `EpisodeSearch` for every other missing episode — never " +
           "`SeriesSearch`, which would also hunt upgrades. Returns once the commands are queued; Radarr/Sonarr run them " +
-          "in the background. Nothing in Summonarr is written.",
+          "in the background. Nothing in Summonarr is written. Rate limited to 120 searches a minute per admin (one capped " +
+          "bulk \"Search selected\" run fits in a window): past it, 429 with a Retry-After header — wait that many seconds " +
+          "and retry. A malformed body is refused first and spends none of the budget.",
         requestBody: {
           required: true,
           content: {
@@ -3006,6 +3168,7 @@ const spec = {
                     commands: { type: "integer" },
                     seasons: { type: "array", items: { type: "integer" }, description: "Sonarr: seasons searched whole" },
                     episodes: { type: "integer", description: "Sonarr: episodes searched individually" },
+                    partial: { type: "boolean", enum: [true], description: "Present only when a Sonarr search was refused part-way: the counts are what WAS queued, and those searches are running" },
                   },
                 },
               },
@@ -3014,7 +3177,11 @@ const spec = {
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled, unknown instance, or no such movie/series" },
-          "409": { description: "Nothing is missing (or, in cutoff mode, below cutoff) for this title any more" },
+          "409": { description: "Nothing is missing (or, in cutoff mode, below cutoff) for this title any more. The nothing-missing answer carries an additive `nothingMissing: true` beside `error`." },
+          "429": {
+            description: "Too many searches — 120 per minute per admin; honour the Retry-After header (seconds)",
+            headers: { "Retry-After": { description: "Seconds to wait before retrying", schema: { type: "integer", minimum: 1 } } },
+          },
           "502": { description: "The search could not be queued" },
         },
       },
@@ -3097,7 +3264,7 @@ const spec = {
         tags: ["Admin – Downloads"],
         summary: "Remove a download from a Radarr/Sonarr queue (ADMIN)",
         description:
-          "One bulk `DELETE /api/v3/queue/bulk` on that instance carrying every record id of the download, with every flag " +
+          "One bulk `DELETE /api/v3/queue/bulk` on that instance carrying the given record ids (the page sends one per download — any record of a Sonarr pack resolves the whole download, and Sonarr v3 blocklists once per id sent), with every flag " +
           "explicit (the arr defaults removeFromClient to true). `remove`: off the queue, no blocklist. `blocklist`: remove " +
           "and blocklist the release, no new search. `blocklistSearch`: remove, blocklist, and let Radarr/Sonarr search for a " +
           "replacement (their own \"redownload failed\" behaviour, which honours that arr setting). `method` is the arr " +
@@ -3512,19 +3679,19 @@ const spec = {
           { name: "tmdbId", in: "query", schema: { type: "integer", minimum: 1 } },
         ],
         responses: {
+          ...ARR_ERRORS,
           "200": {
             description: "The title",
             content: { "application/json": { schema: { type: "object", properties: {
               title: { type: "object", description: "ArrTitle — see src/lib/arr-title.ts" },
-              qualityProfiles: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } },
-              rootFolders: { type: "array", items: { type: "object", properties: { path: { type: "string" }, freeSpace: { type: "number", nullable: true }, accessible: { type: "boolean" } } } },
-              tags: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } },
+              qualityProfiles: { type: "array", nullable: true, description: "null when the instance failed to answer that list (the form disables the field)", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } },
+              rootFolders: { type: "array", nullable: true, description: "null when the instance failed to answer that list (the form disables the field)", items: { type: "object", properties: { path: { type: "string" }, freeSpace: { type: "number", nullable: true }, accessible: { type: "boolean" } } } },
+              tags: { type: "array", nullable: true, description: "null when the instance failed to answer that list (the form disables the field)", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } },
             } } } },
           },
-          "400": { description: "Invalid parameters" },
+          "400": { description: "Invalid parameters — not exactly one of `id` and `tmdbId`" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled, unknown instance, or the instance doesn't have the title" },
-          "502": { description: "The arr could not be read" },
         },
       },
       patch: {
@@ -3533,7 +3700,10 @@ const spec = {
         description:
           "Any of: `monitored`, `qualityProfileId`, `rootFolderPath` (+ `moveFiles`: move the files too), `tags` (replaces), " +
           "Radarr `minimumAvailability` (announced/inCinemas/released), Sonarr `seriesType` (standard/daily/anime), " +
-          "`seasonFolder`, `monitorNewItems` (all/none) and `seasons` [{seasonNumber, monitored}]. Every value must be one the " +
+          "`seasonFolder`, `monitorNewItems` (all/none) — or, on its own, Sonarr `seasons` [{seasonNumber, monitored}]. " +
+          "`seasons` is its own write: sent with any other field it is 400 with nothing written. A field for the other " +
+          "service (to Radarr: seriesType/seasonFolder/monitorNewItems/seasons; to Sonarr: minimumAvailability) is 400. " +
+          "Every value must be one the " +
           "instance offers — its own profiles, root folders, tags and the series' seasons — else 400 with nothing written. " +
           "Settings go through the arr's editor endpoint (only the sent fields change); season monitoring is a read-modify-write " +
           "of the series (Sonarr sets the season's episodes to match). Audited ARR_TITLE_EDIT after the arr accepted it.",
@@ -3546,18 +3716,23 @@ const spec = {
           rootFolderPath: { type: "string" },
           moveFiles: { type: "boolean" },
           tags: { type: "array", items: { type: "integer", minimum: 1 } },
-          minimumAvailability: { type: "string", enum: ["announced", "inCinemas", "released"] },
-          seriesType: { type: "string", enum: ["standard", "daily", "anime"] },
-          seasonFolder: { type: "boolean" },
-          monitorNewItems: { type: "string", enum: ["all", "none"] },
-          seasons: { type: "array", items: { type: "object", properties: { seasonNumber: { type: "integer", minimum: 0 }, monitored: { type: "boolean" } } } },
+          minimumAvailability: { type: "string", enum: ["announced", "inCinemas", "released"], description: "Radarr only" },
+          seriesType: { type: "string", enum: ["standard", "daily", "anime"], description: "Sonarr only" },
+          seasonFolder: { type: "boolean", description: "Sonarr only" },
+          monitorNewItems: { type: "string", enum: ["all", "none"], description: "Sonarr only" },
+          seasons: {
+            type: "array",
+            minItems: 1,
+            description: "Sonarr only, and must be sent alone (with service/instance/id) — combined with any other field it is 400. Each season number at most once.",
+            items: { type: "object", required: ["seasonNumber", "monitored"], properties: { seasonNumber: { type: "integer", minimum: 0 }, monitored: { type: "boolean" } } },
+          },
         } } } } },
         responses: {
-          "200": { description: "{ title } as the arr now has it" },
-          "400": { description: "Malformed or empty edit, a value the instance doesn't offer, or the arr's own refusal (masked)" },
+          ...ARR_ERRORS,
+          "200": { description: "{ title } as the arr now has it — null when the re-read after the write failed (the write landed; read the title again)" },
+          "400": { description: "Malformed or empty edit, `seasons` combined with other fields, a field the other service has, a value the instance doesn't offer, or the arr's own refusal (masked)" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled, unknown instance, or no such title" },
-          "502": { description: "The arr could not be reached" },
         },
       },
     },
@@ -3574,29 +3749,38 @@ const spec = {
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "tmdbId", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
         ],
-        responses: { "200": { description: "{ presentArrId, preview, qualityProfiles, rootFolders, tags, defaults }" }, "403": { description: "Not ADMIN" }, "404": { description: "Integration disabled or unknown instance" } },
+        responses: {
+          ...ARR_ERRORS,
+          "200": { description: "{ presentArrId, preview, qualityProfiles, rootFolders, tags, defaults }" },
+          "400": { description: "Invalid service, instance or tmdbId" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+        },
       },
       post: {
         tags: ["Admin – Arr"],
         summary: "Add a title to one Radarr/Sonarr instance with the admin's choices (ADMIN)",
         description:
-          "Every value must be one the instance offers (400, nothing written). Radarr: `monitored`, `minimumAvailability`; " +
-          "Sonarr: `monitor` (all, future, missing, existing, pilot, firstSeason, latestSeason, none — accepted by v3 and v4), " +
-          "`seriesType`, `seasonFolder`. `search` searches right after adding. No MediaRequest is created — nobody is " +
-          "notified and no watch grade counts it. Audited ARR_TITLE_ADD.",
+          "Every value must be one the instance offers (400, nothing written). Radarr REQUIRES `monitored` " +
+          "(`minimumAvailability` optional); Sonarr REQUIRES `monitor` (all, future, missing, existing, pilot, firstSeason, " +
+          "latestSeason, none — accepted by v3 and v4; `seriesType`, `seasonFolder` optional). A field the other service has " +
+          "is 400. `search` searches right after adding — sent as no search when it can find nothing (Radarr `monitored: " +
+          "false`, Sonarr `monitor: none`). No MediaRequest is created — nobody is notified and no watch grade counts it. " +
+          "Audited ARR_TITLE_ADD. 20 per minute per admin.",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service", "tmdbId", "qualityProfileId", "rootFolderPath", "search"], properties: {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, tmdbId: { type: "integer", minimum: 1 },
           qualityProfileId: { type: "integer", minimum: 1 }, rootFolderPath: { type: "string" }, tags: { type: "array", items: { type: "integer", minimum: 1 } },
-          search: { type: "boolean" }, monitored: { type: "boolean", description: "Radarr" },
-          minimumAvailability: { type: "string", enum: ["announced", "inCinemas", "released"], description: "Radarr" },
-          monitor: { type: "string", enum: ["all", "future", "missing", "existing", "pilot", "firstSeason", "latestSeason", "none"], description: "Sonarr" },
-          seriesType: { type: "string", enum: ["standard", "daily", "anime"], description: "Sonarr" }, seasonFolder: { type: "boolean", description: "Sonarr" },
+          search: { type: "boolean", description: "Search right after adding (Radarr searchForMovie / Sonarr searchForMissingEpisodes). Ignored (sent and audited as false) when nothing is monitored: Radarr `monitored: false`, Sonarr `monitor: \"none\"` — the arr's add-time search would skip it." }, monitored: { type: "boolean", description: "Radarr — required (400 when missing); refused on Sonarr" },
+          minimumAvailability: { type: "string", enum: ["announced", "inCinemas", "released"], description: "Radarr only, optional" },
+          monitor: { type: "string", enum: ["all", "future", "missing", "existing", "pilot", "firstSeason", "latestSeason", "none"], description: "Sonarr — required (400 when missing); refused on Radarr" },
+          seriesType: { type: "string", enum: ["standard", "daily", "anime"], description: "Sonarr only, optional" }, seasonFolder: { type: "boolean", description: "Sonarr only, optional" },
         } } } } },
         responses: {
+          ...ARR_ERRORS,
           "201": { description: "{ arrId, title }" },
-          "400": { description: "Invalid body, or a profile/root folder/tag the instance doesn't have" },
+          "400": { description: "Invalid body (Radarr without `monitored`, Sonarr without `monitor`, a field the other service has), a profile/root folder/tag the instance doesn't have, or the arr's own refusal (masked)" },
           "403": { description: "Not ADMIN" },
-          "404": { description: "The arr's lookup has no such title" },
+          "404": { description: "Integration disabled, unknown instance, or the arr's lookup has no such title" },
           "409": { description: "{ error, arrId } — the instance already has it" },
           "429": { description: "Too many" },
         },
@@ -3618,10 +3802,11 @@ const spec = {
           deleteFiles: { type: "boolean" }, addImportExclusion: { type: "boolean" }, execute: { type: "boolean" }, confirm: { type: "integer", description: "The id, echoed from the dry run" },
         } } } } },
         responses: {
+          ...ARR_ERRORS,
           "200": { description: "Dry run: { title, requests } — execute: { removed, alreadyGone, requestsStamped }" },
           "400": { description: "Invalid body, a missing flag, or no confirmation" },
           "403": { description: "Not ADMIN" },
-          "404": { description: "The instance doesn't have the title" },
+          "404": { description: "Integration disabled, unknown instance, or the instance doesn't have the title" },
           "409": { description: "{ error, approved } — APPROVED requests on this instance" },
           "429": { description: "Too many" },
         },
@@ -3639,6 +3824,7 @@ const spec = {
           { name: "season", in: "query", required: true, schema: { type: "integer", minimum: 0 } },
         ],
         responses: {
+          ...ARR_ERRORS,
           "200": { description: "{ episodes: [{ id, seasonNumber, episodeNumber, title, airDateUtc, monitored, hasFile, episodeFileId, finaleType }], now } — `now` is the server's time to judge \"aired\" against" },
           "400": { description: "Invalid parameters" },
           "403": { description: "Not ADMIN" },
@@ -3654,6 +3840,7 @@ const spec = {
           episodeIds: { type: "array", items: { type: "integer", minimum: 1 }, maxItems: 5000 }, monitored: { type: "boolean" },
         } } } } },
         responses: {
+          ...ARR_ERRORS,
           "200": { description: "{ updated, title }" },
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
@@ -3665,14 +3852,32 @@ const spec = {
     "/admin/arr/title/files": {
       get: {
         tags: ["Admin – Arr"],
-        summary: "A title's files in Radarr/Sonarr (ADMIN)",
-        description: "Path, size, quality (+ PROPER/REPACK), languages, custom formats and score, cutoff, release group, media info, and for Sonarr the episodes each file holds.",
+        summary: "A title's files in Radarr/Sonarr (ADMIN) — or poll a background file delete",
+        description:
+          "Path, size, quality (+ PROPER/REPACK), languages, custom formats and score, cutoff, release group, media info, and for Sonarr the episodes each file holds. " +
+          "With `job` (no other parameter needed) it is instead the poll for a background delete (DELETE with `async: true`): 202 " +
+          "`{ job, running: true }` while it runs, then the DELETE's own status and body — 200 `{ deleted }`, 502 `{ error, deleted }`, " +
+          "or its 4xx `{ error }`; 404 `{ error }` once the job is unknown (expired 10 minutes after it finished, another admin's, or " +
+          "lost to a restart — reload the files, never re-run the delete blindly). Readable by the admin who started it only.",
         parameters: [
-          { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
+          { name: "service", in: "query", schema: { type: "string", enum: ["radarr", "sonarr"] }, description: "Required unless `job`" },
           { name: "instance", in: "query", schema: { type: "string" } },
-          { name: "id", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
+          { name: "id", in: "query", schema: { type: "integer", minimum: 1 }, description: "Required unless `job`" },
+          { name: "job", in: "query", schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "Poll a background delete (DELETE with `async: true`) instead of listing; the other parameters are then ignored" },
         ],
-        responses: { "200": { description: "{ files }" }, "403": { description: "Not ADMIN" }, "404": { description: "No such title or instance" } },
+        responses: {
+          ...ARR_ERRORS,
+          "200": { description: "{ files } — or, with `job`, the finished delete's own 200 { deleted } (any of DELETE's answers passes through with its status)" },
+          "202": {
+            description: "`job`: the delete is still running — { job, running: true }",
+            content: { "application/json": { schema: { type: "object", required: ["job", "running"], properties: {
+              job: { type: "string", pattern: "^[0-9a-f]{32}$" },
+              running: { type: "boolean", enum: [true] },
+            } } } },
+          },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled, or no such title or instance — or, with `job`, the job is gone (expired, another admin's, or lost to a restart): { error }" },
+        },
       },
       delete: {
         tags: ["Admin – Arr"],
@@ -3680,16 +3885,35 @@ const spec = {
         description:
           "Every id must be one of the title's files as the arr lists them now (409 otherwise, nothing deleted). Sonarr: one " +
           "bulk delete; Radarr: one delete per file. The ids go in a JSON body `{ fileIds }` (up to 10,000), or `fileIds` " +
-          "in the query (up to 1,000). Audited ARR_FILE_DELETE after the arr accepted it — when Radarr stops part-way, the " +
-          "files it did delete are audited and the answer is 502 `{ error, deleted }`.",
+          "in the query (up to 1,000). Audited ARR_FILE_DELETE after the arr accepted it — a delete that stops part-way (or " +
+          "times out) audits the files it did delete and answers 502 `{ error, deleted }` with how many; a timeout after every " +
+          "file was deleted answers 200. Each delete may wait up to 120 s (a recycle bin on another disk is a copy), past a " +
+          "reverse proxy's hold, so `async: true` in the JSON body answers 202 `{ job }` at once and runs the delete and its " +
+          "audit in the background; poll GET `?job=<id>` for the answer this call would have sent. The same admin deleting the " +
+          "same files of the same title while one runs joins that job (nothing is sent twice). Without `async` (or with the " +
+          "ids in the query) the delete answers inline.",
         parameters: [
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "id", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
           { name: "fileIds", in: "query", schema: { type: "string" }, description: "Comma-separated file ids (or send them in the body)" },
         ],
-        requestBody: { content: { "application/json": { schema: { type: "object", properties: { fileIds: { type: "array", items: { type: "integer", minimum: 1 }, maxItems: 10000 } } } } } },
-        responses: { "200": { description: "{ deleted }" }, "400": { description: "Invalid ids" }, "403": { description: "Not ADMIN" }, "409": { description: "A file is not this title's" }, "502": { description: "The arr failed — possibly part-way, with `deleted` the count already gone" } },
+        requestBody: { content: { "application/json": { schema: { type: "object", properties: {
+          fileIds: { type: "array", minItems: 1, maxItems: 10000, items: { type: "integer", minimum: 1 } },
+          async: { type: "boolean", description: "Run the delete as a background job: 202 { job }, poll GET ?job=. Default (absent/false): synchronous" },
+        } } } } },
+        responses: {
+          ...ARR_ERRORS,
+          "200": { description: "{ deleted } — the number of files deleted" },
+          "202": {
+            description: "async: true — the delete runs in the background: { job } (the same admin's running delete of the same files is joined); poll GET ?job=",
+            content: { "application/json": { schema: { type: "object", required: ["job"], properties: { job: { type: "string", pattern: "^[0-9a-f]{32}$" } } } } },
+          },
+          "400": { description: "Invalid ids" },
+          "403": { description: "Not ADMIN" },
+          "409": { description: "A file is not this title's" },
+          "502": { description: "The arr failed — possibly part-way, with `deleted` the count already gone" },
+        },
       },
     },
 
@@ -3702,7 +3926,7 @@ const spec = {
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "id", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
         ],
-        responses: { "200": { description: "{ files: [{ fileId, existingPath, newPath, seasonNumber, episodeNumbers }] } — only files whose name would change" }, "403": { description: "Not ADMIN" } },
+        responses: { ...ARR_ERRORS, "200": { description: "{ files: [{ fileId, existingPath, newPath, seasonNumber, episodeNumbers }] } — only files whose name would change" }, "403": { description: "Not ADMIN" } },
       },
       post: {
         tags: ["Admin – Arr"],
@@ -3710,9 +3934,9 @@ const spec = {
         description: "The preview is re-read first; an id it no longer lists is 409 and nothing is renamed. Audited ARR_FILE_RENAME.",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service", "id", "fileIds"], properties: {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, id: { type: "integer", minimum: 1 },
-          fileIds: { type: "array", items: { type: "integer", minimum: 1 } },
+          fileIds: { type: "array", minItems: 1, maxItems: 10000, items: { type: "integer", minimum: 1 } },
         } } } } },
-        responses: { "202": { description: "{ files, commandIds } — queued; commandIds is the arr's id for its RenameFiles command (GET /admin/arr/commands)" }, "400": { description: "Invalid body" }, "403": { description: "Not ADMIN" }, "409": { description: "A file no longer needs renaming" } },
+        responses: { ...ARR_ERRORS, "202": { description: "{ files, commandIds } — queued; commandIds is the arr's id for its RenameFiles command (GET /admin/arr/commands)" }, "400": { description: "Invalid body" }, "403": { description: "Not ADMIN" }, "409": { description: "A file no longer needs renaming" } },
       },
     },
 
@@ -3729,7 +3953,7 @@ const spec = {
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "id", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
         ],
-        responses: { "200": { description: "{ events }" }, "403": { description: "Not ADMIN" }, "404": { description: "No such title or instance" } },
+        responses: { ...ARR_ERRORS, "200": { description: "{ events }" }, "403": { description: "Not ADMIN" }, "404": { description: "Integration disabled, or no such title or instance" } },
       },
     },
 
@@ -3750,7 +3974,7 @@ const spec = {
           episodeIds: { type: "array", items: { type: "integer", minimum: 1 }, maxItems: 1000 },
           missingOnly: { type: "boolean" },
         } } } } },
-        responses: { "202": { description: "{ commands, commandIds } — queued; commandIds are the arr's ids for the queued commands (follow them at GET /admin/arr/commands). searchMissing answers { commands, seasons, episodes, commandIds }" }, "400": { description: "Unknown action for the service" }, "403": { description: "Not ADMIN" }, "409": { description: "Nothing missing, or a season/episode not the series'" }, "429": { description: "Too many" } },
+        responses: { ...ARR_ERRORS, "202": { description: "{ commands, commandIds } — queued; commandIds are the arr's ids for the queued commands (follow them at GET /admin/arr/commands). searchMissing answers { commands, seasons, episodes, commandIds } — a searchMissing refused part-way still answers 202 with the ids it queued and `partial: true`; 404 when the instance no longer has the series" }, "400": { description: "Unknown action for the service" }, "403": { description: "Not ADMIN" }, "409": { description: "Nothing missing (body carries an additive `nothingMissing: true`), a season/episode not the series' (no flag), or the arr's own refusal (its reason, masked; no flag)" }, "429": { description: "Too many" } },
       },
     },
 
@@ -3773,7 +3997,7 @@ const spec = {
           { name: "async", in: "query", schema: { type: "string", enum: ["1"] } },
           { name: "job", in: "query", schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "Poll a background search (the other parameters are then ignored)" },
         ],
-        responses: { "200": { description: "{ releases }" }, "202": { description: "{ job } — searching in the background" }, "400": { description: "Invalid scope" }, "403": { description: "Not ADMIN" }, "404": { description: "Job gone" }, "429": { description: "Too many searches" } },
+        responses: { ...ARR_ERRORS, "200": { description: "{ releases }" }, "202": { description: "{ job } — searching in the background (or, polling `?job=`, { job, running: true } while it runs)" }, "400": { description: "Invalid scope" }, "403": { description: "Not ADMIN" }, "404": { description: "Integration disabled, unknown instance or title, or (with `?job=`) the job is gone — expired, another admin's, or a restart; search again" }, "429": { description: "Too many searches" } },
       },
       post: {
         tags: ["Admin – Arr"],
@@ -3786,7 +4010,7 @@ const spec = {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, id: { type: "integer", minimum: 1 },
           release: { type: "string", pattern: "^[0-9a-f]{32}$" }, season: { type: "integer", minimum: 0 }, episodeId: { type: "integer", minimum: 1 },
         } } } } },
-        responses: { "200": { description: "Grabbed" }, "400": { description: "Invalid body" }, "403": { description: "Not ADMIN" }, "409": { description: "The indexer or download client refused it" }, "410": { description: "Handle expired, from another search, or no longer in the arr's search cache" } },
+        responses: { ...ARR_ERRORS, "200": { description: "{ ok: true } — grabbed" }, "400": { description: "Invalid body" }, "403": { description: "Not ADMIN" }, "409": { description: "The indexer or download client refused it (the arr's reason, masked), or a grab of this handle is already in progress (nothing was sent)" }, "410": { description: "Handle expired, from another search, or no longer in the arr's search cache" } },
       },
     },
 
@@ -3802,7 +4026,7 @@ const spec = {
           { name: "pageSize", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
           { name: "kind", in: "query", schema: { type: "string", enum: ["grabbed", "imported", "failed", "deleted", "renamed", "ignored"] } },
         ],
-        responses: { "200": { description: "{ page, pageSize, totalRecords, records }" }, "400": { description: "Invalid paging or kind" }, "403": { description: "Not ADMIN" } },
+        responses: { ...ARR_ERRORS, "200": { description: "{ page, pageSize, totalRecords, records }" }, "400": { description: "Invalid paging or kind" }, "403": { description: "Not ADMIN" } },
       },
     },
 
@@ -3818,7 +4042,7 @@ const spec = {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" },
           arrId: { type: "integer", minimum: 1 }, historyId: { type: "integer", minimum: 1 },
         } } } } },
-        responses: { "200": { description: "Marked" }, "403": { description: "Not ADMIN" }, "409": { description: "Not a grab, or not this title's" } },
+        responses: { ...ARR_ERRORS, "200": { description: "Marked" }, "400": { description: "Invalid service, instance, arrId or historyId, or the arr refused (its reason, masked)" }, "403": { description: "Not ADMIN" }, "409": { description: "Not a grab, not this title's, or its download already failed" } },
       },
     },
 
@@ -3832,18 +4056,36 @@ const spec = {
           { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 } },
           { name: "pageSize", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
         ],
-        responses: { "200": { description: "{ page, pageSize, totalRecords, records } — title, release, quality, indexer, reason (masked)" }, "403": { description: "Not ADMIN" } },
+        responses: {
+          ...ARR_ERRORS,
+          "200": { description: "{ page, pageSize, totalRecords, records } — title, release, quality, indexer, reason (masked)" },
+          "400": { description: "Invalid service, instance or paging" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled, unknown instance, or the arr is older than the /blocklist API (Radarr v3, Sonarr v3 before Aug 2021) — upgrade it; never \"not found\"" },
+        },
       },
       delete: {
         tags: ["Admin – Arr"],
         summary: "Remove releases from a blocklist (ADMIN)",
-        description: "The arr's bulk delete, so they can be grabbed again. Every id must be on the blocklist as it reads now (409 otherwise, nothing removed). Audited ARR_BLOCKLIST_CHANGE.",
+        description:
+          "The arr's bulk delete, so they can be grabbed again. Every id must be on the blocklist as it reads now (409 " +
+          "otherwise, nothing removed) — the page named by `page`/`pageSize` is re-read first, then a bounded scan. Audited " +
+          "ARR_BLOCKLIST_CHANGE with each removed release's name and title id.",
         parameters: [
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "ids", in: "query", required: true, schema: { type: "string" }, description: "Comma-separated blocklist ids (at most 500)" },
+          { name: "page", in: "query", schema: { type: "integer", minimum: 1 }, description: "The page the ids were picked from, re-read first (with pageSize); malformed → 400" },
+          { name: "pageSize", in: "query", schema: { type: "integer", minimum: 1, maximum: 100 }, description: "The size of that page; malformed → 400" },
         ],
-        responses: { "200": { description: "{ removed }" }, "400": { description: "Invalid ids" }, "403": { description: "Not ADMIN" }, "409": { description: "An id is no longer on the blocklist" } },
+        responses: {
+          ...ARR_ERRORS,
+          "200": { description: "{ removed } — the number of ids removed" },
+          "400": { description: "Invalid service, instance, ids, or page/pageSize" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled, unknown instance, or the arr is older than the /blocklist API (Radarr v3, Sonarr v3 before Aug 2021) — upgrade it; never \"not found\"" },
+          "409": { description: "An id is no longer on the blocklist" },
+        },
       },
     },
 
@@ -3851,9 +4093,12 @@ const spec = {
       post: {
         tags: ["Admin – Arr"],
         summary: "Clear an instance's whole blocklist (ADMIN)",
-        description: "The arr's own ClearBlocklist command. Audited ARR_BLOCKLIST_CHANGE.",
-        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service"], properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" } } } } } },
-        responses: { "202": { description: "{ ok, commandIds } — queued; commandIds is the arr's id for its ClearBlocklist command (GET /admin/arr/commands)" }, "403": { description: "Not ADMIN" } },
+        description: "The arr's own ClearBlocklist command. Audited ARR_BLOCKLIST_CHANGE with the `count` the admin confirmed (the list it names is gone afterwards).",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service"], properties: {
+          service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" },
+          count: { type: "integer", minimum: 0, description: "Size of the list the admin confirmed clearing — recorded in the ARR_BLOCKLIST_CHANGE audit; missing or malformed is recorded as null" },
+        } } } } },
+        responses: { ...ARR_ERRORS, "202": { description: "{ ok, commandIds } — queued; commandIds is the arr's id for its ClearBlocklist command (GET /admin/arr/commands)" }, "403": { description: "Not ADMIN" } },
       },
     },
 
@@ -3863,11 +4108,12 @@ const spec = {
         summary: "Radarr's and Sonarr's own calendars across every instance (ADMIN)",
         description:
           "One entry per episode airing and per movie release date (in cinemas / physical / digital) in the window, each with " +
-          "`status`: downloaded; downloading (in the instance's download queue — `progress` 0..1); missing (monitored, no file — " +
+          "`status`: downloaded; downloading (in the instance's download queue — `progress` 0..1, with `attention` true when Radarr/Sonarr flag that download as needing attention (import blocked, a tracked warning/error)); missing (monitored, no file — " +
           "an episode only once it has finished airing and only in a regular season, a movie once a home release date passed); " +
           "airing (until air time + runtime); aired (a special that aired without a file — never missing); unmonitored; " +
           "upcoming; or released (a passed cinema date). Radarr's window is read a day wider each side, since its release " +
-          "dates are calendar dates at midnight UTC — place each on its date. A failed instance is named in `errors`, each " +
+          "dates are calendar dates at midnight UTC — place each on its date — and Sonarr's 14 h wider each side (a host-local " +
+          "date parse on v3), so entries may fall just outside [start, end); keep only those inside your own days. A failed instance is named in `errors`, each " +
           "with `kind`: auth, timeout, unreachable, server, notFound or other. `now` is the server's time the page judges " +
           "against.",
         parameters: [
@@ -3886,13 +4132,14 @@ const spec = {
         description:
           "Reads every configured, enabled Radarr/Sonarr instance — the disks holding its root folders (/api/v3/rootfolder + /diskspace), " +
           "failed downloads since the last run (/api/v3/history/since, eventType=4) and its queue — and sends `arr.disk_low` / `arr.disk_ok` " +
-          "(on a change of state per instance and disk), `arr.download_failed` (each new failed download once; a Sonarr pack is one event) and " +
+          "(on a change of state per instance and disk), `arr.download_failed` (each new failed download once; a Sonarr pack is one event; a manual mark, \"Manually marked as failed\", is not announced) and " +
           "`arr.queue_attention` (each download newly needing attention, at most 25 per instance per run — the rest by the next run) to the " +
           "outbound notification channels. An announced download and a disk's state are remembered for 24 hours after they drop out of a " +
           "read, so one that comes back inside that is not announced again. A first run per instance seeds its history cursor and attention " +
           "set without announcing them. Writes the counts behind the admin nav's Download Queue badge. " +
           "Skipped (no ledger row) while no Radarr/Sonarr instance is enabled and configured; a failed read answers 200 with ok:false, " +
-          "`error` and X-Cron-Degraded.",
+          "`error` and X-Cron-Degraded. `deferredFailures` counts history RECORDS left for the next run once the per-run cap was " +
+          "reached (a Sonarr pack counts once per episode, so it is not a count of downloads); `deferredAttention` counts downloads.",
         security: [{ cronSecret: [] }],
         responses: {
           "200": { description: "{ ok, checked, notReached, aborted, errors: [{ service, instance, part: disk|history|queue, error }], events: { diskLow, diskOk, downloadFailed, queueAttention }, deferredFailures, deferredAttention, summary: { attention, lowDisks, failed24h }, durationMs, trigger, timestamp } — or { skipped: true, reason }" },
@@ -3916,6 +4163,7 @@ const spec = {
                 lowDisks: { type: "integer" },
                 failed24h: { type: "integer", description: "Failed downloads announced in the last 24 hours" },
               } },
+              navBadges: { type: "object", additionalProperties: { type: "integer", minimum: 1 }, description: "The admin nav's badges (href → count, e.g. { \"/admin/queue\": 3 }) by the same rule the layout renders them: no entry for a zero count or a snapshot older than three monitor intervals (at least an hour); {} for none. The browser re-reads this to keep the Download Queue badge fresh between page loads." },
             } } } },
           },
           "401": { description: "Not signed in" },
@@ -3955,6 +4203,7 @@ const spec = {
           { name: "ids", in: "query", required: true, schema: { type: "string" }, description: "Comma-separated command ids: 1–200 positive integers (duplicates collapse). A Sonarr search-missing queues one SeasonSearch per fully missing season; the pages split a longer list across reads" },
         ],
         responses: {
+          ...ARR_ERRORS,
           "200": { description: "{ commands: [{ id, name, commandName, status, message, queued, started, ended, durationSeconds } | { id, status: \"gone\" }] } — one per id, in the order asked" },
           "400": { description: "Invalid service or ids" },
           "403": { description: "Not ADMIN" },
@@ -3985,7 +4234,7 @@ const spec = {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" },
           task: { type: "string" }, action: { type: "string", enum: ["searchMissing", "searchCutoff"] },
         } } } } },
-        responses: { "202": { description: "{ id } — queued; the arr's command id (follow it at GET /admin/arr/commands)" }, "400": { description: "Neither a scheduled task nor an action" }, "403": { description: "Not ADMIN" }, "429": { description: "Too many" } },
+        responses: { ...ARR_ERRORS, "202": { description: "{ id } — queued; the arr's command id (follow it at GET /admin/arr/commands)" }, "400": { description: "Neither a scheduled task nor an action, a task the instance doesn't list, or the arr refused (masked)" }, "403": { description: "Not ADMIN" }, "429": { description: "Too many" } },
       },
       delete: {
         tags: ["Admin – Arr"],
@@ -3995,7 +4244,7 @@ const spec = {
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "commandId", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
         ],
-        responses: { "200": { description: "Cancelled" }, "403": { description: "Not ADMIN" }, "409": { description: "Not queued any more" } },
+        responses: { ...ARR_ERRORS, "200": { description: "Cancelled" }, "403": { description: "Not ADMIN" }, "409": { description: "Not queued any more" } },
       },
     },
 
@@ -4004,7 +4253,8 @@ const spec = {
         tags: ["Admin – Arr"],
         summary: "Every instance's indexers and download clients (ADMIN)",
         description:
-          "Name, implementation, protocol, priority, which uses are on, tags, whether Prowlarr manages an indexer (its " +
+          "Name, implementation, protocol, priority, which uses are on, whether the indexer supports RSS / search at all " +
+          "(`supportsRss` / `supportsSearch`, null when the arr doesn't say), tags, whether Prowlarr manages an indexer (its " +
           "\"(Prowlarr)\" name suffix — Prowlarr's next sync reverts a change), and a download client's remove-completed/failed " +
           "settings. Never their settings (API keys, passkeys, passwords). Neither arr has an indexer-status endpoint: " +
           "an indexer disabled after failures shows in the instance's health checks.",
@@ -4022,7 +4272,8 @@ const spec = {
         tags: ["Admin – Arr"],
         summary: "Switch an indexer's uses or a download client on/off (ADMIN)",
         description:
-          "The arr's resource is read and saved back with only those flags changed, server-side. Switching one ON lets the arr " +
+          "The arr's resource is read and saved back with only those flags changed, server-side. Saves to one provider are taken " +
+          "one at a time: each reads the resource only once the save before it has finished. Switching one ON lets the arr " +
           "test it (a failing test is 400 with its reason, masked; up to 120 s); a change that only turns things off is saved " +
           "with forceSave. When the arr refuses on WARNINGS alone the answer is 409 `{ warningsOnly: true, messages }`; " +
           "re-sending with `acceptWarnings: true` makes the server re-run the arr's own test on the changed resource and save " +
@@ -4031,7 +4282,8 @@ const spec = {
           "change was saved. `async: true` answers 202 `{ job }` at once and saves in the background (a testing save can wait " +
           "longer than a reverse proxy holds a request); poll GET `?job=<id>` for the answer this call would have sent. A " +
           "background save that times out is re-read for up to a minute more, so one the arr completes in that window answers " +
-          "200 and is audited. The same save while one runs is joined.",
+          "200 and is audited. The same save while one runs is joined. A use the indexer reports it can't do (`supportsRss` / " +
+          "`supportsSearch` false on the fresh read) is never switched ON: 400, nothing sent.",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service", "kind", "id"], properties: {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" },
           kind: { type: "string", enum: ["indexer", "downloadClient"] }, id: { type: "integer", minimum: 1 },
@@ -4041,13 +4293,14 @@ const spec = {
           async: { type: "boolean", description: "Run in the background: 202 { job }, poll GET ?job=" },
         } } } } },
         responses: {
+          ...ARR_ERRORS,
           "200": { description: "{ provider, timedOut? }" },
           "202": { description: "`async: true` — { job }: started, or the same save already running" },
-          "400": { description: "Invalid body, or the arr refused" },
+          "400": { description: "Invalid body, the arr refused, or the indexer doesn't support that use" },
           "403": { description: "Not ADMIN" },
-          "404": { description: "No such provider" },
+          "404": { description: "Integration disabled, unknown instance, or no such provider" },
           "409": { description: "{ warningsOnly: true, messages } — the arr's test only warned" },
-          "504": { description: "{ error, provider, timedOut: true } — the save timed out and the arr does not hold it" },
+          "504": { description: "{ error, provider, timedOut: true } — the save timed out and the arr does not hold it; or { error } alone when the arr timed out anywhere else (reading the provider, re-testing it, or a save that only turns things off) — read the list again to see whether that save landed" },
         },
       },
     },
@@ -4071,7 +4324,7 @@ const spec = {
         summary: "Test indexers or download clients (ADMIN)",
         description:
           "The arr's Test All for the kind, or one by id (read and sent back to the arr's test endpoint server-side; up to " +
-          "120 s). Messages masked; a provider whose test only WARNED is `ok: true, warning: true`. Test All 6 per minute, " +
+          "120 s). A background (`async: true`) Test All waits up to 270 s. Messages masked; a provider whose test only WARNED is `ok: true, warning: true`. Test All 6 per minute, " +
           "single tests 20 per minute, per admin; not audited. `async: true` answers 202 `{ job }` at once and tests in the " +
           "background (120 s outlasts what a reverse proxy holds a request); poll GET `?job=<id>`. The same test while one " +
           "runs is joined and spends no rate token.",
@@ -4081,10 +4334,12 @@ const spec = {
           async: { type: "boolean", description: "Run in the background: 202 { job }, poll GET ?job=" },
         } } } } },
         responses: {
+          ...ARR_ERRORS,
           "200": { description: "{ results: [{ id, ok, warning, messages }] }" },
           "202": { description: "`async: true` — { job }: started, or the same test already running" },
           "400": { description: "Invalid body, or the arr refused" },
           "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled, unknown instance, or no such provider" },
           "429": { description: "Too many" },
         },
       },

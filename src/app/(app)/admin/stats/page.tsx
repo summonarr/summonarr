@@ -13,6 +13,7 @@ import {
   PENDING_AGE_WARN_DAYS,
   STUCK_DOWNLOAD_DAYS,
   durationParts,
+  neverWatchedLine,
   parseStatsRange,
   share,
   statsRangeSince,
@@ -36,6 +37,7 @@ import {
   getUserStats,
   getWatchGradeSpreadForStats,
   type DurationStat,
+  type StorageStats,
   type StuckReason,
 } from "@/lib/admin-stats-data";
 import { StatsRangeFilter } from "@/components/admin/stats/stats-range-filter";
@@ -713,6 +715,33 @@ function SlowSectionFallback({ title, label }: { title: string; label: string })
   );
 }
 
+// The Storage section's "Never watched" line. Zero never-watched is also what
+// the report gives when nothing could be judged, so `neverWatchedLine` decides
+// whether "everything was played" may be said at all; each clause is plural on
+// its own count and left out at zero.
+function neverWatchedText(nw: NonNullable<StorageStats["neverWatched"]>, f: Fmt): string {
+  const { t } = f;
+  const line = neverWatchedLine(nw);
+  switch (line.kind) {
+    case "none":
+      return t("adminManage.stats.neverWatchedNone");
+    case "trackingOff":
+      return t("adminManage.neverWatched.banner.trackingOff");
+    case "unjudged":
+      return t("adminManage.stats.neverWatchedUnjudged");
+    case "value": {
+      const parts: string[] = [];
+      if (line.showTitles) {
+        parts.push(t("adminManage.stats.neverWatchedValue", { size: f.bytes(nw.bytes), count: nw.titles, value: f.num(nw.titles) }));
+      }
+      if (line.showSeasons) {
+        parts.push(t("adminManage.stats.neverWatchedSeasons", { size: f.bytes(nw.seasonBytes), count: nw.seasons, value: f.num(nw.seasons) }));
+      }
+      return parts.join(" ");
+    }
+  }
+}
+
 // Live Radarr/Sonarr calls. Streamed behind a Suspense boundary so one slow or
 // unreachable instance (30 s timeout) no longer holds the whole page blank.
 async function StorageSection({ f }: { f: Fmt }) {
@@ -789,15 +818,7 @@ async function StorageSection({ f }: { f: Fmt }) {
             <div style={{ marginTop: 16 }}>
               <SubHeading>{t("adminManage.stats.neverWatched")}</SubHeading>
               <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
-                {storage.neverWatched.titles === 0 && storage.neverWatched.seasons === 0
-                  ? t("adminManage.stats.neverWatchedNone")
-                  : t("adminManage.stats.neverWatchedValue", {
-                      size: f.bytes(storage.neverWatched.bytes),
-                      count: storage.neverWatched.titles,
-                      value: f.num(storage.neverWatched.titles),
-                      seasons: f.num(storage.neverWatched.seasons),
-                      seasonSize: f.bytes(storage.neverWatched.seasonBytes),
-                    })}{" "}
+                {neverWatchedText(storage.neverWatched, f)}{" "}
                 <Link href="/admin/never-watched" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
                   {t("adminManage.stats.reviewNeverWatched")}
                 </Link>

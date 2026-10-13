@@ -345,5 +345,10 @@
   "apiAdmin.arr.taskBodyInvalid": "Expected a scheduled task name or a search action",
   "apiAdmin.arr.commandIdsInvalid": "Expected service, instance and up to {max} command ids",
   "apiAdmin.arr.providerBodyInvalid": "Expected kind (indexer or downloadClient), a numeric id and the switches to change",
-  "apiAdmin.arrWatch.diskLowPercent": "The low disk space alert must be a whole number of percent from {min} to {max}."
+  "apiAdmin.arrWatch.diskLowPercent": "The low disk space alert must be a whole number of percent from {min} to {max}.",
+  "apiAdmin.arr.providerRssUnsupported": "{service} says this indexer doesn't support RSS, so RSS wasn't switched on",
+  "apiAdmin.arr.providerSearchUnsupported": "{service} says this indexer doesn't support searching, so searching wasn't switched on",
+  "apiAdmin.neverWatched.refreshJobGone": "That watch-record check is no longer being followed — Summonarr may have restarted. Reload to see the latest results.",
+  "apiAdmin.arr.filesJobGone": "That delete is no longer available — reload the files to see what was deleted, and don't run it again blindly.",
+  "apiAdmin.arr.markInProgress": "A mark for this download is still in progress — try again in a minute"
 }

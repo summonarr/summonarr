@@ -34,7 +34,22 @@ const MAX_TAGS = 100;
 const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null);
 const isOneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === "string" && (list as readonly string[]).includes(v);
 
-/** The add a request body asks for, or null when anything in it is malformed or belongs to the other service. */
+/**
+ * The add-time search can do nothing: Radarr's searches skip an unmonitored
+ * movie (only a user-invoked search overrides that), and Sonarr's
+ * MissingEpisodeSearch takes monitored episodes only — with `none` there are
+ * none. Other Sonarr monitor modes are the arr's own semantics, left to it.
+ */
+export function addSearchIsNoop(service: ArrService, add: { monitored?: boolean; monitor?: SonarrAddMonitor }): boolean {
+  return service === "radarr" ? add.monitored === false : add.monitor === "none";
+}
+
+/**
+ * The add a request body asks for, or null when anything in it is malformed or
+ * belongs to the other service. A search that can do nothing (addSearchIsNoop)
+ * is sent — and audited — as no search, so neither the arr call nor the audit
+ * claims one.
+ */
 export function parseTitleAdd(service: ArrService, body: Record<string, unknown>): TitleAdd | null {
   const tmdbId = posInt(body.tmdbId);
   const qualityProfileId = posInt(body.qualityProfileId);
@@ -54,6 +69,7 @@ export function parseTitleAdd(service: ArrService, body: Record<string, unknown>
       if (!isOneOf(MINIMUM_AVAILABILITIES, body.minimumAvailability)) return null;
       add.minimumAvailability = body.minimumAvailability;
     }
+    if (addSearchIsNoop(service, add)) add.search = false;
     return add;
   }
   if (["monitored", "minimumAvailability"].some(has)) return null;
@@ -67,5 +83,6 @@ export function parseTitleAdd(service: ArrService, body: Record<string, unknown>
     if (typeof body.seasonFolder !== "boolean") return null;
     add.seasonFolder = body.seasonFolder;
   }
+  if (addSearchIsNoop(service, add)) add.search = false;
   return add;
 }

@@ -409,5 +409,7 @@
   "adminActivity.trackingOff.description": "Non viene registrato nulla, quindi questa dashboard non ha riproduzioni, tempo di visione o spettatori da mostrare. Attiva il tracciamento in Impostazioni → Media → Cronologia di riproduzione per iniziare a popolarla.",
   "adminActivity.trackingOff.cta": "Apri le impostazioni della cronologia di riproduzione",
   "adminActivity.common.hoursShort": "{n} h",
-  "adminActivity.detail.openPlay": "Apri riproduzione →"
+  "adminActivity.detail.openPlay": "Apri riproduzione →",
+  "adminActivity.stats.noReasonReportedTop": "Il {pct}% delle transcodifiche è stato segnalato senza motivo — il server non ha indicato perché ha transcodificato.",
+  "adminActivity.stats.movieDecadesTvFiltered": "Solo film — non viene mostrato mentre è attivo il filtro Serie TV."
 }

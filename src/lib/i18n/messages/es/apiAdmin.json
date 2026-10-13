@@ -345,5 +345,10 @@
   "apiAdmin.arr.taskBodyInvalid": "Se esperaba el nombre de una tarea programada o una acción de búsqueda",
   "apiAdmin.arr.commandIdsInvalid": "Se esperaba service, instance y hasta {max} ids de comando",
   "apiAdmin.arr.providerBodyInvalid": "Se esperaba kind (indexer o downloadClient), un id numérico y los interruptores que cambiar",
-  "apiAdmin.arrWatch.diskLowPercent": "La alerta de poco espacio en disco debe ser un porcentaje entero entre {min} y {max}."
+  "apiAdmin.arrWatch.diskLowPercent": "La alerta de poco espacio en disco debe ser un porcentaje entero entre {min} y {max}.",
+  "apiAdmin.arr.providerRssUnsupported": "{service} indica que este indexador no admite RSS, así que el RSS no se activó",
+  "apiAdmin.arr.providerSearchUnsupported": "{service} indica que este indexador no admite búsquedas, así que la búsqueda no se activó",
+  "apiAdmin.neverWatched.refreshJobGone": "Ya no se está siguiendo esa comprobación de los registros de visionado: puede que Summonarr se haya reiniciado. Recarga para ver los últimos resultados.",
+  "apiAdmin.arr.filesJobGone": "Esa eliminación ya no está disponible: vuelve a cargar los archivos para ver qué se eliminó y no la ejecutes de nuevo a ciegas.",
+  "apiAdmin.arr.markInProgress": "Esta descarga todavía se está marcando como fallida — vuelve a intentarlo en un minuto"
 }

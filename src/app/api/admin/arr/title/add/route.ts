@@ -8,6 +8,7 @@ import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateArrLibraryIndexCache } from "@/lib/library-cleanup-arr";
+import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 const ADDS_PER_MIN = 20;
@@ -64,6 +65,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return arrFailure(err, target, t, "title add");
   }
   invalidateArrLibraryIndexCache();
+  // The never-watched report's copies and "eligible" read that index — the
+  // title manager's Remove drops it the same way.
+  invalidateNeverWatchedReport();
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,

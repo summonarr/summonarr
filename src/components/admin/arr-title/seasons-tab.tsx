@@ -3,14 +3,17 @@
 // The title manager's Seasons tab (Sonarr): Sonarr's own series page in one
 // list — monitor or unmonitor each season (Sonarr sets its episodes to match)
 // and each episode, search a season or an episode, or pick a release by hand
-// for either. Episodes load per season on expand
-// (GET /api/admin/arr/title/episodes). Air-date verdicts are judged against
-// the server's time when the list was read, never a clock read here (guardrail 16).
+// for either. Episodes load per season on every expand
+// (GET /api/admin/arr/title/episodes), and an open list is read again whenever
+// the title is re-read with that season's header changed (a file deleted in
+// the Files tab, a refresh or a search finishing). Air-date verdicts are judged
+// against the server's time when the list was read, never a clock read here
+// (guardrail 16).
 //
 // Rows are wrapping flex rows, not a fixed-width table: at phone width a
 // table's actions sat off-screen.
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Chip } from "@/components/ui/design";
@@ -18,6 +21,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, Loader2, RefreshCw, Search, D
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { episodeCode, queueFormatters } from "@/components/admin/queue-format";
 import type { ArrTitle, TitleEpisode, TitleSeason } from "@/lib/arr-title";
+import { seasonSignature, staleSeasons } from "@/lib/arr-title-ui";
 import { arrApi, titleQuery, type TitleRef } from "./shared";
 
 export type ReleaseScope = { seasonNumber: number } | { episodeId: number };
@@ -40,8 +44,11 @@ export function SeasonsTab({
 }: {
   titleRef: TitleRef;
   title: ArrTitle;
-  /** The series as Sonarr has it after a season or episode flip. */
-  onTitle: (title: ArrTitle) => void;
+  /**
+   * The series as Sonarr has it after a season or episode flip — null when the
+   * flip landed but its re-read failed (the manager reads it again).
+   */
+  onTitle: (title: ArrTitle | null) => void;
   /** Queue one title command; resolves once the server answered. */
   runCommand: (body: Record<string, unknown>, done: string) => Promise<void>;
   pickRelease: (scope: ReleaseScope, subtitle: string) => void;
@@ -57,18 +64,24 @@ export function SeasonsTab({
   // Per season: only the newest read may write its list — expanding and then
   // flipping a season starts two reads, and a late stale answer must not win.
   const listSeq = useRef<Record<number, number>>({});
+  // Per season: the newest read that answered. A read is in flight while it
+  // trails listSeq.
+  const doneSeq = useRef<Record<number, number>>({});
+  // Per season: the header signature its open list was last brought up to date with.
+  const seenSig = useRef(new Map<number, string>());
   const anime = title.seriesType === "anime";
 
   // Newest season first, specials last — Sonarr's own order.
   const seasons = [...title.seasons].sort((a, b) => (a.seasonNumber === 0 ? 1 : b.seasonNumber === 0 ? -1 : b.seasonNumber - a.seasonNumber));
   const seasonLabel = (n: number) => (n === 0 ? t("adminArr.seasons.specials") : t("adminArr.seasons.season", { number: n }));
 
-  async function loadEpisodes(n: number) {
+  const loadEpisodes = useCallback(async (n: number) => {
     const seq = (listSeq.current[n] ?? 0) + 1;
     listSeq.current[n] = seq;
     setLists((l) => ({ ...l, [n]: { loading: true, error: "", episodes: l[n]?.episodes ?? [], loadedAt: l[n]?.loadedAt ?? 0 } }));
     const res = await arrApi<{ episodes: TitleEpisode[]; now: string }>(`/api/admin/arr/title/episodes?${titleQuery(titleRef, { season: n })}`, undefined, t("adminArr.seasons.episodesFailed"));
     if (listSeq.current[n] !== seq) return;
+    doneSeq.current[n] = seq;
     setLists((l) => ({
       ...l,
       [n]: res.ok
@@ -76,6 +89,23 @@ export function SeasonsTab({
         // A failed re-read keeps the list it had.
         : { loading: false, error: res.error, episodes: l[n]?.episodes ?? [], loadedAt: l[n]?.loadedAt ?? 0 },
     }));
+  }, [titleRef, t]);
+
+  // The title was re-read behind this tab: an open list whose season header
+  // changed is read again, or its rows would disagree with the header above
+  // them (9/10 files over a row still reading "Downloaded"). A flip of this
+  // tab's own marks its season seen first — it re-reads that list itself.
+  useEffect(() => {
+    for (const n of staleSeasons(seenSig.current, title.seasons)) {
+      if (expanded.has(n) && lists[n]) void loadEpisodes(n);
+    }
+  }, [title.seasons, expanded, lists, loadEpisodes]);
+
+  // A season flip's or episode flip's own answer: that season is up to date
+  // as far as this tab is concerned.
+  function markSeen(next: ArrTitle | null, n: number) {
+    const s = next?.seasons.find((x) => x.seasonNumber === n);
+    if (s) seenSig.current.set(n, seasonSignature(s));
   }
 
   function toggle(n: number) {
@@ -86,8 +116,10 @@ export function SeasonsTab({
       else next.delete(n);
       return next;
     });
-    // A list that failed to load is tried again on the next expand.
-    if (opening && (!lists[n] || lists[n].error)) void loadEpisodes(n);
+    // Every expand reads the list again (its rows stay shown meanwhile): a
+    // collapsed list is not kept up to date, and this is also the retry for a
+    // list that failed to load.
+    if (opening) void loadEpisodes(n);
   }
 
   async function setSeasonMonitored(season: TitleSeason, monitored: boolean) {
@@ -98,14 +130,19 @@ export function SeasonsTab({
       { method: "PATCH", body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, seasons: [{ seasonNumber: season.seasonNumber, monitored }] } },
       t("adminArr.settings.saveFailed"),
     );
-    setBusy(null);
     if (!res.ok) {
+      setBusy(null);
       setError(res.error);
       return;
     }
-    if (res.data.title) onTitle(res.data.title);
-    // Sonarr set the season's episodes to match; re-read an open list.
-    if (lists[season.seasonNumber]) void loadEpisodes(season.seasonNumber);
+    const n = season.seasonNumber;
+    markSeen(res.data.title, n);
+    onTitle(res.data.title);
+    // Sonarr set the season's episodes to match; re-read an open list BEFORE
+    // the switches come back — until it answers, its rows show the episodes'
+    // old monitoring, and a flip made from them would race this read.
+    if (expanded.has(n) && lists[n]) await loadEpisodes(n);
+    setBusy(null);
   }
 
   async function setEpisodeMonitored(season: number, ep: TitleEpisode, monitored: boolean) {
@@ -121,6 +158,10 @@ export function SeasonsTab({
       setError(res.error);
       return;
     }
+    // A read of this season still in flight was sent before the flip landed
+    // and carries the old value: start a newer one — only the newest read
+    // writes the list.
+    if ((listSeq.current[season] ?? 0) !== (doneSeq.current[season] ?? 0)) void loadEpisodes(season);
     setLists((l) => {
       const cur = l[season];
       if (!cur) return l;
@@ -128,7 +169,8 @@ export function SeasonsTab({
     });
     // The counts follow monitoring (unmonitoring the one missing aired episode
     // is what makes a series read complete) — show Sonarr's new ones.
-    if (res.data.title) onTitle(res.data.title);
+    markSeen(res.data.title, season);
+    onTitle(res.data.title);
   }
 
   async function command(key: string, body: Record<string, unknown>, done: string) {

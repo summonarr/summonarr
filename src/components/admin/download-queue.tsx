@@ -59,7 +59,10 @@ import { ArrTitleManager } from "@/components/admin/arr-title/title-manager";
 import { episodeCode, episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import type { QualityTag, QueueItem, QueuePhase, QueueRemoveAction, QueueRemoveMethod } from "@/lib/arr-queue";
+import {
+  blocklistRedownload, recheckOutcome, removalIds,
+  type QualityTag, type QueueItem, type QueuePhase, type QueueRemoveAction, type QueueRemoveMethod, type RecheckError,
+} from "@/lib/arr-queue";
 import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
 import { createLoadGate, type LoadKind } from "@/lib/arr-system";
 import { manageTabFor, matchesQueueTitle, queueLinkKey, type QueueLinkFilters, type QueueTitleFilter } from "@/lib/arr-manage-links";
@@ -190,6 +193,19 @@ export function DownloadQueue({
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState("");
   const [notice, setNotice] = useState("");
+  // Instances that refused the last Re-check (the route answers 202 even when
+  // every one did), and whether that was all of them.
+  const [recheckFailed, setRecheckFailed] = useState<{ all: boolean; failed: RecheckError[] } | null>(null);
+  // Each instance's version, from the health report, read ONCE per page when
+  // the first Sonarr row's Remove opens: Sonarr v3 ignores skipRedownload, so
+  // its "Blocklist" can't promise "no new search". Until a Sonarr instance's
+  // version is known (the read still running or failed) the dialog says so
+  // instead of promising anything (`blocklistRedownload` → "unknown").
+  const [arrVersions, setArrVersions] = useState<Record<string, string | null>>({});
+  // The health report reads every configured instance (a dark one takes the
+  // full timeout), so it is never re-read per dialog open — not even after a
+  // failure, which leaves the cautious wording for the session.
+  const versionsRequested = useRef(false);
   const [hidden, setHidden] = useState<ReadonlySet<ColumnId>>(DEFAULT_HIDDEN);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   // The table scrolls sideways inside its frame; an expanded row's details are
@@ -292,7 +308,25 @@ export function DownloadQueue({
   }
 
   // The dialog opens on the action the admin clicked; they can still change it there.
+  async function loadVersions() {
+    if (versionsRequested.current) return;
+    versionsRequested.current = true;
+    try {
+      const res = await fetch(withBasePath("/api/admin/arr-health"));
+      if (!res.ok) return;
+      const data = (await res.json().catch(() => null)) as { instances?: Array<{ service?: unknown; slug?: unknown; version?: unknown }> } | null;
+      const next: Record<string, string | null> = {};
+      for (const i of data?.instances ?? []) {
+        if (typeof i?.service === "string" && typeof i.slug === "string") next[`${i.service}:${i.slug}`] = typeof i.version === "string" ? i.version : null;
+      }
+      setArrVersions((v) => ({ ...v, ...next }));
+    } catch {
+      // Unknown version: the dialog keeps the cautious wording.
+    }
+  }
+
   function openRemove(row: QueueItem, action: QueueRemoveAction) {
+    if (row.service === "sonarr") void loadVersions();
     setRemoving(row);
     setRemoveAction(action);
     setRemoveMethod("removeFromClient");
@@ -324,6 +358,7 @@ export function DownloadQueue({
   async function recheck() {
     setActing("recheck");
     setNotice("");
+    setRecheckFailed(null);
     try {
       const res = await fetch(withBasePath("/api/admin/queue/recheck"), { method: "POST" });
       const data = (await res.json().catch(() => null)) as { instances?: number; errors?: unknown[]; error?: string } | null;
@@ -331,7 +366,9 @@ export function DownloadQueue({
         setError(data?.error ?? t("adminManage.queue.recheck.failed"));
         return;
       }
-      setNotice(t("adminManage.queue.recheck.done", { count: (data?.instances ?? 0) - (data?.errors?.length ?? 0) }));
+      const outcome = recheckOutcome(data);
+      if (outcome.failed.length > 0) setRecheckFailed({ all: outcome.allFailed, failed: outcome.failed });
+      if (!outcome.allFailed) setNotice(t("adminManage.queue.recheck.done", { count: outcome.asked }));
       window.setTimeout(() => void load(), 5_000);
     } catch {
       setError(t("adminManage.queue.recheck.failed"));
@@ -358,7 +395,7 @@ export function DownloadQueue({
         body: JSON.stringify({
           service: removing.service,
           instance: removing.instance,
-          ids: removing.ids,
+          ids: removalIds(removing),
           action: removeAction,
           method: removing.pending ? "removeFromClient" : removeMethod,
         }),
@@ -610,6 +647,31 @@ export function DownloadQueue({
             <CheckCircle2 style={{ width: 14, height: 14 }} aria-hidden /> {notice}
           </p>
         )}
+        {recheckFailed && (
+          <div
+            role={recheckFailed.all ? "alert" : "status"}
+            className={recheckFailed.all ? "rounded-md bg-red-500/15 text-red-400" : "rounded-md bg-amber-500/15 text-amber-400"}
+            style={{ padding: "8px 12px", fontSize: 13 }}
+          >
+            <p className="m-0">
+              {recheckFailed.all
+                ? t("adminManage.queue.recheck.allFailed")
+                : t("adminManage.queue.recheck.someFailed", {
+                    list: recheckFailed.failed.map((e) => arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance)).join(", "),
+                  })}
+            </p>
+            {/* Why, per instance, in the viewer's language — never the raw upstream text (guardrail 5e). */}
+            <ul className="m-0 p-0" style={{ listStyle: "none", fontSize: 12, marginTop: 2 }}>
+              {recheckFailed.failed.map((e) => (
+                <li key={`${e.service}:${e.instance}`}>
+                  {t(ARR_ERROR_KIND_KEYS[isArrErrorKind(e.kind) ? e.kind : "other"], {
+                    name: arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance),
+                  })}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
           <Input
@@ -858,9 +920,18 @@ export function DownloadQueue({
   ];
 
   // Both halves of the arr's own "Remove from queue" dialog.
+  const redownload = removing ? blocklistRedownload(removing.service, arrVersions[`${removing.service}:${removing.instance}`]) : "skipped";
   const REMOVE_OPTIONS: Array<{ value: QueueRemoveAction; label: string; help: string }> = [
     ...(removing?.pending ? [] : [{ value: "blocklistSearch" as const, label: t("adminManage.queue.remove.blocklistSearch"), help: t("adminManage.queue.remove.blocklistSearchHelp") }]),
-    { value: "blocklist", label: t("adminManage.queue.remove.blocklist"), help: t("adminManage.queue.remove.blocklistHelp") },
+    {
+      value: "blocklist",
+      label: t("adminManage.queue.remove.blocklist"),
+      help: redownload === "searches"
+        ? t("adminManage.queue.remove.blocklistHelpSonarrV3")
+        : redownload === "unknown"
+          ? t("adminManage.queue.remove.blocklistHelpSonarrUnknown")
+          : t("adminManage.queue.remove.blocklistHelp"),
+    },
     { value: "remove", label: t("adminManage.queue.remove.remove"), help: t("adminManage.queue.remove.removeHelp") },
   ];
   const METHOD_OPTIONS: Array<{ value: QueueRemoveMethod; label: string; help: string }> = [

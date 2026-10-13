@@ -4,7 +4,9 @@
 // History tab (one title) and Admin → Download History (one instance). Sonarr's
 // per-episode records of one download fold into one row (groupHistoryEvents),
 // and a grab's state comes from the list's own records (grabStateOf): failed
-// since, imported since. A grab not yet failed can be marked failed (POST
+// since, imported since — believed only where the list could hold them
+// (grabStateKnown: not a kind-filtered list, not a page past the first). A
+// grab not yet failed can be marked failed (POST
 // /api/admin/arr/history/failed — the arr's own "Mark as failed": blocklist the
 // release and search again), confirmed inline. Times are server-supplied and
 // only rendered after a client fetch. On the History page each row also opens
@@ -17,7 +19,7 @@ import { Chip, type ChipTone } from "@/components/ui/design";
 import { AlertTriangle, Ban, ChevronDown, Loader2 } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { episodeCode, queueFormatters } from "@/components/admin/queue-format";
-import { grabStateOf, groupHistoryEvents, type ArrHistoryEvent, type HistoryKind, type HistoryRow } from "@/lib/arr-history";
+import { grabStateKnown, grabStateOf, groupHistoryEvents, type ArrHistoryEvent, type HistoryKind, type HistoryRow } from "@/lib/arr-history";
 
 const KIND_TONE: Record<HistoryKind, ChipTone> = {
   grabbed: "accent",
@@ -60,6 +62,7 @@ export function ArrHistoryList({
   showTitle,
   onMarkFailed,
   edges,
+  filtered = false,
   renderManage,
 }: {
   events: ArrHistoryEvent[];
@@ -69,6 +72,11 @@ export function ArrHistoryList({
   onMarkFailed?: (event: ArrHistoryEvent) => Promise<string | null>;
   /** On a paged list: whether there are pages before and after this one (a download's records can span them). */
   edges?: { hasPrevious: boolean; hasNext: boolean };
+  /**
+   * The arr filtered this list by kind: it holds no failures or imports to
+   * judge a grab by, so a grab's state is unknown, not "neither".
+   */
+  filtered?: boolean;
   /**
    * Set ⇒ a row naming a Radarr/Sonarr title (an arr id) shows what this
    * renders beside its name — the History page's Manage icon. Off by default:
@@ -84,6 +92,9 @@ export function ArrHistoryList({
   const hasPrevious = edges?.hasPrevious ?? false;
   const hasNext = edges?.hasNext ?? false;
   const paged = edges !== undefined;
+  // Every newer record of a download is on this list only when the arr didn't
+  // filter it and no page comes before it.
+  const complete = !filtered && !hasPrevious;
   const rows = useMemo(
     () => groupHistoryEvents(events, paged ? { hasPrevious, hasNext } : null),
     [events, paged, hasPrevious, hasNext],
@@ -112,6 +123,13 @@ export function ArrHistoryList({
   async function mark(row: HistoryRow) {
     if (!onMarkFailed) return;
     setBusy(row.key);
+    // A retry starts clean: an earlier attempt's error must not outlive its success.
+    setErrors((m) => {
+      if (!(row.key in m)) return m;
+      const next = { ...m };
+      delete next[row.key];
+      return next;
+    });
     const err = await onMarkFailed(row.lead);
     setBusy(null);
     if (err) {
@@ -134,6 +152,7 @@ export function ArrHistoryList({
         const e = row.lead;
         const group = row.events.length > 1;
         const state = grabStateOf(row, events);
+        const known = grabStateKnown(state, { complete });
         const failed = state.failed || marked.has(markKey(e));
         const isOpen = expanded.has(row.key);
         const href = e.tmdbId !== null ? (e.service === "radarr" ? `/movie/${e.tmdbId}` : `/tv/${e.tmdbId}`) : null;
@@ -203,7 +222,9 @@ export function ArrHistoryList({
                   ) : confirming === row.key ? (
                     <>
                       {row.episodeCount > 1 && <span className="text-xs text-zinc-300">{t("adminArr.history.wholeDownload", { count: row.episodeCount })}</span>}
-                      {state.imported && <span className="text-xs text-amber-400">{t("adminArr.history.alreadyImported")}</span>}
+                      {state.imported
+                        ? <span className="text-xs text-amber-400">{t("adminArr.history.alreadyImported")}</span>
+                        : !known && <span className="text-xs text-amber-400">{t("adminArr.history.stateUnknown")}</span>}
                       <Button ref={cancelRef} variant="ghost" size="xs" onClick={() => cancel(row)} disabled={busy !== null}>{t("adminArr.common.cancel")}</Button>
                       <Button size="xs" className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]" onClick={() => void mark(row)} disabled={busy !== null}>
                         {busy === row.key && <Loader2 className="animate-spin" />} {t("adminArr.history.confirmMarkFailed")}

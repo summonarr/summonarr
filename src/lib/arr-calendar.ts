@@ -5,9 +5,14 @@
 // already has the file, and — from the instance's download queue — whether one
 // is on its way. Zero I/O; the data half is arr-calendar-data.ts, the viewer's
 // days (local placement, the window, grouping) are arr-calendar-days.ts.
+//
+// A movie's status here is judged against midnight UTC of its date (Radarr's
+// rule, and the Missing search's); the page lifts one whose local day hasn't
+// begun back to upcoming (localEntryStatus in arr-calendar-days.ts), so
+// nothing on a future local day reads missing.
 import { bool, bytes, isoOrNull, nonNegInt, posInt, text, textOrNull } from "./arr-parse";
 import { tmdbPosterPathFromImages } from "./arr-missing";
-import { queuePhase } from "./arr-queue";
+import { needsAttention, queuePhase } from "./arr-queue";
 import type { ArrService } from "./arr-instances";
 
 export type CalendarKind = "episode" | "cinema" | "physical" | "digital";
@@ -56,6 +61,12 @@ export interface CalendarEntry {
   status: CalendarStatus;
   /** 0..1 while `downloading` (null when the queue doesn't know the size); null otherwise. */
   progress: number | null;
+  /**
+   * While `downloading`: Radarr/Sonarr flag the download as needing attention
+   * (import blocked, a tracked warning/error — `needsAttention`, the Download
+   * Queue's own verdict). False otherwise.
+   */
+  attention: boolean;
 }
 
 /** The longest window one request may ask for. */
@@ -72,18 +83,26 @@ export function parseCalendarWindow(rawStart: string | null, rawEnd: string | nu
 }
 
 const DAY_MS = 86_400_000;
+// Sonarr v3 runs a query date through DateTime.Parse (Local kind) — the same
+// hedge as arr-watch's /history/since read (HISTORY_QUERY_OVERLAP_MS in
+// arr-watch-data.ts). Were that ever compared as UTC on a host east or west
+// of it, an episode in the window's first or last hours would come back in
+// neither this window nor the next. The widest UTC offset is 14 h.
+const SONARR_DATE_SLACK_MS = 14 * 60 * 60_000;
 
 /**
- * The instants asked of the arr for a window of the viewer's days. Sonarr's
- * calendar is on `airDateUtc`, a real instant: the window as given. A movie's
+ * The instants asked of the arr for a window of the viewer's days. Both are
+ * padded, and the page keeps only the entries inside its own days
+ * (entriesInWindow), so the padding costs nothing on screen. Sonarr's
+ * calendar is on `airDateUtc`, a real instant: padded 14 h either side
+ * against a host-local parse of the query (SONARR_DATE_SLACK_MS). A movie's
  * release date is a calendar DATE (Radarr stores midnight UTC), while the
- * window is the viewer's local days: Radarr's is padded by a day either side so
- * a date on the window's edge in any time zone (UTC−12…UTC+14) comes back; the
- * page keeps the ones inside its own days (entriesInWindow).
+ * window is the viewer's local days: Radarr's is padded by a day either side
+ * so a date on the window's edge in any time zone (UTC−12…UTC+14) comes back.
  */
 export function calendarFetchWindow(service: ArrService, start: Date, end: Date): { from: Date; to: Date } {
-  if (service === "sonarr") return { from: start, to: end };
-  return { from: new Date(start.getTime() - DAY_MS), to: new Date(end.getTime() + DAY_MS) };
+  const pad = service === "sonarr" ? SONARR_DATE_SLACK_MS : DAY_MS;
+  return { from: new Date(start.getTime() - pad), to: new Date(end.getTime() + pad) };
 }
 
 /** The calendar request for one instance. Sonarr's carries the series (title, runtime, monitored) but not the files or images. */
@@ -166,6 +185,7 @@ export function radarrCalendarEntries(instance: string, raw: unknown, startMs: n
         hasFile,
         status: statusOf(kind, ms, nowMs, hasFile, monitored),
         progress: null,
+        attention: false,
       });
     }
   }
@@ -214,15 +234,22 @@ export function sonarrCalendarEntries(instance: string, raw: unknown, nowMs: num
       // regular seasons only (missingEpisodeParts in arr-missing.ts).
       status: statusOf("episode", airMs, nowMs, hasFile, monitored, { endMs: airMs + runtime * 60_000, regular: seasonNumber !== null && seasonNumber > 0 }),
       progress: null,
+      attention: false,
     });
   }
   return out;
 }
 
-/** What one instance's download queue holds: progress (0..1, null when the size is unknown) by Radarr movie id / Sonarr episode id. */
+/** One title's downloads on an instance: progress (0..1, null when the size is unknown), and whether the arr flags one as needing attention. */
+export interface CalendarQueued {
+  progress: number | null;
+  attention: boolean;
+}
+
+/** What one instance's download queue holds, by Radarr movie id / Sonarr episode id. */
 export interface CalendarQueue {
-  movies: Map<number, number | null>;
-  episodes: Map<number, number | null>;
+  movies: Map<number, CalendarQueued>;
+  episodes: Map<number, CalendarQueued>;
 }
 
 /**
@@ -230,7 +257,9 @@ export interface CalendarQueue {
  * record names its movie (`movieId`), a Sonarr record its episode
  * (`episodeId`; a season pack is one record per episode). A download that
  * failed is left out — the arr blocklists it and looks again, so the entry
- * keeps its own status (and its Search).
+ * keeps its own status (and its Search). One the arr flags as needing
+ * attention (an import blocked, a tracked warning) is kept, flagged: it is on
+ * the instance, so Search stays off, but it is not quietly "downloading".
  */
 export function calendarQueue(service: ArrService, records: readonly unknown[]): CalendarQueue {
   const q: CalendarQueue = { movies: new Map(), episodes: new Map() };
@@ -243,8 +272,12 @@ export function calendarQueue(service: ArrService, records: readonly unknown[]):
     const progress = size > 0 ? Math.max(0, Math.min(1, (size - Math.min(bytes(r.sizeleft), size)) / size)) : null;
     const map = service === "radarr" ? q.movies : q.episodes;
     const prior = map.get(id);
-    // Two records for one title (a pack and a single, say): the furthest along.
-    map.set(id, prior == null ? progress : progress === null ? prior : Math.max(prior, progress));
+    // Two records for one title (a pack and a single, say): the furthest
+    // along, flagged when either is.
+    map.set(id, {
+      progress: prior === undefined || prior.progress === null ? progress : progress === null ? prior.progress : Math.max(prior.progress, progress),
+      attention: (prior?.attention ?? false) || needsAttention(r),
+    });
   }
   return q;
 }
@@ -255,9 +288,11 @@ export function applyCalendarQueue(entries: CalendarEntry[], queue: CalendarQueu
     if (e.hasFile) continue;
     const id = e.service === "radarr" ? e.arrId : e.episodeId;
     const map = e.service === "radarr" ? queue.movies : queue.episodes;
-    if (id === null || !map.has(id)) continue;
+    const queued = id === null ? undefined : map.get(id);
+    if (queued === undefined) continue;
     e.status = "downloading";
-    e.progress = map.get(id) ?? null;
+    e.progress = queued.progress;
+    e.attention = queued.attention;
   }
 }
 

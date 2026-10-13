@@ -121,10 +121,14 @@ function setSettings(rows: Record<string, string>): void {
 type LibArgs = { where: Record<string, unknown>; select?: Record<string, unknown> };
 const plexLibCalls: LibArgs[] = [];
 let plexLibRow: { tmdbId: number | null } | null = null;
+// The Plex branch reads findMany (several rows can hold one key — C138); a test
+// that only needs one answer sets plexLibRow, a multi-row case sets plexLibRows.
+let plexLibRows: Array<{ tmdbId: number; plexRatingKey: string | null }> | null = null;
 shadowPrismaModel(prisma, "plexLibraryItem", {
-  findFirst: async (args: LibArgs) => {
+  findMany: async (args: LibArgs) => {
     plexLibCalls.push(args);
-    return plexLibRow;
+    if (plexLibRows) return plexLibRows;
+    return plexLibRow && plexLibRow.tmdbId != null ? [{ tmdbId: plexLibRow.tmdbId, plexRatingKey: null }] : [];
   },
 });
 const jellyfinLibCalls: LibArgs[] = [];
@@ -248,6 +252,7 @@ beforeEach(() => {
   plexLibCalls.length = 0;
   jellyfinLibCalls.length = 0;
   plexLibRow = null;
+  plexLibRows = null;
   jellyfinLibRow = null;
   activeSessionDeletes.length = 0;
   activeSessionDeleteError = null;
@@ -645,6 +650,28 @@ test("resolveShowTmdbId: plex keys map via PlexLibraryItem, TV- and serverInstan
   assert.equal(await resolveShowTmdbId("plex", "rk-unmapped", ""), null);
   plexLibRow = null;
   assert.equal(await resolveShowTmdbId("plex", "rk-missing", ""), null);
+});
+
+test("resolveShowTmdbId: two rows holding one key (a conflated item's key on a second title's array) resolve to the CANONICAL holder, whatever order Postgres returns them in", async () => {
+  // Row 100 lists k2 as a duplicate copy key; row 200's canonical key IS k2.
+  // An unordered findFirst followed physical row order, which a full-sync
+  // delete-and-reinsert changes — and the poller persists the answer.
+  for (const order of [
+    [{ tmdbId: 100, plexRatingKey: "k1" }, { tmdbId: 200, plexRatingKey: "k2" }],
+    [{ tmdbId: 200, plexRatingKey: "k2" }, { tmdbId: 100, plexRatingKey: "k1" }],
+  ]) {
+    plexLibRows = order;
+    assert.equal(await resolveShowTmdbId("plex", "k2", ""), 200, "the canonical holder owns the key");
+  }
+  // No canonical holder: the lowest tmdbId, in either order.
+  for (const order of [
+    [{ tmdbId: 300, plexRatingKey: "k3" }, { tmdbId: 50, plexRatingKey: "k4" }],
+    [{ tmdbId: 50, plexRatingKey: "k4" }, { tmdbId: 300, plexRatingKey: "k3" }],
+  ]) {
+    plexLibRows = order;
+    assert.equal(await resolveShowTmdbId("plex", "k9", ""), 50);
+  }
+  assert.deepEqual(plexLibCalls[0].select, { tmdbId: true, plexRatingKey: true }, "the pick needs the canonical column");
 });
 
 test("resolveShowTmdbId: a named instance's lookup carries ITS serverInstance in the where — ratingKeys are server-local integers, so an unscoped lookup can hit another server's show", async () => {

@@ -746,10 +746,10 @@ test("getPlexEpisodesForShow pages the show's allLeaves and stamps the caller's 
     if (url.pathname === "/library/metadata/444/allLeaves") {
       return mediaContainer(
         [
-          { parentIndex: 1, index: 2 },
+          { parentIndex: 1, index: 2, addedAt: 1_700_000_000 },
           { parentIndex: 0, index: 1 }, // specials → dropped
           { index: 3 }, // missing season → dropped
-          { parentIndex: 3, index: 4 },
+          { parentIndex: 3, index: 4 }, // undated → addedAt null
         ],
         { totalSize: 4 },
       );
@@ -758,9 +758,12 @@ test("getPlexEpisodesForShow pages the show's allLeaves and stamps the caller's 
   };
 
   const episodes = await getPlexEpisodesForShow(S, "t", "444", 777);
+  // addedAt is mapped exactly as getPlexTVEpisodes maps it: fix-match rebuilds
+  // a show's TVEpisodeCache rows from this helper, and one undated episode
+  // makes its season unobservable on the never-watched report (14d).
   assert.deepEqual(episodes, [
-    { tmdbId: 777, seasonNumber: 1, episodeNumber: 2 },
-    { tmdbId: 777, seasonNumber: 3, episodeNumber: 4 },
+    { tmdbId: 777, seasonNumber: 1, episodeNumber: 2, addedAt: new Date(1_700_000_000_000) },
+    { tmdbId: 777, seasonNumber: 3, episodeNumber: 4, addedAt: null },
   ]);
   // Base has no query string, so pagination starts with "?" not "&".
   assert.equal(
@@ -1282,9 +1285,62 @@ test("getPlexWatchHistory stops paging when its AbortSignal fires (guardrail 41)
   assert.deepEqual(h, { entries: [], records: 0, truncated: false });
 });
 
+test("getPlexWatchHistory follows a totalSize that GROWS mid-walk (a view recorded while paging) and reads the shifted oldest record", async () => {
+  // viewedAt-desc: a new view is prepended, every older record shifts one
+  // offset down, and a total frozen at page 0 (2000) ended the walk before
+  // the oldest record — the same one on every run of a busy server.
+  const S = "http://plex-hist-grow.test:32400";
+  const mv = (id: number) => ({ type: "movie", ratingKey: String(id), viewedAt: 1_700_000_000 - id });
+  respond = (url) => {
+    const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+    if (start === 0) return mediaContainer(Array.from({ length: 1000 }, (_, i) => mv(i + 1)), { totalSize: 2000 });
+    // One view landed: this page repeats the previous page's last record.
+    if (start === 1000) return mediaContainer(Array.from({ length: 1000 }, (_, i) => mv(i + 1000)), { totalSize: 2001 });
+    if (start === 2000) return mediaContainer([mv(5_000_000)], { totalSize: 2001 });
+    throw new Error(`unexpected page start=${start}`);
+  };
+  const h = await getPlexWatchHistory(S, "t");
+  assert.ok(
+    fetchCalls.some((c) => c.url.searchParams.get("X-Plex-Container-Start") === "2000"),
+    "the walk must follow the refreshed total past the page-0 count",
+  );
+  assert.ok(h.entries.some((e) => e.itemKey === "5000000"), "the oldest record is read");
+  assert.equal(fetchCalls.length, 3);
+});
+
 test("getPlexWatchHistory THROWS on a non-2xx (a 4xx fast-fails) — the caller must keep its previous snapshot, never read it as 'no history'", async () => {
   const S = "http://plex-hist4.test:32400";
   respond = () => new Response("unauthorized", { status: 401 });
   await assert.rejects(() => getPlexWatchHistory(S, "bad"), /Plex paginated fetch failed: 401/);
   assert.equal(fetchCalls.length, 1, "a 401 is not retried");
+});
+
+// Audit C159 (part 5): the cap counts WATCH RECORDS, not raw ones — a music-
+// heavy history used to hit it on track plays and drop the oldest VIDEO views
+// (the pre-install ones the snapshot exists for). Raw records have their own
+// ceiling below the pager's silent 2M, which ALSO reports truncated. A history
+// of exactly maxItems records is complete.
+test("getPlexWatchHistory: music tracks don't advance the cap; the raw ceiling reports truncated; exactly maxItems is complete", async () => {
+  const S = "http://plex-hist5.test:32400";
+  const page = [
+    { type: "track", ratingKey: "1" }, { type: "track", ratingKey: "2" }, { type: "track", ratingKey: "3" },
+    { type: "movie", ratingKey: "10", viewedAt: 1_700_000_000 },
+    { type: "movie", ratingKey: "11", viewedAt: 1_699_000_000 },
+  ];
+  respond = () => mediaContainer(page, { totalSize: page.length });
+  const h = await getPlexWatchHistory(S, "t", { maxItems: 2 });
+  assert.deepEqual(h.entries.map((e) => e.itemKey), ["10", "11"], "three track plays did not use up a cap of 2");
+  assert.equal(h.records, 2);
+  assert.equal(h.truncated, false, "exactly maxItems watch records, nothing past them: complete");
+
+  fetchCalls.length = 0;
+  const raw = await getPlexWatchHistory(S, "t", { maxItems: 100, maxRaw: 3 });
+  assert.equal(raw.truncated, true, "the raw ceiling stops the walk AND says so");
+  assert.deepEqual(raw.entries, [], "only the three tracks were read");
+  assert.equal(fetchCalls.length, 1);
+
+  fetchCalls.length = 0;
+  const capped = await getPlexWatchHistory(S, "t", { maxItems: 1 });
+  assert.equal(capped.truncated, true, "a watch record past the cap exists");
+  assert.deepEqual(capped.entries.map((e) => e.itemKey), ["10"]);
 });

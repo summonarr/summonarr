@@ -28,7 +28,7 @@ import {
 } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
-import type { NavBadges } from "@/components/layout/admin-nav-groups";
+import { useNavBadges } from "@/components/layout/admin-nav-groups";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -44,8 +44,10 @@ type Tab = {
   match: (pathname: string) => boolean;
 };
 
-export function MobileNav({ featureFlags, navBadges }: { featureFlags?: FeatureFlags; navBadges?: NavBadges }) {
+export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const tr = useT();
+  // The same badges as the sidebar — one NavBadgesProvider feeds both.
+  const navBadges = useNavBadges();
   const pathname = usePathname();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;

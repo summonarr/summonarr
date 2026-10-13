@@ -225,7 +225,7 @@
   "adminQueue.issueActions.replaceFileUnmarked_one": "Impossibile segnare {count} release come non riuscita — è stata avviata una ricerca al suo posto",
   "adminQueue.issueActions.replaceFileUnmarked_other": "Impossibile segnare {count} release come non riuscite — è stata avviata una ricerca al loro posto",
   "adminQueue.issueActions.replaceFileNothingMissing": "{service} non segnala nulla di mancante, quindi non è stata messa in coda alcuna ricerca — verifica che gli episodi siano ancora monitorati",
-  "adminQueue.issueActions.replaceFileRemonitored": "{service} ha smesso di monitorare ciò che è stato eliminato (Unmonitor Deleted): è di nuovo monitorato, quindi viene cercato",
+  "adminQueue.issueActions.replaceFileRemonitored": "{service} ha smesso di monitorare ciò che è stato eliminato («Smetti di monitorare gli eliminati»): è di nuovo monitorato, quindi viene cercato",
   "adminQueue.issueActions.replaceFileRemonitorFailed": "{service} ha smesso di monitorare ciò che è stato eliminato e non è stato possibile monitorarlo di nuovo: è stato cercato per nome. Monitoralo di nuovo in {service}, altrimenti le ricerche successive lo salteranno.",
   "adminQueue.issueActions.replaceFileAnimeNumbering": "Una serie anime: {service} potrebbe numerare gli episodi in modo diverso dal media server su cui è stato segnalato il problema. Controlla i titoli degli episodi di ogni file prima di eliminarlo.",
   "adminQueue.fixMatch.level.exact": "Esatto",
@@ -394,5 +394,10 @@
   "adminQueue.releases.seasonMissing_one": "Stagione {number} · {count} mancante",
   "adminQueue.releases.seasonMissing_other": "Stagione {number} · {count} mancanti",
   "adminQueue.releases.seeders_one": "{count} seeder",
-  "adminQueue.releases.seeders_other": "{count} seeder"
+  "adminQueue.releases.seeders_other": "{count} seeder",
+  "adminQueue.arrStatus.verdict.waitingForLibrary": "In attesa della libreria",
+  "adminQueue.arrStatus.why.waitingForLibrary": "{service} ce l'ha: la richiesta diventerà disponibile quando il media server del richiedente lo avrà in una libreria che può vedere. Se resta qui, controlla che il server abbia scansionato il file.",
+  "adminQueue.arrStatus.why.unmonitoredEpisodes": "{service} monitora la serie ma nessuno dei suoi episodi, quindi nessuno li cerca. Monitora le sue stagioni o i suoi episodi in {service}.",
+  "adminQueue.issueActions.searchAgain": "Cerca di nuovo",
+  "adminQueue.issueActions.replaceFileNoAnswer": "Nessuna risposta dal server — la sostituzione potrebbe essere ancora in corso e alcuni file potrebbero essere già stati eliminati. Ricarica la segnalazione per vedere cosa resta prima di eseguirla di nuovo."
 }

@@ -8,10 +8,11 @@ import { invalidateBlacklistCache } from "@/lib/blacklist";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { mapLimit } from "@/lib/concurrency";
-import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
-import { deleteArrEntry, invalidateArrLibraryIndexCache, loadArrLibraryIndex, resolveArrTargets, type ArrLibraryEntry } from "@/lib/library-cleanup-arr";
-import { cleanupKey, type CleanupMediaType } from "@/lib/library-cleanup";
-import { CLEANUP_FEATURE_KEY, computeCleanupReport, type CleanupRow, type TitleKey } from "@/lib/library-cleanup-data";
+import { ArrResponseError, arrErrorKind, arrErrorMessage, arrWriteOutcomeUnknown } from "@/lib/arr";
+import type { ArrErrorKind } from "@/lib/arr-error-kind";
+import { deleteArrEntry, failedArrInstances, invalidateArrLibraryIndexCache, loadArrLibraryIndex, resolveArrTargets, type ArrLibraryEntry } from "@/lib/library-cleanup-arr";
+import { CLEANUP_MAX_ITEMS, cleanupKey, parseCleanupItems, type CleanupMediaType } from "@/lib/library-cleanup";
+import { CLEANUP_FEATURE_KEY, cleanupRequestIdentity, computeCleanupReport, type CleanupRow, type TitleKey } from "@/lib/library-cleanup-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 
@@ -39,32 +40,25 @@ import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 // Re-download prevention: before deleting, every AVAILABLE request for the title
 // is stamped `cleanedUpAt`. The sync's AVAILABLE→APPROVED demote skips a stamped
 // row (src/app/api/sync/route.ts), so the title's disappearance is never read as
-// a lost file and never re-pushed to Radarr/Sonarr. The stamp is removed again if
-// nothing could be deleted. Status and approvedAt are never touched (guardrail
-// 34a; guardrail 14b). Optionally (default on) the title is also blacklisted, so nobody can
-// request it again without an admin lifting that.
+// a lost file and never re-pushed to Radarr/Sonarr. A title's requests are
+// matched by tmdb id OR — for a show — the tvdb id of every Sonarr target
+// (cleanupRequestIdentity, the title manager's Remove rule), for both the
+// active-request exclusion and the stamp. The stamp is removed again from the
+// requests of any instance that definitely refused its delete (that instance
+// still holds the title), and from all of them when nothing could be deleted.
+// A delete that went through re-asserts the stamp, with its own time, on every
+// AVAILABLE request of the title, so a concurrent execute of the same title
+// whose delete failed can't unstamp a title that is gone. An UNKNOWN outcome — a timeout, a network failure, a 502/504 from a proxy —
+// keeps the stamps — and re-asserts them, as a delete that went through does,
+// even when nothing else was deleted: the arr may have taken the delete, and an
+// unstamp on a deleted title re-downloads it; the result says `uncertain: true`. Status and
+// approvedAt are never touched (guardrail 34a; guardrail 14b). Optionally
+// (default on) the title is also blacklisted, so nobody can request it again
+// without an admin lifting that.
 
-const MAX_ITEMS = 500;
 const TITLE_CONCURRENCY = 2;
 
 type Body = { items?: unknown; blacklist?: unknown; confirmTargets?: unknown };
-
-function parseItems(raw: unknown): TitleKey[] | null {
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_ITEMS) return null;
-  const seen = new Set<string>();
-  const out: TitleKey[] = [];
-  for (const it of raw) {
-    if (!it || typeof it !== "object") return null;
-    const { tmdbId, mediaType } = it as { tmdbId?: unknown; mediaType?: unknown };
-    if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) return null;
-    if (mediaType !== "MOVIE" && mediaType !== "TV") return null;
-    const key = cleanupKey(tmdbId, mediaType);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ tmdbId, mediaType });
-  }
-  return out;
-}
 
 const targetLabel = (e: Pick<ArrLibraryEntry, "service" | "instance">) => `${e.service}:${e.instance || "default"}`;
 
@@ -79,10 +73,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const execute = req.nextUrl.searchParams.get("execute") === "true";
   const parsed = await readJsonCapped<Body>(req, 65_536);
   if (parsed instanceof NextResponse) return parsed;
-  const items = parseItems(parsed.items);
+  // CLEANUP_MAX_ITEMS is the same cap both pages stop their selection at.
+  const items: TitleKey[] | null = parseCleanupItems(parsed.items);
   if (!items) {
     return NextResponse.json(
-      { error: t("apiAdmin.cleanup.itemsInvalid", { max: MAX_ITEMS }) },
+      { error: t("apiAdmin.cleanup.itemsInvalid", { max: CLEANUP_MAX_ITEMS }) },
       { status: 400 },
     );
   }
@@ -91,13 +86,22 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const blacklist = parsed.blacklist !== false;
 
-  // ── plan: re-judge, then resolve every *arr copy ───────────────────────────
+  // ── plan: resolve every *arr copy, then re-judge ───────────────────────────
+  // The targets come first: a show's Sonarr targets carry the tvdb ids its
+  // requests may be linked by (cleanupRequestIdentity), and the judgement must
+  // see those requests — an APPROVED one linked only by tvdb id holds it back.
   const now = new Date();
   const arr = await loadArrLibraryIndex();
-  const report = await computeCleanupReport(arr, now, items);
+  // "fetch": the one path allowed to wait on TMDB's tvdb cross-reference — a
+  // delete must find every copy it removes (CrossRefMode).
+  const targetsByKey = await resolveArrTargets(items, arr, "fetch");
+  const tvdbIdsByKey = new Map<string, number[]>();
+  for (const [key, entries] of targetsByKey) {
+    const ids = entries.flatMap((e) => (e.service === "sonarr" && e.tvdbId !== null ? [e.tvdbId] : []));
+    if (ids.length > 0) tvdbIdsByKey.set(key, ids);
+  }
+  const report = await computeCleanupReport(arr, now, items, { tvdbIds: tvdbIdsByKey, crossRef: "fetch" });
   const rowByKey = new Map(report.rows.map((r) => [cleanupKey(r.tmdbId, r.mediaType), r]));
-  const failedServices = new Map<string, string[]>();
-  for (const e of arr.errors) failedServices.set(e.service, [...(failedServices.get(e.service) ?? []), e.instance || "default"]);
 
   const skipped: Skipped[] = [];
   const eligible: CleanupRow[] = [];
@@ -113,12 +117,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     } else {
       // An instance whose listing failed may hold a copy we can't see, and a
       // partial removal would leave the title half-deleted. Refuse rather than guess.
-      const down = failedServices.get(it.mediaType === "MOVIE" ? "radarr" : "sonarr");
-      if (down) skipped.push({ ...it, title: row.title, reason: t("apiAdmin.cleanup.arrUnreadable", { service: it.mediaType === "MOVIE" ? "Radarr" : "Sonarr", instances: down.join(", ") }) });
+      const down = failedArrInstances(arr, it.mediaType);
+      if (down.length > 0) skipped.push({ ...it, title: row.title, reason: t("apiAdmin.cleanup.arrUnreadable", { service: it.mediaType === "MOVIE" ? "Radarr" : "Sonarr", instances: down.join(", ") }) });
       else eligible.push(row);
     }
   }
-  const targetsByKey = await resolveArrTargets(eligible, arr);
   const planned: Planned[] = [];
   for (const row of eligible) {
     const targets = targetsByKey.get(cleanupKey(row.tmdbId, row.mediaType)) ?? [];
@@ -177,8 +180,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // the next sync would put the title straight back. Only rows not already
     // stamped are touched, so an unstamp below never clears an older stamp.
     const toStamp = await prisma.mediaRequest.findMany({
-      where: { tmdbId, mediaType, status: "AVAILABLE", cleanedUpAt: null },
-      select: { id: true },
+      where: {
+        ...cleanupRequestIdentity(tmdbId, mediaType, targets.map((e) => e.tvdbId)),
+        mediaType, status: "AVAILABLE", cleanedUpAt: null,
+      },
+      select: { id: true, arrInstance: true },
     });
     const stampedIds = toStamp.map((r) => r.id);
     if (stampedIds.length > 0) {
@@ -186,7 +192,15 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     }
 
     const deleted: string[] = [];
-    const failed: Array<{ target: string; error: string }> = [];
+    // `error` is the English detail (older pages print it); the page translates
+    // `kind` through ARR_ERROR_KIND_KEYS, naming the instance from service +
+    // instance (guardrail 5e).
+    const failed: Array<{ target: string; service: ArrLibraryEntry["service"]; instance: string; error: string; kind: ArrErrorKind }> = [];
+    // Instances that definitely refused the delete — they still hold the title.
+    const stillHeldOn = new Set<string>();
+    // A delete whose outcome is unknown: the arr may have removed the title
+    // anyway, so its stamps stay (guardrail 14b).
+    let uncertain = false;
     for (const t of targets) {
       try {
         await deleteArrEntry(t);
@@ -198,17 +212,58 @@ export const POST = withAdmin(async (req, _ctx, session) => {
           continue;
         }
         console.error(`[cleanup] delete of ${mediaType}:${tmdbId} from ${targetLabel(t)} failed:`, err instanceof Error ? err.message : err);
-        failed.push({ target: targetLabel(t), error: arrErrorMessage(err) });
+        failed.push({ target: targetLabel(t), service: t.service, instance: t.instance, error: arrErrorMessage(err), kind: arrErrorKind(err) });
+        if (arrWriteOutcomeUnknown(err)) uncertain = true;
+        else stillHeldOn.add(t.instance);
       }
     }
 
-    if (deleted.length === 0) {
-      // Nothing left the title's *arr instances: it is still fully there, so the
-      // stamp would only mask a genuine future loss. Remove what this call wrote.
-      if (stampedIds.length > 0) {
-        await prisma.mediaRequest.updateMany({ where: { id: { in: stampedIds }, cleanedUpAt: now }, data: { cleanedUpAt: null } });
+    // This call now OWNS the stamp on every AVAILABLE request of the title
+    // (except on an instance that still holds it). A concurrent execute of the
+    // same title stamped first and found nothing for this call to own; if ITS
+    // delete then fails, its unstamp (keyed on its own `now`) would clear the
+    // only stamp on a title that is gone, and the next sync would re-download
+    // it (14b). Re-asserted with this call's time, the other unstamp misses the
+    // rows — and if it already ran, this writes them back. Only null vs set is
+    // ever read, so moving an older stamp's time is harmless. Written by id,
+    // whatever the row's stamp says now: that is what overrides (or writes
+    // back) the other call's. Run after a delete that went through AND after
+    // one whose outcome is unknown — "maybe deleted" holds the stamp exactly as
+    // "deleted" does. Best-effort: the error is returned, never thrown.
+    const reassertStamps = async (): Promise<string | undefined> => {
+      try {
+        const own = (await prisma.mediaRequest.findMany({
+          where: { ...cleanupRequestIdentity(tmdbId, mediaType, targets.map((e) => e.tvdbId)), mediaType, status: "AVAILABLE" },
+          select: { id: true, arrInstance: true },
+        })).filter((r) => !stillHeldOn.has(r.arrInstance)).map((r) => r.id);
+        if (own.length > 0) {
+          await prisma.mediaRequest.updateMany({ where: { id: { in: own }, status: "AVAILABLE" }, data: { cleanedUpAt: now } });
+        }
+        return undefined;
+      } catch (err) {
+        console.error(`[cleanup] re-asserting ${mediaType}:${tmdbId}'s cleanup stamp after its delete failed:`, err);
+        return err instanceof Error ? err.message : String(err);
       }
-      return { tmdbId, mediaType, title, status: "failed" as const, deleted, failed, blacklisted: false };
+    };
+
+    if (deleted.length === 0) {
+      // Every instance refused: the title is still fully there, so the stamp
+      // would only mask a genuine future loss. Remove what this call wrote.
+      // When an outcome is unknown that delete may have gone through: only the
+      // requests on instances that definitely refused lose theirs, and the
+      // rest are re-asserted — this call may own nothing (a concurrent execute
+      // stamped first) and that execute's definite refusal must not leave a
+      // maybe-deleted title unstamped.
+      const unstamp = uncertain ? toStamp.filter((r) => stillHeldOn.has(r.arrInstance)).map((r) => r.id) : stampedIds;
+      if (unstamp.length > 0) {
+        await prisma.mediaRequest.updateMany({ where: { id: { in: unstamp }, cleanedUpAt: now }, data: { cleanedUpAt: null } });
+      }
+      const reassertError = uncertain ? await reassertStamps() : undefined;
+      return {
+        tmdbId, mediaType, title, status: "failed" as const, deleted, failed, blacklisted: false,
+        ...(uncertain ? { uncertain: true } : {}),
+        ...(reassertError ? { bookkeepingError: reassertError } : {}),
+      };
     }
 
     scanTypes.add(mediaType === "MOVIE" ? "movie" : "tv");
@@ -217,9 +272,28 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // Everything past this point is bookkeeping for a delete that is already
     // durable upstream. mapLimit rejects the WHOLE batch on one rejected task,
     // which would 500 the response after Radarr/Sonarr removed the files and
-    // leave the admin not knowing which titles went — so a failed vote clear or
-    // blacklist write is recorded on this title's result, never thrown.
+    // leave the admin not knowing which titles went — so a failed unstamp, vote
+    // clear or blacklist write is recorded on this title's result, never thrown.
     let bookkeepingError: string | undefined;
+    // A partial result: the same reasoning as above, per instance. An instance
+    // that refused its delete still holds the title, so its requests' stamps
+    // would only mask a genuine future loss there (one whose outcome is unknown
+    // is not in stillHeldOn: its stamps stay). Requests on every other instance
+    // keep theirs. A request is routed to the instance of the title's own
+    // service (Radarr for a movie, Sonarr for a show), so the slug alone names it.
+    const unstampIds = toStamp.filter((r) => stillHeldOn.has(r.arrInstance)).map((r) => r.id);
+    let requestsStamped = stampedIds.length;
+    if (unstampIds.length > 0) {
+      try {
+        await prisma.mediaRequest.updateMany({ where: { id: { in: unstampIds }, cleanedUpAt: now }, data: { cleanedUpAt: null } });
+        requestsStamped -= unstampIds.length;
+      } catch (err) {
+        console.error(`[cleanup] un-stamping ${mediaType}:${tmdbId}'s requests on the instances whose delete failed failed:`, err);
+        bookkeepingError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    const reassertError = await reassertStamps();
+    bookkeepingError ??= reassertError;
     if (complete) {
       try {
         await clearDeletionVotesForTmdbs([{ tmdbId, mediaType }]);
@@ -255,8 +329,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         deleted,
         failed: failed.map((f) => f.target),
         sizeOnDisk: targets.reduce((n, t) => n + t.sizeOnDisk, 0),
-        requestsStamped: stampedIds.length,
+        requestsStamped,
         blacklisted,
+        ...(uncertain ? { uncertain: true } : {}),
       },
       ...auditContext(req, session),
     });
@@ -264,6 +339,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       tmdbId, mediaType, title,
       status: complete ? ("deleted" as const) : ("partial" as const),
       deleted, failed, blacklisted,
+      ...(uncertain ? { uncertain: true } : {}),
       ...(bookkeepingError ? { bookkeepingError } : {}),
     };
   });
@@ -271,7 +347,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (results.some((r) => r.blacklisted)) invalidateBlacklistCache();
   // Read-only views cache the Radarr/Sonarr listing and the never-watched
   // report; what was just deleted must not keep showing there.
-  if (results.some((r) => r.deleted.length > 0)) {
+  // A delete whose outcome is unknown may have removed the title as well.
+  if (results.some((r) => r.deleted.length > 0 || ("uncertain" in r && r.uncertain === true))) {
     invalidateArrLibraryIndexCache();
     invalidateNeverWatchedReport();
   }

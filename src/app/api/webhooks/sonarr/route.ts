@@ -2,6 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
+import { CLAIMABLE_GRAB_ISSUE } from "@/lib/issue-grab";
 import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
@@ -488,8 +489,9 @@ export async function POST(req: NextRequest) {
     ...(safeMdbId ? [{ tmdbId: safeMdbId }] : []),
     ...(safeVdbId ? [{ tvdbId: safeVdbId }] : []),
   ];
+  // A RESOLVED issue's grab is never claimed (CLAIMABLE_GRAB_ISSUE — the Radarr twin).
   const grabWhere = grabIdFilters.length > 0
-    ? { OR: grabIdFilters, mediaType: "TV" as const, arrInstance, notifiedAt: null }
+    ? { OR: grabIdFilters, mediaType: "TV" as const, arrInstance, notifiedAt: null, issue: CLAIMABLE_GRAB_ISSUE }
     : null;
   if (grabWhere) {
     const candidateGrabs = await prisma.issueGrab.findMany({ where: grabWhere });

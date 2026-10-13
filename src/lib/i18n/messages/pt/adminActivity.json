@@ -409,5 +409,7 @@
   "adminActivity.trackingOff.description": "Nada está a ser registado, por isso este painel não tem reproduções, tempo de visualização ou espectadores para mostrar. Ative o registo em Definições → Média → Histórico de reprodução para começar a preenchê-lo.",
   "adminActivity.trackingOff.cta": "Abrir definições do histórico de reprodução",
   "adminActivity.common.hoursShort": "{n} h",
-  "adminActivity.detail.openPlay": "Abrir reprodução →"
+  "adminActivity.detail.openPlay": "Abrir reprodução →",
+  "adminActivity.stats.noReasonReportedTop": "{pct}% das transcodificações foram informadas sem motivo — o servidor não disse por que transcodificou.",
+  "adminActivity.stats.movieDecadesTvFiltered": "Só filmes — não aparece enquanto o filtro Séries está ativado."
 }

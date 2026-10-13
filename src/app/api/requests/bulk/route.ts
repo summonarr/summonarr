@@ -544,9 +544,12 @@ export const POST = withPermission([
             // already APPROVED or AVAILABLE, the content is greenlit/fulfilled — mirror
             // that status so the bulk requester is tracked (and gets the "now available"
             // ping) instead of queuing a duplicate PENDING for an admin to re-review.
-            // Matches the single POST /api/requests "mirror-approved" branch.
+            // Matches the single POST /api/requests "mirror-approved" branch,
+            // including its `cleanedUpAt: null`: a stamped row records a
+            // deliberate removal, not a greenlight (guardrail 14b) — mirroring it
+            // as APPROVED would let the sync re-push the deleted title.
             const greenlit = await tx.mediaRequest.findMany({
-              where: { status: { in: ["APPROVED", "AVAILABLE"] }, OR: createPairs },
+              where: { status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null, OR: createPairs },
               select: { tmdbId: true, mediaType: true, status: true },
             });
             // An AVAILABLE peer is mirrored as APPROVED, matching the single route

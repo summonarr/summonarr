@@ -33,10 +33,16 @@ export default async function ArrCalendarPage({
     { week: one(sp.week), filter: one(sp.filter), type: one(sp.type), instance: one(sp.instance), unmonitored: one(sp.unmonitored) },
     instances.map((i) => `${i.service}:${i.slug}`),
   );
+  // Next keeps a page's client state across a navigation that changes only the
+  // query (the nav link to the bare page, another ?week=), so the calendar
+  // would keep its old window and filters while the URL moved on. Every server
+  // render carries a new `today`, so keying on it starts each one from the
+  // URL's view.
+  const today = new Date().toISOString();
   return (
     <div className="ds-page-enter">
       <PageHeader title={t("adminArr.calendar.title")} subtitle={t("adminArr.calendar.subtitle")} />
-      <ArrCalendar instances={instances} today={new Date().toISOString()} initialView={initialView} />
+      <ArrCalendar key={today} instances={instances} today={today} initialView={initialView} />
     </div>
   );
 }

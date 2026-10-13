@@ -225,7 +225,7 @@
   "adminQueue.issueActions.replaceFileUnmarked_one": "{count} 个发布无法标记为失败——已改为搜索",
   "adminQueue.issueActions.replaceFileUnmarked_other": "{count} 个发布无法标记为失败——已改为搜索",
   "adminQueue.issueActions.replaceFileNothingMissing": "{service} 报告没有缺失内容，因此未排队搜索——请检查这些剧集是否仍受监控",
-  "adminQueue.issueActions.replaceFileRemonitored": "{service} 取消了对已删除内容的监控（Unmonitor Deleted）——已重新监控，因此会对其进行搜索",
+  "adminQueue.issueActions.replaceFileRemonitored": "{service} 取消了对已删除内容的监控（取消监控已删除项）——已重新监控，因此会对其进行搜索",
   "adminQueue.issueActions.replaceFileRemonitorFailed": "{service} 取消了对已删除内容的监控，且无法重新监控——已改为按名称搜索。请在 {service} 中重新监控，否则之后的搜索会跳过它。",
   "adminQueue.issueActions.replaceFileAnimeNumbering": "这是一部动画剧集：{service} 的剧集编号可能与报告问题的媒体服务器不同。删除前请核对每个文件的剧集标题。",
   "adminQueue.fixMatch.level.exact": "精确",
@@ -394,5 +394,10 @@
   "adminQueue.releases.seasonMissing_one": "第 {number} 季 · 缺 {count} 集",
   "adminQueue.releases.seasonMissing_other": "第 {number} 季 · 缺 {count} 集",
   "adminQueue.releases.seeders_one": "{count} 个做种",
-  "adminQueue.releases.seeders_other": "{count} 个做种"
+  "adminQueue.releases.seeders_other": "{count} 个做种",
+  "adminQueue.arrStatus.verdict.waitingForLibrary": "等待媒体库收录",
+  "adminQueue.arrStatus.why.waitingForLibrary": "{service} 已有此内容——当请求者的媒体服务器将其收入他们可见的媒体库后，请求即变为可观看。如果一直停留在此状态，请检查服务器是否已扫描该文件。",
+  "adminQueue.arrStatus.why.unmonitoredEpisodes": "{service} 监控了该剧集，但没有监控其任何一集，因此不会搜索它们。请在 {service} 中监控其季或集。",
+  "adminQueue.issueActions.searchAgain": "重新搜索",
+  "adminQueue.issueActions.replaceFileNoAnswer": "服务器没有响应——替换可能仍在进行，部分文件可能已被删除。请重新加载此问题，查看剩余内容后再重新运行。"
 }

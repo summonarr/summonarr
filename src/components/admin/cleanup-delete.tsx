@@ -6,9 +6,24 @@
 // live, so a selection made on either page is deleted only if it is still a
 // candidate. Keeping this in one place is what stops the two pages' confirm
 // steps drifting apart.
+//
+// What the admin confirmed is what is sent: the execute carries the PLAN's own
+// titles (`cleanupExecuteBody`), never the live selection, and a dry-run (or a
+// 409's fresh plan) answering for a selection that has since changed is dropped
+// — the route checks only the target COUNT, so a same-sized different set would
+// otherwise pass.
+//
+// An execute the browser got no answer to from the ROUTE — a proxy's 502/504
+// after ~60 s while the deletes run on, a dropped connection — is outcome
+// unknown, never "the delete failed": the plan is dropped and the page reloads,
+// so "Delete N now" can't start a second run over titles the first may already
+// have removed (cleanupExecuteFailure).
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { arrTitleDiffers, cleanupExecuteBody } from "@/lib/cleanup-delete-plan";
+import { arrFailureText } from "@/lib/cleanup-error-text";
+import { cleanupExecuteFailure } from "@/lib/cleanup-execute-outcome";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -28,7 +43,11 @@ export type CleanupExecResult = {
   deletedCount: number;
   partialCount: number;
   failedCount: number;
-  results: Array<{ tmdbId: number; mediaType: string; title: string; status: "deleted" | "partial" | "failed"; deleted: string[]; failed: Array<{ target: string; error: string }> }>;
+  // `service`/`instance`/`kind` name and word a failure (arrFailureText);
+  // `target` + `error` are the English fallback for a response without them.
+  // `uncertain`: a delete got no answer (a timeout, a 502/504), so the arr may
+  // have taken it anyway — its stamps were kept (guardrail 14b).
+  results: Array<{ tmdbId: number; mediaType: string; title: string; status: "deleted" | "partial" | "failed"; deleted: string[]; failed: Array<{ target: string; error: string; service?: string; instance?: string; kind?: string }>; uncertain?: boolean }>;
 };
 
 export const cleanupKeyOf = (r: { tmdbId: number; mediaType: string }) => `${r.mediaType}:${r.tmdbId}`;
@@ -71,10 +90,20 @@ export function useCleanupDelete(opts: {
   const [blacklist, setBlacklist] = useState(true);
   const [result, setResult] = useState<CleanupExecResult | null>(null);
   const [error, setError] = useState("");
+  // Bumped by every selection change (clearPlan) and every dry run: an answer
+  // whose generation is no longer current was computed for a selection the
+  // admin has since changed, and is dropped instead of shown as the plan.
+  const planGen = useRef(0);
+
+  const clearPlan = useCallback(() => {
+    planGen.current++;
+    setPlan(null);
+  }, []);
 
   const dryRun = useCallback(async () => {
     const body = items();
     if (body.length === 0) return;
+    const gen = ++planGen.current;
     setPlanning(true);
     setError("");
     setResult(null);
@@ -85,26 +114,43 @@ export function useCleanupDelete(opts: {
         body: JSON.stringify({ items: body, blacklist }),
       });
       if (!res.ok) {
-        setError(await readApiError(res, t("adminManage.cleanup.error.dryRun")));
+        const msg = await readApiError(res, t("adminManage.cleanup.error.dryRun"));
+        if (gen === planGen.current) setError(msg);
         return;
       }
-      setPlan((await res.json()) as CleanupPlan);
+      const next = (await res.json()) as CleanupPlan;
+      if (gen === planGen.current) setPlan(next);
     } catch {
-      setError(t("adminManage.cleanup.error.dryRunNetwork"));
+      if (gen === planGen.current) setError(t("adminManage.cleanup.error.dryRunNetwork"));
     } finally {
       setPlanning(false);
     }
   }, [items, blacklist, t]);
 
+  // An execute whose outcome is unknown (cleanupExecuteFailure): drop the plan
+  // (bumping its generation, so a late 409 plan can't come back either) and
+  // reload the page's own state through onDeleted — the selection with it. The
+  // message tells the admin some titles may already be gone.
+  const settleUnknownOutcome = useCallback(async (message: string) => {
+    clearPlan();
+    setError(message);
+    try {
+      await onDeleted();
+    } catch {
+      // The reload reports its own failure; the message above still stands.
+    }
+  }, [clearPlan, onDeleted]);
+
   const execute = useCallback(async () => {
     if (!plan) return;
+    const gen = planGen.current;
     setExecuting(true);
     setError("");
     try {
       const res = await fetch(withBasePath("/api/admin/cleanup/delete?execute=true"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: items(), blacklist, confirmTargets: plan.targetCount }),
+        body: JSON.stringify(cleanupExecuteBody(plan, blacklist)),
       });
       if (res.status === 409) {
         // Something changed since the dry run — show the fresh plan instead.
@@ -112,30 +158,42 @@ export function useCleanupDelete(opts: {
         setError(t("adminManage.cleanup.error.changed"));
         // The 409 body carries the fresh targets but no total, so the heading's
         // size is recomputed from them — a title that dropped out of the plan
-        // must drop out of the number the admin confirms against too.
-        if (fresh?.items) {
+        // must drop out of the number the admin confirms against too. Not when
+        // the selection changed meanwhile: that cleared the plan, and this one
+        // answers for the old selection.
+        if (fresh?.items && gen === planGen.current) {
           const reclaimableBytes = fresh.items.reduce((n, it) => n + it.targets.reduce((m, tg) => m + tg.sizeOnDisk, 0), 0);
           setPlan({ targetCount: fresh.targetCount, reclaimableBytes, items: fresh.items, skipped: fresh.skipped ?? [] });
         }
         return;
       }
       if (!res.ok) {
-        setError(await readApiError(res, t("adminManage.cleanup.error.delete")));
+        const failure = cleanupExecuteFailure(res.status, await res.json().catch(() => null));
+        if (failure.kind === "refused") {
+          // The route's own refusal, answered before any delete: the plan stands.
+          setError(failure.error);
+          return;
+        }
+        // A proxy's 502/504 (or a body that isn't the route's): the route may
+        // still be deleting. Never offer "Delete N now" again over titles that
+        // may be gone — the next delete starts from a fresh dry run.
+        await settleUnknownOutcome(t("adminManage.cleanup.error.deleteUnknown"));
         return;
       }
       setResult((await res.json()) as CleanupExecResult);
       setPlan(null);
       await onDeleted();
     } catch {
-      setError(t("adminManage.cleanup.error.deleteNetwork"));
+      // No answer at all (or an unreadable one): the same unknown outcome.
+      await settleUnknownOutcome(t("adminManage.cleanup.error.deleteNetwork"));
     } finally {
       setExecuting(false);
     }
-  }, [plan, items, blacklist, onDeleted, t]);
+  }, [plan, blacklist, onDeleted, settleUnknownOutcome, t]);
 
   return {
     plan,
-    clearPlan: () => setPlan(null),
+    clearPlan,
     planning,
     executing,
     blacklist,
@@ -175,7 +233,16 @@ export function CleanupPlanPanel({ del, formatBytes }: { del: CleanupDeleteState
       <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "var(--ds-fg)" }}>
         {plan.items.map((it) => (
           <li key={cleanupKeyOf(it)}>
-            {it.title} — {it.targets.map((tg) => `${arrInstanceLabel(tg.service, tg.instance)} (${formatBytes(tg.sizeOnDisk)})`).join(", ")}
+            {/* A target the instance holds under ANOTHER title (TMDB's TVDB
+                cross-reference) is named, so the admin sees which entry — and
+                whose files — the delete removes. */}
+            {it.title} — {it.targets.map((tg) => {
+              const instance = arrInstanceLabel(tg.service, tg.instance);
+              const size = formatBytes(tg.sizeOnDisk);
+              return arrTitleDiffers(it.title, tg.title)
+                ? t("adminManage.cleanup.plan.targetAs", { instance, title: tg.title, size })
+                : `${instance} (${size})`;
+            }).join(", ")}
           </li>
         ))}
       </ul>
@@ -239,7 +306,14 @@ export function CleanupResultPanel({ result }: { result: CleanupExecResult | nul
         {result.results.map((r) => (
           <li key={cleanupKeyOf(r)}>
             <span className={r.status === "deleted" ? "text-green-400" : "text-red-400"}>{t(`adminManage.cleanup.status.${r.status}`)}</span> — {r.title}
-            {r.failed.length > 0 ? ` ${t("adminManage.cleanup.result.failedOn", { list: r.failed.map((f) => `${f.target}: ${f.error}`).join("; ") })}` : ""}
+            {r.failed.length > 0
+              ? ` ${t("adminManage.cleanup.result.failedReasons", {
+                list: r.failed.map((f) => arrFailureText(t, f.service ? arrInstanceLabel(f.service, f.instance ?? "") : f.target, f)).join("; "),
+              })}`
+              : ""}
+            {r.uncertain === true && (
+              <span style={{ color: "var(--ds-fg-muted)" }}> {t("adminManage.cleanup.result.uncertain")}</span>
+            )}
           </li>
         ))}
       </ul>

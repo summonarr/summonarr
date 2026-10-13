@@ -3,7 +3,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
 import { parseProviderEnableChange, parseProviderKind } from "@/lib/arr-system";
-import { loadProviders, ProviderWarningsError, setProviderEnabled } from "@/lib/arr-system-data";
+import { loadProviders, ProviderUseUnsupportedError, ProviderWarningsError, setProviderEnabled } from "@/lib/arr-system-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -21,6 +21,11 @@ import { answerOf, jobResponse, startArrJob } from "@/lib/release-search-jobs";
 //   PATCH { service, instance, kind: "downloadClient", id, enable, acceptWarnings?, async? } — switch
 //       them. The arr's own resource is read and saved back with only those
 //       flags changed, server-side.
+//       • Saves to one provider are taken one at a time, server-side: each
+//         reads the arr's resource only once the save before it has finished,
+//         so two overlapping saves never put back each other's flag.
+//       • A use the indexer reports it can't do (the arr's supportsRss /
+//         supportsSearch false) is never switched ON: 400, nothing sent.
 //       • A change that only turns things off is saved without the arr's test (forceSave).
 //       • Switching one ON lets the arr test it: a failing test is 400 with its
 //         (masked) reason; a test that only WARNED is 409 { warningsOnly: true,
@@ -84,6 +89,12 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         settle: background === true ? "wait" : "once",
       });
     } catch (err) {
+      if (err instanceof ProviderUseUnsupportedError) {
+        return NextResponse.json(
+          { error: t(err.use === "rss" ? "apiAdmin.arr.providerRssUnsupported" : "apiAdmin.arr.providerSearchUnsupported", { service }) },
+          { status: 400 },
+        );
+      }
       if (err instanceof ProviderWarningsError) {
         const reason = err.messages.join(" ") || t("apiAdmin.arr.noReason");
         return NextResponse.json(

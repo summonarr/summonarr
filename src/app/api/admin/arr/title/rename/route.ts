@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrTitleGate, parseIdArray } from "@/lib/arr-admin-http";
+import { MAX_TITLE_FILE_IDS, TITLE_FILE_IDS_BODY_BYTES } from "@/lib/arr-title";
 import { loadRenamePreview, renameTitleFiles } from "@/lib/arr-title-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
@@ -28,12 +29,14 @@ export const GET = withAdmin(async (req) => {
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 64 * 1024);
+  // The preview pre-ticks every file it lists, so the cap is the delete's: a
+  // long daily show after a naming-scheme change lists thousands.
+  const parsed = await readJsonCapped<Record<string, unknown>>(req, TITLE_FILE_IDS_BODY_BYTES);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   const target = await arrTitleGate(body.service, body.instance, body.id, t);
   if (target instanceof NextResponse) return target;
-  const fileIds = parseIdArray(body.fileIds, 2_000);
+  const fileIds = parseIdArray(body.fileIds, MAX_TITLE_FILE_IDS);
   if (!fileIds) return NextResponse.json({ error: t("apiAdmin.arr.fileIdsInvalid") }, { status: 400 });
   let renamed: { files: number; commandIds: number[] };
   try {

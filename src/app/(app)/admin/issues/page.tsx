@@ -12,7 +12,7 @@ import Image from "next/image";
 import { Film, Tv2, MessageSquare } from "@/components/icons";
 import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
-import { requireFeature } from "@/lib/features";
+import { isFeatureEnabled, requireFeature } from "@/lib/features";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { arrHoldersByTmdbId } from "@/lib/arr-manage-links";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
@@ -111,7 +111,7 @@ export default async function AdminIssuesPage({
     ? (rawFilter as FilterValue)
     : "OPEN";
 
-  const [allIssues, statusCounts, radarrInstances, sonarrInstances] = await Promise.all([
+  const [allIssues, statusCounts, radarrInstances, sonarrInstances, radarrOn, sonarrOn] = await Promise.all([
     // Filter by status in SQL, not in JS. If we fetched 500 rows of every
     // status and filtered afterwards, a busy tab could show a count of "620"
     // over a list missing its older issues. Filtering here spends the whole
@@ -129,6 +129,11 @@ export default async function AdminIssuesPage({
     prisma.issue.groupBy({ by: ["status"], _count: { status: true } }),
     getSyncableArrInstances("radarr"),
     getSyncableArrInstances("sonarr"),
+    // The Manage icon opens routes that answer 404 while the integration is
+    // switched off (arrGate), and the synced cache rows it reads outlive the
+    // switch-off — so the flag, not the cache, decides whether it shows.
+    isFeatureEnabled("feature.integration.radarr").catch(() => false),
+    isFeatureEnabled("feature.integration.sonarr").catch(() => false),
   ]);
 
   // Configured-instance options for the Replace panel's instance picker.
@@ -187,16 +192,18 @@ export default async function AdminIssuesPage({
   const movieIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "MOVIE").map((p) => p.tmdbId))];
   const tvIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "TV").map((p) => p.tmdbId))];
   const holderSelect = { tmdbId: true, arrInstance: true } as const;
-  const [radarrWanted, radarrAvailable, sonarrWanted, sonarrAvailable] = isAdmin
-    ? await Promise.all([
-        movieIds.length > 0 ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
-        movieIds.length > 0 ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
-        tvIds.length > 0 ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
-        tvIds.length > 0 ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
-      ])
-    : [[], [], [], []];
-  const radarrHolders = arrHoldersByTmdbId(radarrOptions, [...radarrWanted, ...radarrAvailable]);
-  const sonarrHolders = arrHoldersByTmdbId(sonarrOptions, [...sonarrWanted, ...sonarrAvailable]);
+  const readRadarr = isAdmin && radarrOn && movieIds.length > 0;
+  const readSonarr = isAdmin && sonarrOn && tvIds.length > 0;
+  const [radarrWanted, radarrAvailable, sonarrWanted, sonarrAvailable] = await Promise.all([
+    readRadarr ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
+    readRadarr ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
+    readSonarr ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
+    readSonarr ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
+  ]);
+  // Holders only for a switched-on service: the cached rows of a switched-off
+  // one would draw a Manage icon whose every read 404s.
+  const radarrHolders = arrHoldersByTmdbId(radarrOn ? radarrOptions : [], [...radarrWanted, ...radarrAvailable]);
+  const sonarrHolders = arrHoldersByTmdbId(sonarrOn ? sonarrOptions : [], [...sonarrWanted, ...sonarrAvailable]);
   const manageFor = (tmdbId: number, mediaType: string) => {
     const holders = (mediaType === "MOVIE" ? radarrHolders : sonarrHolders).get(tmdbId);
     return isAdmin && holders ? { tmdbId, holders } : undefined;

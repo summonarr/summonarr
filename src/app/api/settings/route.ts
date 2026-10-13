@@ -22,7 +22,23 @@ import { WATCH_GRADE_SETTING_KEYS, watchGradeCrossFieldError, watchGradeSettingE
 import { mergedWatchGradeSettings } from "@/lib/watch-grade-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
-import { trackingStampsFor } from "@/lib/never-watched";
+import { TRACKING_STAMP_KEYS, trackingStampsFor } from "@/lib/never-watched";
+import { NEVER_WATCHED_FEATURE_KEY } from "@/lib/never-watched-data";
+import { CLEANUP_FEATURE_KEY } from "@/lib/library-cleanup-data";
+import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
+
+// The settings this route writes that the never-watched report reads (guardrail
+// 14d): a tracking switch (and its stamp) moves a server's coverage, retention
+// moves the coverage floor, and the two feature flags decide whether a row can
+// be "eligible" at all. The report is cached ~2 minutes; a write of any of these
+// drops it, after the commit (switching tracking OFF changes the verdict too, so
+// this keys on the switches themselves, not only on the stamps written).
+const NEVER_WATCHED_INPUT_KEYS: ReadonlySet<string> = new Set([
+  ...Object.keys(TRACKING_STAMP_KEYS),
+  "playHistoryRetentionDays",
+  CLEANUP_FEATURE_KEY,
+  NEVER_WATCHED_FEATURE_KEY,
+]);
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -924,6 +940,8 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // Feature flags are memoized (features.ts); drop the memo so a toggle in this
   // write is visible on the very next check instead of after the TTL.
   invalidateFeatureFlagCache();
+  const neverWatchedInputChanged = changedKeys.some((k) => NEVER_WATCHED_INPUT_KEYS.has(k));
+  if (neverWatchedInputChanged) invalidateNeverWatchedReport();
   // Same for the APNs relay config, which push.ts memoizes for 30s. The admin
   // flow is "save the relay key, then press Send test notification", so a stale
   // read lands on exactly the interaction used to verify the change.
@@ -1122,6 +1140,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // The rollback rewrote Setting rows — drop the flag memo again.
     invalidateFeatureFlagCache();
     invalidateApnsRelayCache();
+    if (neverWatchedInputChanged) invalidateNeverWatchedReport();
     // Same for the Discord public key and the session-duration TTLs: both memos were
     // dropped BEFORE the connectivity tests ran, so anything that repopulated them
     // during the test window (a Discord interaction, a sign-in) cached the value this

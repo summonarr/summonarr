@@ -377,8 +377,12 @@ async function fetchJellyfinPagesSequential<T>(
   // caller returns void and pages to the end exactly as before.
   processItems: (items: T[]) => void | boolean,
   pageSize = EPISODE_PAGE_SIZE,
-): Promise<void> {
+): Promise<number | null> {
   let startIndex = 0;
+  // The first page's TotalRecordCount (clamped), returned so a caller that must
+  // know the walk read everything can compare (getJellyfinUserPlayedItems).
+  // Every other caller ignores it. null = the server reported no count.
+  let reportedTotal: number | null = null;
   // Absent TotalRecordCount ⇒ walk until a short page ends the results (the
   // checks below), rather than `startIndex < null` exiting immediately. The
   // starting value is the CAP, not Infinity: an unbounded `total` leaves the
@@ -400,6 +404,7 @@ async function fetchJellyfinPagesSequential<T>(
     // hostile or buggy TotalRecordCount must not drive an unbounded walk.
     if (pageNum === 0 && page.total !== null) {
       total = Math.min(page.total, MAX_LIBRARY_ITEMS);
+      reportedTotal = total;
     }
     const stop = processItems(page.items) === true;
     startIndex += page.items.length;
@@ -418,6 +423,7 @@ async function fetchJellyfinPagesSequential<T>(
       `[jellyfin] sequential page walk hit the ${MAX_LIBRARY_ITEMS}-item cap; results may be incomplete`,
     );
   }
+  return reportedTotal;
 }
 
 async function getJellyfinItemsByType(
@@ -651,15 +657,23 @@ export async function getJellyfinEpisodesForShow(
 ): Promise<JellyfinTVEpisodeData[]> {
   const base = baseUrl.replace(/\/$/, "");
   const episodes: JellyfinTVEpisodeData[] = [];
-  const fields = "ParentIndexNumber,IndexNumber";
+  // DateCreated as in getJellyfinTVEpisodes: fix-match rebuilds the show's
+  // TVEpisodeCache rows from here, and an undated episode makes its season
+  // `unobservable` on the never-watched report (14d).
+  const fields = "ParentIndexNumber,IndexNumber,DateCreated";
   await fetchJellyfinPagesSequential(
     `${base}/Items?ParentId=${seriesId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
     apiKey,
-    (batch: Array<{ ParentIndexNumber?: number; IndexNumber?: number }>) => {
+    (batch: Array<{ ParentIndexNumber?: number; IndexNumber?: number; DateCreated?: string }>) => {
       for (const ep of batch) {
         if (!Number.isInteger(ep.ParentIndexNumber) || (ep.ParentIndexNumber as number) < 1) continue;
         if (!Number.isInteger(ep.IndexNumber) || (ep.IndexNumber as number) < 1) continue;
-        episodes.push({ tmdbId, seasonNumber: ep.ParentIndexNumber as number, episodeNumber: ep.IndexNumber as number });
+        episodes.push({
+          tmdbId,
+          seasonNumber: ep.ParentIndexNumber as number,
+          episodeNumber: ep.IndexNumber as number,
+          addedAt: parseJellyfinDate(ep.DateCreated),
+        });
       }
     },
   );
@@ -984,14 +998,14 @@ export async function getJellyfinUserPlayedItems(
   filter: "IsPlayed" | "IsResumable",
   opts: { signal?: AbortSignal } = {},
 ): Promise<JellyfinUserPlayedItems> {
-  const out: JellyfinUserPlayedItems = { items: [], records: 0 };
-  if (opts.signal?.aborted) return out;
+  if (opts.signal?.aborted) return { items: [], records: 0 };
   const base = baseUrl.replace(/\/+$/, "");
-  await fetchJellyfinPagesSequential<unknown>(
+  const query =
     `${base}/Users/${encodeURIComponent(userId)}/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Filters=${filter}` +
-      "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending",
-    apiKey,
-    (batch) => {
+    "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending";
+  const walk = async (): Promise<{ out: JellyfinUserPlayedItems; total: number | null }> => {
+    const out: JellyfinUserPlayedItems = { items: [], records: 0 };
+    const total = await fetchJellyfinPagesSequential<unknown>(query, apiKey, (batch) => {
       out.records += batch.length;
       for (const raw of batch) {
         const item = parseJellyfinPlayedItem(raw);
@@ -999,9 +1013,39 @@ export async function getJellyfinUserPlayedItems(
       }
       // Stop paging on abort (guardrail 41); the caller discards the result.
       return opts.signal?.aborted === true;
-    },
+    });
+    return { out, total };
+  };
+  const complete = (w: { out: JellyfinUserPlayedItems; total: number | null }) =>
+    opts.signal?.aborted === true || w.total === null || w.out.records >= w.total;
+
+  // The list is paged by OFFSET over a filter that can SHRINK mid-walk (a
+  // resumable item finished, an item marked unplayed, a library scan replacing
+  // one): every later item shifts down one and the item at the next page
+  // boundary is never read, while the walk still ends on a short page and
+  // reads healthy. For the never-watched report that one missing record can be
+  // a title's only evidence (14d), so a walk that read fewer than page 0
+  // promised is read again — a growth (records > total) is harmless, the
+  // caller merges by item key.
+  const first = await walk();
+  if (complete(first)) return first.out;
+  const second = await walk();
+  if (complete(second)) return second.out;
+  // Short twice with a MOVED count: the list is changing under the read.
+  // Throwing fails this server's refresh, which keeps the previous snapshot and
+  // holds watch-rule candidates back (`upstreamUnchecked`) — fail-safe.
+  if (second.total !== first.total) {
+    throw new Error(`Jellyfin ${filter} list changed while it was read`);
+  }
+  // Short twice by the SAME count: a server that counts more than it serves
+  // (items hidden from the user, say), not a live change. Throwing would fail
+  // every refresh forever; read it as served and say so once (guardrail 7b).
+  warnOnChange(
+    `jellyfin-played-shortfall:${base}:${userId}:${filter}`,
+    `${second.out.records}/${second.total}`,
+    `[jellyfin] ${filter} list for user ${userId} reports ${second.total} item(s) but serves ${second.out.records}; read as served`,
   );
-  return out;
+  return second.out;
 }
 
 export async function setJellyfinDownloadPolicy(

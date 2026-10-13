@@ -3,7 +3,8 @@
 // The title manager's History tab: every grab, import, failure, deletion and
 // rename Radarr/Sonarr recorded for the title (GET /api/admin/arr/title/history),
 // with "Mark as failed" on a grab, and a link to the title's downloads in the
-// Download Queue (filtered to exactly this title on this instance).
+// Download Queue (filtered to exactly this title on this instance). Following
+// that link leaves the manager — through the manager's own close rules.
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
@@ -12,10 +13,24 @@ import { AlertTriangle, Download, Loader2, RefreshCw } from "@/components/icons"
 import { useT } from "@/components/i18n/i18n-provider";
 import { ArrHistoryList } from "@/components/admin/arr-history-list";
 import { queueTitleHref } from "@/lib/arr-manage-links";
+import { opensElsewhere } from "@/lib/arr-title-ui";
 import type { ArrHistoryEvent } from "@/lib/arr-history";
 import { arrApi, titleQuery, useTRef, type TitleRef } from "./shared";
 
-export function HistoryTab({ titleRef }: { titleRef: TitleRef }) {
+export function HistoryTab({
+  titleRef,
+  onLeave,
+}: {
+  titleRef: TitleRef;
+  /**
+   * The queue link is being followed: the manager closes and answers true, or
+   * answers false and stays open (unsaved Settings edits ask first, a save in
+   * flight waits) — the navigation is then cancelled. The manager must close
+   * itself: on the Download Queue, a link to the URL already open re-renders
+   * nothing that would close it.
+   */
+  onLeave?: () => boolean;
+}) {
   const t = useT();
   const tRef = useTRef();
   // null until the first read answers; a failed FIRST read is not "no history".
@@ -74,6 +89,11 @@ export function HistoryTab({ titleRef }: { titleRef: TitleRef }) {
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <Link
             href={queueTitleHref(titleRef)}
+            onClick={(e) => {
+              // A new tab or window leaves this page, and the manager, as they are.
+              if (!onLeave || opensElsewhere(e)) return;
+              if (!onLeave()) e.preventDefault();
+            }}
             className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-[var(--ds-accent-text)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
           >
             <Download className="h-3.5 w-3.5 shrink-0" aria-hidden /> {t("adminArr.history.queueLink")}

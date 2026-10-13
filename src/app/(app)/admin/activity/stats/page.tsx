@@ -61,7 +61,7 @@ export default async function StatsPage({
       />
       <ActivityFilterBar />
       {stats ? (
-        <ActivityStatsRedesign stats={pickStatsForPage(stats)} days={days} />
+        <ActivityStatsRedesign stats={pickStatsForPage(stats)} days={days} mediaType={mediaType} />
       ) : (
         <EmptyState
           icon={Activity}

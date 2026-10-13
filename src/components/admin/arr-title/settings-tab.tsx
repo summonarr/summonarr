@@ -86,6 +86,7 @@ export function SettingsTab({
   tags,
   onSaved,
   onDirtyChange,
+  onSavingChange,
 }: {
   titleRef: TitleRef;
   title: ArrTitle;
@@ -97,6 +98,11 @@ export function SettingsTab({
   onSaved: (title: ArrTitle | null) => void;
   /** Tells the manager there are unsaved edits (closing asks first). */
   onDirtyChange?: (dirty: boolean) => void;
+  /**
+   * Tells the manager a save is in flight: its PATCH is already sent and the
+   * arr applies it, so the manager must not offer to "discard" these edits.
+   */
+  onSavingChange?: (saving: boolean) => void;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -134,6 +140,13 @@ export function SettingsTab({
   useEffect(() => {
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    if (!saving) return;
+    onSavingChange?.(true);
+    // The save answered — or this form unmounted under it (the manager reset):
+    // either way no save of THIS form is waiting any more.
+    return () => onSavingChange?.(false);
+  }, [saving, onSavingChange]);
 
   function update(patch: Partial<Draft>) {
     setEdits((e) => ({ ...e, ...patch }));

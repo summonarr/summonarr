@@ -18,6 +18,10 @@ import { episodeSummary, queueFormatters } from "@/components/admin/queue-format
 import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
 import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { manageTabFor } from "@/lib/arr-manage-links";
+import { holdLiveRefresh, runOrDefer } from "@/lib/client/refresh-hold";
+import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { runReleaseSearchJob } from "@/lib/client/release-search-job";
+import { seriesReleaseScopeSearchable } from "@/lib/release-scope";
 
 interface IssueActionsProps {
   issueId: string;
@@ -105,6 +109,12 @@ export function IssueActions({
   // it belongs to the instance no longer selected. grabRelease() would then send one
   // server's release ids to a different server. Only the newest search may write state.
   const releaseReqRef = useRef(0);
+
+  // While the Replace-release dialog is open, the page's live refresh waits
+  // (refresh-hold.ts): the grab flips the issue to IN_PROGRESS and announces
+  // it first, and on the OPEN tab the refresh would unmount this row — and the
+  // dialog with its answer — mid-request. Closing it lets the refresh through.
+  useEffect(() => (panel === "replace" ? holdLiveRefresh() : undefined), [panel]);
 
   async function triggerRefetch() {
     setLoading("refetch");
@@ -197,17 +207,23 @@ export function IssueActions({
     setShowRejected(false);
     setReleaseFilter("");
     try {
-      const res = await fetch(withBasePath(`/api/issues/${issueId}/releases?instance=${encodeURIComponent(targetInstance)}`));
+      // In the background (release-search-jobs.ts, the guardrail-37a pattern):
+      // a Sonarr season search takes a minute or two, longer than a reverse
+      // proxy keeps one request open — held open, the admin saw a 502 while the
+      // arr finished, and a retry hit every indexer again.
+      const answer = await runReleaseSearchJob(
+        fetch,
+        withBasePath(`/api/issues/${issueId}/releases?instance=${encodeURIComponent(targetInstance)}`),
+        { isAlive: () => reqId === releaseReqRef.current },
+      );
       // A superseded search must not write back — neither its list nor its error.
-      if (reqId !== releaseReqRef.current) return;
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        if (reqId !== releaseReqRef.current) return;
-        setArrError(data.error ?? t("adminQueue.issueActions.releasesFailed"));
+      if (answer === null || reqId !== releaseReqRef.current) return;
+      if (answer.status < 200 || answer.status >= 300 || !Array.isArray(answer.data)) {
+        const data = answer.data as { error?: string } | null;
+        setArrError(data?.error ?? t("adminQueue.issueActions.releasesFailed"));
         setPanel(null);
       } else {
-        const data = (await res.json()) as ArrRelease[];
-        if (reqId !== releaseReqRef.current) return;
+        const data = answer.data as ArrRelease[];
         setReleases(data);
         const first = data.find((r) => !r.rejected) ?? data[0];
         if (first) setSelectedGuid(first.guid);
@@ -225,6 +241,14 @@ export function IssueActions({
       // current search is still running.
       if (reqId === releaseReqRef.current) setLoading(null);
     }
+  }
+
+  // Closing the panel supersedes a search still polling: it stops, and its
+  // late answer writes nothing (nor leaves the spinner state behind).
+  function closeReplacePicker() {
+    releaseReqRef.current++;
+    if (loading === "releases") setLoading(null);
+    setPanel(null);
   }
 
   async function openReplacePicker() {
@@ -254,7 +278,8 @@ export function IssueActions({
         setArrError(data.error ?? t("adminQueue.issueActions.grabFailed"));
       } else {
         setGrabOk(true);
-        router.refresh();
+        // Once the dialog closes — not under the "grab queued" it is showing.
+        runOrDefer(() => router.refresh());
       }
     } catch {
       setArrError(t("shared.thread.networkError"));
@@ -287,7 +312,11 @@ export function IssueActions({
       : t(REFETCH_LABEL_KEY[scope] ?? "adminQueue.issueActions.refetch");
   const canRefetch = mediaType === "MOVIE" || !!tvdbId;
 
-  const canReplace = mediaType === "MOVIE" || !!tvdbId || scope === "EPISODE";
+  // A whole-series TV issue has no release search: Sonarr's series-only query is
+  // the indexers' RSS feed, other shows included (release-scope.ts). Refetch or
+  // Replace file covers it.
+  const canReplace = mediaType === "MOVIE"
+    || (seriesReleaseScopeSearchable(scope, seasonNumber, episodeNumber) && (!!tvdbId || scope === "EPISODE"));
   const serviceName = mediaType === "MOVIE" ? "Radarr" : "Sonarr";
   // A search only ever takes an UPGRADE of a file still on disk, so Refetch
   // can't replace a broken file that's already at the profile's cutoff — say
@@ -477,7 +506,7 @@ export function IssueActions({
         </div>
       )}
 
-      <Dialog open={panel === "replace"} onOpenChange={(o) => { if (!o && loading !== "grab") setPanel(null); }}>
+      <Dialog open={panel === "replace"} onOpenChange={(o) => { if (!o && loading !== "grab") closeReplacePicker(); }}>
         <DialogPortal>
           <DialogBackdrop />
           <DialogPopup className="max-w-3xl">
@@ -621,6 +650,28 @@ export function IssueActions({
                   </button>
                 )}
 
+                {/* A refused grab is said HERE: the column copy below sits
+                    under this dialog's backdrop. The arr's 410 ("search
+                    again") is what Search again answers. */}
+                {arrError && (
+                  <div role="alert" className="flex items-start justify-between gap-3 px-6 py-3 border-t border-zinc-800 bg-amber-500/10 flex-shrink-0">
+                    <span className="flex items-start gap-1.5 text-xs text-amber-400">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                      {arrError}
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void loadReleases(instance)}
+                      disabled={loading !== null}
+                      className="shrink-0"
+                    >
+                      <RefreshCw />
+                      {t("adminQueue.issueActions.searchAgain")}
+                    </Button>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-700 bg-zinc-900 flex-shrink-0">
                   <button type="button" onClick={() => setPanel(null)} className="rounded px-2 py-1 text-sm text-zinc-500 hover:text-zinc-300">{t("shared.common.cancel")}</button>
                   {/* The accent Button, like every other primary CTA — the old
@@ -661,7 +712,7 @@ export function IssueActions({
           <span className="max-w-60 text-[10px] text-zinc-500">{refetchHint}</span>
         </span>
       )}
-      {arrError && (
+      {arrError && panel !== "replace" && (
         <span className="flex items-center gap-1 text-[11px] text-amber-400 max-w-52 text-right">
           <AlertTriangle className="w-3 h-3 shrink-0" />
           {arrError}
@@ -737,6 +788,19 @@ function ReplaceFileDialog({
   // let the older answer land on the newer instance's picker.
   const reqRef = useRef(0);
 
+  // The page's live refresh waits while this dialog is open (refresh-hold.ts):
+  // the replace flips the issue to IN_PROGRESS and announces it BEFORE the
+  // delete, and on the OPEN tab a refresh would unmount the issue's row — and
+  // this dialog with its result and warnings — mid-request. Unmounting (the
+  // dialog closing) releases it, and any refresh asked for meanwhile runs then.
+  useEffect(() => holdLiveRefresh(), []);
+  // Polling stops once the dialog is gone.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
+
   const load = useCallback(async (target: string) => {
     const reqId = ++reqRef.current;
     try {
@@ -804,37 +868,54 @@ function ReplaceFileDialog({
     setError(null);
     let reload = false;
     try {
-      const res = await fetch(withBasePath(`/api/issues/${issueId}/files`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instance, fileIds: [...selected], then }),
-      });
-      const data = (await res.json().catch(() => ({}))) as Partial<ReplaceResult> & { error?: string };
-      // A 502 can still carry what WAS done (files deleted before the search
-      // failed, or a delete that stopped part-way) — show it either way.
-      if (typeof data.deleted === "number" && data.deleted > 0) {
-        setResult({
-          deleted: data.deleted,
-          requested: data.requested ?? data.deleted,
-          marked: data.marked ?? 0,
-          unmarked: data.unmarked ?? 0,
-          searched: data.searched === true,
-          redownload: typeof data.redownload === "boolean" ? data.redownload : null,
-          redownloading: typeof data.redownloading === "number" ? data.redownloading : 0,
-          remonitored: typeof data.remonitored === "number" ? data.remonitored : 0,
-          remonitorFailed: data.remonitorFailed === true,
-          nothingMissing: data.nothingMissing === true,
-        });
-        setSelected(new Set());
-        router.refresh();
-      }
-      if (!res.ok) {
-        setError(data.error ?? t("adminQueue.issueActions.replaceFileFailed"));
-        // Some files may be gone: show what's left.
+      // A background job, polled (the guardrail-37a pattern): a long series'
+      // marks outlast a reverse proxy's hold, and a 502 there read as a failed
+      // replace while the files were already gone.
+      const answer = await runReplaceFileJob(
+        fetch,
+        withBasePath(`/api/issues/${issueId}/files`),
+        { instance, fileIds: [...selected], then },
+        { isAlive: () => aliveRef.current },
+      );
+      if (answer === null) return;
+      if (answer.status === 0) {
+        // No answer (the polls failed or ran out): the replace may still be
+        // running, and files may already be gone — never "try again" on a
+        // destructive job. Show what's left.
+        setError(t("adminQueue.issueActions.replaceFileNoAnswer"));
         reload = true;
+      } else {
+        const res = { ok: answer.status >= 200 && answer.status < 300 };
+        const data = (answer.data && typeof answer.data === "object" ? answer.data : {}) as Partial<ReplaceResult> & { error?: string };
+        // A 502 can still carry what WAS done (files deleted before the search
+        // failed, or a delete that stopped part-way) — show it either way.
+        if (typeof data.deleted === "number" && data.deleted > 0) {
+          setResult({
+            deleted: data.deleted,
+            requested: data.requested ?? data.deleted,
+            marked: data.marked ?? 0,
+            unmarked: data.unmarked ?? 0,
+            searched: data.searched === true,
+            redownload: typeof data.redownload === "boolean" ? data.redownload : null,
+            redownloading: typeof data.redownloading === "number" ? data.redownloading : 0,
+            remonitored: typeof data.remonitored === "number" ? data.remonitored : 0,
+            remonitorFailed: data.remonitorFailed === true,
+            nothingMissing: data.nothingMissing === true,
+          });
+          setSelected(new Set());
+          // Once the dialog closes — the issue may leave this tab's list.
+          runOrDefer(() => router.refresh());
+        }
+        if (!res.ok) {
+          setError(data.error ?? t("adminQueue.issueActions.replaceFileFailed"));
+          // Some files may be gone: show what's left.
+          reload = true;
+        }
       }
     } catch {
-      setError(t("shared.thread.networkError"));
+      // The POST itself failed on the network — it may have reached the
+      // server first, so this is the same "no answer", not a network retry.
+      setError(t("adminQueue.issueActions.replaceFileNoAnswer"));
       reload = true;
     } finally {
       setBusy(null);

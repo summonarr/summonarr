@@ -11,6 +11,15 @@
 // here as READ-ONLY evidence that a title WAS watched. They never write
 // PlayHistory (guardrail 19) and never make anything look LESS watched.
 //
+// The two sources do not see the same plays. Plex's history lists only views
+// Plex COUNTED as watched (past the server's "video played" threshold), so a
+// Plex view started and abandoned before Summonarr was installed leaves no
+// upstream evidence; Jellyfin's IsResumable list does carry a started-but-
+// unfinished item, and it counts here as one use. Accepted, not a bug: such a
+// Plex title reads "no plays in recorded history since <date>" — an honest
+// claim over its stated window. Closing it would need per-account On Deck /
+// viewOffset reads (managed users' own tokens), which is a feature.
+//
 // The join keys the report uses (never-watched-data.ts, step 5):
 //   - a MOVIE row's itemKey is the movie's own Plex ratingKey / Jellyfin item Id,
 //     seasonNumber -1;
@@ -20,7 +29,8 @@
 // UNVERIFIED upstream shapes (checked against public documentation and client
 // code, NOT against a live server — confirm before trusting a change here):
 //   - Plex GET /status/sessions/history/all returns MediaContainer.Metadata[]
-//     entries, one per recorded view, carrying `type` ("movie" | "episode" | …),
+//     entries, one per recorded (i.e. COUNTED-as-watched) view — not every
+//     started play — carrying `type` ("movie" | "episode" | …),
 //     `ratingKey`, `key` ("/library/metadata/<id>"), `grandparentKey`
 //     ("/library/metadata/<showId>"), sometimes `grandparentRatingKey`,
 //     `parentIndex` (season), `index` (episode), `viewedAt` (epoch SECONDS) and
@@ -204,7 +214,9 @@ export function defaultUpstreamMediaType(kind: UpstreamKind): NwMediaType {
 // the date is the LATEST dated play — an undated play never overwrites a real
 // date, and a group made only of undated plays keeps null (the report reads
 // that as "watched, date unknown"). An episode with no show key can't be placed
-// on a title and is skipped here (it still counts toward the agreement check).
+// on a title and is skipped here (it still counts toward the agreement check,
+// and the data layer counts it as an unplaced episode BEFORE aggregating — most
+// episodes unplaced is a "failed" snapshot, upstreamEpisodesUnplaced).
 // Grouping is by (itemKey, season) — the table's primary key within a server.
 export function aggregateUpstream(
   items: Iterable<UpstreamPlay>,
@@ -262,6 +274,41 @@ export function agreementSince(now: Date, floor: Date | null): Date {
   return floor && floor > windowStart ? floor : windowStart;
 }
 
+// Why a refresh failed, as a closed vocabulary. The status row stores the
+// English text (log lines and older readers print it); the page translates the
+// CODE (upstreamErrorCode) through a literal key map, never the stored words —
+// so this table is the ONE place each phrase is spelled, for writer and reader.
+export type UpstreamErrorCode =
+  | "timeout" | "unreachable" | "blocked" | "tooLarge" | "redirect"
+  | "http" | "noUsers" | "shape" | "noRecords" | "other";
+
+export const UPSTREAM_ERROR_TEXT = {
+  timeout: "timed out",
+  unreachable: "unreachable",
+  blocked: "blocked by the outbound network policy",
+  tooLarge: "response too large",
+  redirect: "unexpected redirect",
+  noUsers: "the server returned no users",
+  shape: "unexpected response shape",
+  noRecords: "the server returned no watch records",
+  other: "request failed",
+} as const satisfies Record<Exclude<UpstreamErrorCode, "http">, string>;
+
+const UPSTREAM_HTTP_TEXT = /^HTTP (\d{3})$/;
+
+// A stored failure text → its code (and the HTTP status for "HTTP 401"). Any
+// text outside the vocabulary — a row written by a build that worded it
+// differently — is "other", never dropped: the page still says the check failed.
+export function upstreamErrorCode(error: string | null | undefined): { code: UpstreamErrorCode; httpStatus: number | null } | null {
+  if (!error) return null;
+  const http = UPSTREAM_HTTP_TEXT.exec(error);
+  if (http) return { code: "http", httpStatus: Number(http[1]) };
+  for (const [code, text] of Object.entries(UPSTREAM_ERROR_TEXT) as Array<[Exclude<UpstreamErrorCode, "http">, string]>) {
+    if (text === error) return { code, httpStatus: null };
+  }
+  return { code: "other", httpStatus: null };
+}
+
 // A short, client-safe description of a failed fetch: never the URL, never a
 // token, never upstream body text. Duck-typed on SafeFetchError (`reason`) so
 // this module stays import-free.
@@ -270,16 +317,16 @@ export function safeUpstreamError(err: unknown): string {
     ? (err as { reason?: unknown }).reason
     : null;
   switch (reason) {
-    case "timeout": return "timed out";
-    case "network": return "unreachable";
-    case "ssrf-blocked": return "blocked by the outbound network policy";
-    case "size": return "response too large";
-    case "redirect": return "unexpected redirect";
+    case "timeout": return UPSTREAM_ERROR_TEXT.timeout;
+    case "network": return UPSTREAM_ERROR_TEXT.unreachable;
+    case "ssrf-blocked": return UPSTREAM_ERROR_TEXT.blocked;
+    case "size": return UPSTREAM_ERROR_TEXT.tooLarge;
+    case "redirect": return UPSTREAM_ERROR_TEXT.redirect;
   }
   const msg = err instanceof Error ? err.message : typeof err === "string" ? err : "";
   const status = /(?:failed|users|status)[^\d]{0,4}(\d{3})\b/i.exec(msg);
   if (status) return `HTTP ${status[1]}`;
-  if (/no users/i.test(msg)) return "the server returned no users";
-  if (/MediaContainer/.test(msg)) return "unexpected response shape";
-  return "request failed";
+  if (/no users/i.test(msg)) return UPSTREAM_ERROR_TEXT.noUsers;
+  if (/MediaContainer/.test(msg)) return UPSTREAM_ERROR_TEXT.shape;
+  return UPSTREAM_ERROR_TEXT.other;
 }

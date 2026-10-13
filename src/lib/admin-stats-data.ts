@@ -727,7 +727,18 @@ export interface StorageStats {
   // Present only while Library cleanup is enabled.
   reclaimable: { titles: number; bytes: number } | null;
   // Present only while the never-watched page is enabled (guardrail 14d).
-  neverWatched: { titles: number; bytes: number; seasons: number; seasonBytes: number } | null;
+  // `unknown`/`possible` count the titles AND seasons the verdict could not
+  // call either way, so zero never-watched is not read as "all watched" while
+  // nothing could be judged (`neverWatchedLine` in admin-stats.ts).
+  neverWatched: {
+    titles: number;
+    bytes: number;
+    seasons: number;
+    seasonBytes: number;
+    unknown: number;
+    possible: number;
+    trackingOn: boolean;
+  } | null;
   computedAt: string;
 }
 
@@ -785,7 +796,8 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
   let reclaimable: StorageStats["reclaimable"] = null;
   if (cleanupOn) {
     try {
-      const report = await computeCleanupReport(index, new Date());
+      // "cached": a page render never waits on TMDB (CrossRefMode).
+      const report = await computeCleanupReport(index, new Date(), undefined, { resolveTargets: true, crossRef: "cached" });
       const candidates = report.rows.filter((r) => r.candidate);
       reclaimable = {
         titles: candidates.length,
@@ -799,12 +811,17 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
   let neverWatched: StorageStats["neverWatched"] = null;
   if (neverWatchedOn) {
     try {
-      const { totals } = await getNeverWatchedReport();
+      const { totals, seasons, trackingOn } = await getNeverWatchedReport();
       neverWatched = {
         titles: totals.never.titles,
         bytes: totals.never.bytes,
         seasons: totals.seasons.count,
         seasonBytes: totals.seasons.bytes,
+        // The report's totals count unjudged TITLES only; a watched show's
+        // season can be unjudged too (an undated episode).
+        unknown: totals.unknown + seasons.filter((s) => s.state === "unobservable").length,
+        possible: totals.possible + seasons.filter((s) => s.state === "possiblyWatched").length,
+        trackingOn,
       };
     } catch (err) {
       console.warn("[admin-stats] never-watched report failed:", err instanceof Error ? err.message : err);
