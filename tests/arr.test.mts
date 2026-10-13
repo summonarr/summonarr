@@ -88,6 +88,17 @@ test("arrErrorMessage: >=500 maps to server-error (500 is the boundary)", () => 
   assert.equal(arrErrorMessage(new ArrResponseError(499, "x")), "Arr request failed (499)");
 });
 
+test("arrErrorMessage: 502/504 point at the proxy, never at the arr's own logs", () => {
+  // Radarr/Sonarr never send 502 or 504 — a reverse proxy in front of them
+  // does, and the arr's log has no trace of the request.
+  for (const status of [502, 504]) {
+    const msg = arrErrorMessage(new ArrResponseError(status, "gateway"));
+    assert.match(msg, new RegExp(`\\(${status}\\)`));
+    assert.match(msg, /proxy/);
+    assert.doesNotMatch(msg, /arr service logs/);
+  }
+});
+
 test("arrErrorMessage: other statuses fall through to the generic bucket", () => {
   assert.equal(arrErrorMessage(new ArrResponseError(400, "validation")), "Arr request failed (400)");
   assert.equal(arrErrorMessage(new ArrResponseError(409, "conflict")), "Arr request failed (409)");

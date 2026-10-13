@@ -473,10 +473,17 @@ export function arrErrorKind(err: unknown): ArrErrorKind {
   return "other";
 }
 
+// Radarr and Sonarr never answer 502 or 504 themselves — those come from a
+// reverse proxy in front of them, which is where the failure is recorded. The
+// old "check the arr service logs" hint sent the admin to logs that had no
+// trace of the request. 503 keeps that hint: Sonarr answers 503 itself under
+// import load (guardrail 14a).
 export function arrErrorMessage(err: unknown): string {
   if (err instanceof ArrResponseError) {
     if (err.status === 401 || err.status === 403) return `Arr authentication failed (${err.status}) — check the API key`;
     if (err.status === 404) return `Item not found in arr (${err.status})`;
+    if (err.status === 502) return `Bad gateway (502) from a proxy in front of the arr — check the reverse proxy and the network path to the arr`;
+    if (err.status === 504) return `Gateway timeout (504) from a proxy in front of the arr — the arr was slow or unreachable; check the proxy and the arr`;
     if (err.status >= 500) return `Arr server error (${err.status}) — check the arr service logs`;
     return `Arr request failed (${err.status})`;
   }
