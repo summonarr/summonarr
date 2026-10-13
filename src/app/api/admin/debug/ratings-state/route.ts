@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { prisma } from "@/lib/prisma";
 import { isMdblistQuotaLocked } from "@/lib/mdblist";
 import { isOmdbQuotaLocked } from "@/lib/omdb";
@@ -61,7 +62,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     return NextResponse.json({ error: "tmdbId and type=movie|tv required" }, { status: 400 });
   }
   const tmdbId = Number(tmdbIdRaw);
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  if (!isTmdbIdInRange(tmdbId)) {
     return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
   }
   const liveRequested = sp.get("live") === "1";

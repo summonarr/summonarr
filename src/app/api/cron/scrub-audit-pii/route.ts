@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, getAuditPiiRetentionDays } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
@@ -60,6 +60,6 @@ export async function POST(request: NextRequest) {
         timestamp: new Date().toISOString(),
       });
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    () => cronSkippedResponse(),
   ));
 }

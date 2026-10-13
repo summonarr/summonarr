@@ -27,6 +27,10 @@ export function SyncSettingsCard({ initialSettings, lastRefreshAt = null, onAfte
   const mounted = useHasMounted();
   const [settings, setSettings] = useState<TrashSettings>(initialSettings);
   const [saveState, setSaveState] = useState<ActionState>("idle");
+  // The route's own reason for a refused save (the per-key 10 s cooldown, the
+  // admin-settings rate limit) — "Save failed" alone hid why a quick second
+  // toggle was refused.
+  const [saveError, setSaveError] = useState("");
   const [refreshState, setRefreshState] = useState<ActionState>("idle");
   const [syncState, setSyncState] = useState<ActionState>("idle");
   const [syncSkipped, setSyncSkipped] = useState(false);
@@ -35,6 +39,7 @@ export function SyncSettingsCard({ initialSettings, lastRefreshAt = null, onAfte
 
   async function patchSettings(partial: Partial<TrashSettings>) {
     setSaveState("running");
+    setSaveError("");
     const body: Record<string, string> = {};
     if (partial.enabled !== undefined) body.trashGuidesEnabled = String(partial.enabled);
     if (partial.syncCustomFormats !== undefined) body.trashSyncCustomFormats = String(partial.syncCustomFormats);
@@ -49,7 +54,14 @@ export function SyncSettingsCard({ initialSettings, lastRefreshAt = null, onAfte
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error();
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        setSaveError(typeof data?.error === "string" ? data.error : "");
+        setSaveState("error");
+        // Long enough to read a reason ("wait N seconds").
+        setTimeout(() => setSaveState("idle"), 6000);
+        return;
+      }
       setSettings((prev) => ({ ...prev, ...partial }));
       setSaveState("ok");
     } catch {
@@ -202,7 +214,7 @@ export function SyncSettingsCard({ initialSettings, lastRefreshAt = null, onAfte
         </Button>
 
         {saveState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.common.saved")}</span>}
-        {saveState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.common.saveFailed")}</span>}
+        {saveState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{saveError || t("trash.common.saveFailed")}</span>}
         {refreshState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.sync.catalogRefreshed")}</span>}
         {refreshState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.sync.refreshFailed")}</span>}
         {syncState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.sync.syncComplete")}</span>}

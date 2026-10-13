@@ -15,6 +15,7 @@ import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
 import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
 import { isFeatureEnabled } from "@/lib/features";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const PAGE_SIZE = 40;
@@ -191,6 +192,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
+  }
+  if (!isTmdbIdInRange(tmdbId)) {
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
     return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });

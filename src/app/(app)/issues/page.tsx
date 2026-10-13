@@ -45,7 +45,7 @@ function scopeLabelFor(
 export default async function IssuesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string; selected?: string; status?: string; type?: string; q?: string }>;
+  searchParams: Promise<{ page?: string; selected?: string | string[]; status?: string; type?: string; q?: string | string[] }>;
 }) {
   await requireFeature("feature.page.issues");
   const session = await requireAppSession();
@@ -56,11 +56,15 @@ export default async function IssuesPage({
 
   const {
     page: pageParam,
-    selected: selectedId,
+    selected: selectedRaw,
     status: statusParam,
     type: typeParam,
-    q: qParam,
+    q: qRaw,
   } = await searchParams;
+  // A repeated query key arrives as an array at runtime: `.trim()` on it would
+  // 500 the page, and an array `id` is a Prisma validation error. Take the first.
+  const selectedId = Array.isArray(selectedRaw) ? selectedRaw[0] : selectedRaw;
+  const qParam = Array.isArray(qRaw) ? qRaw[0] : qRaw;
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
   const skip = (page - 1) * PAGE_SIZE;
 

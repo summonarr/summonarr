@@ -425,6 +425,9 @@ export function ActivityRecentPlays({
                           setExpandedId(isExpanded ? null : p.id)
                         }
                         onKeyDown={(e) => {
+                          // Ignore keys pressed on the user/title links inside
+                          // the row: preventDefault() would block them.
+                          if (e.target !== e.currentTarget) return;
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             setExpandedId(isExpanded ? null : p.id);

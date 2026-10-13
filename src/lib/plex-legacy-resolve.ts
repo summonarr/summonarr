@@ -113,7 +113,16 @@ export function mergeResolvedLegacyItems(
   items: Map<number, PlexLibraryItemData>,
   ratingKeyToTmdb?: Map<string, number[]>,
 ): void {
-  for (const r of resolved) {
+  // Two legacy items can resolve to ONE tmdb id (a split duplicate, two sections).
+  // The first one merged becomes the stored row, and `resolved` arrives in the
+  // order the legacy map was filled — by section walks that run concurrently
+  // (Promise.all in getPlexTmdbIds), so arrival order varies between runs and
+  // would flip which copy owns the row's ratingKey/filePath. Order by ratingKey
+  // (numeric-aware) so the same copy wins every time (guardrail 37b's rule).
+  const ordered = [...resolved].sort((a, b) =>
+    a.ratingKey.localeCompare(b.ratingKey, "en", { numeric: true }) || a.tmdbId - b.tmdbId,
+  );
+  for (const r of ordered) {
     const existing = items.get(r.tmdbId);
     // The modern-agent row keeps the title; the legacy copy's ratingKey stays
     // addressable so its plays still resolve (guardrail 37c).

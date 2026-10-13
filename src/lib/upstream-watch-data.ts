@@ -235,7 +235,9 @@ async function jellyfinSnapshot(slug: string, signal: AbortSignal | undefined): 
             byItem.set(it.itemKey, prev ? mergeUserItem(prev, it) : it);
           }
         }
-        if (!stop.signal.aborted) items.push(...byItem.values());
+        // A loop, not push(...spread): a user with a six-figure played list would
+        // exceed the engine's argument limit and fail the whole server.
+        if (!stop.signal.aborted) for (const it of byItem.values()) items.push(it);
       } catch (err) {
         if (!failed) {
           failed = true;

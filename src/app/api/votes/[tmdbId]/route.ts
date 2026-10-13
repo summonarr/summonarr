@@ -6,6 +6,7 @@ import { tooManyRequests } from "@/lib/http";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { isFeatureEnabled } from "@/lib/features";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const DELETE = withAuth(async (
@@ -29,7 +30,7 @@ export const DELETE = withAuth(async (
 
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
-  if (isNaN(tmdbId)) return NextResponse.json({ error: t("apiUser.votes.invalidTmdbId") }, { status: 400 });
+  if (isNaN(tmdbId) || !isTmdbIdInRange(tmdbId)) return NextResponse.json({ error: t("apiUser.votes.invalidTmdbId") }, { status: 400 });
 
   const mediaType = req.nextUrl.searchParams.get("mediaType");
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
@@ -80,7 +81,7 @@ export const PATCH = withAdmin(async (
 
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
-  if (isNaN(tmdbId)) return NextResponse.json({ error: t("apiUser.votes.invalidTmdbId") }, { status: 400 });
+  if (isNaN(tmdbId) || !isTmdbIdInRange(tmdbId)) return NextResponse.json({ error: t("apiUser.votes.invalidTmdbId") }, { status: 400 });
 
   const mediaType = req.nextUrl.searchParams.get("mediaType");
   if (mediaType !== "MOVIE" && mediaType !== "TV") {

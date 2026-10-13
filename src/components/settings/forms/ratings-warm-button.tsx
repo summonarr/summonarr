@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -11,9 +11,15 @@ export function RatingsWarmButton() {
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [results, setResults] = useState<{ omdb?: string; mdblist?: string } | null>(null);
 
+  // Resets the button 10s after a run. A newer run cancels the previous timer,
+  // or it could flip "loading" to "idle" and re-enable the buttons mid-run.
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+
   type MdblistWarmData = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; error?: string };
 
   async function runWarm(force: boolean) {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("loading");
     setResults(null);
     try {
@@ -58,7 +64,7 @@ export function RatingsWarmButton() {
       setStatus("error");
       setResults({ omdb: t("settings.form.common.requestFailed") });
     }
-    setTimeout(() => setStatus("idle"), 10000);
+    resetTimer.current = setTimeout(() => setStatus("idle"), 10000);
   }
 
   return (

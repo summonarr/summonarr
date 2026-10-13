@@ -7,6 +7,7 @@ import { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 import { addToWatchlist, takeWatchlistAddToken, WATCHLIST_ITEM_SELECT } from "@/lib/watchlist-add";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const PAGE_SIZE = 60;
@@ -73,6 +74,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
+  if (!isTmdbIdInRange(tmdbId)) {
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
+  }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
     return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
@@ -110,6 +114,9 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   const mediaType = sp.get("mediaType");
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
+  }
+  if (!isTmdbIdInRange(tmdbId)) {
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
     return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });

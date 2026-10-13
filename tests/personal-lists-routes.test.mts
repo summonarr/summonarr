@@ -503,6 +503,15 @@ test("hidden POST never contacts TMDB — a 'not interested' tap must not fail o
   assert.deepEqual(fetchCalls, []);
 });
 
+test("hidden POST rejects a tmdbId past INT4 with 400 instead of a Prisma 500", async () => {
+  const me = await mintSession();
+  const res = await inScope(() =>
+    hidden.POST(mk("/api/hidden", me.token, { method: "POST", body: JSON.stringify({ tmdbId: 2147483648, mediaType: "MOVIE" }) }), undefined),
+  );
+  assert.equal(res.status, 400);
+  assert.equal(opsOf("hiddenItem.create").length, 0);
+});
+
 test("hidden POST bounds the caller-supplied title and posterPath", async () => {
   const me = await mintSession();
   await inScope(() =>

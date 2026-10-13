@@ -332,6 +332,12 @@ for (const [label, mediaType] of [
   });
 }
 
+test("POST with a tmdbId past INT4 is 400 and never upserts (it would 500 out of Prisma)", async () => {
+  const res = await add(await mintSession(), { tmdbId: 2_147_483_648, mediaType: "MOVIE" });
+  assert.equal(res.status, 400);
+  assert.equal(opsOf("blacklistItem.upsert").length, 0);
+});
+
 test("POST accepts TV as well as MOVIE", async () => {
   assert.equal((await add(await mintSession(), { tmdbId: 1399, mediaType: "TV" })).status, 201);
 });

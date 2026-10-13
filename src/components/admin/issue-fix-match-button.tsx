@@ -283,8 +283,8 @@ export function IssueFixMatchButton({
       try {
         const type = mediaType === "MOVIE" ? "movie" : "tv";
         const res = await fetch(withBasePath(`/api/search?q=${encodeURIComponent(query.trim())}&type=${type}`), { signal: ac.signal });
-        const json = await res.json() as TmdbMedia[] | { error: string };
-        if (!res.ok || "error" in json) throw new Error("error" in json ? json.error : t("adminQueue.common.requestFailed", { status: res.status }));
+        const json = await res.json().catch(() => null) as TmdbMedia[] | { error: string } | null;
+        if (!res.ok || !json || "error" in json) throw new Error(json && "error" in json ? json.error : t("adminQueue.common.requestFailed", { status: res.status }));
         setSearchResults(json as TmdbMedia[]);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -321,8 +321,9 @@ export function IssueFixMatchButton({
       // POST that applies them. Omitted when default — see the file-info fetch.
       if (plexInstance) params.set("serverInstance", plexInstance);
       const res  = await fetch(withBasePath(`/api/admin/fix-match/candidates?${params}`));
-      const json = await res.json() as CandidatesResponse & { error?: string };
-      if (!res.ok) throw new Error(json.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
+      // A reverse proxy's HTML 502/504 is not JSON — report the status, not a parser error.
+      const json = await res.json().catch(() => null) as (CandidatesResponse & { error?: string }) | null;
+      if (!res.ok || !json) throw new Error(json?.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
       setPlexCandidates(json);
       setPlexState({ status: "selecting" });
       setPhase("plex-candidates");

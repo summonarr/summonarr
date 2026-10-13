@@ -58,7 +58,12 @@ function titleWithYear(title: string | null, year: number | null, fallback: stri
   return year && !name.endsWith(`(${year})`) ? `${name} (${year})` : name;
 }
 
-function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdbId: number } }; onFixed: (key: string) => void }) {
+// `onFixed(key, warning)`: a fix that went through but carries a warning (a
+// partial remap, a Plex metadata merge) keeps its row on screen with that
+// warning — dropping the row at once threw the note away unread.
+type OnFixed = (key: string, warning?: string) => void;
+
+function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdbId: number } }; onFixed: OnFixed }) {
   const t = useT();
   const [state, setState] = useState<"idle" | "confirm" | "running" | "error">("idle");
   const [progress, setProgress] = useState<FixMatchProgressView | null>(null);
@@ -79,8 +84,7 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
         { onProgress: setProgress },
       );
       const warning = fixMatchWarningMessage(outcome, t);
-      if (warning) setMessage(warning);
-      onFixed(flagKey(flag));
+      onFixed(flagKey(flag), warning ?? undefined);
     } catch (err) {
       setState("error");
       setMessage(fixMatchErrorMessage(err, t));
@@ -131,7 +135,7 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
   );
 }
 
-function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr: { tmdbId: number } }>; onFixed: (key: string) => void }) {
+function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr: { tmdbId: number } }>; onFixed: OnFixed }) {
   const t = useT();
   const router = useRouter();
   const [state, setState] = useState<"idle" | "confirm" | "running" | "done">("idle");
@@ -149,14 +153,16 @@ function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr
     // One at a time: each remap finishes on the server before the next starts.
     for (const flag of flags) {
       try {
-        await runFixMatch({
+        const outcome = await runFixMatch({
           server: flag.server,
           mediaType: flag.mediaType,
           correctTmdbId: flag.arr.tmdbId,
           itemKey: flag.itemKey,
           ...(flag.serverInstance ? { serverInstance: flag.serverInstance } : {}),
         });
-        onFixed(flagKey(flag));
+        // The row keeps the warning (FlagRow); a bulk run that dropped it read
+        // "N/N fixed" over a remap that was only partial.
+        onFixed(flagKey(flag), fixMatchWarningMessage(outcome, t) ?? undefined);
       } catch (err) {
         failed++;
         collected.push({ key: flagKey(flag), title: titleWithYear(flag.title, flag.year, flag.folder ?? flag.itemKey), error: fixMatchErrorMessage(err, t) });
@@ -214,7 +220,7 @@ function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr
   );
 }
 
-function FlagRow({ flag, onFixed }: { flag: ClientMatchFlag; onFixed: (key: string) => void }) {
+function FlagRow({ flag, onFixed, fixedWarning }: { flag: ClientMatchFlag; onFixed: OnFixed; fixedWarning?: string }) {
   const t = useT();
   const server = serviceLabel(flag.server, flag.serverInstance);
   const stated = folderYear(flag.folder);
@@ -275,8 +281,11 @@ function FlagRow({ flag, onFixed }: { flag: ClientMatchFlag; onFixed: (key: stri
           )}
         </div>
         {note && <div style={{ color: "var(--ds-fg-subtle)", fontSize: 11.5 }}>{note}</div>}
+        {fixedWarning !== undefined && (
+          <div role="status" className="text-amber-400" style={{ fontSize: 11.5 }}>{fixedWarning}</div>
+        )}
       </div>
-      {fixableFlag({ ...flag, path: null }) && flag.arr?.tmdbId != null && (
+      {fixedWarning === undefined && fixableFlag({ ...flag, path: null }) && flag.arr?.tmdbId != null && (
         <div className="shrink-0">
           <FixOneButton flag={flag as ClientMatchFlag & { arr: { tmdbId: number } }} onFixed={onFixed} />
         </div>
@@ -300,11 +309,12 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
   const [error, setError] = useState("");
   const [kind, setKind] = useState<MatchFlagKind | "all">("all");
   // Fixed this session: hidden at once; the stored report already dropped them.
-  const [fixed, setFixed] = useState<ReadonlySet<string>>(new Set());
-  const onFixed = useCallback((key: string) => setFixed((prev) => new Set(prev).add(key)), []);
+  // key -> warning ("" = none). A fix with a warning keeps its row, showing it.
+  const [fixed, setFixed] = useState<ReadonlyMap<string, string>>(new Map());
+  const onFixed = useCallback<OnFixed>((key, warning) => setFixed((prev) => new Map(prev).set(key, warning ?? "")), []);
 
   const flags = useMemo(
-    () => (report?.flags ?? []).filter((f) => (!mediaType || f.mediaType === mediaType) && !fixed.has(flagKey(f))),
+    () => (report?.flags ?? []).filter((f) => (!mediaType || f.mediaType === mediaType) && fixed.get(flagKey(f)) !== ""),
     [report, mediaType, fixed],
   );
   const byKind = useMemo(() => {
@@ -313,7 +323,7 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
     return out;
   }, [flags]);
   const shown = kind === "all" ? flags : flags.filter((f) => f.kind === kind);
-  const fixable = shown.filter((f): f is ClientMatchFlag & { arr: { tmdbId: number } } => fixableFlag({ ...f, path: null }));
+  const fixable = shown.filter((f): f is ClientMatchFlag & { arr: { tmdbId: number } } => !fixed.has(flagKey(f)) && fixableFlag({ ...f, path: null }));
   const unread = (report?.sources ?? []).filter((s) => !s.ok);
 
   async function check() {
@@ -337,7 +347,7 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
         setError(typeof msg === "string" && msg ? msg : t("adminManage.library.match.checkFailed"));
         return;
       }
-      setFixed(new Set());
+      setFixed(new Map());
       router.refresh();
     } catch {
       setError(t("adminManage.library.match.checkFailed"));
@@ -423,7 +433,7 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
             <FixAllButton flags={fixable} onFixed={onFixed} />
           </div>
           <ul className="m-0 list-none p-0">
-            {shown.slice(0, RENDER_CAP).map((f) => <FlagRow key={flagKey(f)} flag={f} onFixed={onFixed} />)}
+            {shown.slice(0, RENDER_CAP).map((f) => <FlagRow key={flagKey(f)} flag={f} onFixed={onFixed} fixedWarning={fixed.get(flagKey(f))} />)}
           </ul>
           {shown.length > RENDER_CAP && (
             <p style={{ fontSize: 12, margin: 0, padding: "10px 16px", color: "var(--ds-fg-subtle)", borderTop: "1px solid var(--ds-border)" }}>

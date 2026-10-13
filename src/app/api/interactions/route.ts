@@ -257,7 +257,16 @@ async function cachedSearchTmdb(query: string, type: "movie" | "tv", discordUser
   return results;
 }
 
-async function editOriginal(appId: string, token: string, payload: Record<string, unknown>): Promise<void> {
+// Discord answers a message with content over 2000 characters with a 400 and
+// changes nothing, which leaves the deferred "thinking…" reply up for the whole
+// 15-minute token life. Titles and queries are upstream/user text, so cap the
+// content at the one edit boundary.
+const DISCORD_CONTENT_MAX = 2000;
+
+async function editOriginal(appId: string, token: string, rawPayload: Record<string, unknown>): Promise<void> {
+  const payload = typeof rawPayload.content === "string" && rawPayload.content.length > DISCORD_CONTENT_MAX
+    ? { ...rawPayload, content: truncateText(rawPayload.content, DISCORD_CONTENT_MAX) }
+    : rawPayload;
   const res = await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}/messages/@original`, {
     allowedHosts: DISCORD_HOSTS,
     method: "PATCH",
@@ -388,6 +397,13 @@ async function loadPending<T>(key: string): Promise<T | null> {
 
 function mediaTypeOption(value: unknown): "movie" | "tv" | null {
   return value === "movie" || value === "tv" ? value : null;
+}
+
+// searchTmdb labels an undated title "Unknown" for display; the stored
+// MediaRequest.releaseYear (and the admin notifications) must carry null, as the
+// web path's verified metadata does.
+function releaseYearOf(r: { releaseYear: string }): string | null {
+  return /^\d{4}$/.test(r.releaseYear) ? r.releaseYear : null;
 }
 
 function truncateText(text: string, max: number): string {
@@ -653,6 +669,44 @@ async function handleRecentCommand(
   await editOriginal(appId, token, { content: `${t("notify.bot.recent.header")}\n${lines.join("\n")}` });
 }
 
+// Admin fan-out for a request that ends up PENDING, shared by the plain pending
+// branch of a pick and the auto-approve rollback (a failed *arr push leaves a
+// PENDING row that otherwise reaches admins through no channel at all — the web
+// path, request-create.ts, announces it the same way). Only the EARLIEST pending
+// request for a title alerts, ordered by (createdAt, id), so concurrent
+// duplicates alert once.
+async function announcePendingToAdmins(
+  request: { id: string; createdAt: Date },
+  media: { tmdbId: number; mediaType: "MOVIE" | "TV"; arrInstance: string; title: string; posterPath: string | null; releaseYear: string | null },
+  requestedBy: string,
+  requesterId: string,
+): Promise<void> {
+  const earlierPending = await prisma.mediaRequest.findFirst({
+    where: {
+      tmdbId: media.tmdbId,
+      mediaType: media.mediaType,
+      arrInstance: media.arrInstance,
+      status: "PENDING",
+      id: { not: request.id },
+      OR: [
+        { createdAt: { lt: request.createdAt } },
+        { createdAt: request.createdAt, id: { lt: request.id } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (earlierPending) return;
+  emitNotificationEvent({
+    event: "request.created",
+    media: { type: media.mediaType, tmdbId: media.tmdbId, title: media.title, year: media.releaseYear, posterPath: media.posterPath },
+    request: { id: request.id, instance: media.arrInstance },
+    actor: { name: requestedBy },
+  });
+  void notifyAdminsNewRequest({ title: media.title, mediaType: media.mediaType, requestedBy, note: null, posterPath: media.posterPath, tmdbId: media.tmdbId, releaseYear: media.releaseYear, excludeUserId: requesterId });
+  void notifyAdminsNewRequestPush({ title: media.title, mediaType: media.mediaType, tmdbId: media.tmdbId, requestedBy, requestId: request.id, excludeUserId: requesterId });
+  void notifyAdminsNewRequestDiscord({ requestId: request.id, title: media.title, mediaType: media.mediaType, tmdbId: media.tmdbId, requestedBy, note: null, posterPath: media.posterPath });
+}
+
 function withDiscordTimeout(
   fn: () => Promise<void>,
   appId: string,
@@ -660,9 +714,7 @@ function withDiscordTimeout(
   t: Translator,
   timeoutMs = 25_000,
 ): void {
-  let timedOut = false;
   const timer = setTimeout(() => {
-    timedOut = true;
     void editOriginal(appId, token, {
       content: t("notify.bot.slow"),
     }).catch(() => {});
@@ -670,12 +722,12 @@ function withDiscordTimeout(
 
   void fn()
     .catch((err) => {
-      if (!timedOut) {
-        console.error("[interactions] handler error:", err);
-        void editOriginal(appId, token, {
-          content: t("notify.bot.unexpected"),
-        }).catch(() => {});
-      }
+      // Reported even after the "taking longer" line went out: that line promises
+      // a result, and a handler that then fails would otherwise leave it standing.
+      console.error("[interactions] handler error:", err);
+      void editOriginal(appId, token, {
+        content: t("notify.bot.unexpected"),
+      }).catch(() => {});
     })
     .finally(() => clearTimeout(timer));
 }
@@ -831,7 +883,7 @@ async function handleCommand(interaction: any): Promise<void> {
           statusLabel = inQueue ? t("notify.bot.status.APPROVED_QUEUE") : t("notify.bot.status.APPROVED_PENDING");
         }
         const media = r.mediaType === "MOVIE" ? t("notify.bot.status.movie") : t("notify.bot.status.tv");
-        return `${emoji[r.status] ?? "❓"} **${escMd(r.title)}** (${media}) — ${statusLabel}`;
+        return `${emoji[r.status] ?? "❓"} **${escMd(truncateText(r.title, 80))}** (${media}) — ${statusLabel}`;
       });
       await editOriginal(appId, token, { content: `${t("notify.bot.status.header")}\n${lines.join("\n")}` });
     }
@@ -1240,7 +1292,7 @@ async function handleComponent(interaction: any): Promise<void> {
         arrInstance: routedSlug,
         title: selected.title,
         posterPath: selected.posterPath ?? null,
-        releaseYear: selected.releaseYear ?? null,
+        releaseYear: releaseYearOf(selected),
         note: null,
         requestedBy: dbUser.id,
       } as const;
@@ -1348,6 +1400,14 @@ async function handleComponent(interaction: any): Promise<void> {
             // admin request list doesn't stay stuck at APPROVED (parity with the web
             // POST/PATCH rollback paths, which emit the same corrective event).
             emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: dbUser.id });
+            // The row now sits in the admin queue like any pending request and
+            // pendingNotifyAt is cleared, so this is the only alert admins get.
+            await announcePendingToAdmins(
+              request,
+              { tmdbId: selected.id, mediaType, arrInstance: routedSlug, title: selected.title, posterPath: selected.posterPath ?? null, releaseYear: releaseYearOf(selected) },
+              dbUser.name ?? dbUser.email ?? dbUser.id,
+              dbUser.id,
+            );
             // The push failed and the request rolled back to PENDING — don't tell
             // the user it's "being downloaded"; surface that an admin will review it.
             note = t("notify.bot.pick.arrFailed");
@@ -1429,35 +1489,12 @@ async function handleComponent(interaction: any): Promise<void> {
             note = t("notify.bot.pick.mirrored");
             confirmEmbed.color = 0x57f287;
           } else {
-            const pendingRequest = createdRequest;
-            const requestedBy = dbUser.name ?? dbUser.email ?? dbUser.id;
-            // Only the earliest PENDING request for a title alerts admins — a later duplicate
-            // (different user requesting the same still-pending title) is nothing new to review.
-            const earlierPending = await prisma.mediaRequest.findFirst({
-              where: {
-                tmdbId: selected.id,
-                mediaType,
-                arrInstance: routedSlug,
-                status: "PENDING",
-                id: { not: pendingRequest.id },
-                OR: [
-                  { createdAt: { lt: pendingRequest.createdAt } },
-                  { createdAt: pendingRequest.createdAt, id: { lt: pendingRequest.id } },
-                ],
-              },
-              select: { id: true },
-            });
-            if (!earlierPending) {
-              emitNotificationEvent({
-                event: "request.created",
-                media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: selected.id, title: selected.title, year: selected.releaseYear ?? null, posterPath: selected.posterPath ?? null },
-                request: { id: pendingRequest.id, instance: routedSlug },
-                actor: { name: requestedBy },
-              });
-              void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null, excludeUserId: dbUser.id });
-              void notifyAdminsNewRequestPush({ title: selected.title, mediaType, tmdbId: selected.id, requestedBy, requestId: pendingRequest.id, excludeUserId: dbUser.id });
-              void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, tmdbId: selected.id, requestedBy, note: null, posterPath: selected.posterPath ?? null });
-            }
+            await announcePendingToAdmins(
+              createdRequest,
+              { tmdbId: selected.id, mediaType, arrInstance: routedSlug, title: selected.title, posterPath: selected.posterPath ?? null, releaseYear: releaseYearOf(selected) },
+              dbUser.name ?? dbUser.email ?? dbUser.id,
+              dbUser.id,
+            );
             note = t("notify.bot.pick.pending");
             confirmEmbed.color = 0x57f287;
           }
@@ -1548,7 +1585,7 @@ async function handleComponent(interaction: any): Promise<void> {
       const row = await prisma.watchlistItem.findFirst({ where, select: { title: true } });
       // deleteMany: a title already removed elsewhere is a no-op, not an error.
       await prisma.watchlistItem.deleteMany({ where });
-      const notice = row ? t("notify.bot.watchlist.removed", { title: escMd(row.title) }) : null;
+      const notice = row ? t("notify.bot.watchlist.removed", { title: escMd(truncateText(row.title, 80)) }) : null;
       await editOriginal(appId, token, await watchlistListPayload(t, linked.user.id, discordUserId, notice));
     }
 

@@ -338,7 +338,7 @@
   "adminManage.cleanup.filter.heldBy": "Trattenuto da",
   "adminManage.cleanup.filter.heldByAny": "Trattenuti o no",
   "adminManage.cleanup.filter.heldByNone": "Nulla lo trattiene",
-  "adminManage.cleanup.filter.server": "Media server",
+  "adminManage.cleanup.filter.server": "Server multimediale",
   "adminManage.cleanup.filter.serverAny": "Tutti i media server",
   "adminManage.cleanup.filter.arr": "Istanza Radarr/Sonarr",
   "adminManage.cleanup.filter.arrAny": "Tutte le istanze Radarr/Sonarr",

@@ -8,6 +8,7 @@ import type { ArrErrorKind } from "./arr-error-kind";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
+import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { prisma } from "./prisma";
 import {
   cutoffMovie,
@@ -108,13 +109,18 @@ async function loadReport<T extends { tmdbId: number | null; posterPath: string 
 
   const report: MissingReport<T> = { service, enabled, instances, errors: [], items: [] };
   settled.forEach((s, i) => {
+    // The page re-reads on open and the snapshot refresh re-reads every 10
+    // minutes: a dark instance is one unchanged condition, logged once until it
+    // changes (guardrail 7b).
+    const logKey = `missing:${service}:${instances[i].slug}`;
     if (s.status === "fulfilled") {
       report.items.push(...s.value);
+      forgetWarnOnChange(logKey);
       return;
     }
     const error = arrErrorMessage(s.reason);
     report.errors.push({ instance: instances[i].slug, error, kind: arrErrorKind(s.reason) });
-    console.warn(`[missing] ${service} instance "${instances[i].slug}" listing failed:`, error);
+    warnOnChange(logKey, error, `[missing] ${service} instance "${instances[i].slug}" listing failed: ${error}`);
   });
 
   const needPoster = report.items.filter((it) => it.posterPath === null && it.tmdbId !== null).map((it) => it.tmdbId as number);
@@ -212,9 +218,14 @@ export async function loadCutoffMovies(): Promise<MissingReport<CutoffMovie>> {
   const report = await loadReport<CutoffMovie>("radarr", () => [], async (cfg, instance) => {
     const [listing, profiles] = await Promise.all([readCutoffPages(cfg, "radarr"), readProfiles(cfg)]);
     const out: CutoffMovie[] = [];
+    const seen = new Set<number>();
     for (const row of listing.records as RadarrCutoffRow[]) {
       const m = row && typeof row === "object" ? cutoffMovie(row, instance, profiles) : null;
-      if (m) out.push(m);
+      // A page boundary can repeat a record while the list changes under the read.
+      if (m && !seen.has(m.arrId)) {
+        seen.add(m.arrId);
+        out.push(m);
+      }
     }
     if (listing.truncated) truncated.push({ instance, read: listing.records.length, total: listing.total });
     return out;

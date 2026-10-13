@@ -5,6 +5,7 @@ import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
 import { isFeatureEnabled } from "@/lib/features";
 import { loadMissingEpisodes, MissingInstanceError } from "@/lib/arr-missing-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 // Admin → Missing, one series expanded (ADMIN): its aired, monitored,
 // regular-season episodes that have no file, with their air dates. `instance` is
@@ -34,7 +35,8 @@ export const GET = withAdmin(snapshotted(async (req) => {
     if (err instanceof ArrResponseError && err.status === 404) {
       return NextResponse.json({ error: t("apiAdmin.missing.seriesNotFound") }, { status: 404 });
     }
-    console.warn(`[missing] sonarr instance "${instance}" episode listing failed:`, arrErrorMessage(err));
+    // The slug is the browser's: never written raw into a log line (CR/LF, ANSI).
+    console.warn(`[missing] sonarr instance "${sanitizeForLog(instance)}" episode listing failed:`, arrErrorMessage(err));
     return NextResponse.json({ error: t("apiAdmin.missing.sonarrUnreachable") }, { status: 502 });
   }
 }));

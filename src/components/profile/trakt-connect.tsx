@@ -51,25 +51,33 @@ export function TraktConnect(props: TraktConnectProps) {
   const [error, setError] = useState<string | null>(null);
   // The poll loop's timer, so a cancel or an unmount stops it.
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped by every stop (cancel, unmount). A poll request already in flight
+  // when that happens would otherwise resume afterwards, reschedule itself and
+  // keep polling (and report "expired") for a flow the user abandoned.
+  const pollGen = useRef(0);
 
   useEffect(() => () => {
+    pollGen.current += 1;
     if (pollTimer.current) clearTimeout(pollTimer.current);
   }, []);
 
   function stopPolling() {
+    pollGen.current += 1;
     if (pollTimer.current) clearTimeout(pollTimer.current);
     pollTimer.current = null;
   }
 
   function schedulePoll(intervalSeconds: number) {
     stopPolling();
-    pollTimer.current = setTimeout(() => void poll(intervalSeconds), Math.max(intervalSeconds, 2) * 1000);
+    const gen = pollGen.current;
+    pollTimer.current = setTimeout(() => void poll(intervalSeconds, gen), Math.max(intervalSeconds, 2) * 1000);
   }
 
-  async function poll(intervalSeconds: number) {
+  async function poll(intervalSeconds: number, gen: number) {
     try {
       const res = await fetch(withBasePath("/api/profile/trakt/device/poll"), { method: "POST" });
       const data = await res.json().catch(() => ({}));
+      if (pollGen.current !== gen) return;
       if (!res.ok) {
         // Transient (Trakt unreachable, rate limited): keep waiting.
         if (res.status === 429 || res.status >= 500) {
@@ -104,7 +112,7 @@ export function TraktConnect(props: TraktConnectProps) {
           setError(t("profile.trakt.error.expired"));
       }
     } catch {
-      schedulePoll(intervalSeconds * 2);
+      if (pollGen.current === gen) schedulePoll(intervalSeconds * 2);
     }
   }
 

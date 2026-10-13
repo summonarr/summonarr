@@ -26,8 +26,11 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   // with no body (or `{}`) the claim toggles without that check. `null` is a real
   // value meaning "I saw this unclaimed", so we test whether the key is present
   // with `in`, not with a truthiness check.
-  const body = await readJsonCappedOr<{ expectedClaimedBy?: unknown }>(req, 8192, {});
-  if (body instanceof NextResponse) return body;
+  const rawBody = await readJsonCappedOr<{ expectedClaimedBy?: unknown }>(req, 8192, {});
+  if (rawBody instanceof NextResponse) return rawBody;
+  // `in` throws on null / a primitive (a literal `null` or `5` body parses fine).
+  const body: { expectedClaimedBy?: unknown } =
+    rawBody !== null && typeof rawBody === "object" ? rawBody : {};
   const hasExpectation = "expectedClaimedBy" in body;
   const expectedClaimedBy = body.expectedClaimedBy;
   if (hasExpectation && expectedClaimedBy !== null && typeof expectedClaimedBy !== "string") {

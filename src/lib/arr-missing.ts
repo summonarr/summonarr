@@ -391,8 +391,15 @@ export function cutoffSeriesFromEpisodes(
   profiles: ReadonlyMap<number, QualityProfileInfo>,
 ): CutoffSeries[] {
   const bySeries = new Map<number, CutoffSeries>();
+  // The listing is paged while it changes: an episode on two pages is one episode.
+  const seenEpisodes = new Set<number>();
   for (const r of records) {
     if (!r || typeof r !== "object" || r.hasFile !== true) continue;
+    const episodeId = posInt(r.id);
+    if (episodeId !== null) {
+      if (seenEpisodes.has(episodeId)) continue;
+      seenEpisodes.add(episodeId);
+    }
     const seriesId = posInt(r.seriesId) ?? posInt(r.series?.id);
     const seasonNumber = typeof r.seasonNumber === "number" && Number.isInteger(r.seasonNumber) && r.seasonNumber >= 0 ? r.seasonNumber : null;
     const episodeNumber = typeof r.episodeNumber === "number" && Number.isInteger(r.episodeNumber) && r.episodeNumber >= 0 ? r.episodeNumber : null;

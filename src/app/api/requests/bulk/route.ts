@@ -28,6 +28,7 @@ import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow } from "@/lib/q
 import { logAudit, auditContext } from "@/lib/audit";
 import { mapLimit } from "@/lib/concurrency";
 import { readJsonCapped } from "@/lib/body-size";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
@@ -131,9 +132,16 @@ export const POST = withPermission([
 
   const parsed: { tmdbId: number; mediaType: MediaType }[] = [];
   for (const raw of body.items) {
-    const it = raw as { tmdbId?: unknown; mediaType?: unknown };
+    // A null/primitive element is a malformed item, not a TypeError (500).
+    const it = (raw !== null && typeof raw === "object" ? raw : {}) as { tmdbId?: unknown; mediaType?: unknown };
     if (!Number.isInteger(it.tmdbId) || (it.tmdbId as number) <= 0) {
       return NextResponse.json({ error: t("apiUser.requests.bulk.itemTmdbId") }, { status: 400 });
+    }
+    // Bulk carries no per-item _token (the single POST's HMAC token is minted only
+    // for an in-range id), so an INT4-overflowing id would reach the first keyed
+    // mediaRequest read below and throw out of Prisma as a 500.
+    if (!isTmdbIdInRange(it.tmdbId as number)) {
+      return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
     }
     if (it.mediaType !== "MOVIE" && it.mediaType !== "TV") {
       return NextResponse.json({ error: t("apiUser.requests.bulk.itemMediaType") }, { status: 400 });

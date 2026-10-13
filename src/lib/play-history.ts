@@ -1010,7 +1010,7 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "mediaServerUserId" IN (${idIn}) AND "resolution" IS NOT NULL
-       GROUP BY resolution ORDER BY count DESC LIMIT 8`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 8`,
       ...ids,
     ),
     prisma.$queryRawUnsafe<{ dow: number; hour: number; count: bigint }[]>(
@@ -1273,7 +1273,7 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
       // otherwise one looped session reads as 300% and drags the title's
       // average past 100%.
       `SELECT AVG(
-         CASE WHEN "duration" > 0 THEN LEAST("playDuration"::float / "duration", 1.0) * 100 ELSE 0 END
+         CASE WHEN "duration" > 0 THEN LEAST("playDuration"::float / "duration", 1.0) * 100 ELSE NULL END
        )::float8 AS avg_pct
        FROM "PlayHistory" WHERE "tmdbId" = $1 AND ${mtClause}`,
       tmdbId,
@@ -1325,7 +1325,7 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "tmdbId" = $1 AND ${mtClause} AND "resolution" IS NOT NULL
-       GROUP BY resolution ORDER BY count DESC`,
+       GROUP BY 1 ORDER BY count DESC`,
       tmdbId,
       mt,
     ),
@@ -2298,7 +2298,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       `SELECT COALESCE(NULLIF(LOWER("container"), ''), 'unknown') AS container,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
-       GROUP BY container ORDER BY count DESC LIMIT 8`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 8`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
@@ -2351,7 +2351,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       `SELECT COALESCE(NULLIF("device", ''), 'Unknown') AS device,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY device ORDER BY count DESC LIMIT 10`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
     // Client apps and the source split are SESSION analytics (raw `where`), like the codec,
@@ -2362,7 +2362,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       `SELECT COALESCE(NULLIF("player", ''), 'Unknown') AS player,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
-       GROUP BY player ORDER BY count DESC LIMIT 10`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ source: string; count: bigint }[]>(
@@ -2768,7 +2768,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     prisma.$queryRawUnsafe<{ resolution: string; count: bigint }[]>(
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "resolution" IS NOT NULL AND "resolution" <> ''
-       GROUP BY resolution ORDER BY count DESC LIMIT 4`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 4`,
       ...params,
     ),
     // Most-played titles in the bucket — same tmdbId/title dedup as the stats

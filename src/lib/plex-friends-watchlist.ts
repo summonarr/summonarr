@@ -267,6 +267,10 @@ export async function fetchFriendWatchlist(
     }
     nodes.push(...page.nodes);
     if (!page.hasNextPage) break;
+    // A page that adds nothing, or one whose cursor did not move, would loop
+    // forever on a misbehaving plex.tv (the walk is otherwise bounded only by
+    // maxItems, which an empty page never advances).
+    if (page.nodes.length === 0 || page.endCursor === after) break;
     after = page.endCursor;
   }
   return { status: "ok", nodes: nodes.slice(0, opts.maxItems) };

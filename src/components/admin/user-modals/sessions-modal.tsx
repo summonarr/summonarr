@@ -72,30 +72,47 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
   useModalA11y(dialogRef, onClose, closeBtnRef);
 
+  // The translator through a ref: the users page router.refresh()es after every
+  // row action, which hands the provider a new catalog and so a new `t`. As an
+  // effect dependency that re-fetched the list under an open modal — and a
+  // read that began before a revoke could land after it and bring the row back.
+  const tRef = useRef(t);
   useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
+  useEffect(() => {
+    let live = true;
     (async () => {
       try {
         const r = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`));
+        if (!live) return;
         if (!r.ok) {
           // Show the route's own sentence when it has one. The route admits
           // MANAGE_USERS but refuses an ADMIN target to a caller without the
           // ADMIN bit (403) — a generic "could not load" there read as a broken
           // page rather than a rule. An empty list would read as "no sessions".
           const data = (await r.json().catch(() => null)) as { error?: string } | null;
+          if (!live) return;
           setSessions([]);
-          setError(data?.error ?? t("adminManage.sessions.loadError"));
+          setError(data?.error ?? tRef.current("adminManage.sessions.loadError"));
           return;
         }
         const data = (await r.json()) as unknown;
+        if (!live) return;
         setSessions(Array.isArray(data) ? (data as AdminAuthSession[]) : []);
       } catch {
+        if (!live) return;
         setSessions([]);
-        setError(t("adminManage.sessions.loadError"));
+        setError(tRef.current("adminManage.sessions.loadError"));
       } finally {
-        setLoading(false);
+        if (live) setLoading(false);
       }
     })();
-  }, [u.id, t]);
+    return () => {
+      live = false;
+    };
+  }, [u.id]);
 
   async function revoke(sessionId: string) {
     setConfirmingRevoke(null);

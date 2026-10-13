@@ -59,7 +59,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
       });
     try {
       const res = await fetch(withBasePath(endpoint), { method: "POST" });
-      const data = await res.json() as { ok?: boolean; skipped?: unknown; durationMs?: number; error?: string };
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; skipped?: unknown; durationMs?: number; error?: string };
       // Success = a 2xx status and no `error` field. Don't look at `ok` or
       // `skipped`: most of these endpoints don't return `ok` at all (/api/sync
       // answers {checked, marked, …}), and /api/sync/ratings' `skipped` is a

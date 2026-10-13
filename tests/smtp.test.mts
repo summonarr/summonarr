@@ -367,6 +367,27 @@ test("ASCII subject passes through; unicode subject becomes a UTF-8 B encoded-wo
   assert.equal(Buffer.from(m[1], "base64").toString("utf8"), subject);
 });
 
+test("a long non-ASCII subject is split into <=75-char encoded-words on code-point boundaries", async () => {
+  const subject = "新しい映画のリクエスト 📬 ".repeat(12) + "Fin";
+  const r = await runSendMail({ msg: { subject } });
+  assert.equal(r.error, undefined);
+  const { headers } = extractMessage(r.writes);
+  const start = headers.findIndex((h) => h.startsWith("Subject: "));
+  const lines = [headers[start].slice("Subject: ".length)];
+  for (let i = start + 1; headers[i]?.startsWith(" "); i++) lines.push(headers[i].slice(1));
+  assert.ok(lines.length > 1, "expected the subject to fold across several lines");
+  let decoded = "";
+  for (const line of lines) {
+    assert.ok(line.length <= 75, `encoded-word too long: ${line.length}`);
+    const m = /^=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=$/.exec(line);
+    assert.ok(m, line);
+    const text = Buffer.from(m[1], "base64").toString("utf8");
+    assert.equal(text.includes("�"), false, "a word split a multi-byte character");
+    decoded += text;
+  }
+  assert.equal(decoded, subject);
+});
+
 test("CRLF in the subject is neutralized by the encoded-word path (no header injection)", async () => {
   const subject = "Hello\r\nX-Injected: evil";
   const r = await runSendMail({ msg: { subject } });

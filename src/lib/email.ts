@@ -842,7 +842,7 @@ export async function notifyUserSecurityEventEmail(data: {
       lang,
       preheader: data.message,
       accent: "amber",
-      heading: esc(data.heading),
+      heading: data.heading,
       subheading: t("notify.email.security.subheading", { message: esc(data.message) }),
       ctaLabel: cfg.siteUrl ? t("notify.email.security.cta") : undefined,
       ctaHref: cfg.siteUrl ? buildSiteUrl(cfg.siteUrl, "/profile#two-factor") : undefined,
@@ -889,7 +889,15 @@ export async function sendNotificationEmailVerification(to: string, token: strin
   if (!cfg || !isBackendConfigured(cfg)) {
     throw new Error("Email transport is not configured on this server");
   }
-  const base = (cfg.siteUrl || process.env.AUTH_URL || "").replace(/\/+$/, "");
+  let base = (cfg.siteUrl || "").replace(/\/+$/, "");
+  if (!base) {
+    // AUTH_URL is the bare origin; on a BASE_PATH deployment the app (and this
+    // route) live under that prefix, so the fallback link needs it too or the
+    // emailed Confirm link 404s (the same rule calendarSiteUrl applies).
+    base = (process.env.AUTH_URL || "").replace(/\/+$/, "");
+    const bp = (process.env.BASE_PATH ?? "").trim().replace(/^\/+|\/+$/g, "");
+    if (base && bp && !base.endsWith(`/${bp}`)) base = `${base}/${bp}`;
+  }
   if (!base) throw new Error("No site URL is configured for the verification link");
   const verifyUrl = `${base}/api/profile/notification-email/confirm?token=${encodeURIComponent(token)}`;
   const lang = langFor(locale);

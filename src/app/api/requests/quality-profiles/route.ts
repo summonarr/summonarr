@@ -6,6 +6,8 @@ import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { prisma } from "@/lib/prisma";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 
 // Quality profiles for the Radarr/Sonarr instance a given request targets, so the
 // approve UI can offer "approve with profile X", and the request UI can offer a
@@ -17,6 +19,12 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 //   ?is4k=true           → legacy shorthand for instance=4k
 export const GET = withPermission([Permission.MANAGE_REQUESTS, Permission.REQUEST_ADVANCED])(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // Every call is a live Radarr/Sonarr read, and REQUEST_ADVANCED is held by
+  // ordinary requesters, so bound it per user (generous: an approver opens the
+  // picker once per request they act on).
+  if (!checkRateLimit(`quality-profiles:${session.user.id}`, 120, 60_000)) {
+    return tooManyRequests(60);
+  }
   const sp = req.nextUrl.searchParams;
   const mediaType = sp.get("mediaType");
   if (mediaType !== "MOVIE" && mediaType !== "TV") {

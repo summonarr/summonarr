@@ -68,9 +68,13 @@ export function parsePlayHistoryFilters(params: URLSearchParams): SqlFragment[] 
   if (platform) fragments.push({ sql: `h."platform" = ?`, binds: [platform] });
 
   const startDate = params.get("startDate");
-  if (startDate) fragments.push({ sql: `h."startedAt" >= ?`, binds: [new Date(startDate)] });
+  // An unparseable date is ignored like any other unrecognized param — binding
+  // an Invalid Date makes the driver throw (a 500 for a malformed query string).
+  const startAt = startDate ? new Date(startDate) : null;
+  if (startAt && !isNaN(startAt.getTime())) fragments.push({ sql: `h."startedAt" >= ?`, binds: [startAt] });
   const endDate = params.get("endDate");
-  if (endDate) fragments.push({ sql: `h."startedAt" <= ?`, binds: [new Date(endDate)] });
+  const endAt = endDate ? new Date(endDate) : null;
+  if (endAt && !isNaN(endAt.getTime())) fragments.push({ sql: `h."startedAt" <= ?`, binds: [endAt] });
 
   const search = params.get("search")?.trim().slice(0, SEARCH_TERM_MAX_LEN);
   if (search) {

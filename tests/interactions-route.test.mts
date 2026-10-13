@@ -1307,3 +1307,29 @@ test("the welcome channel takes /link only — /watchlist, /issue and /recent ar
   }
   assert.deepEqual(opsOf("watchlistItem.create"), []);
 });
+
+// ── pick: an auto-approve whose *arr push fails still alerts the admins ─────
+// The row rolls back to PENDING with pendingNotifyAt cleared, so the web path
+// (request-create.ts) announces it like any pending request. The Discord fork
+// replied "an admin will review it" and told the admins nothing.
+test("pick: auto-approve whose push fails announces the PENDING row to the outbound admin channels", async () => {
+  const sid = seedPick("ADMIN"); // no Radarr configured ⇒ the push throws
+  agentRows.push(agentRow("request.created"));
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(() => agentPosts.length >= 1, 400);
+  assert.equal(requestRows.at(-1)?.status ?? "PENDING", "PENDING");
+  assert.deepEqual(agentPosts.map((p) => p.event), ["request.created"]);
+});
+
+test("pick: an undated TMDB result is stored with releaseYear null, never the display word \"Unknown\"", async () => {
+  const sid = seedPick("USER");
+  const key = `p:${sid}:${PICKER}`;
+  const row = pendingRows.get(key)!;
+  const pending = JSON.parse(row.data) as { results: Array<Record<string, unknown>> };
+  pending.results[0].releaseYear = "Unknown";
+  pendingRows.set(key, { ...row, data: JSON.stringify(pending) });
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  const data = (opsOf("mediaRequest.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(data.releaseYear, null);
+});

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { generateRequestToken } from "@/lib/request-token";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Mints the short-lived HMAC token (scoped to tmdbId+mediaType+user) that
@@ -12,6 +13,9 @@ export const GET = withAuth(async (req, _ctx, session) => {
 
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
+  }
+  if (!isTmdbIdInRange(tmdbId)) {
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
     return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });

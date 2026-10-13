@@ -339,11 +339,17 @@ function mergeInto(row: QueueItem, next: QueueItem): void {
 export function foldQueueRecords(service: QueueService, instance: string, records: readonly unknown[]): QueueItem[] {
   const rows: QueueItem[] = [];
   const byDownload = new Map<string, QueueItem>();
+  // The queue is read page by page while it changes (the arr's default order is
+  // time left, which moves with progress), so a record can land on two pages.
+  // One record is one record: a repeat would be a second row with the same key,
+  // and a Sonarr pack would list its id twice.
+  const seenIds = new Set<number>();
   for (const raw of records) {
     if (!raw || typeof raw !== "object") continue;
     const r = raw as QueueRecord;
     const id = posInt(r.id);
-    if (id === null) continue;
+    if (id === null || seenIds.has(id)) continue;
+    seenIds.add(id);
     const item = toItem(service, instance, r, id);
     const key = service === "sonarr" && item.downloadId ? `${item.downloadId}:${item.arrMediaId ?? ""}` : null;
     const existing = key ? byDownload.get(key) : undefined;

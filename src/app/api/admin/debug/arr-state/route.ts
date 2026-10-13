@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
 import { getSonarrSeriesCompletion, isArrConfigured, isMovieWantedInRadarr } from "@/lib/arr";
@@ -23,7 +24,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     return NextResponse.json({ error: "tmdbId and type=movie|tv required" }, { status: 400 });
   }
   const tmdbId = Number(tmdbIdRaw);
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  if (!isTmdbIdInRange(tmdbId)) {
     return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
   }
   const dbType: "MOVIE" | "TV" = type === "movie" ? "MOVIE" : "TV";

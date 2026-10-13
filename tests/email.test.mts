@@ -596,6 +596,23 @@ test("verification email: respects the master toggle, falls back to AUTH_URL, re
   assert.equal(fetchCalls.length, 0);
 });
 
+test("verification email: the AUTH_URL fallback carries BASE_PATH so the confirm link resolves on a subpath deployment", async () => {
+  const prevAuth = process.env.AUTH_URL;
+  const prevBase = process.env.BASE_PATH;
+  try {
+    configureResend({ siteUrl: undefined });
+    process.env.AUTH_URL = "https://auth.example.com/";
+    process.env.BASE_PATH = "/request/";
+    await sendNotificationEmailVerification("x@example.com", "tok9");
+    assert.ok(
+      sentEmails()[0].html.includes("https://auth.example.com/request/api/profile/notification-email/confirm?token=tok9"),
+    );
+  } finally {
+    if (prevAuth === undefined) delete process.env.AUTH_URL; else process.env.AUTH_URL = prevAuth;
+    if (prevBase === undefined) delete process.env.BASE_PATH; else process.env.BASE_PATH = prevBase;
+  }
+});
+
 // ── SMTP path: pre-socket gates ─────────────────────────────────────────────
 
 test("smtp backend: SSRF and port gates fire before any socket (and the resend path is never touched)", async () => {

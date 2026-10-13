@@ -79,3 +79,10 @@ test("bulk: the per-call limit honours rateLimitRequests and a zero-row batch is
   assert.match(CODE, /checkRateLimit\(`bulk:\$\{session\.user\.id\}`, bulkLimit, 60_000\)/);
   assert.match(CODE, /\{ status: createdCount > 0 \? 201 : 200 \}/);
 });
+
+test("bulk: an INT4-overflowing tmdbId is a 400 before any keyed read (no per-item _token to bound it)", () => {
+  const range = CODE.indexOf("isTmdbIdInRange(it.tmdbId as number)");
+  const firstKeyedRead = CODE.indexOf("prisma.mediaRequest.findMany");
+  assert.ok(range > 0 && firstKeyedRead > range, "the range check precedes the first tmdbId-keyed query");
+  assert.match(CODE, /tmdbIdOutOfRange"\) \}, \{ status: 400 \}/);
+});

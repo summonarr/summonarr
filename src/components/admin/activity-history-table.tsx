@@ -179,7 +179,17 @@ export function ActivityHistoryTable({
     // `limit` is part of the key (a page-size change re-pages from 1); `page`
     // and `reloadToken` deliberately are not — a delete refetches the CURRENT
     // page.
-    const filterKey = `${params.toString()}|${limit}`;
+    //
+    // The period's lower bound is NOT part of the key. `startDateIso` is read
+    // off the clock on every server render, and the page's live refresher
+    // (activity:history-updated → router.refresh) hands this table a new one
+    // each time a play finishes: keyed on it, every finished stream looked like
+    // a filter change and threw an admin paging through history back to page 1.
+    // A period change remounts the table (the page's `key`), so it never needs
+    // to be detected here; the refetch itself still runs, on the current page.
+    const keyParams = new URLSearchParams(params);
+    if (startDateIso && keyParams.get("startDate") === startDateIso) keyParams.delete("startDate");
+    const filterKey = `${keyParams.toString()}|${limit}`;
     if (
       lastFilterKeyRef.current !== null &&
       lastFilterKeyRef.current !== filterKey &&
@@ -232,7 +242,7 @@ export function ActivityHistoryTable({
       });
 
     return () => controller.abort();
-  }, [page, limit, buildFilterParams, reloadToken]);
+  }, [page, limit, buildFilterParams, reloadToken, startDateIso]);
 
   function toggleSort(field: SortField) {
     if (sortBy === field) {

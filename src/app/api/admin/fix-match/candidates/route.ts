@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import nodePath from "node:path";
 import { prisma } from "@/lib/prisma";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -408,9 +409,9 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
   const arrTmdbIdParam     = searchParams.get("arrTmdbId");
   const arrTmdbIdHintRaw   = arrTmdbIdParam ? parseInt(arrTmdbIdParam, 10) : null;
 
-  const tmdbId        = Number.isInteger(tmdbIdRaw)        && tmdbIdRaw        > 0 ? tmdbIdRaw        : 0;
-  const correctTmdbId = Number.isInteger(correctTmdbIdRaw) && correctTmdbIdRaw > 0 ? correctTmdbIdRaw : 0;
-  const arrTmdbIdHint = arrTmdbIdHintRaw !== null && Number.isInteger(arrTmdbIdHintRaw) && arrTmdbIdHintRaw > 0
+  const tmdbId        = isTmdbIdInRange(tmdbIdRaw)        ? tmdbIdRaw        : 0;
+  const correctTmdbId = isTmdbIdInRange(correctTmdbIdRaw) ? correctTmdbIdRaw : 0;
+  const arrTmdbIdHint = arrTmdbIdHintRaw !== null && isTmdbIdInRange(arrTmdbIdHintRaw)
     ? arrTmdbIdHintRaw
     : null;
 

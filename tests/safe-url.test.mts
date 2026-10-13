@@ -11,6 +11,16 @@ test("absolute http/https pass through (trimmed)", () => {
   assert.equal(safeExternalHref("  https://example.com  "), "https://example.com");
 });
 
+// Dot-segment collapsing leaves a leading "//" on the internal origin, which a
+// Location header / new URL(path, base) then treats as protocol-relative.
+test("dot-segment protocol-relative bypasses are rejected", () => {
+  assert.equal(safeInternalPath("/.//evil.com"), undefined);
+  assert.equal(safeInternalPath("/a/..//evil.com"), undefined);
+  assert.equal(safeInternalPath("/%2e//evil.com"), undefined);
+  assert.equal(safeInternalPath("/..//evil.com"), undefined);
+  assert.equal(safeInternalPath("/./\\evil.com"), undefined);
+});
+
 test("script-execution schemes are rejected", () => {
   assert.equal(safeExternalHref("javascript:alert(1)"), undefined);
   assert.equal(safeExternalHref("data:text/html,<script>alert(1)</script>"), undefined);

@@ -60,7 +60,8 @@ export default async function MediaActivityPage({
 
   const { tmdbId: tmdbIdStr } = await params;
   const tmdbId = parseInt(tmdbIdStr, 10);
-  if (!Number.isFinite(tmdbId)) notFound();
+  // tmdbId is an INT4 column: anything past it would throw in Postgres (500).
+  if (!Number.isInteger(tmdbId) || tmdbId < 1 || tmdbId > 2147483647) notFound();
 
   // TMDB ids are namespaced per type, so a movie and a show can share one id.
   // When the linking surface passes ?type=, scope the stats to that media type.

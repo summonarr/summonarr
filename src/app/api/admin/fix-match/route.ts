@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { readJsonCapped } from "@/lib/body-size";
 import { withIssueAdmin } from "@/lib/api-auth";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted, SafeFetchError } from "@/lib/safe-fetch";
 
@@ -1082,10 +1083,10 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.mediaTypeQuoted") }, { status: 400 });
   }
   const itemMode = body.itemKey !== undefined;
-  if (!itemMode && (!Number.isInteger(tmdbId) || tmdbId <= 0)) {
+  if (!itemMode && !isTmdbIdInRange(tmdbId)) {
     return NextResponse.json({ error: t("apiAdmin.common.tmdbIdPositive") }, { status: 400 });
   }
-  if (!Number.isInteger(correctTmdbId) || correctTmdbId <= 0) {
+  if (!isTmdbIdInRange(correctTmdbId)) {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.correctTmdbIdPositive") }, { status: 400 });
   }
   if (!itemMode && tmdbId === correctTmdbId) {

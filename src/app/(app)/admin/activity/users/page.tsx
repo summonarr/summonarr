@@ -83,13 +83,16 @@ function SortHeader({
 export default async function UsersActivityPage({
   searchParams,
 }: {
-  searchParams: Promise<{ search?: string; sort?: string; dir?: string }>;
+  searchParams: Promise<{ search?: string | string[]; sort?: string; dir?: string }>;
 }) {
   await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const { search, sort: sortParam, dir: dirParam } = await searchParams;
+  const { search: searchRaw, sort: sortParam, dir: dirParam } = await searchParams;
+  // A repeated ?search= arrives as an array at runtime; `.toLowerCase()` on it
+  // would 500 the page. Take the first value.
+  const search = Array.isArray(searchRaw) ? searchRaw[0] : searchRaw;
   const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
 
   const sort: SortField = (SORT_FIELDS as readonly string[]).includes(sortParam ?? "")

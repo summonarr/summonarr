@@ -94,7 +94,7 @@ function groupIssues<T extends {
 export default async function AdminIssuesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string; selected?: string }>;
+  searchParams: Promise<{ filter?: string; selected?: string | string[] }>;
 }) {
   await requireFeature("feature.page.issues");
   const session = await authActive();
@@ -106,7 +106,10 @@ export default async function AdminIssuesPage({
   const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
   const t = await getTranslator();
 
-  const { filter: rawFilter, selected: selectedId } = await searchParams;
+  const { filter: rawFilter, selected: selectedRaw } = await searchParams;
+  // A repeated ?selected= arrives as an array at runtime, and an array `id` is a
+  // Prisma validation error (a 500) in the findUnique fallback below.
+  const selectedId = Array.isArray(selectedRaw) ? selectedRaw[0] : selectedRaw;
   const filter: FilterValue = VALID_FILTERS.includes(rawFilter as FilterValue)
     ? (rawFilter as FilterValue)
     : "OPEN";

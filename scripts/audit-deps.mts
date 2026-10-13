@@ -492,7 +492,14 @@ export function loadExceptions(cwd: string): { exceptions: SecurityException[]; 
       return;
     }
     const expires = record.expires as string;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(expires) || Number.isNaN(Date.parse(`${expires}T00:00:00Z`))) {
+    const expiresMs = Date.parse(`${expires}T00:00:00Z`);
+    // V8 rolls an impossible date (2026-02-31) over to the next month instead of
+    // returning NaN, so round-trip it to reject one.
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(expires) ||
+      Number.isNaN(expiresMs) ||
+      new Date(expiresMs).toISOString().slice(0, 10) !== expires
+    ) {
       errors.push(`${where}: "expires" must be an ISO date (YYYY-MM-DD), got "${expires}"`);
       return;
     }

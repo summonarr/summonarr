@@ -32,13 +32,17 @@ for (const action of AUDIT_ACTIONS) {
 export default async function AuditLogPage({
   searchParams,
 }: {
-  searchParams: Promise<{ action?: string; group?: string; dateFrom?: string; dateTo?: string; user?: string; target?: string; hideCron?: string }>;
+  searchParams: Promise<{ action?: string; group?: string; dateFrom?: string; dateTo?: string; user?: string | string[]; target?: string | string[]; hideCron?: string }>;
 }) {
   await requireFeature("feature.admin.auditLog");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const { action: actionParam, group: groupParam, dateFrom, dateTo, user, target, hideCron: hideCronParam } = await searchParams;
+  const { action: actionParam, group: groupParam, dateFrom, dateTo, user: userRaw, target: targetRaw, hideCron: hideCronParam } = await searchParams;
+  // A repeated query key arrives as an array at runtime; sanitizeContainsSearch
+  // calls .replace, which would 500 the page. Take the first value.
+  const user = Array.isArray(userRaw) ? userRaw[0] : userRaw;
+  const target = Array.isArray(targetRaw) ? targetRaw[0] : targetRaw;
   const action = VALID_ACTIONS.includes(actionParam as AuditAction)
     ? (actionParam as AuditAction)
     : undefined;
