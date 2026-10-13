@@ -16,7 +16,7 @@
 //     server-wide instead.
 import { prisma } from "./prisma";
 import { lookupTmdbToTvdb, resolveArrTargets, type ArrLibraryEntry, type ArrLibraryIndex, type CrossRefMode } from "./library-cleanup-arr";
-import { loadLibraryWatchFacts, type LibraryWatchTitle, type ServerCoverage, type TitleKey } from "./never-watched-data";
+import { loadLibraryWatchFacts, type LibraryWatchTitle, type ServerCoverage, type SharedWatchFacts, type TitleKey } from "./never-watched-data";
 import { latestDate, type NwSeasonVerdict } from "./never-watched";
 import {
   CLEANUP_SETTING_KEYS,
@@ -124,6 +124,10 @@ export function cleanupRequestIdentity(
 // and the exact requests they link, for every row it could call eligible. The
 // map comes back as `targets` (null when not asked for). `opts.crossRef`
 // (default "cached" — a read path never waits on TMDB, see CrossRefMode).
+// `opts.shared` is a whole-library facts load another computation of the same
+// caller shares (SharedWatchFacts): used IN PLACE of this read, so it must be
+// the read this call would make — same index, same `now`, whole library,
+// seasons when asked for — or it throws (sharedFactsMismatch).
 export async function loadCleanupTitles(
   arr: ArrLibraryIndex | null,
   only?: readonly TitleKey[],
@@ -133,9 +137,16 @@ export async function loadCleanupTitles(
     tvdbIds?: ReadonlyMap<string, readonly number[]>;
     resolveTargets?: (t: LibraryWatchTitle) => boolean;
     crossRef?: CrossRefMode;
+    shared?: SharedWatchFacts;
   } = {},
 ): Promise<{ titles: CleanupTitle[]; ctx: CleanupLoadContext; targets: ReadonlyMap<string, readonly ArrLibraryEntry[]> | null }> {
-  const facts = await loadLibraryWatchFacts(arr, { only, seasons: opts.seasons, now: opts.now });
+  if (opts.shared) {
+    const mismatch = sharedFactsMismatch(opts.shared, arr, only, opts);
+    if (mismatch) throw new Error(`[cleanup] shared watch facts don't fit this read: ${mismatch}`);
+  }
+  const facts = opts.shared
+    ? await opts.shared.load()
+    : await loadLibraryWatchFacts(arr, { only, seasons: opts.seasons, now: opts.now });
   const loadCtx: CleanupLoadContext = {
     playHistoryTracked: facts.ctx.trackingOn,
     historyStart: facts.historyStart,
@@ -250,6 +261,24 @@ export async function loadCleanupTitles(
   return { titles: [...byKey.values()], ctx: loadCtx, targets };
 }
 
+// Why a shared facts load can't stand in for this read, or null when it can.
+// Same index object (the verdict reads it: a fulfilled request's delivery date
+// counts only while its instance hasn't re-added the title since), same `now`
+// (every window and age), the whole library (a narrowed read is its own query),
+// and seasons when the caller wants them.
+function sharedFactsMismatch(
+  shared: SharedWatchFacts,
+  arr: ArrLibraryIndex | null,
+  only: readonly TitleKey[] | undefined,
+  opts: { seasons?: boolean; now?: Date },
+): string | null {
+  if (only) return "a narrowed read";
+  if (shared.arr !== arr) return "another Radarr/Sonarr index";
+  if (!opts.now || opts.now.getTime() !== shared.now.getTime()) return "another now";
+  if (opts.seasons && !shared.seasons) return "no seasons";
+  return null;
+}
+
 const DAY_MS = 86_400_000;
 const TMDB_STATUS_CHUNK = 500;
 const CORE_CHUNK = 5_000;
@@ -345,15 +374,18 @@ export interface CleanupReport {
 // narrowed-read parity). The delete route resolves its own targets first and
 // passes `tvdbIds` instead. `opts.crossRef` defaults to "cached" (no TMDB call
 // inside a page render); the delete route passes "fetch" (CrossRefMode).
+// `opts.shared` (the /admin/stats storage section — SharedWatchFacts) replaces
+// the first, whole-library facts read and nothing else: the narrowed re-judge
+// below still reads its own.
 export async function computeCleanupReport(
   arr: ArrLibraryIndex | null,
   now: Date,
   only?: readonly TitleKey[],
-  opts: { tvdbIds?: ReadonlyMap<string, readonly number[]>; resolveTargets?: boolean; crossRef?: CrossRefMode } = {},
+  opts: { tvdbIds?: ReadonlyMap<string, readonly number[]>; resolveTargets?: boolean; crossRef?: CrossRefMode; shared?: SharedWatchFacts } = {},
 ): Promise<CleanupReport> {
   const crossRef = opts.crossRef ?? "cached";
   const settings = await loadCleanupSettings();
-  const { titles: firstRead, ctx: partial } = await loadCleanupTitles(arr, only, { now, tvdbIds: opts.tvdbIds });
+  const { titles: firstRead, ctx: partial } = await loadCleanupTitles(arr, only, { now, tvdbIds: opts.tvdbIds, shared: opts.shared });
   const ctx: CleanupContext = { now };
   let titles = firstRead;
 

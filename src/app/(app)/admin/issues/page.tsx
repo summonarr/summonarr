@@ -446,10 +446,14 @@ export default async function AdminIssuesPage({
                         )}
                       </div>
 
+                      {/* grow + a real basis, not flex-1: with a 0 basis the row
+                          wrapped only once the actions ALONE overflowed it, so a
+                          ~490px action bar (Refetch · Replace file · In progress ·
+                          Resolve) left the title ~100px at a 1024px viewport. */}
                       <Link
                         href={issueHref(issue.id)}
                         scroll={false}
-                        className="flex-1 min-w-0 block rounded transition-colors"
+                        className="grow basis-40 min-w-0 block rounded transition-colors"
                         style={{ margin: -4, padding: 4 }}
                       >
                         <div

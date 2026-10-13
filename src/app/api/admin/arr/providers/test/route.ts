@@ -16,7 +16,7 @@ const TEST_ONE_PER_MIN = 20;
 
 // Admin → Arr System → Indexers & clients, "Test" (ADMIN).
 //   POST { service, instance, kind: "indexer" | "downloadClient", id?, async? } →
-//   { results: [{ id, ok, warning, messages }] } — the arr's Test All for the
+//   { results: [{ id, ok, warning, messages, uncertain? }] } — the arr's Test All for the
 //   kind (enabled providers only, so an empty list means nothing was enabled
 //   to test), or one provider by id (read from the arr and sent back to its
 //   test endpoint server-side; its credentials never leave the server).

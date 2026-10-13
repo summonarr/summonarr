@@ -46,7 +46,7 @@ test("C002: a never-watched count is reported whatever else is unjudged", () => 
 
 test("C002: the data layer passes the unjudged counts and the tracking switch to the page", () => {
   const src = read("src/lib/admin-stats-data.ts");
-  assert.match(src, /const \{ totals, seasons, trackingOn \} = await getNeverWatchedReport\(\);/);
+  assert.match(src, /const \{ totals, seasons, trackingOn \} = await getNeverWatchedReport\(\{ shared \}\);/);
   assert.match(src, /unknown: totals\.unknown \+ seasons\.filter\(\(s\) => s\.state === "unobservable"\)\.length,/);
   assert.match(src, /possible: totals\.possible \+ seasons\.filter\(\(s\) => s\.state === "possiblyWatched"\)\.length,/);
   assert.match(src, /\n\s+trackingOn,\n/);

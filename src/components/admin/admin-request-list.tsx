@@ -545,7 +545,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
           return (
             <div
               key={group.groupKey}
-              className="flex flex-wrap sm:flex-nowrap items-start"
+              className="flex flex-wrap xl:flex-nowrap items-start"
               style={{
                 gap: 14,
                 padding: 14,
@@ -853,9 +853,11 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 </Chip>
               </div>
 
-              {/* Below sm the actions take their own row: their approve/decline
-                  panels are 208–224px wide and would crush the title column. */}
-              <div className="flex justify-end basis-full sm:basis-auto sm:shrink-0">
+              {/* Below xl the actions take their own row. An APPROVED row's bar
+                  (Why? · Search · Pick release · Re-push · Delete, ~490px) and the
+                  208–224px approve/decline and Why? panels left the title column
+                  36px wide at a 1024px viewport — the title disappeared. */}
+              <div className="flex justify-end basis-full xl:basis-auto xl:shrink-0">
                 <RequestActions
                   requestId={representativeId}
                   currentStatus={group.aggregateStatus}

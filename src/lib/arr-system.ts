@@ -355,6 +355,14 @@ export interface ProviderTestResult {
   warning: boolean;
   /** The arr's validation failures, credentials masked. */
   messages: string[];
+  /**
+   * Test All only: the arr reported failures, none of them is a known error,
+   * and at least one doesn't say whether it is only a warning — what every
+   * System.Text.Json arr sends (see warningFlag). `ok` and `warning` are false;
+   * the page shows it neutrally and points at the row's own Test, whose answer
+   * does carry the flag. Present only when true.
+   */
+  uncertain?: true;
 }
 
 /** An arr's validation failures: masked messages, and whether every one is only a warning. */
@@ -362,49 +370,86 @@ export interface ValidationFailures {
   /** Deduplicated, at most five. */
   messages: string[];
   /**
-   * True when there is at least one failure and EVERY one is a warning —
-   * judged over the whole list, messageless and unreadable entries included
-   * (those count as errors), so a dropped message can never turn an error into
-   * "warnings only".
+   * True when there is at least one failure and EVERY one is known to be a
+   * warning — judged over the whole list, messageless and unreadable entries
+   * included (an unreadable one is an error), so a dropped message can never
+   * turn an error into "warnings only".
    */
   warningsOnly: boolean;
+  /** No failure is a known error, but at least one carries no warning flag and was read as "unknown". */
+  uncertain: boolean;
 }
 
-// NzbDroneValidationFailure carries `isWarning`, which is what the arr itself
-// decides on (its result's IsValid counts the non-warnings). Without it: the
-// failure's `customState` — an `.AsWarning()` rule sets NzbDroneValidationState
-// { isWarning }, and an object-typed property is written with its runtime shape
-// even where a serializer writes a list by its declared base type (Test All's
-// list may be one) — then FluentValidation's `severity` ("warning", or 1).
-function isWarningFailure(r: Raw | null): boolean {
-  if (!r) return false;
+// Which failures are warnings, as read from the arrs' own source (2026-10-13:
+// Radarr v3.2.2, v4.7.5, v5.28, develop; Sonarr v3, v4.0.20, v5.0, develop):
+//   • The arr decides on NzbDroneValidationFailure.IsWarning alone —
+//     NzbDroneValidationResult splits Errors/Warnings on it, taking it from an
+//     `.AsWarning()` rule's CustomState for a plain FluentValidation failure.
+//   • A /test or save 400 writes `validationException.Errors` as `object`
+//     (STJson.ToJson; Radarr v3's STJson.Serialize casts to object), so by its
+//     RUNTIME type, List<NzbDroneValidationFailure>, and every failure of the
+//     provider's test carries `isWarning` (Sonarr v3: Newtonsoft, runtime types
+//     throughout). A
+//     failure without it is a resource validator's plain ValidationFailure,
+//     which the arr refuses on outright — an error.
+//   • Test All's ProviderTestAllResult.ValidationFailures is DECLARED
+//     List<ValidationFailure>, and System.Text.Json writes a list element by its
+//     declared type: on every STJ arr (Radarr v3 and later, Sonarr v4 and later,
+//     /api/v3 and Sonarr's /api/v5 alike) an entry is only {propertyName,
+//     errorMessage, severity}, and a warning's entry is shaped exactly like an
+//     error's. Only Sonarr v3 (Newtonsoft) writes `isWarning` there.
+//   • `severity` is always "error" — FluentValidation's default; neither arr
+//     ever sets it — so it is never evidence of an error, and is read after
+//     everything else, only as positive evidence. `customState` (what the arr
+//     derives IsWarning from) never carries a warning the arr didn't also flag
+//     `isWarning` — Test All's settings failures are the errors-only list — and
+//     is read after it.
+/** true / false: the failure says; null: it carries no warning flag at all. */
+function warningFlag(r: Raw): boolean | null {
   if (typeof r.isWarning === "boolean") return r.isWarning;
   const state = obj(r.customState);
   if (typeof state?.isWarning === "boolean") return state.isWarning;
-  return (typeof r.severity === "string" && r.severity.toLowerCase() === "warning") || r.severity === 1;
+  if ((typeof r.severity === "string" && r.severity.toLowerCase() === "warning") || r.severity === 1) return true;
+  return null;
 }
 
-export function projectFailures(v: unknown): ValidationFailures {
+/**
+ * `unflagged` is what a failure with no warning flag counts as: "error" for a
+ * /test or save 400 (there every warning is flagged — see warningFlag),
+ * "unknown" for Test All, where a System.Text.Json arr flags nothing.
+ */
+export function projectFailures(v: unknown, unflagged: "error" | "unknown" = "error"): ValidationFailures {
   const list = Array.isArray(v) ? v : [];
   const messages: string[] = [];
-  let warningsOnly = list.length > 0;
+  let errors = 0;
+  let unknown = 0;
   for (const x of list) {
     const r = obj(x);
-    if (!isWarningFailure(r)) warningsOnly = false;
+    const flag = r ? warningFlag(r) : false;
+    if (flag === false || (flag === null && unflagged === "error")) errors++;
+    else if (flag === null) unknown++;
     const m = safeMessage(r?.errorMessage ?? r?.message, 300);
     if (m && !messages.includes(m) && messages.length < 5) messages.push(m);
   }
-  return { messages, warningsOnly };
+  return { messages, warningsOnly: list.length > 0 && errors === 0 && unknown === 0, uncertain: errors === 0 && unknown > 0 };
 }
 
 /** A test outcome from the arr's verdict and its failures. */
 export function testResultOf(id: number, isValid: boolean, failures: ValidationFailures): ProviderTestResult {
-  return { id, ok: isValid || failures.warningsOnly, warning: !isValid && failures.warningsOnly, messages: failures.messages };
+  return {
+    id,
+    ok: isValid || failures.warningsOnly,
+    warning: !isValid && failures.warningsOnly,
+    messages: failures.messages,
+    ...(!isValid && failures.uncertain ? { uncertain: true as const } : {}),
+  };
 }
 
 /**
  * /api/v3/{indexer,downloadclient}/testall → one result per provider. The arr
- * marks a provider with only warnings invalid; here it is working, with warnings.
+ * marks a provider with only warnings invalid; here it is working, with
+ * warnings — when the arr says so (Sonarr v3). An STJ arr's entries carry no
+ * flag, so a provider with no known error is `uncertain`, never "failed".
  */
 export function projectTestAll(raw: unknown): ProviderTestResult[] {
   if (!Array.isArray(raw)) return [];
@@ -413,7 +458,7 @@ export function projectTestAll(raw: unknown): ProviderTestResult[] {
     const r = obj(x);
     const id = posInt(r?.id);
     if (!r || id === null) continue;
-    out.push(testResultOf(id, r.isValid === true, projectFailures(r.validationFailures)));
+    out.push(testResultOf(id, r.isValid === true, projectFailures(r.validationFailures, "unknown")));
   }
   return out;
 }
@@ -425,7 +470,7 @@ export function validationFailuresFromBody(body: string): ValidationFailures {
     return projectFailures(Array.isArray(parsed) ? parsed : [parsed]);
   } catch {
     const m = safeMessage(body, 300);
-    return { messages: m ? [m] : [], warningsOnly: false };
+    return { messages: m ? [m] : [], warningsOnly: false, uncertain: false };
   }
 }
 

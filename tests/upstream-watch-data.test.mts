@@ -571,9 +571,11 @@ test("jellyfin: every user × {IsPlayed, IsResumable}; one item in both lists is
   };
   respond = (url) => {
     if (url.pathname === "/Users") return json([{ Id: "u1", Name: "One" }, { Id: "u2", Name: "Two" }]);
-    const m = /^\/Users\/([^/]+)\/Items$/.exec(url.pathname);
-    assert.ok(m, url.pathname);
-    const items = lists[`${m![1]}|${url.searchParams.get("Filters")}`];
+    // GET /Items?userId= — the non-legacy form of /Users/{userId}/Items (same handler).
+    assert.equal(url.pathname, "/Items", `a per-user read on the non-legacy route: ${url}`);
+    const userId = url.searchParams.get("userId");
+    assert.ok(userId, `a per-user read names its user: ${url}`);
+    const items = lists[`${userId}|${url.searchParams.get("Filters")}`];
     assert.ok(items, `unexpected list ${url}`);
     return json({ Items: items, TotalRecordCount: items.length });
   };
@@ -584,8 +586,16 @@ test("jellyfin: every user × {IsPlayed, IsResumable}; one item in both lists is
     { source: "jellyfin", serverInstance: "", completed: true, startedAt: ago(100), sourceItemId: "jold" }, // outside 90 days
   ];
   const result = await refreshUpstreamWatch();
-  const filters = calls.filter((c) => c.path !== "/Users").map((c) => `${c.path}?${c.params.get("Filters")}`).sort();
-  assert.deepEqual(filters, ["/Users/u1/Items?IsPlayed", "/Users/u1/Items?IsResumable", "/Users/u2/Items?IsPlayed", "/Users/u2/Items?IsResumable"]);
+  const filters = calls
+    .filter((c) => c.path !== "/Users")
+    .map((c) => `${c.path}?userId=${c.params.get("userId")}&Filters=${c.params.get("Filters")}`)
+    .sort();
+  assert.deepEqual(filters, [
+    "/Items?userId=u1&Filters=IsPlayed",
+    "/Items?userId=u1&Filters=IsResumable",
+    "/Items?userId=u2&Filters=IsPlayed",
+    "/Items?userId=u2&Filters=IsResumable",
+  ]);
 
   const rows = new Map(evidence.map((e) => [`${e.itemKey}/${e.seasonNumber}`, e]));
   assert.deepEqual([...rows.keys()].sort(), ["jm1/-1", "js1/1"]);
@@ -618,7 +628,7 @@ test("jellyfin: ONE user's list failing fails the whole server (a snapshot missi
   evidence = [oldRow("jellyfin", "")];
   respond = (url) => {
     if (url.pathname === "/Users") return json([{ Id: "u1", Name: "One" }, { Id: "u2", Name: "Two" }]);
-    if (url.pathname === "/Users/u2/Items") return new Response("forbidden", { status: 403 });
+    if (url.pathname === "/Items" && url.searchParams.get("userId") === "u2") return new Response("forbidden", { status: 403 });
     return json({ Items: [{ Type: "Movie", Id: "jm" }], TotalRecordCount: 1 });
   };
   const result = await refreshUpstreamWatch();

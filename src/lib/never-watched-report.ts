@@ -20,7 +20,7 @@ import { cleanupKey, evaluateCleanupTitle, type CleanupExclusion, type CleanupMe
 import { currentActivityGeneration } from "./play-history";
 import { processSingleton } from "./process-singleton";
 import { coalesce } from "./concurrency";
-import { loadLibraryWatchFacts, NEVER_WATCHED_FEATURE_KEY, type LibraryWatchTitle } from "./never-watched-data";
+import { loadLibraryWatchFacts, NEVER_WATCHED_FEATURE_KEY, type LibraryWatchTitle, type SharedWatchFacts } from "./never-watched-data";
 import { hasPermission, Permission } from "./permissions";
 import { upstreamErrorCode, type UpstreamErrorCode } from "./upstream-watch";
 import {
@@ -160,17 +160,27 @@ export function arrServiceReadable(errors: ArrLibraryIndex["errors"], mediaType:
 const needsTargets = (w: LibraryWatchTitle) =>
   w.verdict.state !== "watched" || (w.seasons ?? []).some((s) => s.state !== "watched");
 
-export async function computeNeverWatchedReport(opts: { now?: Date; freshArr?: boolean } = {}): Promise<NeverWatchedReport> {
-  const now = opts.now ?? new Date();
+// `opts.shared` (the /admin/stats storage section, which computes the cleanup
+// report from the same load — SharedWatchFacts) supplies the Radarr/Sonarr index
+// it was loaded for, its `now` and the facts themselves; everything else is
+// computed here exactly as without it.
+export async function computeNeverWatchedReport(
+  opts: { now?: Date; freshArr?: boolean; shared?: SharedWatchFacts } = {},
+): Promise<NeverWatchedReport> {
+  const shared = opts.shared;
+  if (shared && opts.now && opts.now.getTime() !== shared.now.getTime()) {
+    throw new Error("[never-watched] shared watch facts were loaded for another now");
+  }
+  const now = shared?.now ?? opts.now ?? new Date();
   const [{ index: arr, at: arrAt }, settings, cleanupEnabled] = await Promise.all([
-    getCachedArrLibraryIndex({ fresh: opts.freshArr }),
+    shared ? { index: shared.arr, at: shared.arrAt } : getCachedArrLibraryIndex({ fresh: opts.freshArr }),
     loadCleanupSettings(),
     isFeatureEnabled(CLEANUP_FEATURE_KEY),
   ]);
   // "cached": a GET never waits on TMDB's tmdb→tvdb cross-reference (a miss is
   // filled in the background for the next load — CrossRefMode). Resolving every
   // unwatched show live made a cold report one TMDB call per show.
-  const { titles, ctx, targets } = await loadCleanupTitles(arr, undefined, { seasons: true, now, resolveTargets: needsTargets, crossRef: "cached" });
+  const { titles, ctx, targets } = await loadCleanupTitles(arr, undefined, { seasons: true, now, resolveTargets: needsTargets, crossRef: "cached", shared });
   const copiesOf = (t: { tmdbId: number; mediaType: CleanupMediaType }): readonly ArrLibraryEntry[] =>
     targets?.get(cleanupKey(t.tmdbId, t.mediaType)) ?? [];
 
@@ -348,14 +358,26 @@ export function invalidateNeverWatchedReport(): void {
   reportCache.value = null;
 }
 
-export async function getNeverWatchedReport(opts: { fresh?: boolean } = {}): Promise<NeverWatchedReport> {
+// `opts.shared` hands a miss the caller's shared facts load (SharedWatchFacts —
+// the /admin/stats storage section) instead of a load of its own; a hit never
+// touches it. The store check below sees only what changed AFTER this call read
+// its generation and version, so the shared inputs must not be older than that:
+// the facts load not yet started (this computation starts it), and the
+// Radarr/Sonarr index it carries still the shared index cache's current one (an
+// Add, Remove or cleanup delete drops that cache along with this one — a
+// listing obtained before it is no longer there). Otherwise the report may
+// predate an invalidation this call can't see, so it is computed for this
+// caller alone: never stored, never joined by another caller.
+export async function getNeverWatchedReport(opts: { fresh?: boolean; shared?: SharedWatchFacts } = {}): Promise<NeverWatchedReport> {
   const generation = currentActivityGeneration();
+  const sharedPredates = !!opts.shared && (opts.shared.started || peekCachedArrLibraryIndex() !== opts.shared.arr);
   const c = reportCache;
   const ttl = c.value && c.value.arrErrors.length > 0 ? REPORT_ERROR_TTL_MS : REPORT_TTL_MS;
   if (!opts.fresh && c.value && c.generation === generation && Date.now() - c.at < ttl) return c.value;
+  if (opts.shared && sharedPredates) return computeNeverWatchedReport({ shared: opts.shared });
   const version = c.version;
   return coalesce(`never-watched:report:${generation}:${version}:${opts.fresh ? "fresh" : ""}`, async () => {
-    const value = await computeNeverWatchedReport({ freshArr: opts.fresh });
+    const value = await computeNeverWatchedReport({ freshArr: opts.fresh, shared: opts.shared });
     // A report computed across an invalidation or a new play is already stale —
     // never store it over a newer state (the guardrail-19b shape).
     if (c.version === version && currentActivityGeneration() === generation) {

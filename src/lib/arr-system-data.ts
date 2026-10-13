@@ -215,7 +215,10 @@ function projectProvider(kind: ProviderKind, raw: unknown): ArrIndexer | ArrDown
  * Test every indexer or download client on the instance (the arr's Test All),
  * or one by id — the one is read from the arr and sent back to its test
  * endpoint server-side, so its stored credentials never leave the server. A
- * provider with only warnings is working, with warnings (testResultOf).
+ * provider with only warnings is working, with warnings (testResultOf). Test
+ * All on a System.Text.Json arr (Radarr v3+, Sonarr v4+) doesn't say which of
+ * its failures are only warnings, so a provider with no known error comes back
+ * `uncertain` (projectTestAll); a single test's 400 always says.
  */
 export async function testProviders(
   service: ArrService,
@@ -246,7 +249,7 @@ export async function testProviders(
   const { cfg, raw } = await readProvider(service, instance, kind, id);
   try {
     await arrFetchNoContent(cfg, `${PROVIDER_PATH[kind]}/test`, { method: "POST", body: JSON.stringify(raw), timeoutMs: PROVIDER_TEST_TIMEOUT_MS });
-    return [testResultOf(id, true, { messages: [], warningsOnly: false })];
+    return [testResultOf(id, true, { messages: [], warningsOnly: false, uncertain: false })];
   } catch (err) {
     if (err instanceof ArrResponseError && err.status === 400) return [testResultOf(id, false, validationFailuresFromBody(err.body))];
     throw err;

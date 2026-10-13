@@ -1695,9 +1695,20 @@ test("edits of one title are serialized: a season flip never PUTs back a series 
     }
     return undefined;
   }) as unknown as Responder, sonarrBase);
+  // The Settings save must own the title's edit lock FIRST: the held read is the
+  // SECOND one, so if the season flip won the lock (it can, under load — both
+  // requests race through auth and body parsing) the held read would be the
+  // Settings save's own, waiting on its own editor PUT: a deadlock that hung the
+  // whole suite. editTitle takes the lock before any read, so the first series
+  // read arriving proves the Settings save holds it. The fallback release turns
+  // any future ordering slip into a failed assertion instead of a hang.
   const settingsSave = call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", instance: "", id: 21, qualityProfileId: 2 } });
+  for (let i = 0; i < 500 && seriesReads === 0; i++) await new Promise((r) => setTimeout(r, 2));
+  assert.equal(seriesReads, 1, "the Settings save read the series (and so holds the title's edit lock)");
+  const fallback = setTimeout(() => release(), 5_000);
   const seasonFlip = call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", instance: "", id: 21, seasons: [{ seasonNumber: 2, monitored: false }] } });
   const [a, b] = await Promise.all([settingsSave, seasonFlip]);
+  clearTimeout(fallback);
   assert.equal(a.status, 200);
   assert.equal(b.status, 200);
   const seasonPut = writes().find((c) => c.path === "/api/v3/series/21");

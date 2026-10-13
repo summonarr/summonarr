@@ -1324,7 +1324,9 @@ test("download policy failure contracts: a failed user read throws before any PO
 
 // ── getJellyfinUserPlayedItems (the never-watched report's upstream evidence) ─
 // Appended for src/lib/upstream-watch-data.ts. Pins the exact per-user query
-// (encoded user id, Filters, Fields, user data on, images off, a stable sort),
+// (GET /Items?userId= — never the [Obsolete] /Users/{userId}/Items, which is the
+// same Jellyfin handler; see the source citation above the query — encoded
+// user id, Filters, Fields, user data on, images off, a stable sort),
 // sequential paging, parse-while-paging with the raw record count, and the
 // AbortSignal stop (guardrail 41).
 
@@ -1344,7 +1346,7 @@ test("getJellyfinUserPlayedItems: the exact per-user query, encoded user id, adm
   assert.equal(sent.length, 1);
   assert.equal(
     sent[0].url,
-    `${B}/Users/user%201/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Filters=IsPlayed` +
+    `${B}/Items?userId=user%201&Recursive=true&IncludeItemTypes=Movie,Episode&Filters=IsPlayed` +
       "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending" +
       "&StartIndex=0&Limit=1000",
   );
@@ -1358,7 +1360,10 @@ test("getJellyfinUserPlayedItems: the exact per-user query, encoded user id, adm
   sent.length = 0;
   respond = () => okJson({ Items: [], TotalRecordCount: 0 });
   await getJellyfinUserPlayedItems(B, "key-uw", "u2", "IsResumable");
-  assert.equal(new URL(sent[0].url).searchParams.get("Filters"), "IsResumable");
+  const second = new URL(sent[0].url);
+  assert.equal(second.pathname, "/Items", "the non-legacy route, never /Users/{id}/Items");
+  assert.equal(second.searchParams.get("userId"), "u2");
+  assert.equal(second.searchParams.get("Filters"), "IsResumable");
 });
 
 test("getJellyfinUserPlayedItems pages sequentially by StartIndex until a short page", async () => {

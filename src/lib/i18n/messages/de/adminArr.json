@@ -411,5 +411,8 @@
   "adminArr.history.stateUnknown": "Diese Liste kann nicht alles zeigen, was seit dem Holen mit diesem Download passiert ist – er ist möglicherweise schon importiert. „Als fehlgeschlagen markieren“ sperrt das Release trotzdem und sucht erneut; ist der Download bereits fehlgeschlagen, lehnt Summonarr ab, bevor etwas gesendet wird.",
   "adminArr.add.searchNeedsMonitor": "Nichts ist überwacht, daher sucht Radarr/Sonarr nicht danach.",
   "adminArr.notice.searchMissingPartial": "Nur ein Teil der Suche wurde gestartet – Sonarr hat den Rest abgelehnt. Führen Sie „Fehlende suchen“ für den Rest erneut aus.",
-  "adminArr.files.deleteStillRunning": "Der Löschvorgang läuft noch – lade die Dateien in einer Minute neu, um zu sehen, was übrig ist."
+  "adminArr.files.deleteStillRunning": "Der Löschvorgang läuft noch – lade die Dateien in einer Minute neu, um zu sehen, was übrig ist.",
+  "adminArr.system.testUncertain": "{service} hat nicht angegeben, ob das nur eine Warnung ist – führen Sie dafür „Testen“ aus, um es zu sehen",
+  "adminArr.system.testSummaryUncertain_one": "{count} unklar",
+  "adminArr.system.testSummaryUncertain_other": "{count} unklar"
 }

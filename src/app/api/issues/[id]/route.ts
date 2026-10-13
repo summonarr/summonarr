@@ -85,6 +85,11 @@ export const PATCH = withIssueAdmin(async (
         } else if (issue.scope === "SEASON" && issue.seasonNumber != null) {
           await searchSeasonInSonarr(tvdbId, issue.seasonNumber, instance);
         } else {
+          // Deliberately SeriesSearch: a refetch is an upgrade search of the
+          // issue's own scope (the arr only replaces a file on disk with an
+          // upgrade), the series-wide twin of the SeasonSearch/EpisodeSearch
+          // above. The Missing plan would queue nothing whenever every episode
+          // is on disk — exactly when the issue is about the files themselves.
           await searchSeriesInSonarr(tvdbId, instance);
         }
       }

@@ -411,5 +411,8 @@
   "adminArr.history.stateUnknown": "Cette liste ne peut pas montrer tout ce qui est arrivé à ce téléchargement depuis sa récupération — il est peut-être déjà importé. Le marquer en échec bloque quand même la version et relance une recherche ; si le téléchargement a déjà échoué, Summonarr refuse avant d'envoyer quoi que ce soit.",
   "adminArr.add.searchNeedsMonitor": "Rien n'est surveillé, donc Radarr/Sonarr ne le recherchera pas.",
   "adminArr.notice.searchMissingPartial": "Seule une partie de la recherche a démarré — Sonarr a refusé le reste. Relancez « Rechercher les manquants » pour ce qui reste.",
-  "adminArr.files.deleteStillRunning": "La suppression est toujours en cours — rechargez les fichiers dans une minute pour voir ce qui reste."
+  "adminArr.files.deleteStillRunning": "La suppression est toujours en cours — rechargez les fichiers dans une minute pour voir ce qui reste.",
+  "adminArr.system.testUncertain": "{service} n'a pas indiqué s'il s'agit seulement d'un avertissement — lancez « Tester » dessus pour le savoir",
+  "adminArr.system.testSummaryUncertain_one": "{count} indéterminé",
+  "adminArr.system.testSummaryUncertain_other": "{count} indéterminés"
 }

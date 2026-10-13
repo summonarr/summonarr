@@ -411,5 +411,8 @@
   "adminArr.history.stateUnknown": "Esta lista no puede mostrar todo lo que le ha pasado a esta descarga desde que se capturó: puede que ya se haya importado. Marcarla como fallida igualmente bloquea la versión y vuelve a buscar; si la descarga ya falló, Summonarr lo rechaza antes de enviar nada.",
   "adminArr.add.searchNeedsMonitor": "No hay nada monitorizado, así que Radarr/Sonarr no lo buscará.",
   "adminArr.notice.searchMissingPartial": "Solo se inició parte de la búsqueda: Sonarr rechazó el resto. Vuelve a ejecutar Buscar faltantes para lo que queda.",
-  "adminArr.files.deleteStillRunning": "La eliminación sigue en curso: vuelve a cargar los archivos en un minuto para ver qué queda."
+  "adminArr.files.deleteStillRunning": "La eliminación sigue en curso: vuelve a cargar los archivos en un minuto para ver qué queda.",
+  "adminArr.system.testUncertain": "{service} no ha indicado si esto es solo una advertencia: usa «Probar» en él para verlo",
+  "adminArr.system.testSummaryUncertain_one": "{count} sin determinar",
+  "adminArr.system.testSummaryUncertain_other": "{count} sin determinar"
 }

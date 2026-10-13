@@ -411,5 +411,8 @@
   "adminArr.history.stateUnknown": "此列表无法显示此下载自被抓取以来发生的所有情况——它可能已被导入。将其标记为失败仍会将该发布加入黑名单并重新搜索；若该下载已失败，Summonarr 会在发送任何内容之前拒绝。",
   "adminArr.add.searchNeedsMonitor": "没有任何内容受监控，因此 Radarr/Sonarr 不会搜索它。",
   "adminArr.notice.searchMissingPartial": "搜索只启动了一部分——Sonarr 拒绝了其余部分。请再次运行“搜索缺失”以处理剩余内容。",
-  "adminArr.files.deleteStillRunning": "删除仍在进行中——请一分钟后重新加载文件，查看剩余内容。"
+  "adminArr.files.deleteStillRunning": "删除仍在进行中——请一分钟后重新加载文件，查看剩余内容。",
+  "adminArr.system.testUncertain": "{service} 未说明这是否只是警告——请对它单独点击“测试”查看",
+  "adminArr.system.testSummaryUncertain_one": "{count} 个不确定",
+  "adminArr.system.testSummaryUncertain_other": "{count} 个不确定"
 }

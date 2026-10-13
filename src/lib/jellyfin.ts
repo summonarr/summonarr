@@ -1000,8 +1000,18 @@ export async function getJellyfinUserPlayedItems(
 ): Promise<JellyfinUserPlayedItems> {
   if (opts.signal?.aborted) return { items: [], records: 0 };
   const base = baseUrl.replace(/\/+$/, "");
+  // `GET /Items?userId=` is the SAME handler as the [Obsolete] (10.9+)
+  // `/Users/{userId}/Items`, on every release, read from Jellyfin's source
+  // (Jellyfin.Api/Controllers/ItemsController.cs): the legacy action's body is
+  // `GetItems(userId, …)`, forwarding every parameter (10.10+ adds indexNumber,
+  // master audio/subtitleLanguages, passed as null/[] — none of which we send)
+  // — v10.8.13 L679, v10.9.11 L711, v10.10.7 L714, v10.11.11 L716, master L811.
+  // GetItems has bound userId FROM THE QUERY since 10.7 (v10.8.13 L155, v10.11.11
+  // L163), and 10.6's ServiceStack served both paths from one request DTO. With
+  // an API key (role Administrator) RequestHelpers.GetUserId returns the given
+  // id, so the Filters, the paging and the UserData are that user's either way.
   const query =
-    `${base}/Users/${encodeURIComponent(userId)}/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Filters=${filter}` +
+    `${base}/Items?userId=${encodeURIComponent(userId)}&Recursive=true&IncludeItemTypes=Movie,Episode&Filters=${filter}` +
     "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending";
   const walk = async (): Promise<{ out: JellyfinUserPlayedItems; total: number | null }> => {
     const out: JellyfinUserPlayedItems = { items: [], records: 0 };

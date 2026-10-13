@@ -22,7 +22,7 @@ import {
   mergeDiskGroups,
   type MergedDisk,
 } from "./admin-stats";
-import { NEVER_WATCHED_FEATURE_KEY } from "./never-watched-data";
+import { NEVER_WATCHED_FEATURE_KEY, shareLibraryWatchFacts } from "./never-watched-data";
 import { getNeverWatchedReport } from "./never-watched-report";
 
 type Status = "PENDING" | "APPROVED" | "DECLINED" | "AVAILABLE";
@@ -759,7 +759,7 @@ export async function getStorageStats(opts: { fresh?: boolean } = {}): Promise<S
 }
 
 async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
-  const [disk, { index }, radarr, sonarr, cleanupOn, neverWatchedOn] = await Promise.all([
+  const [disk, { index, at: indexAt }, radarr, sonarr, cleanupOn, neverWatchedOn] = await Promise.all([
     getArrDiskSpace(),
     // Shared with the never-watched report (same 5-minute window).
     getCachedArrLibraryIndex({ fresh }),
@@ -793,25 +793,24 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
   for (const list of index.byKey.values()) list.forEach(add);
   for (const list of index.tvdbOnly.values()) list.forEach(add);
 
-  let reclaimable: StorageStats["reclaimable"] = null;
-  if (cleanupOn) {
-    try {
-      // "cached": a page render never waits on TMDB (CrossRefMode).
-      const report = await computeCleanupReport(index, new Date(), undefined, { resolveTargets: true, crossRef: "cached" });
-      const candidates = report.rows.filter((r) => r.candidate);
-      reclaimable = {
-        titles: candidates.length,
-        bytes: candidates.reduce((sum, r) => sum + (r.sizeOnDisk ?? 0), 0),
-      };
-    } catch (err) {
-      console.warn("[admin-stats] cleanup report failed:", err instanceof Error ? err.message : err);
-    }
-  }
+  // Both reports below read the same whole-library watch facts (five
+  // whole-table PlayHistory aggregates, sessions, upstream evidence, requests,
+  // coverage): ONE load for this computation, for the same index and the same
+  // `now`, handed to each — and each still computes exactly what it computes on
+  // its own page (SharedWatchFacts). Lazy: a never-watched cache hit with
+  // cleanup off loads nothing.
+  const shared = cleanupOn || neverWatchedOn
+    ? shareLibraryWatchFacts(index, indexAt, { now: new Date(), seasons: neverWatchedOn })
+    : null;
 
+  // The never-watched report FIRST: its cache reads its generation before the
+  // shared load starts, so a report computed here can be stored for the page.
+  // Started by the cleanup report first, the load could predate an
+  // invalidation, and the report would be computed for this figure only.
   let neverWatched: StorageStats["neverWatched"] = null;
-  if (neverWatchedOn) {
+  if (neverWatchedOn && shared) {
     try {
-      const { totals, seasons, trackingOn } = await getNeverWatchedReport();
+      const { totals, seasons, trackingOn } = await getNeverWatchedReport({ shared });
       neverWatched = {
         titles: totals.never.titles,
         bytes: totals.never.bytes,
@@ -825,6 +824,21 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
       };
     } catch (err) {
       console.warn("[admin-stats] never-watched report failed:", err instanceof Error ? err.message : err);
+    }
+  }
+
+  let reclaimable: StorageStats["reclaimable"] = null;
+  if (cleanupOn && shared) {
+    try {
+      // "cached": a page render never waits on TMDB (CrossRefMode).
+      const report = await computeCleanupReport(index, shared.now, undefined, { resolveTargets: true, crossRef: "cached", shared });
+      const candidates = report.rows.filter((r) => r.candidate);
+      reclaimable = {
+        titles: candidates.length,
+        bytes: candidates.reduce((sum, r) => sum + (r.sizeOnDisk ?? 0), 0),
+      };
+    } catch (err) {
+      console.warn("[admin-stats] cleanup report failed:", err instanceof Error ? err.message : err);
     }
   }
 

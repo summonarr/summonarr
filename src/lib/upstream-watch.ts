@@ -35,7 +35,7 @@
 //     ("/library/metadata/<showId>"), sometimes `grandparentRatingKey`,
 //     `parentIndex` (season), `index` (episode), `viewedAt` (epoch SECONDS) and
 //     `accountID`. With the server owner's token it covers every account.
-//   - Jellyfin GET /Users/{id}/Items?Filters=IsPlayed|IsResumable returns Items[]
+//   - Jellyfin GET /Items?userId=<id>&Filters=IsPlayed|IsResumable returns Items[]
 //     with `Type` ("Movie" | "Episode"), `Id`, `SeriesId`, `ParentIndexNumber`,
 //     and `UserData.{PlayCount, LastPlayedDate}` (ISO string).
 // Every parser below is defensive about those shapes: numbers or numeric

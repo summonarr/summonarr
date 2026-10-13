@@ -411,5 +411,8 @@
   "adminArr.history.stateUnknown": "This list can't show everything that has happened to this download since it was grabbed — it may already be imported. Marking it failed still blocklists the release and searches again; if the download already failed, Summonarr refuses before sending anything.",
   "adminArr.add.searchNeedsMonitor": "Nothing is monitored, so the arr won't search for it.",
   "adminArr.notice.searchMissingPartial": "Only part of the search started — Sonarr refused the rest. Run Search missing again for what's left.",
-  "adminArr.files.deleteStillRunning": "The delete is still running — reload the files in a minute to see what's left."
+  "adminArr.files.deleteStillRunning": "The delete is still running — reload the files in a minute to see what's left.",
+  "adminArr.system.testUncertain": "{service} didn't say whether this is only a warning — run Test on it to see",
+  "adminArr.system.testSummaryUncertain_one": "{count} unclear",
+  "adminArr.system.testSummaryUncertain_other": "{count} unclear"
 }

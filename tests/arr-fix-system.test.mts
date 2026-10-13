@@ -24,7 +24,10 @@
 //      A testing save that times out is read back: saved → 200 audited, not
 //      saved → 504 with the provider, not audited.
 //   9. Warnings-only test results read as "working, with warnings"; Test All
-//      and single tests are rate-limited separately.
+//      and single tests are rate-limited separately. A System.Text.Json arr's
+//      Test All flags no failure either way (C089 — the source facts are in
+//      tests/audit-fix4-test-all.test.mts): those rows reach the page as
+//      `uncertain`, never failed.
 //  10. A "********" secret the arr sent is sent back to it unchanged in both
 //      the save and the test body (the secret-preservation contract).
 //  11. Root folders take their total size from the disk that holds them.
@@ -229,8 +232,11 @@ const CLIENT = {
   removeCompletedDownloads: false, removeFailedDownloads: true, tags: [],
   fields: [{ name: "password", value: "********" }],
 };
-const warning = (msg: string) => ({ propertyName: "", errorMessage: msg, isWarning: true, severity: "warning" });
-const failure = (msg: string) => ({ propertyName: "BaseUrl", errorMessage: msg, isWarning: false, severity: "error" });
+// A /test or save 400's failure as the arr writes it (its runtime type,
+// NzbDroneValidationFailure): `severity` is "error" on warnings too —
+// FluentValidation's default, which neither arr ever changes.
+const warning = (msg: string) => ({ isWarning: true, propertyName: "", errorMessage: msg, severity: "error" });
+const failure = (msg: string) => ({ isWarning: false, propertyName: "BaseUrl", errorMessage: msg, severity: "error" });
 
 beforeEach(() => {
   calls = [];
@@ -486,6 +492,34 @@ test("a warnings-only test reads as working with warnings, single and Test All; 
     assert.ok(!text.includes(SECRET), body);
     assert.match(text, /refused/);
   }
+});
+
+test("an STJ arr's Test All 400 (no isWarning on any entry) reaches the page as uncertain, the single test as working with warnings", async () => {
+  const token = await mintSession();
+  // Radarr develop's /testall: ValidationFailures is declared List<ValidationFailure>,
+  // so System.Text.Json writes only the base properties — no isWarning.
+  const stj = (msg: string) => ({ propertyName: "", errorMessage: msg, severity: "error" });
+  responder = (c) => {
+    if (c.origin !== RADARR) return undefined;
+    if (c.path === "/api/v3/indexer/3" && c.method === "GET") return json(INDEXER);
+    if (c.path === "/api/v3/indexer/test") return json([warning("Jackett's all endpoint is not supported, please add indexers individually")], 400);
+    if (c.path === "/api/v3/indexer/testall") {
+      return json([
+        { id: 3, isValid: false, validationFailures: [stj("Jackett's all endpoint is not supported, please add indexers individually")] },
+        { id: 4, isValid: true, validationFailures: [] },
+      ], 400);
+    }
+    return undefined;
+  };
+  const res = await testProvider(token, { kind: "indexer" });
+  assert.equal(res.status, 200, "the per-provider list, not the arr's refusal");
+  const all = (await res.json()) as { results: unknown[] };
+  assert.deepEqual(all.results, [
+    { id: 3, ok: false, warning: false, messages: ["Jackett's all endpoint is not supported, please add indexers individually"], uncertain: true },
+    { id: 4, ok: true, warning: false, messages: [] },
+  ]);
+  const one = (await (await testProvider(token, { kind: "indexer", id: 3 })).json()) as { results: unknown[] };
+  assert.deepEqual(one.results, [{ id: 3, ok: true, warning: true, messages: ["Jackett's all endpoint is not supported, please add indexers individually"] }]);
 });
 
 test("Test All and single tests have their own rate limits — testing rows one by one never locks out Test All", async () => {

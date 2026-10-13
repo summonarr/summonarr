@@ -25,7 +25,7 @@ import { CommandWatchLine, isWatchActive, useArrCommandWatch } from "@/component
 import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { queueFormatters } from "@/components/admin/queue-format";
 import {
-  AlertTriangle, Check, ChevronDown, ChevronRight, Clock, HardDrive, Loader2, Play, RefreshCw, Search, Server, X, XCircle,
+  AlertTriangle, Check, ChevronDown, ChevronRight, CircleDashed, Clock, HardDrive, Loader2, Play, RefreshCw, Search, Server, X, XCircle,
 } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
@@ -427,8 +427,11 @@ function TasksTab() {
 // ── indexers and download clients ────────────────────────────────────────────
 
 type ProviderKind = "indexer" | "downloadClient";
-/** `pending`: the page stopped waiting while the arr was still at it — neither a pass nor a failure. */
-type TestView = Pick<ProviderTestResult, "ok" | "warning" | "messages"> & { pending?: boolean };
+/**
+ * `pending`: the page stopped waiting while the arr was still at it — neither a pass nor a failure.
+ * `uncertain`: Test All's answer doesn't say whether the failures were only warnings (projectTestAll).
+ */
+type TestView = Pick<ProviderTestResult, "ok" | "warning" | "messages" | "uncertain"> & { pending?: boolean };
 const pendingView = (res: { error: string; body: Record<string, unknown> | null }): TestView =>
   ({ ok: false, warning: false, messages: [res.error], ...(res.body?.stillRunning === true ? { pending: true } : {}) });
 type Change = Record<string, boolean>;
@@ -443,8 +446,9 @@ function ProvidersTab() {
   // every other instance's switches.
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [results, setResults] = useState<Record<string, TestView>>({});
-  // The last Test All per instance and kind: how many answered, how many work.
-  const [summaries, setSummaries] = useState<Record<string, { working: number; count: number }>>({});
+  // The last Test All per instance and kind: how many answered, how many work,
+  // and how many the arr's answer left unclear (failures it didn't flag either way).
+  const [summaries, setSummaries] = useState<Record<string, { working: number; count: number; uncertain: number }>>({});
   const [overrides, setOverrides] = useState<Record<string, ArrIndexer | ArrDownloadClient>>({});
   // A switch-ON the arr held back for warnings alone, until the admin accepts or drops it.
   const [held, setHeld] = useState<Record<string, { change: Change; messages: string[] }>>({});
@@ -491,7 +495,14 @@ function ProvidersTab() {
       });
       setSummaries((m) => {
         if (id !== null) return without(m, (key) => key === `${service}:${instance}:${kind}`);
-        return { ...m, [`${service}:${instance}:${kind}`]: { working: answered.filter((r) => r.ok).length, count: answered.length } };
+        return {
+          ...m,
+          [`${service}:${instance}:${kind}`]: {
+            working: answered.filter((r) => r.ok).length,
+            count: answered.length,
+            uncertain: answered.filter((r) => r.uncertain === true).length,
+          },
+        };
       });
     } else {
       setResults((m) => ({ ...m, [k]: pendingView(res) }));
@@ -537,7 +548,7 @@ function ProvidersTab() {
     setResults((m) => ({ ...m, [k]: pendingView(res) }));
   }
 
-  function result(k: string) {
+  function result(k: string, service: Service) {
     const r = results[k];
     if (!r) return null;
     if (r.pending) {
@@ -557,6 +568,18 @@ function ProvidersTab() {
         </span>
       );
     }
+    // Not a failure we can name: Test All didn't say whether these were only
+    // warnings, and the row's own Test will.
+    if (r.uncertain === true) {
+      return (
+        <span className="flex items-start gap-1 text-xs" style={{ color: "var(--ds-fg-muted)" }}>
+          <CircleDashed className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />{" "}
+          <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>
+            {t("adminArr.system.testUncertain", { service: SERVICE_LABEL[service] })}{r.messages.length > 0 && `: ${r.messages.join(" ")}`}
+          </span>
+        </span>
+      );
+    }
     return (
       <span className="flex items-start gap-1 text-xs" style={{ color: "var(--ds-danger)" }}>
         <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>{r.messages.join(" ") || t("adminArr.system.testFailed")}</span>
@@ -568,9 +591,12 @@ function ProvidersTab() {
     const s = summaries[key];
     if (!s) return null;
     if (s.count === 0) return <span className="text-xs text-zinc-400">{t("adminArr.system.testNothing")}</span>;
+    // Nothing known to have failed (the rest are unclear) is neutral, not a warning.
+    const tone = s.working === s.count ? "text-green-400" : s.working + s.uncertain === s.count ? "text-zinc-400" : "text-amber-400";
     return (
-      <span className={`text-xs ${s.working === s.count ? "text-green-400" : "text-amber-400"}`}>
+      <span className={`text-xs ${tone}`}>
         {t("adminArr.system.testSummary", { working: s.working, count: s.count })}
+        {s.uncertain > 0 && ` · ${t("adminArr.system.testSummaryUncertain", { count: s.uncertain })}`}
       </span>
     );
   }
@@ -644,7 +670,7 @@ function ProvidersTab() {
                 <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-zinc-500">{t("adminArr.system.indexers")}</h3>
                 <span className="flex-1" />
                 {summary(`${card}:indexer`)}
-                {result(`${card}:indexer:all`)}
+                {result(`${card}:indexer:all`, r.service)}
                 <Button variant="outline" size="xs" disabled={cardBusy !== undefined || r.indexers.length === 0} onClick={() => void test(r.service, r.instance, "indexer", null)}>
                   {cardBusy === `test:${card}:indexer:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
                 </Button>
@@ -697,7 +723,7 @@ function ProvidersTab() {
                           })}
                         </div>
                         {pending(r.service, r.instance, "indexer", ix)}
-                        {result(k)}
+                        {result(k, r.service)}
                       </li>
                     );
                   })}
@@ -710,7 +736,7 @@ function ProvidersTab() {
                 <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-zinc-500">{t("adminArr.system.downloadClients")}</h3>
                 <span className="flex-1" />
                 {summary(`${card}:downloadClient`)}
-                {result(`${card}:downloadClient:all`)}
+                {result(`${card}:downloadClient:all`, r.service)}
                 <Button variant="outline" size="xs" disabled={cardBusy !== undefined || r.downloadClients.length === 0} onClick={() => void test(r.service, r.instance, "downloadClient", null)}>
                   {cardBusy === `test:${card}:downloadClient:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
                 </Button>
@@ -751,7 +777,7 @@ function ProvidersTab() {
                           </Button>
                         </div>
                         {pending(r.service, r.instance, "downloadClient", dc)}
-                        {result(k)}
+                        {result(k, r.service)}
                       </li>
                     );
                   })}

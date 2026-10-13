@@ -91,6 +91,13 @@ async function main() {
        ON CONFLICT (key) DO NOTHING`,
       [new Date().toISOString()],
     );
+    // Library cleanup is default-OFF (its page 404s), so the crawl would never
+    // mount it; switch it on for this throwaway database only.
+    await client.query(
+      `INSERT INTO "Setting" (key, value, "updatedAt")
+       VALUES ('feature.admin.cleanup', 'true', now())
+       ON CONFLICT (key) DO NOTHING`,
+    );
     console.log(`[e2e-seed] ADMIN user ready: ${email}`);
   } finally {
     await client.end();

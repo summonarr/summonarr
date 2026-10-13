@@ -86,6 +86,20 @@ const ROUTES = [
   "/admin/trash-guides/quality-profiles",
   "/admin/trash-guides/custom-formats",
   "/admin/trash-guides/naming-sizes",
+  // The Radarr/Sonarr management, Never Watched and Library cleanup pages. With
+  // no arr configured they render their empty / not-configured states, which is
+  // still every client component's mount + hydration. Library cleanup is
+  // default-OFF; e2e-seed.mts switches it on for the crawl.
+  "/admin/activity/stats",
+  "/admin/queue",
+  "/admin/missing",
+  "/admin/missing?mode=cutoff",
+  "/admin/arr-history",
+  "/admin/arr-history?tab=blocklist",
+  "/admin/arr-calendar",
+  "/admin/arr-system",
+  "/admin/never-watched",
+  "/admin/cleanup",
 ];
 
 interface PageResult {

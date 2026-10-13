@@ -411,5 +411,8 @@
   "adminArr.history.stateUnknown": "Esta lista não consegue mostrar tudo o que aconteceu com este download desde que ele foi capturado — ele pode já ter sido importado. Marcá-lo como falha ainda bloqueia o release e busca de novo; se o download já falhou, o Summonarr recusa antes de enviar qualquer coisa.",
   "adminArr.add.searchNeedsMonitor": "Nada está monitorado, então o arr não vai buscá-lo.",
   "adminArr.notice.searchMissingPartial": "Só parte da busca foi iniciada — o Sonarr recusou o resto. Execute Buscar faltantes de novo para o que sobrou.",
-  "adminArr.files.deleteStillRunning": "A exclusão ainda está em andamento — recarregue os arquivos em um minuto para ver o que resta."
+  "adminArr.files.deleteStillRunning": "A exclusão ainda está em andamento — recarregue os arquivos em um minuto para ver o que resta.",
+  "adminArr.system.testUncertain": "O {service} não informou se isto é apenas um aviso — use “Testar” nele para ver",
+  "adminArr.system.testSummaryUncertain_one": "{count} indeterminado",
+  "adminArr.system.testSummaryUncertain_other": "{count} indeterminados"
 }

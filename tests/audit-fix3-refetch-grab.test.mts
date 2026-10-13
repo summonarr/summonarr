@@ -516,3 +516,37 @@ test("a refused refetch (RESOLVED issue, malformed instance) contacts no arr and
   assert.equal(fetchCalls.length, 0);
   assert.equal(grabs.length, 0);
 });
+
+// Refetch is an UPGRADE search of the issue's own scope — the arr only replaces a
+// file on disk with an upgrade — so each scope sends that scope's own search:
+// EPISODE → EpisodeSearch, SEASON → SeasonSearch, FULL → SeriesSearch. The
+// "never SeriesSearch" rule belongs to the MISSING-only actions (Missing page,
+// title manager Search missing, the request queue's Search, Replace file's
+// follow-up); a FULL refetch routed through the Missing plan would queue nothing
+// whenever every episode is on disk, i.e. exactly when the issue is about the
+// files themselves.
+test("a refetch searches the issue's own scope: FULL → SeriesSearch, EPISODE → EpisodeSearch (SEASON → SeasonSearch above)", async () => {
+  const admin = await mintAdmin();
+  const commands: Array<Record<string, unknown>> = [];
+  fetchImpl = (url, init) => {
+    if (url.pathname === "/api/v3/series") return jsonResponse([{ id: 9, tvdbId: 121361, tmdbId: 1399 }]);
+    if (url.pathname === "/api/v3/episode") return jsonResponse([{ id: 501, seriesId: 9, seasonNumber: 3, episodeNumber: 4 }]);
+    if (url.pathname === "/api/v3/command") {
+      commands.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse({ id: 2003 });
+    }
+    throw new Error(`unexpected Sonarr fetch: ${url.href}`);
+  };
+
+  issues.set("issue-full", { ...SHOW, id: "issue-full", scope: "FULL", seasonNumber: null });
+  assert.equal(((await (await refetch(admin.token, "issue-full", {})).json()) as { arrError: unknown }).arrError, null);
+  assert.deepEqual(commands, [{ name: "SeriesSearch", seriesId: 9 }]);
+
+  commands.length = 0;
+  issues.set("issue-ep", { ...SHOW, id: "issue-ep", scope: "EPISODE", seasonNumber: 3, episodeNumber: 4 });
+  assert.equal(((await (await refetch(admin.token, "issue-ep", {})).json()) as { arrError: unknown }).arrError, null);
+  // Read through a fresh binding: the deepEqual above narrowed `commands` to the
+  // SeriesSearch literal shape, which has no episodeIds.
+  const sent: Array<Record<string, unknown>> = commands;
+  assert.deepEqual(sent, [{ name: "EpisodeSearch", episodeIds: [501] }]);
+});

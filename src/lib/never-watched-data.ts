@@ -657,6 +657,54 @@ export async function loadLibraryWatchFacts(
   return { titles, ctx, coverage, unplacedPlays, softPlays, historyStart };
 }
 
+// ONE whole-library load of the facts above, handed to more than one
+// computation of a single caller: the /admin/stats storage section computes the
+// Library cleanup report AND the never-watched report, and each used to run this
+// whole load (five whole-table PlayHistory aggregates, sessions, upstream
+// evidence, requests, coverage) itself. It is loadLibraryWatchFacts called once —
+// lazily, memoized — for the Radarr/Sonarr index and the `now` it carries, and
+// each computation still does exactly what it does alone (both take it as
+// `shared`; a shared value that doesn't fit the read they were asked for throws
+// rather than standing in for it). Nothing here judges anything, so it is not a
+// second definition of either report (guardrail 14d).
+//
+// Loaded with `seasons` only when a computation needs them (the never-watched
+// report): the title verdicts don't depend on it, so the cleanup report reads
+// the same titles either way.
+export interface SharedWatchFacts {
+  readonly arr: ArrLibraryIndex;
+  // When `arr` was listed (the never-watched report's "sizes as of").
+  readonly arrAt: Date;
+  readonly now: Date;
+  readonly seasons: boolean;
+  // load() has been called. A cache fed from this load reads it before its own
+  // generation check: a load that began earlier may predate an invalidation the
+  // check can't see (the guardrail-19b shape — see getNeverWatchedReport).
+  readonly started: boolean;
+  load(): Promise<LibraryWatchFacts>;
+}
+
+export function shareLibraryWatchFacts(
+  arr: ArrLibraryIndex,
+  arrAt: Date,
+  opts: { now: Date; seasons: boolean },
+): SharedWatchFacts {
+  let pending: Promise<LibraryWatchFacts> | null = null;
+  return {
+    arr,
+    arrAt,
+    now: opts.now,
+    seasons: opts.seasons,
+    get started() {
+      return pending !== null;
+    },
+    load() {
+      pending ??= loadLibraryWatchFacts(arr, { seasons: opts.seasons, now: opts.now });
+      return pending;
+    },
+  };
+}
+
 // Per-server recording coverage and upstream status.
 async function loadCoverage(
   now: Date,

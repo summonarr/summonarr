@@ -4324,7 +4324,7 @@ const spec = {
         summary: "Test indexers or download clients (ADMIN)",
         description:
           "The arr's Test All for the kind, or one by id (read and sent back to the arr's test endpoint server-side; up to " +
-          "120 s). A background (`async: true`) Test All waits up to 270 s. Messages masked; a provider whose test only WARNED is `ok: true, warning: true`. Test All 6 per minute, " +
+          "120 s). A background (`async: true`) Test All waits up to 270 s. Messages masked; a provider whose test only WARNED is `ok: true, warning: true`. On Test All, a provider whose failures don't say whether they are only warnings (every System.Text.Json Radarr/Sonarr — only Sonarr v3 says) is `ok: false, warning: false, uncertain: true`; a single test always says. Test All 6 per minute, " +
           "single tests 20 per minute, per admin; not audited. `async: true` answers 202 `{ job }` at once and tests in the " +
           "background (120 s outlasts what a reverse proxy holds a request); poll GET `?job=<id>`. The same test while one " +
           "runs is joined and spends no rate token.",
@@ -4335,7 +4335,7 @@ const spec = {
         } } } } },
         responses: {
           ...ARR_ERRORS,
-          "200": { description: "{ results: [{ id, ok, warning, messages }] }" },
+          "200": { description: "{ results: [{ id, ok, warning, messages, uncertain? }] }" },
           "202": { description: "`async: true` — { job }: started, or the same test already running" },
           "400": { description: "Invalid body, or the arr refused" },
           "403": { description: "Not ADMIN" },
