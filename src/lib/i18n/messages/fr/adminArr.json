@@ -414,5 +414,7 @@
   "adminArr.files.deleteStillRunning": "La suppression est toujours en cours — rechargez les fichiers dans une minute pour voir ce qui reste.",
   "adminArr.system.testUncertain": "{service} n'a pas indiqué s'il s'agit seulement d'un avertissement — lancez « Tester » dessus pour le savoir",
   "adminArr.system.testSummaryUncertain_one": "{count} indéterminé",
-  "adminArr.system.testSummaryUncertain_other": "{count} indéterminés"
+  "adminArr.system.testSummaryUncertain_other": "{count} indéterminés",
+  "adminArr.snapshot.refreshing": "Données lues {when} — actualisation…",
+  "adminArr.snapshot.stale": "Données lues {when} — la lecture en direct n'a pas abouti"
 }

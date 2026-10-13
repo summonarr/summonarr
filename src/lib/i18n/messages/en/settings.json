@@ -425,5 +425,7 @@
   "settings.cron.job.upstreamWatch.name": "Server Watch History",
   "settings.cron.job.upstreamWatch.description": "Read each Plex and Jellyfin server's own watch records, so a title watched before Summonarr was installed (or while it was down) is never reported as unwatched",
   "settings.cron.job.arrWatch.name": "Radarr/Sonarr Monitor",
-  "settings.cron.job.arrWatch.description": "Check every Radarr and Sonarr instance for low disk space, failed downloads and downloads that need attention, and alert the notification channels that subscribe to them"
+  "settings.cron.job.arrWatch.description": "Check every Radarr and Sonarr instance for low disk space, failed downloads and downloads that need attention, and alert the notification channels that subscribe to them",
+  "settings.cron.job.arrSnapshots.name": "Radarr/Sonarr Page Refresh",
+  "settings.cron.job.arrSnapshots.description": "Re-read the Radarr/Sonarr pages admins opened in the last day, by priority (queue and health every 5 minutes, Missing, history, calendar and titles every 10, Arr System every 15), so they open on recent data"
 }

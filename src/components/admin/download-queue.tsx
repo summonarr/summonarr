@@ -29,6 +29,11 @@
 //
 // Every time and size is server-supplied and formatted for the viewer's
 // locale; nothing reads the clock while rendering (guardrail 16).
+//
+// Instant, then live (use-arr-snapshot.ts): on open the last queue the server
+// kept paints at once, marked with when it was read, while the live read is
+// out; the live answer replaces it and polling carries on as before. A row
+// painted from it acts through the same routes, which re-check live.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -65,6 +70,8 @@ import {
 } from "@/lib/arr-queue";
 import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
 import { createLoadGate, type LoadKind } from "@/lib/arr-system";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
 import { manageTabFor, matchesQueueTitle, queueLinkKey, type QueueLinkFilters, type QueueTitleFilter } from "@/lib/arr-manage-links";
 
 type Service = "radarr" | "sonarr";
@@ -77,6 +84,9 @@ interface QueueReport {
 }
 
 const POLL_MS = 20_000;
+// The page's one read. The live load and its snapshot must name the SAME url,
+// or the server's snapshot key misses.
+const queueUrl = () => withBasePath("/api/admin/queue");
 const SERVICE_LABEL: Record<Service, string> = { radarr: "Radarr", sonarr: "Sonarr" };
 
 const PHASE_TONE: Record<QueuePhase, ChipTone> = {
@@ -227,6 +237,12 @@ export function DownloadQueue({
   // whole 30 s request timeout, past POLL_MS, and a tick that superseded it
   // would discard every answer (createLoadGate).
   const [gate] = useState(createLoadGate);
+  // The snapshot only paints an EMPTY page: it never replaces rows already on
+  // screen (a live answer, or a removal's optimistic drop), and leaves the
+  // error, filters, selections and dialogs alone.
+  const { staleAt: snapshotAt, markLive } = useArrSnapshot<QueueReport>(configured ? queueUrl() : null, (data) =>
+    setReport((cur) => cur ?? data),
+  );
 
   const load = useCallback(async (kind: LoadKind = "manual") => {
     const id = gate.begin(kind);
@@ -234,7 +250,7 @@ export function DownloadQueue({
     setLoading(true);
     let next: { report: QueueReport } | { error: string };
     try {
-      const res = await fetch(withBasePath("/api/admin/queue"));
+      const res = await fetch(queueUrl());
       next = res.ok ? { report: (await res.json()) as QueueReport } : { error: await readError(res, t("adminManage.queue.error.load")) };
     } catch {
       next = { error: t("adminManage.queue.error.loadNetwork") };
@@ -244,8 +260,9 @@ export function DownloadQueue({
     if ("report" in next) {
       setReport(next.report);
       setError("");
+      markLive();
     } else setError(next.error);
-  }, [gate, t]);
+  }, [gate, t, markLive]);
 
   useEffect(() => {
     if (configured) void load();
@@ -984,6 +1001,7 @@ export function DownloadQueue({
             ) : null
           }
         />
+        <ArrSnapshotNote at={snapshotAt} refreshing={loading} />
         {report && error && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error}</p>}
         {body}
       </div>

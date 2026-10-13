@@ -17,6 +17,13 @@
 // and the day headings are in the VIEWER's time zone and region, which the
 // server render cannot know. The view (week, status, type, instance,
 // unmonitored) is kept in the URL.
+//
+// "Instant, then live" (src/lib/arr-snapshot.ts): opening a window paints the
+// last answer the server kept for exactly that window's read (`calendarReadUrl`
+// — the live load fetches the same URL, so the server's snapshot key matches),
+// marked with when it was read, while the live read is out; the live answer
+// then replaces it. A snapshot is drawn only for the window it was read for,
+// like a live report. Searches still re-judge live on the server.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -27,6 +34,8 @@ import { Chip, EmptyState, FilterBar, type ChipTone } from "@/components/ui/desi
 import { Poster } from "@/components/admin/activity-ui";
 import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import { episodeCode } from "@/components/admin/queue-format";
 import { AlertTriangle, CalendarDays, Check, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -108,6 +117,18 @@ const PREMIERE_LABEL = {
 
 const canSearch = (c: CalendarCell) => c.status === "missing" && (c.service === "radarr" || c.episodeId !== null);
 
+/**
+ * The calendar read for one window. The live load and its snapshot both use
+ * THIS URL — the server keys a snapshot on the read's path + query, so a
+ * snapshot is only ever painted for the window (and unmonitored switch) it
+ * was read for.
+ */
+function calendarReadUrl(from: number, withUnmonitored: boolean): string {
+  const q = new URLSearchParams({ start: new Date(from).toISOString(), end: new Date(addDays(from, CALENDAR_DAYS)).toISOString() });
+  if (withUnmonitored) q.set("unmonitored", "1");
+  return withBasePath(`/api/admin/arr/calendar?${q.toString()}`);
+}
+
 export function ArrCalendar({ instances, today, initialView }: { instances: InstanceRef[]; today: string; initialView: CalendarView }) {
   const t = useT();
   const locale = useLocale();
@@ -121,6 +142,9 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
   const [instanceFilter, setInstanceFilter] = useState(initialView.instance);
   const [unmonitored, setUnmonitored] = useState(initialView.unmonitored);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
+  // The newest LIVE report's clock. Not a snapshot's: one read hours ago must
+  // not move "today" back while the live read is out.
+  const [clock, setClock] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [searches, setSearches] = useState<Record<string, SearchState>>({});
@@ -134,7 +158,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
 
   // "Today" follows the newest report's clock, so a page left open overnight
   // still knows which day it is.
-  const nowIso = loaded?.report.now ?? today;
+  const nowIso = clock ?? today;
   const todayMs = useMemo(() => Date.parse(nowIso), [nowIso]);
 
   useEffect(() => {
@@ -145,14 +169,29 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
     setStart(weekStart(initialView.week ? localDayStartOf(initialView.week) : todayMs, first));
   }, [mounted, start, todayMs, locale, initialView.week]);
 
+  // The current window's read — null until the window is known (after mount)
+  // or with nothing configured to read.
+  const readUrl = useMemo(
+    () => (start !== null && instances.length > 0 ? calendarReadUrl(start, unmonitored) : null),
+    [start, unmonitored, instances.length],
+  );
+  // A snapshot is a report read for THIS window: stored exactly as a live one
+  // is, and drawn under the same `loaded.start === start` rule. It touches
+  // nothing else — errors, searches (an in-flight one keeps its spinner) and the
+  // clock stay as they are.
+  const applySnapshot = useCallback((data: Report) => {
+    if (start === null) return false;
+    setLoaded({ start, unmonitored, report: data });
+  }, [start, unmonitored]);
+  const snap = useArrSnapshot<Report>(readUrl, applySnapshot);
+  const { markLive } = snap;
+
   const load = useCallback(async (from: number, withUnmonitored: boolean) => {
     const id = ++seq.current;
     setLoading(true);
     setError("");
-    const q = new URLSearchParams({ start: new Date(from).toISOString(), end: new Date(addDays(from, CALENDAR_DAYS)).toISOString() });
-    if (withUnmonitored) q.set("unmonitored", "1");
     try {
-      const res = await fetch(withBasePath(`/api/admin/arr/calendar?${q.toString()}`));
+      const res = await fetch(calendarReadUrl(from, withUnmonitored));
       const data = (await res.json().catch(() => null)) as (Report & { error?: string }) | null;
       if (id !== seq.current) return;
       if (!res.ok || !data) {
@@ -166,6 +205,9 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
         return;
       }
       setLoaded({ start: from, unmonitored: withUnmonitored, report: data });
+      setClock(data.now);
+      // The live answer for this window landed: a late snapshot no longer paints.
+      markLive();
       // A fresh report is a fresh start: what was searched shows its new
       // status — but a search still in flight keeps its spinner (and its
       // disabled button) until its own answer arrives.
@@ -175,7 +217,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
     } finally {
       if (id === seq.current) setLoading(false);
     }
-  }, [t]);
+  }, [t, markLive]);
 
   useEffect(() => {
     if (start !== null && instances.length > 0) void load(start, unmonitored);
@@ -367,6 +409,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
           {t("adminArr.calendar.range", { from: rangeFmt.format(start), to: rangeFmt.format(addDays(start, CALENDAR_DAYS - 1)) })}
         </p>
       )}
+      <ArrSnapshotNote at={snap.staleAt} refreshing={loading} />
 
       {error && (
         <p role="alert" className="m-0 flex items-center gap-1.5 text-sm" style={{ color: "var(--ds-danger)" }}>

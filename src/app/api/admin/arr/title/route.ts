@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, arrTitleGate, parseArrId } from "@/lib/arr-admin-http";
 import { editedFields, parseTitleEdit } from "@/lib/arr-title";
 import { editTitle, findTitle, loadTitle } from "@/lib/arr-title-data";
@@ -26,7 +27,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 //       Every value must be one the instance offers (400 otherwise, nothing
 //       written). → { title } as the arr now has it. Audited ARR_TITLE_EDIT
 //       after the arr accepted it (guardrail 26).
-export const GET = withAdmin(async (req) => {
+// GET with `cached=1` → the last answer kept for this exact read, for display only
+// (src/lib/arr-snapshot.ts).
+export const GET = withAdmin(snapshotted(async (req) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
   const target = await arrGate(q.get("service"), q.get("instance"), t);
@@ -43,7 +46,7 @@ export const GET = withAdmin(async (req) => {
   } catch (err) {
     return arrFailure(err, target, t, "title read");
   }
-});
+}));
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);

@@ -425,5 +425,7 @@
   "settings.cron.job.upstreamWatch.name": "服务器观看记录",
   "settings.cron.job.upstreamWatch.description": "读取每台 Plex 和 Jellyfin 服务器自身的观看记录，确保在安装 Summonarr 之前（或其停止运行期间）看过的作品不会被报告为未观看",
   "settings.cron.job.arrWatch.name": "Radarr/Sonarr 监控",
-  "settings.cron.job.arrWatch.description": "检查每个 Radarr 和 Sonarr 实例是否存在磁盘空间不足、下载失败以及需要处理的下载，并提醒订阅了这些事件的通知通道"
+  "settings.cron.job.arrWatch.description": "检查每个 Radarr 和 Sonarr 实例是否存在磁盘空间不足、下载失败以及需要处理的下载，并提醒订阅了这些事件的通知通道",
+  "settings.cron.job.arrSnapshots.name": "Radarr/Sonarr 页面刷新",
+  "settings.cron.job.arrSnapshots.description": "按优先级重新读取管理员在过去一天内打开过的 Radarr/Sonarr 页面（队列和健康状况每 5 分钟；缺失、历史、日历和标题每 10 分钟；Arr 系统每 15 分钟），让页面打开时即显示最新数据"
 }

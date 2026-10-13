@@ -8,6 +8,11 @@
 // The webhook token never reaches the browser — the server builds the URL it
 // hands to Radarr/Sonarr (POST /api/admin/arr-health/webhook). Nothing here
 // reads the clock while rendering (guardrail 16).
+//
+// Instant, then live (use-arr-snapshot.ts): on open the last report the server
+// kept paints at once, marked with when it was read, while the live read is
+// out; the live answer replaces it. Setup always goes to the server, which
+// re-reads the instance.
 
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -19,6 +24,8 @@ import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { ArrHealthCheck, WebhookState } from "@/lib/arr-health";
 import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
 
 type Service = "radarr" | "sonarr";
 
@@ -55,6 +62,10 @@ const WEBHOOK_TONE: Record<WebhookState | "unknown", ChipTone> = {
 
 const LEVEL_TONE: Record<ArrHealthCheck["level"], ChipTone> = { error: "declined", warning: "pending", notice: "neutral" };
 
+// The panel's one read. The live load and its snapshot must name the SAME url,
+// or the server's snapshot key misses.
+const healthUrl = () => withBasePath("/api/admin/arr-health");
+
 async function readJson<T>(res: Response): Promise<T | null> {
   return (await res.json().catch(() => null)) as T | null;
 }
@@ -67,12 +78,18 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
   const [openSetup, setOpenSetup] = useState<string | null>(null);
   const [base, setBase] = useState("");
   const [setup, setSetup] = useState<Record<string, SetupState>>({});
+  // The snapshot only paints an EMPTY panel: it never replaces a report already
+  // on screen, and leaves the load error and any open setup form alone.
+  const { staleAt: snapshotAt, markLive } = useArrSnapshot<HealthReport>(healthUrl(), (data) => {
+    setReport((cur) => cur ?? data);
+    setBase((cur) => cur || data.webhookBase || "");
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError("");
     try {
-      const res = await fetch(withBasePath("/api/admin/arr-health"));
+      const res = await fetch(healthUrl());
       const data = await readJson<HealthReport & { error?: string }>(res);
       if (!res.ok || !data) {
         setLoadError(data?.error ?? t("adminManage.arrHealth.loadError"));
@@ -80,12 +97,13 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
       }
       setReport(data);
       setBase((cur) => cur || data.webhookBase || "");
+      markLive();
     } catch {
       setLoadError(t("adminManage.arrHealth.loadError"));
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [t, markLive]);
 
   useEffect(() => {
     void load();
@@ -278,6 +296,7 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
   return (
     <div className="flex flex-col gap-3">
       {header}
+      <ArrSnapshotNote at={snapshotAt} refreshing={loading} />
       {body}
     </div>
   );

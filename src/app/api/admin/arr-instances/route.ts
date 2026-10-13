@@ -17,6 +17,7 @@ import { buildArrInstanceRegistryWrite, getArrInstances } from "@/lib/arr-instan
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { validateServerUrl, stripUrlUserinfo } from "@/lib/server-url";
+import { clearArrSnapshots } from "@/lib/arr-snapshot";
 
 // Admin management surface for the full Radarr/Sonarr instance list (multi-
 // instance support): the registry metadata (slug/name/routing/access) AND each
@@ -329,6 +330,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       testResults[inst.slug] = { error: t("apiAdmin.arrInstances.connectionFailed", { service }) };
     }
   });
+
+  // The registry changed (an instance added, removed or re-pointed): the admin
+  // arr pages' snapshots may name an instance that is gone (guardrail 5h).
+  clearArrSnapshots();
 
   void logAudit({
     userId: session.user.id,

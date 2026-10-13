@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
 import { isBulkAction, isTaskName } from "@/lib/arr-system";
 import { cancelCommand, loadTasks, runBulkAction, runTask } from "@/lib/arr-system-data";
@@ -32,9 +33,11 @@ const LIMIT_PER_MIN = 10;
 //       once it started or finished — including when it starts between our
 //       read and the arr's cancel). Not audited.
 // Runs are rate-limited per admin.
-export const GET = withAdmin(async () => {
+// GET with `cached=1` → the last answer kept for this exact read, for display only
+// (src/lib/arr-snapshot.ts).
+export const GET = withAdmin(snapshotted(async () => {
   return NextResponse.json(await loadTasks());
-});
+}));
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);

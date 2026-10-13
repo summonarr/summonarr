@@ -5,17 +5,25 @@
 // with "Mark as failed" on a grab, and a link to the title's downloads in the
 // Download Queue (filtered to exactly this title on this instance). Following
 // that link leaves the manager — through the manager's own close rules.
+//
+// "Instant, then live" (src/lib/arr-snapshot.ts): on open the history the
+// server last read is painted while the live read is out — only over an EMPTY
+// list; "Mark as failed" on a painted row is re-checked live by its route.
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Download, Loader2, RefreshCw } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
 import { ArrHistoryList } from "@/components/admin/arr-history-list";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
+import { withBasePath } from "@/lib/base-path";
 import { queueTitleHref } from "@/lib/arr-manage-links";
 import { opensElsewhere } from "@/lib/arr-title-ui";
 import type { ArrHistoryEvent } from "@/lib/arr-history";
 import { arrApi, titleQuery, useTRef, type TitleRef } from "./shared";
+import { snapshotMayPaint } from "./snapshot-rules";
 
 export function HistoryTab({
   titleRef,
@@ -38,18 +46,28 @@ export function HistoryTab({
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // The live read's URL — and its snapshot's (one builder: the server keys on it).
+  const readPath = useMemo(() => `/api/admin/arr/title/history?${titleQuery(titleRef)}`, [titleRef]);
+  const applySnapshot = useCallback((data: { events: ArrHistoryEvent[] }) => {
+    if (!Array.isArray(data?.events)) return false;
+    setEvents((prev) => (snapshotMayPaint(prev !== null, false) ? data.events : prev));
+  }, []);
+  const snap = useArrSnapshot<{ events: ArrHistoryEvent[] }>(withBasePath(readPath), applySnapshot);
+  const markLive = snap.markLive;
+
   const load = useCallback(async () => {
     setLoading(true);
-    const res = await arrApi<{ events: ArrHistoryEvent[] }>(`/api/admin/arr/title/history?${titleQuery(titleRef)}`, undefined, tRef.current("adminArr.history.loadFailed"));
+    const res = await arrApi<{ events: ArrHistoryEvent[] }>(readPath, undefined, tRef.current("adminArr.history.loadFailed"));
     setLoading(false);
     if (res.ok) {
       setEvents(res.data.events);
       setError("");
+      markLive();
     } else {
       // A failed re-read keeps the list it had.
       setError(res.error);
     }
-  }, [titleRef, tRef]);
+  }, [readPath, tRef, markLive]);
 
   useEffect(() => {
     void load();
@@ -103,6 +121,7 @@ export function HistoryTab({
           </Button>
         </div>
       </div>
+      <ArrSnapshotNote at={snap.staleAt} refreshing={loading} />
       <ArrHistoryList events={events} showTitle={false} onMarkFailed={markFailed} />
     </div>
   );

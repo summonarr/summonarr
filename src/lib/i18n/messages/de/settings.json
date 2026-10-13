@@ -425,5 +425,7 @@
   "settings.cron.job.upstreamWatch.name": "Server-Wiedergabeverlauf",
   "settings.cron.job.upstreamWatch.description": "Den eigenen Wiedergabeverlauf jedes Plex- und Jellyfin-Servers lesen, damit ein Titel, der vor der Installation von Summonarr (oder während eines Ausfalls) angesehen wurde, nie als nicht angesehen gemeldet wird",
   "settings.cron.job.arrWatch.name": "Radarr/Sonarr-Monitor",
-  "settings.cron.job.arrWatch.description": "Jede Radarr- und Sonarr-Instanz auf knappen Speicherplatz, fehlgeschlagene Downloads und Downloads prüfen, die Aufmerksamkeit brauchen, und die Benachrichtigungskanäle warnen, die sie abonniert haben"
+  "settings.cron.job.arrWatch.description": "Jede Radarr- und Sonarr-Instanz auf knappen Speicherplatz, fehlgeschlagene Downloads und Downloads prüfen, die Aufmerksamkeit brauchen, und die Benachrichtigungskanäle warnen, die sie abonniert haben",
+  "settings.cron.job.arrSnapshots.name": "Radarr/Sonarr-Seitenaktualisierung",
+  "settings.cron.job.arrSnapshots.description": "Liest die Radarr/Sonarr-Seiten, die Admins am letzten Tag geöffnet haben, nach Priorität neu ein (Warteschlange und Status alle 5 Minuten, Fehlend, Verlauf, Kalender und Titel alle 10, Arr-System alle 15), damit sie mit aktuellen Daten öffnen"
 }

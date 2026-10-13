@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import { parseCalendarWindow, MAX_CALENDAR_DAYS } from "@/lib/arr-calendar";
 import { loadCalendar } from "@/lib/arr-calendar-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -19,11 +20,13 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 //   An instance that could not be read is named in `errors` with the KIND of
 //   failure (the page translates it) — its titles are absent, not "nothing
 //   airing". `now` is the server's clock, which the page's "today" follows.
-export const GET = withAdmin(async (req) => {
+// GET with `cached=1` → the last answer kept for this exact read, for display only
+// (src/lib/arr-snapshot.ts).
+export const GET = withAdmin(snapshotted(async (req) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
   const range = parseCalendarWindow(q.get("start"), q.get("end"));
   if (!range) return NextResponse.json({ error: t("apiAdmin.arr.calendarWindowInvalid", { days: MAX_CALENDAR_DAYS }) }, { status: 400 });
   const unmonitored = q.get("unmonitored") === "1" || q.get("unmonitored") === "true";
   return NextResponse.json(await loadCalendar(range.start, range.end, unmonitored, new Date()));
-});
+}));

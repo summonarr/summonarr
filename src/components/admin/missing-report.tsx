@@ -13,6 +13,13 @@
 // server-supplied ISO string formatted for the viewer's locale, and "missing
 // for" is a server-computed day count — nothing here reads the clock while
 // rendering (guardrail 16).
+//
+// "Instant, then live" (use-arr-snapshot.ts): until a list holds a live answer,
+// the page paints the last one the server kept for the same read — marked with
+// when it was read — while the live load is out, then swaps the live answer in.
+// A row painted from the snapshot acts through the same routes, which re-judge
+// it live. Episode expansion stays live: rows expand independently and the
+// hook follows one read per view.
 
 import { Fragment, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -28,6 +35,8 @@ import { Chip, EmptyState, FilterBar, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
 import { manageTabFor } from "@/lib/arr-manage-links";
 import { Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, Loader2, RefreshCw, RotateCcw, Search, X } from "@/components/icons";
 import type { CutoffMovie, CutoffSeries, MissingEpisode, MissingMovie, MissingSeries } from "@/lib/arr-missing";
@@ -89,6 +98,9 @@ const SERVICE_LABEL: Record<Service, string> = { sonarr: "Sonarr", radarr: "Rada
 const PAGE_SIZE = 100;
 const SONARR_STATUSES = new Set(["continuing", "ended", "upcoming", "deleted"]);
 const rowKey = (r: { instance: string; arrId: number }) => `${r.instance}:${r.arrId}`;
+// A list's live read. ONE builder for the live load and the snapshot read, so
+// the server keys the snapshot on exactly the read the live load makes.
+const missingListUrl = (svc: Service, m: Mode) => withBasePath(`/api/admin/missing?service=${svc}&mode=${m}`);
 const episodeCode = (e: { seasonNumber: number; episodeNumber: number }) =>
   `S${String(e.seasonNumber).padStart(2, "0")}E${String(e.episodeNumber).padStart(2, "0")}`;
 
@@ -179,6 +191,15 @@ export function MissingReport({
   useEffect(() => () => bulkAbort.current?.abort(), []);
 
   const current: ReportKey = `${service}:${mode}`;
+  // The lists holding a LIVE answer (not a snapshot): the ref for the
+  // synchronous checks in `load` and the snapshot painter, the state for the
+  // render (the snapshot url). Never shrinks — a Refresh is always live.
+  const liveRef = useRef<Set<ReportKey>>(new Set());
+  const [liveKeys, setLiveKeys] = useState<ReadonlySet<ReportKey>>(new Set());
+  // The view on screen and its snapshot's markLive, as of the last commit — a
+  // live answer for another list must not mark this one live.
+  const viewRef = useRef<ReportKey>(current);
+  const markLiveRef = useRef<() => void>(() => {});
 
   const load = useCallback(async (svc: Service, m: Mode) => {
     const k: ReportKey = `${svc}:${m}`;
@@ -189,7 +210,7 @@ export function MissingReport({
     setLoadingKeys((prev) => new Set(prev).add(k));
     setErrors((e) => ({ ...e, [k]: "" }));
     try {
-      const res = await fetch(withBasePath(`/api/admin/missing?service=${svc}&mode=${m}`));
+      const res = await fetch(missingListUrl(svc, m));
       if (!res.ok) {
         const message = await readError(res, t("adminManage.missing.error.load"));
         if (superseded()) return;
@@ -198,17 +219,30 @@ export function MissingReport({
       }
       const data = await res.json();
       if (superseded()) return;
+      // This list now holds a live answer: no snapshot paints over it from here
+      // on (the ref is what a snapshot landing in the same tick reads), its
+      // snapshot read stops and the stale note goes.
+      const replacesLive = liveRef.current.has(k);
+      liveRef.current.add(k);
+      setLiveKeys(new Set(liveRef.current));
+      if (viewRef.current === k) markLiveRef.current();
       setReports((r) => ({ ...r, [k]: data }));
-      // A fresh listing is a fresh start: the rows that were searched may be
-      // gone, and any still listed can be searched again; every expanded
-      // episode list belongs to the old listing. A row whose search is still
-      // IN FLIGHT keeps its state — its request settles it, and until then its
-      // Search stays off (a cleared entry re-armed the button mid-request).
-      updateSearches((s) => Object.fromEntries(Object.entries(s).filter(([key, st]) => !key.startsWith(`${k}|`) || st.busy)));
-      setSelected((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
-      setBulkResult((r) => (r?.key === k ? null : r));
-      setExpanded((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
-      setEpisodes((s) => Object.fromEntries(Object.entries(s).filter(([key]) => !key.startsWith(`${k}|`))));
+      // A fresh listing after an earlier LIVE one (Refresh) is a fresh start:
+      // the rows that were searched may be gone, and any still listed can be
+      // searched again; every expanded episode list belongs to the old
+      // listing. A row whose search is still IN FLIGHT keeps its state — its
+      // request settles it, and until then its Search stays off (a cleared
+      // entry re-armed the button mid-request). The FIRST live answer replaces
+      // at most a snapshot, whose rows are the same rows (instance + id): what
+      // the admin ticked or searched on it stands — re-arming a row searched a
+      // moment ago would let it be searched twice.
+      if (replacesLive) {
+        updateSearches((s) => Object.fromEntries(Object.entries(s).filter(([key, st]) => !key.startsWith(`${k}|`) || st.busy)));
+        setSelected((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
+        setBulkResult((r) => (r?.key === k ? null : r));
+        setExpanded((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
+        setEpisodes((s) => Object.fromEntries(Object.entries(s).filter(([key]) => !key.startsWith(`${k}|`))));
+      }
     } catch {
       if (superseded()) return;
       setErrors((e) => ({ ...e, [k]: t("adminManage.missing.error.loadNetwork") }));
@@ -230,6 +264,31 @@ export function MissingReport({
   useEffect(() => {
     if (needsLoad) void load(service, mode);
   }, [needsLoad, service, mode, load]);
+
+  // A snapshot only ever fills a list with no live answer yet, and never while
+  // the admin has something going on that list: a bulk search (its runner and
+  // the selection it took stay exactly as they are — a run whose list isn't
+  // committed yet counts), its confirmation, or a row's own search in flight.
+  // It sets the report alone — never an error, a selection, a dialog or a
+  // row's search state.
+  const snapshotMayPaint = (k: ReportKey) =>
+    !liveRef.current.has(k) &&
+    !(bulkAbort.current !== null && (bulk === null || bulk.key === k)) &&
+    confirming?.key !== k &&
+    !Object.entries(searchesRef.current).some(([key, st]) => st.busy && key.startsWith(`${k}|`));
+
+  // The snapshot of this view's read, painted while it has no live answer —
+  // on open and on each tab/mode switch. Null once a live answer landed (a
+  // Refresh is live, never a snapshot) and while nothing is configured.
+  const snapshotUrl = configured[service] && !liveKeys.has(current) ? missingListUrl(service, mode) : null;
+  const snap = useArrSnapshot<Reports[ReportKey]>(snapshotUrl, (data) => {
+    if (!snapshotMayPaint(current)) return false;
+    setReports((r) => ({ ...r, [current]: data }));
+  });
+  useEffect(() => {
+    viewRef.current = current;
+    markLiveRef.current = snap.markLive;
+  });
 
   // Keep the tab and mode in the URL so a reload or a shared link lands on
   // them. The native History API is synced with Next's router and does not
@@ -1133,6 +1192,8 @@ export function MissingReport({
           </div>
         }
       />
+      {/* The list on screen is the server's last kept answer: when it was read, and that the live read is out (or didn't finish). */}
+      <ArrSnapshotNote at={snap.staleAt} refreshing={loadingHere} />
       {report && errors[current] && (
         <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{errors[current]}</p>
       )}

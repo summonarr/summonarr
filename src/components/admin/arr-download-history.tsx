@@ -20,6 +20,13 @@
 // flight the tab, instance, kind and page stay put, or its refusal would land
 // on a list no longer on screen. While Clear blocklist's command is followed,
 // Clear and Remove wait for it — the list on screen is the one being cleared.
+//
+// Instant, then live (src/lib/arr-snapshot.ts): opening the page, or changing
+// the tab, instance, kind or page, first draws the answer the server kept for
+// exactly that read (`viewUrl` — the live load fetches the same URL), marked
+// with when it was read, then the live load replaces it. A snapshot is never
+// drawn while a write is in flight or over its re-read (`paintsSnapshot`), and
+// it is display only: every write re-checks the arr live on the server.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -27,6 +34,8 @@ import { Button } from "@/components/ui/button";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Chip, EmptyState, FilterBar } from "@/components/ui/design";
 import { ArrHistoryList, historyKindLabel } from "@/components/admin/arr-history-list";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import { CommandWatchLine, isWatchActive, useArrCommandWatch } from "@/components/admin/arr-command-watch";
 import { useTRef } from "@/components/admin/arr-title/shared";
 import { arrInstanceLabel } from "@/components/admin/open-in-arr";
@@ -36,10 +45,12 @@ import { AlertTriangle, Ban, Check, ChevronLeft, ChevronRight, Loader2, Magnet, 
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
 import { lastPageIfStranded, type ArrHistoryEvent, type ArrPage, type BlocklistEntry, type HistoryFilterKind } from "@/lib/arr-history";
+import { blocklistCountPath, historyViewPath, paintsSnapshot, type HistoryView } from "@/lib/arr-history-view";
 import { manageTabFor } from "@/lib/arr-manage-links";
 
 type Service = "radarr" | "sonarr";
 type Tab = "history" | "blocklist";
+type Busy = "remove" | "clear" | "mark" | null;
 interface InstanceRef { service: Service; slug: string; name: string }
 
 const PAGE_SIZE = 50;
@@ -48,9 +59,10 @@ const instKey = (i: { service: Service; slug: string }) => `${i.service}:${i.slu
 // A blocklist entry's identity: its id alone collides across instances.
 const entryKey = (r: BlocklistEntry) => `${r.service}:${r.instance}:${r.id}`;
 
-async function getJson<T>(path: string, fallback: string): Promise<{ data: T } | { error: string }> {
+// `url` already carries the base path: it is the same string the snapshot is read for.
+async function getJson<T>(url: string, fallback: string): Promise<{ data: T } | { error: string }> {
   try {
-    const res = await fetch(withBasePath(path));
+    const res = await fetch(url);
     const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null;
     if (!res.ok || !data) return { error: data?.error ?? fallback };
     return { data };
@@ -115,54 +127,105 @@ export function ArrDownloadHistory({
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<ReadonlyMap<string, BlocklistEntry>>(new Map());
   const [confirmClear, setConfirmClear] = useState(false);
-  const [busy, setBusy] = useState<"remove" | "clear" | "mark" | null>(null);
+  const [busy, setBusyState] = useState<"remove" | "clear" | "mark" | null>(null);
+  // Mirrored at once, not after a render: a snapshot landing mid-write reads it.
+  const busyRef = useRef<Busy>(null);
+  const setBusy = useCallback((next: Busy) => {
+    busyRef.current = next;
+    setBusyState(next);
+  }, []);
   const seq = useRef(0);
   // Clear blocklist's command, followed live; the list is re-read once it ends.
   const { watch: watchCommand, stop: stopWatch, watches } = useArrCommandWatch();
+  const clearingRef = useRef(false);
+  useEffect(() => {
+    clearingRef.current = isWatchActive(watches.clear);
+  }, [watches.clear]);
   // Set when a load jumps to the last page: the load that follows continues it.
   const keepErrorNext = useRef(false);
+  // The read a load just jumped to (the page asked for was past the end): its
+  // snapshot predates what that answer showed, so only a live answer draws it.
+  const jumpedTo = useRef<string | null>(null);
+
+  // The view on screen and the one read it is drawn from — fetched live by
+  // `load`, and the snapshot's key — or null with nothing to read.
+  const view = useMemo<HistoryView | null>(
+    () => (inst ? { tab, service: inst.service, instance: inst.slug, page, pageSize: PAGE_SIZE, kind } : null),
+    [inst, tab, page, kind],
+  );
+  const viewUrl = useMemo(() => (view ? withBasePath(historyViewPath(view)) : null), [view]);
+  const countUrl = useMemo(() => (inst ? withBasePath(blocklistCountPath(inst.service, inst.slug)) : null), [inst]);
+
+  // Which read the last snapshot offered was actually drawn for: the stale note
+  // describes the rows on screen, never a snapshot paintsSnapshot turned away.
+  const [snapshotDrawn, setSnapshotDrawn] = useState<string | null>(null);
+  // A snapshot is drawn exactly as a live answer for this view is — the rows,
+  // and the kind the History rows were read with — and nothing else: errors,
+  // the selection, an open confirm and a write's pending state stay as they are.
+  const { staleAt, markLive } = useArrSnapshot<ArrPage<ArrHistoryEvent> | ArrPage<BlocklistEntry>>(viewUrl, (data) => {
+    const draw = view !== null && paintsSnapshot({
+      writing: busyRef.current !== null || clearingRef.current,
+      jumpedHere: jumpedTo.current === viewUrl,
+      page: view.page,
+      data,
+    });
+    setSnapshotDrawn(draw ? viewUrl : null);
+    if (!draw) return false;
+    if (view.tab === "history") {
+      setHistory(data as ArrPage<ArrHistoryEvent>);
+      setHistoryKind(view.kind);
+    } else setBlocklist(data as ArrPage<BlocklistEntry>);
+  });
+  // The Blocklist tab's count, drawn from its own snapshot until it is read live.
+  const { markLive: markCountLive } = useArrSnapshot<ArrPage<BlocklistEntry>>(countUrl, (data) => {
+    if (inst) setBlocklistCount({ inst: instKey(inst), total: data.totalRecords });
+  });
 
   const load = useCallback(async (opts: { keepError?: boolean } = {}) => {
-    if (!inst) return;
+    if (!view || !viewUrl) return;
     const id = ++seq.current;
     setLoading(true);
     const keepError = opts.keepError === true || keepErrorNext.current;
     keepErrorNext.current = false;
     if (!keepError) setError("");
-    const q = new URLSearchParams({ service: inst.service, instance: inst.slug, page: String(page), pageSize: String(PAGE_SIZE) });
-    if (tab === "history") {
-      if (kind !== "all") q.set("kind", kind);
-      const res = await getJson<ArrPage<ArrHistoryEvent>>(`/api/admin/arr/history?${q.toString()}`, tRef.current("adminArr.history.loadFailed"));
+    if (view.tab === "history") {
+      const res = await getJson<ArrPage<ArrHistoryEvent>>(viewUrl, tRef.current("adminArr.history.loadFailed"));
       if (id !== seq.current) return;
       if ("data" in res) {
         // Past the end (its records were removed, or the URL named a page the
         // list no longer has): show the last page instead — the effect loads it.
-        const last = lastPageIfStranded(page, res.data);
+        const last = lastPageIfStranded(view.page, res.data);
         if (last !== null) {
           keepErrorNext.current = true;
+          jumpedTo.current = withBasePath(historyViewPath({ ...view, page: last }));
           setPage(last);
           return;
         }
         setHistory(res.data);
         setHistoryKind(kind);
+        jumpedTo.current = null;
+        markLive();
       } else setError(res.error);
     } else {
-      const res = await getJson<ArrPage<BlocklistEntry>>(`/api/admin/arr/blocklist?${q.toString()}`, tRef.current("adminArr.blocklist.loadFailed"));
+      const res = await getJson<ArrPage<BlocklistEntry>>(viewUrl, tRef.current("adminArr.blocklist.loadFailed"));
       if (id !== seq.current) return;
       if ("data" in res) {
-        const last = lastPageIfStranded(page, res.data);
+        const last = lastPageIfStranded(view.page, res.data);
         if (last !== null) {
           keepErrorNext.current = true;
+          jumpedTo.current = withBasePath(historyViewPath({ ...view, page: last }));
           setPage(last);
           return;
         }
         const records = res.data.records;
         setBlocklist(res.data);
         setSelected((prev) => new Map([...prev].filter(([k]) => records.some((r) => entryKey(r) === k))));
+        jumpedTo.current = null;
+        markLive();
       } else setError(res.error);
     }
     setLoading(false);
-  }, [inst, page, tab, kind, tRef]);
+  }, [view, viewUrl, kind, tRef, markLive]);
 
   // The loader of the view on screen now, for reloads that finish after a click.
   const loadRef = useRef(load);
@@ -179,17 +242,19 @@ export function ArrDownloadHistory({
   const cancelReload = useCallback(() => stopWatch("clear"), [stopWatch]);
 
   useEffect(() => {
-    if (!inst) return;
+    if (!inst || !countUrl) return;
     let live = true;
     const key = instKey(inst);
-    const q = new URLSearchParams({ service: inst.service, instance: inst.slug, page: "1", pageSize: "1" });
-    void getJson<ArrPage<BlocklistEntry>>(`/api/admin/arr/blocklist?${q.toString()}`, "").then((res) => {
-      if (live && "data" in res) setBlocklistCount({ inst: key, total: res.data.totalRecords });
+    void getJson<ArrPage<BlocklistEntry>>(countUrl, "").then((res) => {
+      if (live && "data" in res) {
+        setBlocklistCount({ inst: key, total: res.data.totalRecords });
+        markCountLive();
+      }
     });
     return () => {
       live = false;
     };
-  }, [inst]);
+  }, [inst, countUrl, markCountLive]);
 
   useEffect(() => {
     if (!current) return;
@@ -368,6 +433,7 @@ export function ArrDownloadHistory({
         />
       </fieldset>
 
+      <ArrSnapshotNote at={snapshotDrawn === viewUrl ? staleAt : null} refreshing={loading} />
       {error && (
         <p role="alert" className="m-0 flex items-center gap-1.5 text-sm" style={{ color: "var(--ds-danger)" }}>
           <AlertTriangle className="h-4 w-4 shrink-0" /> {error}

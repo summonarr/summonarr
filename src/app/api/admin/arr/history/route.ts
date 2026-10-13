@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate } from "@/lib/arr-admin-http";
 import { parseHistoryKind, parsePaging } from "@/lib/arr-history";
 import { loadHistoryPage } from "@/lib/arr-history-data";
@@ -10,7 +11,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 //   GET ?service&instance&page=1&pageSize=50[&kind=grabbed|imported|failed|deleted|renamed|ignored]
 //   → { page, pageSize, totalRecords, records }. Only named fields of each
 //   record's data are returned — never the release's download URL or guid.
-export const GET = withAdmin(async (req) => {
+// GET with `cached=1` → the last answer kept for this exact read, for display only
+// (src/lib/arr-snapshot.ts).
+export const GET = withAdmin(snapshotted(async (req) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
   const target = await arrGate(q.get("service"), q.get("instance"), t);
@@ -26,4 +29,4 @@ export const GET = withAdmin(async (req) => {
   } catch (err) {
     return arrFailure(err, target, t, "history read");
   }
-});
+}));

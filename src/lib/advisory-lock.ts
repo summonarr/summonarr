@@ -20,6 +20,9 @@ export const UPSTREAM_WATCH_LOCK_ID = 2041;
 // The Radarr/Sonarr monitor (arr-watch cron): disk space, failed downloads,
 // newly stuck downloads. Same reasoning: a parallel-branch-safe id.
 export const ARR_WATCH_LOCK_ID = 2051;
+// The admin arr pages' background re-reads (refresh-arr-snapshots cron,
+// src/lib/arr-snapshot.ts). Same reasoning: a parallel-branch-safe id.
+export const ARR_SNAPSHOT_LOCK_ID = 2061;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

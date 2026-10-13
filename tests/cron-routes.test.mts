@@ -1,5 +1,5 @@
-// Route-level unit tests for all fifteen POST /api/cron/* handlers:
-//   arr-watch, purge-auth-sessions, refresh-upstream-watch, scrub-audit-pii, sync-download-policies,
+// Route-level unit tests for all sixteen POST /api/cron/* handlers:
+//   arr-watch, purge-auth-sessions, refresh-arr-snapshots, refresh-upstream-watch, scrub-audit-pii, sync-download-policies,
 //   sync-plex-watchlists, sync-trakt, trash-diagnostic, trash-sync, warm-activity, warm-library,
 //   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations
 //
@@ -222,6 +222,7 @@ const AL = await import("../src/lib/advisory-lock.ts");
 const ROUTES: CronRoute[] = [
   await load("arr-watch", AL.ARR_WATCH_LOCK_ID),
   await load("purge-auth-sessions", 2001),
+  await load("refresh-arr-snapshots", AL.ARR_SNAPSHOT_LOCK_ID),
   await load("refresh-upstream-watch", AL.UPSTREAM_WATCH_LOCK_ID),
   await load("scrub-audit-pii", 2002),
   await load("sync-download-policies", 2009),
@@ -239,13 +240,24 @@ const ROUTES: CronRoute[] = [
 
 const LOCKING = ROUTES.filter((r) => r.lockId !== null);
 
+// refresh-arr-snapshots short-circuits before its lock unless an admin arr view
+// is due; beforeEach plants one (a queue view read 10 minutes ago, whose route
+// handler answers an empty report — no DB, no network).
+const SNAP = await import("../src/lib/arr-snapshot.ts");
+async function plantDueArrView(): Promise<void> {
+  SNAP.resetArrSnapshotsForTests();
+  const url = "http://localhost:3000/api/admin/queue";
+  await SNAP.snapshotted(async () => Response.json({ items: [] }))(new NextRequest(url, { headers: { "accept-language": "en" } }), {}, {});
+  SNAP.rememberSnapshot(SNAP.snapshotKey(url, "en")!, '{"items":[]}', Date.now() - 10 * 60_000, { url, locale: "en", viewed: true });
+}
+
 function req(route: CronRoute, headers: Record<string, string> = {}, query = ""): InstanceType<typeof NextRequest> {
   return new NextRequest(`http://localhost:3000${route.path}${query}`, { method: "POST", headers });
 }
 
 const authed = (route: CronRoute) => req(route, { authorization: `Bearer ${CRON_SECRET}` });
 
-beforeEach(() => {
+beforeEach(async () => {
   ops = [];
   pgLockCalls = [];
   fetchCalls.length = 0;
@@ -267,12 +279,13 @@ beforeEach(() => {
   settings.set("radarrApiKey", "cron-routes-radarr-key");
   invalidateFeatureFlagCache();
   lockAcquire = () => true;
+  await plantDueArrView();
 });
 
 // ── the matrix itself must not pass vacuously ────────────────────────────────
 
-test("all fifteen cron routes loaded and expose a POST handler", () => {
-  assert.equal(ROUTES.length, 15);
+test("all sixteen cron routes loaded and expose a POST handler", () => {
+  assert.equal(ROUTES.length, 16);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
 });
 
@@ -392,7 +405,7 @@ for (const route of LOCKING) {
 // run outlasts its tick. The warm-* routes record inside the work callback and
 // never recorded their skips; these now agree with them. sync-plex-watchlists
 // still answers a plain 200 skip and is recorded — not changed here.
-for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refresh-upstream-watch", "arr-watch"]) {
+for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refresh-upstream-watch", "arr-watch", "refresh-arr-snapshots"]) {
   test(`${name}: a BUSY lock writes NO cron:lastRun ledger row`, async () => {
     const route = ROUTES.find((r) => r.name === name)!;
     lockAcquire = () => false;

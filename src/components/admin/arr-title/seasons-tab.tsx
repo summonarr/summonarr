@@ -12,6 +12,12 @@
 //
 // Rows are wrapping flex rows, not a fixed-width table: at phone width a
 // table's actions sat off-screen.
+//
+// "Instant, then live" (src/lib/arr-snapshot.ts): a season opened for the first
+// time paints the list the server last read for it while its live read is out
+// (episodeSnapshotMayPaint) — or after that read failed — never over rows
+// already shown, never for a read a newer one superseded, never while a flip
+// or search of this tab is in flight.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -19,14 +25,20 @@ import { Switch } from "@/components/ui/switch";
 import { Chip } from "@/components/ui/design";
 import { AlertTriangle, ChevronDown, ChevronRight, Loader2, RefreshCw, Search, Download } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
 import { episodeCode, queueFormatters } from "@/components/admin/queue-format";
 import type { ArrTitle, TitleEpisode, TitleSeason } from "@/lib/arr-title";
 import { seasonSignature, staleSeasons } from "@/lib/arr-title-ui";
+import { withBasePath } from "@/lib/base-path";
+import { readArrSnapshot } from "@/lib/client/arr-snapshot";
 import { arrApi, titleQuery, type TitleRef } from "./shared";
+import { episodeSnapshotMayPaint } from "./snapshot-rules";
 
 export type ReleaseScope = { seasonNumber: number } | { episodeId: number };
 
-type EpisodeList = { loading: boolean; error: string; episodes: TitleEpisode[]; loadedAt: number };
+// `staleAt`: the rows are the snapshot read then (ISO), until a live answer lands.
+type EpisodeList = { loading: boolean; error: string; episodes: TitleEpisode[]; loadedAt: number; staleAt: string | null };
+type EpisodesAnswer = { episodes: TitleEpisode[]; now: string };
 
 // Sonarr's finale kinds, translated (a literal map — never a built key).
 const FINALE_KEYS: Record<string, string> = {
@@ -69,6 +81,13 @@ export function SeasonsTab({
   const doneSeq = useRef<Record<number, number>>({});
   // Per season: the header signature its open list was last brought up to date with.
   const seenSig = useRef(new Map<number, string>());
+  // What the lists and the busy key are now, for a snapshot answering later.
+  const listsRef = useRef(lists);
+  const busyRef = useRef(busy);
+  useEffect(() => {
+    listsRef.current = lists;
+    busyRef.current = busy;
+  });
   const anime = title.seriesType === "anime";
 
   // Newest season first, specials last — Sonarr's own order.
@@ -78,16 +97,36 @@ export function SeasonsTab({
   const loadEpisodes = useCallback(async (n: number) => {
     const seq = (listSeq.current[n] ?? 0) + 1;
     listSeq.current[n] = seq;
-    setLists((l) => ({ ...l, [n]: { loading: true, error: "", episodes: l[n]?.episodes ?? [], loadedAt: l[n]?.loadedAt ?? 0 } }));
-    const res = await arrApi<{ episodes: TitleEpisode[]; now: string }>(`/api/admin/arr/title/episodes?${titleQuery(titleRef, { season: n })}`, undefined, t("adminArr.seasons.episodesFailed"));
+    // One builder: the live read and its snapshot are this URL (the server keys on it).
+    const path = `/api/admin/arr/title/episodes?${titleQuery(titleRef, { season: n })}`;
+    setLists((l) => ({ ...l, [n]: { loading: true, error: "", episodes: l[n]?.episodes ?? [], loadedAt: l[n]?.loadedAt ?? 0, staleAt: l[n]?.staleAt ?? null } }));
+    if (!listsRef.current[n]?.episodes.length) {
+      void readArrSnapshot<EpisodesAnswer>(withBasePath(path)).then((snap) => {
+        if (!snap || !Array.isArray(snap.data?.episodes)) return;
+        setLists((l) => {
+          const cur = l[n];
+          const paint = episodeSnapshotMayPaint({
+            seq,
+            newest: listSeq.current[n],
+            answered: doneSeq.current[n],
+            failed: (cur?.error ?? "") !== "",
+            shown: cur?.episodes.length ?? 0,
+            writing: busyRef.current !== null,
+          });
+          if (!paint) return l;
+          return { ...l, [n]: { loading: cur?.loading ?? true, error: cur?.error ?? "", episodes: snap.data.episodes, loadedAt: Date.parse(snap.data.now) || 0, staleAt: snap.at } };
+        });
+      });
+    }
+    const res = await arrApi<EpisodesAnswer>(path, undefined, t("adminArr.seasons.episodesFailed"));
     if (listSeq.current[n] !== seq) return;
     doneSeq.current[n] = seq;
     setLists((l) => ({
       ...l,
       [n]: res.ok
-        ? { loading: false, error: "", episodes: res.data.episodes, loadedAt: Date.parse(res.data.now) || 0 }
-        // A failed re-read keeps the list it had.
-        : { loading: false, error: res.error, episodes: l[n]?.episodes ?? [], loadedAt: l[n]?.loadedAt ?? 0 },
+        ? { loading: false, error: "", episodes: res.data.episodes, loadedAt: Date.parse(res.data.now) || 0, staleAt: null }
+        // A failed re-read keeps the list it had (a snapshot stays marked as one).
+        : { loading: false, error: res.error, episodes: l[n]?.episodes ?? [], loadedAt: l[n]?.loadedAt ?? 0, staleAt: l[n]?.staleAt ?? null },
     }));
   }, [titleRef, t]);
 
@@ -265,6 +304,7 @@ export function SeasonsTab({
               </div>
               {open && (
                 <div className="px-3 pb-3" style={{ background: "var(--ds-bg-1)" }}>
+                  <ArrSnapshotNote at={list?.staleAt ?? null} refreshing={list?.loading ?? false} />
                   {!list || (list.loading && list.episodes.length === 0) ? (
                     <div className="flex items-center gap-2 py-3 text-xs text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> {t("adminArr.common.loading")}</div>
                   ) : list.error && list.episodes.length === 0 ? (

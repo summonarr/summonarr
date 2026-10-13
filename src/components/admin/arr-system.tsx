@@ -15,12 +15,18 @@
 // Live reads (GET /api/admin/arr/{tasks,providers,storage}); the Tasks tab
 // re-reads while visible so a command's status moves on its own — a tick is
 // skipped while a read is still out (createLoadGate), never stacked on it.
+// Opening a tab paints the last answer the server kept for its read at once
+// (useArrSnapshot, marked with when it was read) while that live read is out;
+// the live answer then replaces it. Display only: every action below still
+// re-checks live on the server (guardrail 5e).
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Chip, EmptyState, FilterBar, type ChipTone } from "@/components/ui/design";
 import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import { CommandWatchLine, isWatchActive, useArrCommandWatch } from "@/components/admin/arr-command-watch";
 import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { queueFormatters } from "@/components/admin/queue-format";
@@ -54,9 +60,20 @@ const SERVICE_LABEL: Record<Service, string> = { radarr: "Radarr", sonarr: "Sona
 
 type CallResult<T> = { data: T; status: number } | { error: string; status: number; body: Record<string, unknown> | null };
 
+/**
+ * The URL a tab's report is read from. ONE builder for the live read and its
+ * snapshot (useArrSnapshot), so both name the same server-side snapshot key.
+ */
+const reportUrl = (path: string) => withBasePath(path);
+
 async function call<T>(path: string, init: { method: string; body?: unknown } | undefined, fallback: string): Promise<CallResult<T>> {
+  return callUrl<T>(withBasePath(path), init, fallback);
+}
+
+/** `call` on a URL that already carries the base path. */
+async function callUrl<T>(url: string, init: { method: string; body?: unknown } | undefined, fallback: string): Promise<CallResult<T>> {
   try {
-    const res = await fetch(withBasePath(path), {
+    const res = await fetch(url, {
       method: init?.method ?? "GET",
       ...(init?.body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(init.body) } : {}),
     });
@@ -123,6 +140,13 @@ async function callJob<T>(
  * action, start at once and supersede it (createLoadGate). `load` resolves
  * true only when ITS report landed — false when it was skipped, superseded or
  * failed (the old report is then still shown).
+ *
+ * On open the tab's snapshot is painted while the first live read is out
+ * (`staleAt` says when it was read). It only ever sets the report: errors,
+ * the tab's in-flight tests/saves/runs, its switch overrides and its command
+ * watches are the tab's own state and a snapshot never touches them — and it
+ * lands at most once, before any live answer, i.e. before there is a row to
+ * act on that it could overwrite.
  */
 function useReport<T>(path: string, fallback: string, poll: number | null) {
   const [report, setReport] = useState<Report<T> | null>(null);
@@ -133,21 +157,28 @@ function useReport<T>(path: string, fallback: string, poll: number | null) {
   useEffect(() => {
     fallbackRef.current = fallback;
   }, [fallback]);
+  const url = reportUrl(path);
+  const snap = useArrSnapshot<Report<T>>(url, (data) => {
+    if (data && typeof data === "object" && !Array.isArray(data)) setReport(data);
+  });
+  const { markLive } = snap;
   const load = useCallback(async (kind: LoadKind = "manual"): Promise<boolean> => {
     const id = gate.begin(kind);
     if (id === null) return false;
     setLoading(true);
-    const res = await call<Report<T>>(path, undefined, fallbackRef.current);
+    const res = await callUrl<Report<T>>(url, undefined, fallbackRef.current);
     if (!gate.settle(id)) return false;
     setLoading(false);
     if ("data" in res) {
+      // This read's answer replaces whatever is shown, a snapshot included.
+      markLive();
       setReport(res.data);
       setError("");
       return true;
     }
     setError(res.error);
     return false;
-  }, [path, gate]);
+  }, [url, gate, markLive]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -158,7 +189,7 @@ function useReport<T>(path: string, fallback: string, poll: number | null) {
     }, poll);
     return () => window.clearInterval(h);
   }, [poll, load]);
-  return { report, loading, error, load };
+  return { report, loading, error, load, staleAt: snap.staleAt };
 }
 
 /** Each instance that could not be read, and why — in the viewer's language (the raw upstream detail stays in the server log). */
@@ -220,7 +251,7 @@ function TasksTab() {
   const t = useT();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
-  const { report, loading, error, load } = useReport<{ tasks: ArrTask[]; commands: ArrCommandRow[] }>("/api/admin/arr/tasks", t("adminArr.system.loadFailed"), TASKS_POLL_MS);
+  const { report, loading, error, load, staleAt } = useReport<{ tasks: ArrTask[]; commands: ArrCommandRow[] }>("/api/admin/arr/tasks", t("adminArr.system.loadFailed"), TASKS_POLL_MS);
   // Per instance card: the action in flight there. A dark instance holds its
   // POST for the whole arr timeout; that must not lock every other card.
   const [busy, setBusy] = useState<Record<string, string>>({});
@@ -270,7 +301,7 @@ function TasksTab() {
   if (!report) return <Loading error={error} loading={loading} onRetry={() => void load()} />;
   return (
     <div className="grid gap-4">
-      <Toolbar loading={loading} onReload={() => void load()} error={error} />
+      <Toolbar loading={loading} onReload={() => void load()} error={error} staleAt={staleAt} />
       <InstanceErrors report={report} />
       {report.results.map((r) => {
         const card = `${r.service}:${r.instance}`;
@@ -439,7 +470,7 @@ type ToggleOpts = { acceptWarnings?: boolean; confirmed?: boolean };
 
 function ProvidersTab() {
   const t = useT();
-  const { report, loading, error, load } = useReport<{ indexers: ArrIndexer[]; downloadClients: ArrDownloadClient[]; tags?: ArrTag[] }>("/api/admin/arr/providers", t("adminArr.system.loadFailed"), null);
+  const { report, loading, error, load, staleAt } = useReport<{ indexers: ArrIndexer[]; downloadClients: ArrDownloadClient[]; tags?: ArrTag[] }>("/api/admin/arr/providers", t("adminArr.system.loadFailed"), null);
   // Per instance card (`service:instance`): the test or save in flight there.
   // One card at a time keeps a Test All and a single test on it from racing
   // the results; a dead indexer hanging ~100 s on one instance must not lock
@@ -656,7 +687,7 @@ function ProvidersTab() {
   const anyProwlarr = report.results.some((r) => r.indexers.some((ix) => ix.managedByProwlarr));
   return (
     <div className="grid gap-4">
-      <Toolbar loading={loading} onReload={reload} error={error} />
+      <Toolbar loading={loading} onReload={reload} error={error} staleAt={staleAt} />
       {anyProwlarr && <p className="m-0 text-xs text-zinc-500">{t("adminArr.system.prowlarrHint")}</p>}
       <InstanceErrors report={report} />
       {report.results.map((r) => {
@@ -814,13 +845,13 @@ function StorageTab() {
   const t = useT();
   const locale = useLocale();
   const fmt = useMemo(() => ({ size: storageSize(locale) }), [locale]);
-  const { report, loading, error, load } = useReport<{ rootFolders: ArrRootFolder[]; disks: ArrDisk[] }>("/api/admin/arr/storage", t("adminArr.system.loadFailed"), null);
+  const { report, loading, error, load, staleAt } = useReport<{ rootFolders: ArrRootFolder[]; disks: ArrDisk[] }>("/api/admin/arr/storage", t("adminArr.system.loadFailed"), null);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
 
   if (!report) return <Loading error={error} loading={loading} onRetry={() => void load()} />;
   return (
     <div className="grid gap-4">
-      <Toolbar loading={loading} onReload={() => void load()} error={error} />
+      <Toolbar loading={loading} onReload={() => void load()} error={error} staleAt={staleAt} />
       <InstanceErrors report={report} />
       {report.results.map((r) => {
         const card = `${r.service}:${r.instance}`;
@@ -914,15 +945,17 @@ function StorageTab() {
 
 // ── shell ────────────────────────────────────────────────────────────────────
 
-function Toolbar({ loading, onReload, error }: { loading: boolean; onReload: () => void; error: string }) {
+/** Reload, the last read's error, and — while the report shown is a snapshot — when it was read. */
+function Toolbar({ loading, onReload, error, staleAt }: { loading: boolean; onReload: () => void; error: string; staleAt: string | null }) {
   const t = useT();
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       {error && (
         <p role="alert" className="m-0 flex items-center gap-1.5 text-sm" style={{ color: "var(--ds-danger)" }}>
           <AlertTriangle className="h-4 w-4 shrink-0" /> {error}
         </p>
       )}
+      <ArrSnapshotNote at={staleAt} refreshing={loading} />
       <Button variant="ghost" size="sm" className="ml-auto" disabled={loading} onClick={onReload}>
         {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />} {t("adminArr.common.reload")}
       </Button>

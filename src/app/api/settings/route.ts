@@ -26,6 +26,7 @@ import { TRACKING_STAMP_KEYS, trackingStampsFor } from "@/lib/never-watched";
 import { NEVER_WATCHED_FEATURE_KEY } from "@/lib/never-watched-data";
 import { CLEANUP_FEATURE_KEY } from "@/lib/library-cleanup-data";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
+import { clearArrSnapshots, isArrConfigKey } from "@/lib/arr-snapshot";
 
 // The settings this route writes that the never-watched report reads (guardrail
 // 14d): a tracking switch (and its stamp) moves a server's coverage, retention
@@ -942,6 +943,10 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   invalidateFeatureFlagCache();
   const neverWatchedInputChanged = changedKeys.some((k) => NEVER_WATCHED_INPUT_KEYS.has(k));
   if (neverWatchedInputChanged) invalidateNeverWatchedReport();
+  // A Radarr/Sonarr connection or integration switch changed: the admin arr
+  // pages' snapshots may name an instance that is gone or switched off (5h).
+  const arrConfigChanged = changedKeys.some(isArrConfigKey);
+  if (arrConfigChanged) clearArrSnapshots();
   // Same for the APNs relay config, which push.ts memoizes for 30s. The admin
   // flow is "save the relay key, then press Send test notification", so a stale
   // read lands on exactly the interaction used to verify the change.
@@ -1141,6 +1146,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     invalidateFeatureFlagCache();
     invalidateApnsRelayCache();
     if (neverWatchedInputChanged) invalidateNeverWatchedReport();
+    if (arrConfigChanged) clearArrSnapshots();
     // Same for the Discord public key and the session-duration TTLs: both memos were
     // dropped BEFORE the connectivity tests ran, so anything that repopulated them
     // during the test window (a Discord interaction, a sign-in) cached the value this

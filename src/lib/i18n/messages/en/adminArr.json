@@ -414,5 +414,7 @@
   "adminArr.files.deleteStillRunning": "The delete is still running — reload the files in a minute to see what's left.",
   "adminArr.system.testUncertain": "{service} didn't say whether this is only a warning — run Test on it to see",
   "adminArr.system.testSummaryUncertain_one": "{count} unclear",
-  "adminArr.system.testSummaryUncertain_other": "{count} unclear"
+  "adminArr.system.testSummaryUncertain_other": "{count} unclear",
+  "adminArr.snapshot.refreshing": "Showing what was read {when} — refreshing…",
+  "adminArr.snapshot.stale": "Showing what was read {when} — the live read didn't finish"
 }

@@ -17,16 +17,20 @@ import { AlertTriangle, Check, Download, Loader2, RefreshCw, Search, Wrench, X }
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { OpenInArrLink } from "@/components/admin/open-in-arr";
 import { CommandWatchLine, useArrCommandWatch } from "@/components/admin/arr-command-watch";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import { ReleaseSearchDialog, type TitleReleaseTarget } from "@/components/admin/release-search-dialog";
 import { queueFormatters } from "@/components/admin/queue-format";
 import type { ArrTitle, Choice, RootFolderChoice } from "@/lib/arr-title";
 import { closeVerdict } from "@/lib/arr-title-ui";
+import { withBasePath } from "@/lib/base-path";
 import { SettingsTab } from "./settings-tab";
 import { SeasonsTab, type ReleaseScope } from "./seasons-tab";
 import { FilesTab } from "./files-tab";
 import { HistoryTab } from "./history-tab";
 import { RemovePanel } from "./remove-panel";
 import { arrApi, useTRef, type ArrServiceName, type TitleRef } from "./shared";
+import { liveTitleLanding, snapshotMayPaint, titleReadPath, titleTargetKey, titleTargetOfKey } from "./snapshot-rules";
 
 interface TitleState {
   title: ArrTitle;
@@ -116,31 +120,51 @@ export function ArrTitleManager({
   const { watch, stop: stopWatches, watches } = useArrCommandWatch();
   const [watchKey, setWatchKey] = useState<string | null>(null);
   const tRef = useTRef();
+  // This open's title came from the snapshot (src/lib/arr-snapshot.ts): the
+  // open-time live answer rebases the form instead of replacing it — the admin
+  // may already be editing over what was painted.
+  const snapshotPainted = useRef(false);
+
+  // Effects key on the target's VALUE: a parent re-render hands a new object.
+  const targetKey = titleTargetKey(target);
+  // "Instant, then live": the open-time read's snapshot is painted while the
+  // live read is out. Its URL is the open-time live read's own (one builder).
+  // It only ever fills an EMPTY dialog — never over a live answer or a write's.
+  const openPath = open ? titleReadPath(service, instance, titleTargetOfKey(targetKey)) : null;
+  const applyTitleSnapshot = useCallback((data: TitleState) => {
+    if (!data?.title) return false;
+    snapshotPainted.current = true;
+    setState((prev) => (snapshotMayPaint(prev !== null, false) ? data : prev));
+  }, []);
+  const snap = useArrSnapshot<TitleState>(openPath === null ? null : withBasePath(openPath), applyTitleSnapshot);
+  // Through a ref: the reads answer after the commit that opened this url.
+  const markTitleLive = useRef(snap.markLive);
+  useEffect(() => {
+    markTitleLive.current = snap.markLive;
+  });
 
   // `initial` is the open-time read: it replaces the state and remounts the
   // Settings form; a later re-read merges and leaves the admin's edits alone.
+  // So does the open-time read when a snapshot was painted first.
   const load = useCallback(async (by: TitleManagerTarget, initial = false) => {
     const seq = ++loadSeq.current;
-    const q = new URLSearchParams({ service, instance });
-    if ("tmdbId" in by) q.set("tmdbId", String(by.tmdbId));
-    else q.set("id", String(by.arrId));
     const fallback = tRef.current("adminArr.manage.loadFailed");
     // arrApi never throws: a failure is its answer.
     loadsInFlight.current++;
-    const res = await arrApi<TitleState>(`/api/admin/arr/title?${q.toString()}`, undefined, fallback);
+    const res = await arrApi<TitleState>(titleReadPath(service, instance, by), undefined, fallback);
     loadsInFlight.current--;
     if (seq !== loadSeq.current) return;
     if (res.ok) {
-      setState((prev) => (prev && !initial ? { ...res.data, title: mergeTitle(prev.title, res.data.title) } : res.data));
-      if (initial) setVersion((v) => v + 1);
+      const landing = liveTitleLanding(initial, snapshotPainted.current);
+      setState((prev) => (prev && landing === "rebase" ? { ...res.data, title: mergeTitle(prev.title, res.data.title) } : res.data));
+      if (landing === "replace") setVersion((v) => v + 1);
       setLoadError("");
+      markTitleLive.current();
     } else {
       setLoadError(res.error);
     }
   }, [service, instance, tRef]);
 
-  // Effects key on the target's VALUE: a parent re-render hands a new object.
-  const targetKey = "tmdbId" in target ? `tmdb:${target.tmdbId}` : `arr:${target.arrId}`;
   const firstTab: Tab = initialTab === "seasons" && service !== "sonarr" ? "settings" : initialTab ?? "settings";
   // The tab is chosen at OPEN time only. A host re-rendering with another
   // initialTab (the request list's follows the row's live status) must not
@@ -166,8 +190,8 @@ export function ArrTitleManager({
     setConfirmDiscard(false);
     setRemoved(false);
     setWatchKey(null);
-    const [kind, id] = targetKey.split(":");
-    void load(kind === "tmdb" ? { tmdbId: Number(id) } : { arrId: Number(id) }, true);
+    snapshotPainted.current = false;
+    void load(titleTargetOfKey(targetKey), true);
     // Closing invalidates a read still in flight, and stops following every
     // command — no status read and no re-read after close.
     const counter = loadSeq;
@@ -355,6 +379,8 @@ export function ArrTitleManager({
                 <span className="flex-1" />
                 <OpenInArrLink service={service} instance={instance} target={{ arrId: state.title.arrId }} label={t("adminManage.openIn", { name: instanceLabel })} />
               </div>
+              {/* Until a live title answer lands, the open-time read is out — or it failed (loadError). */}
+              <ArrSnapshotNote at={snap.staleAt} refreshing={loadError === ""} />
               {error || loadError ? (
                 <p role="alert" className="m-0 flex items-center gap-1.5 text-xs" style={{ color: "var(--ds-danger)" }}>
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {error || loadError}
@@ -392,6 +418,7 @@ export function ArrTitleManager({
                     qualityProfiles={state.qualityProfiles}
                     rootFolders={state.rootFolders}
                     tags={state.tags}
+                    baseIsSnapshot={snap.staleAt !== null}
                     onSaved={(next) => {
                       // The write landed but its re-read failed: read it again.
                       if (!next) return reload();

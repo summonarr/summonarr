@@ -414,5 +414,7 @@
   "adminArr.files.deleteStillRunning": "删除仍在进行中——请一分钟后重新加载文件，查看剩余内容。",
   "adminArr.system.testUncertain": "{service} 未说明这是否只是警告——请对它单独点击“测试”查看",
   "adminArr.system.testSummaryUncertain_one": "{count} 个不确定",
-  "adminArr.system.testSummaryUncertain_other": "{count} 个不确定"
+  "adminArr.system.testSummaryUncertain_other": "{count} 个不确定",
+  "adminArr.snapshot.refreshing": "显示{when}读取的数据——正在刷新…",
+  "adminArr.snapshot.stale": "显示{when}读取的数据——实时读取未完成"
 }

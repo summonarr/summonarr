@@ -414,5 +414,7 @@
   "adminArr.files.deleteStillRunning": "La eliminación sigue en curso: vuelve a cargar los archivos en un minuto para ver qué queda.",
   "adminArr.system.testUncertain": "{service} no ha indicado si esto es solo una advertencia: usa «Probar» en él para verlo",
   "adminArr.system.testSummaryUncertain_one": "{count} sin determinar",
-  "adminArr.system.testSummaryUncertain_other": "{count} sin determinar"
+  "adminArr.system.testSummaryUncertain_other": "{count} sin determinar",
+  "adminArr.snapshot.refreshing": "Mostrando lo leído {when}: actualizando…",
+  "adminArr.snapshot.stale": "Mostrando lo leído {when}: la lectura en directo no terminó"
 }

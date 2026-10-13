@@ -414,5 +414,7 @@
   "adminArr.files.deleteStillRunning": "A exclusão ainda está em andamento — recarregue os arquivos em um minuto para ver o que resta.",
   "adminArr.system.testUncertain": "O {service} não informou se isto é apenas um aviso — use “Testar” nele para ver",
   "adminArr.system.testSummaryUncertain_one": "{count} indeterminado",
-  "adminArr.system.testSummaryUncertain_other": "{count} indeterminados"
+  "adminArr.system.testSummaryUncertain_other": "{count} indeterminados",
+  "adminArr.snapshot.refreshing": "A mostrar o que foi lido {when} — a atualizar…",
+  "adminArr.snapshot.stale": "A mostrar o que foi lido {when} — a leitura em direto não terminou"
 }

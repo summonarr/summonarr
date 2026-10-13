@@ -49,6 +49,23 @@ const ARR_ERRORS = {
   "504": { description: "{ error } — the arr timed out" },
 };
 
+// `cached=1` on the admin Radarr/Sonarr READS that keep their last answer
+// (`snapshotted`, src/lib/arr-snapshot.ts): a page opened again paints that
+// answer at once, then reloads live. Display only — every action re-checks live
+// on the server. Inlined like ARR_ERRORS: the in-app viewer resolves no $ref.
+const ARR_SNAPSHOT_PARAM = {
+  name: "cached",
+  in: "query",
+  schema: { type: "string", enum: ["1"] },
+  description:
+    "`1` → the last answer kept for this exact read (same query, same language), at once and without asking " +
+    "Radarr/Sonarr — 200 with the same body plus `X-Summonarr-Snapshot-At` (when it was read, ISO 8601), or 204 when " +
+    "none is kept. Display only. A background-job poll (`job=`) is never kept.",
+};
+const ARR_SNAPSHOT_204 = {
+  description: "`cached=1` and no answer is kept for this exact read yet (a restart starts empty; kept answers expire after 24 h). No body.",
+};
+
 const spec = {
   openapi: "3.0.3",
   info: {
@@ -2935,8 +2952,10 @@ const spec = {
           "physical OR digital release date has passed (a cinema-only or undated movie is never listed). `sonarr`: " +
           "series with at least one aired, monitored, regular-season episode that has no file — Sonarr's own per-season " +
           "statistics, specials excluded, the same completion rule the sync uses. `monitored` is reported, not filtered " +
-          "on. An instance whose listing failed is named in `errors` and contributes no items. Nothing is cached or written.",
+          "on. An instance whose listing failed is named in `errors` and contributes no items. Nothing is written; the last " +
+          "answer is kept for display only (`cached=1`).",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
           {
             name: "mode",
@@ -2950,6 +2969,7 @@ const spec = {
           },
         ],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           "200": {
             description: "The report. `items` are movies for radarr, series for sonarr.",
             content: {
@@ -3084,10 +3104,12 @@ const spec = {
           "`instance` is a Sonarr instance slug (absent or empty = the default) and must name a configured instance; " +
           "`seriesId` is Sonarr's own id from the /admin/missing report.",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "seriesId", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
           { name: "instance", in: "query", schema: { type: "string" } },
         ],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           "200": {
             description: "The episodes",
             content: {
@@ -3197,8 +3219,10 @@ const spec = {
           "Radarr/Sonarr flag (warning/error tracked status, blocked or failed import, failed or unreachable client) " +
           "have `attention: true` and sort first. `requesters` names the users with a non-declined request for the title " +
           "on that instance. An instance whose queue could not be read is named in `errors`; its downloads are absent, " +
-          "not finished. Nothing is cached or written.",
+          "not finished. Nothing is written; the last answer is kept for display only (`cached=1`).",
+        parameters: [ARR_SNAPSHOT_PARAM],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           "200": {
             description: "The queues",
             content: {
@@ -3562,7 +3586,9 @@ const spec = {
           "(`ok`: enabled for every event Summonarr handles and carrying the token Summonarr accepts; `missing`; " +
           "`tokenMismatch`; `eventsMissing`; `unknown` when the list could not be read). The token is never returned. " +
           "`webhookBase` is the address the setup form pre-fills (AUTH_URL + BASE_PATH).",
+        parameters: [ARR_SNAPSHOT_PARAM],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           "200": {
             description: "The report",
             content: {
@@ -3671,14 +3697,17 @@ const spec = {
           "instance: Radarr filters by tmdbId; Sonarr through TMDB's TVDB cross-reference, then its own lookup). Returns the " +
           "title's settings (monitored, quality profile, root folder, path, tags, Radarr minimum availability and release " +
           "dates, Sonarr series type / season folders / monitorNewItems and every season with its counts — specials included, " +
-          "but excluded from the series totals) and the instance's own quality profiles, root folders and tags. Live; nothing cached.",
+          "but excluded from the series totals) and the instance's own quality profiles, root folders and tags. Read live; the " +
+          "last answer is kept for display only (`cached=1`).",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
           { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug; empty = the default" },
           { name: "id", in: "query", schema: { type: "integer", minimum: 1 }, description: "Radarr movie id / Sonarr series id" },
           { name: "tmdbId", in: "query", schema: { type: "integer", minimum: 1 } },
         ],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           ...ARR_ERRORS,
           "200": {
             description: "The title",
@@ -3818,12 +3847,14 @@ const spec = {
         tags: ["Admin – Arr"],
         summary: "One season's episodes of a Sonarr series (ADMIN)",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["sonarr"] } },
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "id", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
           { name: "season", in: "query", required: true, schema: { type: "integer", minimum: 0 } },
         ],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           ...ARR_ERRORS,
           "200": { description: "{ episodes: [{ id, seasonNumber, episodeNumber, title, airDateUtc, monitored, hasFile, episodeFileId, finaleType }], now } — `now` is the server's time to judge \"aired\" against" },
           "400": { description: "Invalid parameters" },
@@ -3860,12 +3891,14 @@ const spec = {
           "or its 4xx `{ error }`; 404 `{ error }` once the job is unknown (expired 10 minutes after it finished, another admin's, or " +
           "lost to a restart — reload the files, never re-run the delete blindly). Readable by the admin who started it only.",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "service", in: "query", schema: { type: "string", enum: ["radarr", "sonarr"] }, description: "Required unless `job`" },
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "id", in: "query", schema: { type: "integer", minimum: 1 }, description: "Required unless `job`" },
           { name: "job", in: "query", schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "Poll a background delete (DELETE with `async: true`) instead of listing; the other parameters are then ignored" },
         ],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           ...ARR_ERRORS,
           "200": { description: "{ files } — or, with `job`, the finished delete's own 200 { deleted } (any of DELETE's answers passes through with its status)" },
           "202": {
@@ -3949,11 +3982,12 @@ const spec = {
           "data are returned — never the release's download URL, guid or info URL (they can embed an indexer apikey); " +
           "messages have credentials masked.",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "id", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
         ],
-        responses: { ...ARR_ERRORS, "200": { description: "{ events }" }, "403": { description: "Not ADMIN" }, "404": { description: "Integration disabled, or no such title or instance" } },
+        responses: { "204": ARR_SNAPSHOT_204, ...ARR_ERRORS, "200": { description: "{ events }" }, "403": { description: "Not ADMIN" }, "404": { description: "Integration disabled, or no such title or instance" } },
       },
     },
 
@@ -4020,13 +4054,14 @@ const spec = {
         summary: "One instance's Radarr/Sonarr history, paged (ADMIN)",
         description: "Newest first, paged by the arr. `kind` filters (translated per service — the event enums differ). Same data projection as the title history.",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 } },
           { name: "pageSize", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
           { name: "kind", in: "query", schema: { type: "string", enum: ["grabbed", "imported", "failed", "deleted", "renamed", "ignored"] } },
         ],
-        responses: { ...ARR_ERRORS, "200": { description: "{ page, pageSize, totalRecords, records }" }, "400": { description: "Invalid paging or kind" }, "403": { description: "Not ADMIN" } },
+        responses: { "204": ARR_SNAPSHOT_204, ...ARR_ERRORS, "200": { description: "{ page, pageSize, totalRecords, records }" }, "400": { description: "Invalid paging or kind" }, "403": { description: "Not ADMIN" } },
       },
     },
 
@@ -4051,12 +4086,14 @@ const spec = {
         tags: ["Admin – Arr"],
         summary: "One instance's blocklist, paged (ADMIN)",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
           { name: "instance", in: "query", schema: { type: "string" } },
           { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 } },
           { name: "pageSize", in: "query", schema: { type: "integer", minimum: 1, maximum: 100, default: 50 } },
         ],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           ...ARR_ERRORS,
           "200": { description: "{ page, pageSize, totalRecords, records } — title, release, quality, indexer, reason (masked)" },
           "400": { description: "Invalid service, instance or paging" },
@@ -4117,11 +4154,12 @@ const spec = {
           "with `kind`: auth, timeout, unreachable, server, notFound or other. `now` is the server's time the page judges " +
           "against.",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "start", in: "query", required: true, schema: { type: "string", format: "date-time" } },
           { name: "end", in: "query", required: true, schema: { type: "string", format: "date-time" }, description: "At most 62 days after start" },
           { name: "unmonitored", in: "query", schema: { type: "string", enum: ["1", "true"] } },
         ],
-        responses: { "200": { description: "{ instances, errors, entries, now }" }, "400": { description: "Invalid window" }, "403": { description: "Not ADMIN" } },
+        responses: { "204": ARR_SNAPSHOT_204, "200": { description: "{ instances, errors, entries, now }" }, "400": { description: "Invalid window" }, "403": { description: "Not ADMIN" } },
       },
     },
 
@@ -4143,6 +4181,24 @@ const spec = {
         security: [{ cronSecret: [] }],
         responses: {
           "200": { description: "{ ok, checked, notReached, aborted, errors: [{ service, instance, part: disk|history|queue, error }], events: { diskLow, diskOk, downloadFailed, queueAttention }, deferredFailures, deferredAttention, summary: { attention, lowDisks, failed24h }, durationMs, trigger, timestamp } — or { skipped: true, reason }" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
+      },
+    },
+
+    "/cron/refresh-arr-snapshots": {
+      post: {
+        tags: ["Cron"],
+        summary: "Keep the admin Radarr/Sonarr pages' last answers fresh in the background",
+        description:
+          "Re-reads, through each route's own handler, every admin arr view an admin opened in the last 24 hours, on its page's priority: " +
+          "the queue and Radarr/Sonarr health every 5 minutes; Missing, Download History/Blocklist, the calendar and the title manager every 10; " +
+          "Arr System (tasks, indexers & clients, storage) every 15 — at most 40 re-reads per run, 2 at a time. The kept answer is what the page " +
+          "paints at once on its next open (`?cached=1`). A failed re-read keeps the last good answer. Skipped (no ledger row) when nothing is due; " +
+          "a failed re-read answers 200 with ok:false, `error` and X-Cron-Degraded.",
+        security: [{ cronSecret: [] }],
+        responses: {
+          "200": { description: "{ ok, due, refreshed, failed, deferred, aborted, durationMs, trigger, timestamp } — or { skipped: true, reason }" },
           "401": { description: "Neither an admin session nor the cron secret" },
         },
       },
@@ -4219,7 +4275,8 @@ const spec = {
         tags: ["Admin – Arr"],
         summary: "Every instance's scheduled tasks and recent commands (ADMIN)",
         description: "Commands newest first; a command's body is never returned.",
-        responses: { "200": { description: "{ instances, errors, results: [{ service, instance, tasks, commands }] }" }, "403": { description: "Not ADMIN" } },
+        parameters: [ARR_SNAPSHOT_PARAM],
+        responses: { "204": ARR_SNAPSHOT_204, "200": { description: "{ instances, errors, results: [{ service, instance, tasks, commands }] }" }, "403": { description: "Not ADMIN" } },
       },
       post: {
         tags: ["Admin – Arr"],
@@ -4259,9 +4316,11 @@ const spec = {
           "settings. Never their settings (API keys, passkeys, passwords). Neither arr has an indexer-status endpoint: " +
           "an indexer disabled after failures shows in the instance's health checks.",
         parameters: [
+          ARR_SNAPSHOT_PARAM,
           { name: "job", in: "query", schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "Poll a background save (PATCH with `async: true`) instead of listing" },
         ],
         responses: {
+          "204": ARR_SNAPSHOT_204,
           "200": { description: "{ instances, errors, results: [{ service, instance, indexers, downloadClients, tags }] } — or, with `job`, the finished save's own answer (any of PATCH's)" },
           "202": { description: "`job`: { job, running: true } — the save is still running" },
           "403": { description: "Not ADMIN" },
@@ -4352,7 +4411,8 @@ const spec = {
         description:
           "Root folders with free space, whether the arr can reach them, and unmapped folders (on disk, no title in the arr); " +
           "disks with free/total space. A root folder's total comes from the disk it sits on (neither arr reports it).",
-        responses: { "200": { description: "{ instances, errors, results: [{ service, instance, rootFolders, disks }] }" }, "403": { description: "Not ADMIN" } },
+        parameters: [ARR_SNAPSHOT_PARAM],
+        responses: { "204": ARR_SNAPSHOT_204, "200": { description: "{ instances, errors, results: [{ service, instance, rootFolders, disks }] }" }, "403": { description: "Not ADMIN" } },
       },
     },
 

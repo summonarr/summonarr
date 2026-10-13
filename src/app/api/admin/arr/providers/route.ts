@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
 import { parseProviderEnableChange, parseProviderKind } from "@/lib/arr-system";
@@ -47,11 +48,13 @@ import { answerOf, jobResponse, startArrJob } from "@/lib/release-search-jobs";
 //         after it is still answered 504 and not audited. The same save while
 //         one runs joins it. Without `async` the request waits, as before
 //         (one read-back) — the contract API callers have.
-export const GET = withAdmin(async (req, _ctx, session) => {
+// GET with `cached=1` → the last answer kept for this exact read, for display only
+// (src/lib/arr-snapshot.ts); a job poll is never kept.
+export const GET = withAdmin(snapshotted(async (req, _ctx, session) => {
   const job = req.nextUrl.searchParams.get("job");
   if (job !== null) return jobResponse(session.user.id, job, translatorForRequest(req), "apiAdmin.arr.providerJobGone");
   return NextResponse.json(await loadProviders());
-});
+}));
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);

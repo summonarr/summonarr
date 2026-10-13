@@ -425,5 +425,7 @@
   "settings.cron.job.upstreamWatch.name": "Historial de visionado de los servidores",
   "settings.cron.job.upstreamWatch.description": "Lee los registros de visionado propios de cada servidor Plex y Jellyfin, para que un título visto antes de instalar Summonarr (o mientras estaba caído) nunca aparezca como no visto",
   "settings.cron.job.arrWatch.name": "Supervisión de Radarr/Sonarr",
-  "settings.cron.job.arrWatch.description": "Revisa cada instancia de Radarr y Sonarr en busca de poco espacio en disco, descargas fallidas y descargas que requieren atención, y avisa a los canales de notificación suscritos a ellas"
+  "settings.cron.job.arrWatch.description": "Revisa cada instancia de Radarr y Sonarr en busca de poco espacio en disco, descargas fallidas y descargas que requieren atención, y avisa a los canales de notificación suscritos a ellas",
+  "settings.cron.job.arrSnapshots.name": "Actualización de páginas de Radarr/Sonarr",
+  "settings.cron.job.arrSnapshots.description": "Vuelve a leer las páginas de Radarr/Sonarr que los administradores abrieron en el último día, según su prioridad (cola y estado cada 5 minutos; Faltantes, historial, calendario y títulos cada 10; Sistema Arr cada 15), para que se abran con datos recientes"
 }

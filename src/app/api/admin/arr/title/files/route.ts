@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import { arrErrorMessage } from "@/lib/arr";
 import { arrFailure, arrTitleGate, parseIdArray } from "@/lib/arr-admin-http";
 import { parseIdList } from "@/lib/arr-history";
@@ -35,7 +36,9 @@ import { sanitizeForLog } from "@/lib/sanitize";
 const jobKey = (service: string, instance: string, arrId: number, fileIds: readonly number[]) =>
   `title-files\u0000${service}\u0000${instance}\u0000${arrId}\u0000${[...fileIds].sort((a, b) => a - b).join(",")}`;
 
-export const GET = withAdmin(async (req, _ctx, session) => {
+// GET with `cached=1` → the last answer kept for this exact read, for display only
+// (src/lib/arr-snapshot.ts); a job poll is never kept.
+export const GET = withAdmin(snapshotted(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
   const job = q.get("job");
@@ -47,7 +50,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   } catch (err) {
     return arrFailure(err, target, t, "file listing");
   }
-});
+}));
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);

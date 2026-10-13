@@ -414,5 +414,7 @@
   "adminArr.files.deleteStillRunning": "Der Löschvorgang läuft noch – lade die Dateien in einer Minute neu, um zu sehen, was übrig ist.",
   "adminArr.system.testUncertain": "{service} hat nicht angegeben, ob das nur eine Warnung ist – führen Sie dafür „Testen“ aus, um es zu sehen",
   "adminArr.system.testSummaryUncertain_one": "{count} unklar",
-  "adminArr.system.testSummaryUncertain_other": "{count} unklar"
+  "adminArr.system.testSummaryUncertain_other": "{count} unklar",
+  "adminArr.snapshot.refreshing": "Stand {when} — wird aktualisiert …",
+  "adminArr.snapshot.stale": "Stand {when} — die Live-Abfrage ist nicht fertig geworden"
 }

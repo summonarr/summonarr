@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrTitleGate, parseIdArray, parseSeasonNumber } from "@/lib/arr-admin-http";
 import { loadSeasonEpisodes, setEpisodesMonitored } from "@/lib/arr-title-data";
 import { auditContext, logAudit } from "@/lib/audit";
@@ -14,7 +15,9 @@ const MAX_EPISODES = 5_000;
 //       monitor or unmonitor episodes; every id must be one of the series'
 //       episodes (409 otherwise, nothing written). → { updated, title }: the
 //       series re-read, since its counts follow monitoring. Audited ARR_TITLE_EDIT.
-export const GET = withAdmin(async (req) => {
+// GET with `cached=1` → the last answer kept for this exact read, for display only
+// (src/lib/arr-snapshot.ts).
+export const GET = withAdmin(snapshotted(async (req) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
   const target = await arrTitleGate(q.get("service"), q.get("instance"), q.get("id"), t);
@@ -29,7 +32,7 @@ export const GET = withAdmin(async (req) => {
   } catch (err) {
     return arrFailure(err, target, t, "episode read");
   }
-});
+}));
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);

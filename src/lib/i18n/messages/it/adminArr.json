@@ -414,5 +414,7 @@
   "adminArr.files.deleteStillRunning": "L'eliminazione è ancora in corso: ricarica i file tra un minuto per vedere cosa rimane.",
   "adminArr.system.testUncertain": "{service} non ha indicato se si tratta solo di un avviso: usa «Testa» su questo elemento per scoprirlo",
   "adminArr.system.testSummaryUncertain_one": "{count} non determinato",
-  "adminArr.system.testSummaryUncertain_other": "{count} non determinati"
+  "adminArr.system.testSummaryUncertain_other": "{count} non determinati",
+  "adminArr.snapshot.refreshing": "Dati letti {when}: aggiornamento in corso…",
+  "adminArr.snapshot.stale": "Dati letti {when}: la lettura in tempo reale non è terminata"
 }

@@ -11,6 +11,9 @@
 // haven't touched always shows the title as the arr last reported it, so a
 // background re-read (after a refresh, Radarr unmonitoring a movie whose file
 // vanished) can never be saved back over the arr as if the admin had chosen it.
+// While the title shown is the last-known SNAPSHOT (src/lib/arr-snapshot.ts),
+// edits are kept but Save waits: the live read rebases them first, so no save
+// is ever diffed against data that may be a day old.
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -84,6 +87,7 @@ export function SettingsTab({
   qualityProfiles,
   rootFolders,
   tags,
+  baseIsSnapshot = false,
   onSaved,
   onDirtyChange,
   onSavingChange,
@@ -94,6 +98,8 @@ export function SettingsTab({
   qualityProfiles: Choice[] | null;
   rootFolders: RootFolderChoice[] | null;
   tags: Choice[] | null;
+  /** `title` is the snapshot painted on open, not yet rebased by a live read: Save waits for it. */
+  baseIsSnapshot?: boolean;
   /** The title as the arr now has it — null when the save landed but its re-read failed. */
   onSaved: (title: ArrTitle | null) => void;
   /** Tells the manager there are unsaved edits (closing asks first). */
@@ -375,7 +381,7 @@ export function SettingsTab({
         <Button variant="ghost" size="sm" onClick={() => { setEdits({}); setConfirmMove(false); setError(""); }} disabled={!dirty || saving}>
           {t("adminArr.settings.reset")}
         </Button>
-        <Button size="sm" onClick={() => void save()} disabled={!dirty || saving || confirmMove}>
+        <Button size="sm" onClick={() => void save()} disabled={!dirty || saving || confirmMove || baseIsSnapshot}>
           {saving && <Loader2 className="animate-spin" />}
           {t("adminArr.settings.save")}
         </Button>

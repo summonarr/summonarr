@@ -6,6 +6,11 @@
 // to its naming scheme (the arr's preview first, then RenameFiles for the
 // files chosen). The server re-checks every id against the title's files
 // (GET/DELETE /api/admin/arr/title/files, GET/POST …/rename).
+//
+// "Instant, then live" (src/lib/arr-snapshot.ts): on open the list the server
+// last read is painted while the live read is out. It only ever fills an EMPTY
+// list, never while a delete or rename is in flight; the live answer replaces
+// it and prunes the selection as every re-read does.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -14,9 +19,12 @@ import { AlertTriangle, ArrowDown, Check, ChevronDown, ChevronRight, FileText, L
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { CommandWatchLine, useArrCommandWatch } from "@/components/admin/arr-command-watch";
+import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
+import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import type { RenamePreview, TitleFile, TitleFileMedia } from "@/lib/arr-title";
 import { withBasePath } from "@/lib/base-path";
 import { arrApi, titleQuery, useTRef, type TitleRef } from "./shared";
+import { snapshotMayPaint } from "./snapshot-rules";
 
 type T = ReturnType<typeof useT>;
 
@@ -139,19 +147,40 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
     }
   }, [confirmDelete]);
 
+  // The live listing's URL — and its snapshot's (one builder: the server keys on it).
+  const readPath = useMemo(() => `/api/admin/arr/title/files?${titleQuery(titleRef)}`, [titleRef]);
+  // Live reads out (the snapshot note's "refreshing").
+  const [reads, setReads] = useState(0);
+  const readsOut = useRef(0);
+  const busyRef = useRef(busy);
+  useEffect(() => {
+    busyRef.current = busy;
+  });
+  const applySnapshot = useCallback((data: { files: TitleFile[] }) => {
+    if (!Array.isArray(data?.files) || busyRef.current !== null) return false;
+    setFiles((prev) => (snapshotMayPaint(prev !== null, busyRef.current !== null) ? data.files : prev));
+  }, []);
+  const snap = useArrSnapshot<{ files: TitleFile[] }>(withBasePath(readPath), applySnapshot);
+  const markLive = snap.markLive;
+
   const load = useCallback(async () => {
-    const res = await arrApi<{ files: TitleFile[] }>(`/api/admin/arr/title/files?${titleQuery(titleRef)}`, undefined, tRef.current("adminArr.files.loadFailed"));
+    readsOut.current++;
+    setReads(readsOut.current);
+    const res = await arrApi<{ files: TitleFile[] }>(readPath, undefined, tRef.current("adminArr.files.loadFailed"));
+    readsOut.current--;
+    setReads(readsOut.current);
     if (res.ok) {
       setFiles(res.data.files);
       setLoadFailed(false);
       setSelected((prev) => new Set([...prev].filter((id) => res.data.files.some((f) => f.id === id))));
       setError("");
+      markLive();
     } else {
       // A failed re-read keeps the list it had.
       setError(res.error);
       setLoadFailed(true);
     }
-  }, [titleRef, tRef]);
+  }, [readPath, tRef, markLive]);
 
   useEffect(() => {
     void load();
@@ -274,6 +303,7 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
           <RefreshCw /> {t("adminArr.common.reload")}
         </Button>
       </div>
+      <ArrSnapshotNote at={snap.staleAt} refreshing={reads > 0} />
 
       {confirmDelete && (
         <div role="alertdialog" aria-label={t("adminArr.files.confirmTitle")} className="flex flex-wrap items-center gap-3 rounded-lg px-3 py-2.5 text-sm" style={{ background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)", border: "1px solid var(--ds-danger)" }}>
