@@ -859,7 +859,6 @@ model DeletionVote {
   reason String? @db.VarChar(200)
 
   @@unique([tmdbId, mediaType, userId]) // one vote per user per item
-  @@index([tmdbId, mediaType])
   // Serves the `where {userId}` reads on account delete (admin/users/[id]) and
   // Discord account merge (discord-merge.ts) — the unique key leads with tmdbId
   // and can't serve a userId-only predicate.
@@ -1073,7 +1072,6 @@ model MediaServerUser {
 
   @@unique([source, serverInstance, sourceUserId])
   @@index([userId])
-  @@index([source, serverInstance])
 }
 
 model PlayHistory {
@@ -1183,7 +1181,6 @@ model PlayHistory {
   // 30+ range-scoped aggregate queries from a smaller heap when filters are set.
   @@index([source, startedAt(sort: Desc)])
   @@index([mediaType, startedAt(sort: Desc)])
-  @@index([source, serverInstance])
   // The never-watched verdict's narrowed read (the ADMIN detail-page chip, the
   // cleanup delete's re-judgement) looks a show's plays up by `sourceShowId IN
   // (…)` with no source predicate; without this it is a sequential scan of the
@@ -1277,7 +1274,6 @@ model ActiveSession {
   creditsEndMs   Int?
 
   @@unique([source, serverInstance, sessionKey])
-  @@index([source, serverInstance])
 }
 
 // ─── IP Geolocation Cache ────────────────────────────────────────────────────
@@ -1323,7 +1319,6 @@ model TrashSpec {
   applications TrashApplication[]
 
   @@unique([service, kind, trashId])
-  @@index([service, kind])
 }
 
 // One row per spec the admin has chosen to push to Radarr/Sonarr. `enabled=false`

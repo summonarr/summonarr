@@ -9,7 +9,8 @@ import { ThemeProvider } from "@/components/theme/theme-provider";
 import { ToastProvider } from "@/components/ui/toast";
 import { I18nProvider } from "@/components/i18n/i18n-provider";
 import { getLocale } from "@/lib/i18n/server";
-import { CATALOGS } from "@/lib/i18n/catalogs";
+import { clientCatalog } from "@/lib/i18n/catalogs";
+import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 
 const EMPTY_MESSAGES = {};
 
@@ -93,6 +94,17 @@ export default async function RootLayout({
   // We reuse it for the anti-FOUC theme script below (strict-dynamic requires it).
   const nonce = (await headers()).get("x-nonce") ?? undefined;
   const locale = await getLocale();
+  // The admin message areas (~240 KB raw) are sent only to a session that could
+  // open admin UI — the same gate as the (app)/admin layout. Everyone else, the
+  // login page included, gets the smaller catalog. A role change signs the
+  // account out (sessionId rotation) and sign-in ends in router.refresh(), so
+  // this is re-evaluated whenever the answer can change.
+  const includeAdminMessages =
+    summonarrSessionClaims != null &&
+    hasPermission(
+      effectivePermissions(summonarrSessionClaims.role, parsePermissions(summonarrSessionClaims.permissions)),
+      [Permission.MANAGE_USERS, Permission.MANAGE_REQUESTS, Permission.MANAGE_ISSUES, Permission.ADMIN],
+    );
   return (
     <html
       lang={locale}
@@ -141,7 +153,7 @@ export default async function RootLayout({
       >
         <I18nProvider
           locale={locale}
-          messages={CATALOGS[locale]}
+          messages={clientCatalog(locale, includeAdminMessages)}
           // No client-side fallback: tests/i18n.test.mts pins every locale to
           // exactly English's key set, so the active catalog is always complete
           // and shipping English beside it would only double the payload.

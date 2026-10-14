@@ -471,16 +471,11 @@ test("guardrail 37c: PlexLibraryItem keeps plexRatingKeys alongside plexRatingKe
 // containment operators no btree can, and no btree serves what it does.
 
 /** [model, index columns] pairs that are prefix-redundant but deliberately still present. */
-const KNOWN_PREFIX_REDUNDANT_INDEXES = new Set([
-  // Same shape as the seven that were dropped — a [a, b] @@index sitting under a
-  // [a, b, c] @@unique on the same model. Left in place pending their own review
-  // rather than removed on the strength of a structural argument alone; delete
-  // the entry here when the index goes.
-  "DeletionVote:[tmdbId,mediaType]",
-  "TrashSpec:[service,kind]",
-  "MediaServerUser:[source,serverInstance]",
-  "PlayHistory:[source,serverInstance]",
-  "ActiveSession:[source,serverInstance]",
+const KNOWN_PREFIX_REDUNDANT_INDEXES = new Set<string>([
+  // Empty on purpose. The last five (DeletionVote [tmdbId, mediaType], TrashSpec
+  // [service, kind], and [source, serverInstance] on MediaServerUser, PlayHistory
+  // and ActiveSession) were reviewed and dropped: each sat under a wider
+  // @@unique that serves the same equality/prefix scans.
 ]);
 
 test("no @@index is a leading-column prefix of another btree key on the same model", () => {

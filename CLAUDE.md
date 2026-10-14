@@ -764,6 +764,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Stored data stays English; each SENDER localizes the title for the language its message is WRITTEN in, at send time, never written back.
     - The iCal feed reads cached translations ONLY
     - A language-tagged poster is chosen per locale by vote; a poster tagged with a region must match one of the locale's tags, and a region-less Chinese poster is NEVER used for `zh` (the script can't be told — Traditional posters would leak into Simplified).
+
+40b. **The BROWSER is sent a subset of the message catalog — `clientCatalog` ([catalogs.ts](src/lib/i18n/catalogs.ts)), never `CATALOGS` — and a client module may only read keys from areas it is sent.**
+
+    Why:
+    - The root layout serialises the active catalog into every full page load; all 24 areas were ~94 KB gzipped on every document, the login page included. The server translates from `CATALOGS` (every area) and is unaffected.
+
+    Rules:
+    - `SERVER_ONLY_AREAS` (`apiAdmin`/`apiAuth`/`apiUser`) are never sent; `ADMIN_ONLY_AREAS` (admin queue/arr/manage, settings, trash) go only to a session passing the admin layout's gate (computed in the root layout from the session claims). A new area is sent to everyone unless it is added to one of those lists.
+    - NEVER read a server-only key from a module a client component imports, and NEVER read an admin-only key from non-admin client code: the key renders as the raw string. `tests/i18n-client-catalog.test.mts` walks the client import graph to prove both; a file-level false positive is allowlisted there WITH a reason (and a check that no client calls the server-only function).
+    - Admin client UI belongs under `components/admin|settings` or `app/(app)/admin|settings`; a shared component that must show in non-admin views (`activity-ui`) keeps its area in the sent set (`adminActivity` is).
+
 41. **A `withAdvisoryLock` callback that can run for minutes MUST observe its AbortSignal.**
 
     Detail and rationale: [docs/guardrails/41.md](docs/guardrails/41.md).
