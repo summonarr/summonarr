@@ -175,13 +175,15 @@ shadowPrismaModel(prisma, "user", {
     // notifyRequestStatusChange's disabled-account gate: one lookup that decides
     // whether ANY channel runs for this requester (account removal disables
     // rather than scrubs, so the row keeps a live email + push subscriptions).
-    if (args.select.deactivatedAt) {
-      activeGateReads.push(args);
-      return { deactivatedAt: requesterDisabled ? new Date("2026-07-01T00:00:00.000Z") : null };
-    }
+    // discord-notify's notifyUser also selects deactivatedAt now (guardrail 33 at the
+    // single-user chokepoint), so recognise ITS read by discordId first.
     if (args.select.discordId) {
       discordUserReads.push(args);
       return null; // unlinked — discord stops after recipient resolution
+    }
+    if (args.select.deactivatedAt) {
+      activeGateReads.push(args);
+      return { deactivatedAt: requesterDisabled ? new Date("2026-07-01T00:00:00.000Z") : null };
     }
     if (args.select.pushOnApproved || args.select.pushOnDeclined) {
       pushUserReads.push(args);

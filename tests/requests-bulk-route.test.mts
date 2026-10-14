@@ -94,3 +94,11 @@ test("bulk: the *arr-available cache short-circuits only for an auto-approver, l
   assert.match(CODE, /const arrCounts = arrAvailSet\.has\(k\) && canAutoApproveInstance\(targetPerms, inst, grants, it\.mediaType\)/);
   assert.doesNotMatch(CODE, /\|\| arrAvailSet\.has\(k\)\)/, "a bare arrAvailSet verdict is the old ungated shape");
 });
+
+test("bulk: an on-behalf non-ADMIN filer must hold the named-instance request/auto-approve grants and sees only servers they can view", () => {
+  assert.match(CODE, /const filerChecked = isOnBehalf && !hasPermission\(session\.user\.permissions, Permission\.ADMIN\)/);
+  // Every instance gate the target passes also runs the filer's own check.
+  assert.equal((CODE.match(/filerMay\(/g) ?? []).length >= 4, true, "request gate, remap, and both auto-approve sites");
+  assert.match(CODE, /canAutoApproveInstance\(session\.user\.permissions, inst, filerGrants/);
+  assert.match(CODE, /targetVisible\.plex\.filter\(\(x\) => filerVisible\.plex\.includes\(x\)\)/);
+});

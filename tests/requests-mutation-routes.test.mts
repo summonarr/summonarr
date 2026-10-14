@@ -1334,9 +1334,12 @@ test("quality-profiles routes MOVIE to radarr and TV to sonarr", async () => {
 
 test("quality-profiles is rate-limited per user (live arr read)", async () => {
   const { token } = await mintSession({ permissions: Permission.REQUEST_ADVANCED });
-  let last = 200;
-  for (let i = 0; i < 125; i++) last = (await doProfiles(token, "?mediaType=MOVIE")).status;
-  assert.equal(last, 429);
+  for (let i = 0; i < 120; i++) {
+    assert.notEqual((await doProfiles(token, "?mediaType=MOVIE")).status, 429, `call ${i + 1} is inside the 120/min budget`);
+  }
+  const over = await doProfiles(token, "?mediaType=MOVIE");
+  assert.equal(over.status, 429, "the 121st call within a minute is refused");
+  assert.ok(over.headers.get("retry-after"));
 });
 
 test("quality-profiles returns the profile list and the default id", async () => {

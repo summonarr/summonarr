@@ -1038,6 +1038,12 @@ test("C101: without an abort the monitor's queue walk still reads every page", a
   f.queueTotal = 600;
   await runArrWatch({ now: T0, signal: new AbortController().signal });
   assert.deepEqual(arrCalls(RADARR, "/api/v3/queue").map((c) => c.query.get("page")), ["1", "2", "3"]);
+  // A stable order across pages: the default (progress/time-left) order reshuffles between
+  // page reads and a title crossing a page boundary is skipped or doubled.
+  for (const c of arrCalls(RADARR, "/api/v3/queue")) {
+    assert.equal(c.query.get("sortKey"), "added");
+    assert.equal(c.query.get("sortDirection"), "ascending");
+  }
 });
 
 test("an instance no longer configured is dropped from the state, so coming back re-seeds instead of replaying", async () => {

@@ -132,6 +132,11 @@ function makeTx() {
     // Tagged-template form: strings array + interpolated bind values. Both the
     // role-change CAS and anonymize's last-admin CAS read the row count back.
     $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      // reactivateUser now runs INSIDE the lock-42 tx; route its guarded restore to
+      // the same stub the top-level client used.
+      if (/UPDATE "User" SET "deactivatedAt" = NULL/.test(strings.join("?"))) {
+        return (fakePrisma as unknown as { $executeRaw: (s: TemplateStringsArray, ...v: unknown[]) => Promise<number> }).$executeRaw(strings, ...values);
+      }
       txOps.push({ op: "$executeRaw", args: { sql: strings.join("?"), values } });
       return casRows;
     },

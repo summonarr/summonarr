@@ -1603,9 +1603,14 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
         }),
       });
       if (seriesReleased) {
-        await arrFetch<unknown>(cfg, "/api/v3/command", {
-          method: "POST",
-          body: JSON.stringify({ name: "SeriesSearch", seriesId: row.id }),
+        // The Missing plan (SeasonSearch for a fully-missing season, EpisodeSearch for the
+        // rest), NOT SeriesSearch: this is a missing-only action — the add path's own
+        // searchForMissingEpisodes is missing-only too — and SeriesSearch would also hunt
+        // upgrades for every episode already on disk. Dynamic import: arr-missing-data
+        // imports this module. Nothing missing is fine (nothing to search).
+        const { searchMissing, NothingMissingError } = await import("./arr-missing-data");
+        await searchMissing("sonarr", variant === "hd" ? "" : variant, row.id, new Date()).catch((e) => {
+          if (!(e instanceof NothingMissingError)) throw e;
         });
       }
     } catch (remErr) {

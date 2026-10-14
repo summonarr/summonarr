@@ -235,15 +235,6 @@ export interface OidcUserClaims {
 export async function findOrCreateOidcUser(
   claims: OidcUserClaims,
 ): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
-  if (!claims.emailVerified) {
-    throw new Error("OIDC account email is not verified");
-  }
-  if (!claims.email) {
-    console.error("[auth/oidc] provider returned no email — rejecting sign-in for sub:", claims.sub);
-    throw new Error("[auth/oidc] provider returned no email");
-  }
-  const normalizedEmail = normalizeEmail(claims.email);
-
   const accountTokens = {
     access_token: claims.accessToken,
     refresh_token: claims.refreshToken,
@@ -267,6 +258,19 @@ export async function findOrCreateOidcUser(
       role: byAccount.user.role,
     };
   }
+
+  // Email trust is only needed to LINK or CREATE by email. A returning user is
+  // already bound by (provider, sub) above — the sub is the identity, so an IdP that
+  // stops sending email_verified (or the email) must not lock them out. New links and
+  // new accounts keep the strict requirement.
+  if (!claims.emailVerified) {
+    throw new Error("OIDC account email is not verified");
+  }
+  if (!claims.email) {
+    console.error("[auth/oidc] provider returned no email — rejecting sign-in for sub:", claims.sub);
+    throw new Error("[auth/oidc] provider returned no email");
+  }
+  const normalizedEmail = normalizeEmail(claims.email);
 
   // Same account-takeover guard as the Plex/Jellyfin paths: an existing user with
   // this email but no (provider=oidc, sub=...) Account row is the SSO-takeover
@@ -453,7 +457,10 @@ export function invalidateUserSession(userId: string): void {
   markUserForceRevalidate(userId);
 }
 
-export async function revokeSessionById(sessionId: string): Promise<void> {
+export async function revokeSessionById(
+  sessionId: string,
+  guard?: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0], userId: string) => Promise<void>,
+): Promise<void> {
   // Deliberately does NOT touch sessionsRevokedAt.
   //
   // It used to bump the cutoff to the revoked row's createdAt, on the theory that
@@ -475,6 +482,10 @@ export async function revokeSessionById(sessionId: string): Promise<void> {
   // is correct for its everywhere semantics.
   try {
     await prisma.$transaction(async (tx) => {
+      if (guard) {
+        const row = await tx.authSession.findUnique({ where: { sessionId }, select: { userId: true } });
+        if (row) await guard(tx, row.userId);
+      }
       await tx.authSession.delete({ where: { sessionId } });
     });
   } catch (err) {
@@ -498,12 +509,16 @@ function isPrismaNotFound(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2025";
 }
 
-export async function revokeAllUserSessions(userId: string): Promise<void> {
+export async function revokeAllUserSessions(
+  userId: string,
+  guard?: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => Promise<void>,
+): Promise<void> {
   // The read, the delete and the sessionsRevokedAt stamp share one $transaction,
   // so either all of them land or none do. Without it, a failed stamp could leave
   // the rows deleted but no cutoff set, and a JWT still inside its short
   // dbCheckedAt fast-path window (see session-refresh.ts) could keep working.
   const sessionIds = await prisma.$transaction(async (tx) => {
+    if (guard) await guard(tx); // e.g. role re-read under lock 42 (admin routes)
     const sessions = await tx.authSession.findMany({
       where: { userId },
       select: { sessionId: true },

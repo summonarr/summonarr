@@ -14,6 +14,7 @@ import { manageTabFor } from "@/lib/arr-manage-links";
 import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
 import { createRefreshGate } from "@/lib/refresh-gate";
 import type { WatchGradeSummary } from "@/lib/watch-grade";
@@ -114,6 +115,8 @@ function formatUserLabel(r: Requester, t: Translator) {
   }
   return r.userName ?? r.userEmail;
 }
+
+const BATCH_ID_CAP = 100; // /api/requests/batch rejects more ids than this per call
 
 // Admin request queue: groups requests by title, drives per-group + batch
 // approve/decline, and paginates. Live-refreshes on request:* SSE events.
@@ -244,25 +247,35 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
     setBatchLoading(true);
     setBatchError(null);
     try {
-      const res = await fetch(withBasePath("/api/requests/batch"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: Array.from(selected), status, adminNote: adminNote || undefined }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setBatchError(data?.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
-        return;
+      // The route takes at most BATCH_ID_CAP ids per call. A bigger selection
+      // (select-all across a long queue) is sent in sequential chunks; the first
+      // refusal stops the run and leaves the unsent + failed ids selected.
+      const allIds = Array.from(selected);
+      const stillPending: string[] = [];
+      let arrError: string | undefined;
+      for (let i = 0; i < allIds.length; i += BATCH_ID_CAP) {
+        const chunk = allIds.slice(i, i + BATCH_ID_CAP);
+        const res = await fetch(withBasePath("/api/requests/batch"), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: chunk, status, adminNote: adminNote || undefined }),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => null)) as { error?: string } | null;
+          setBatchError(rateLimitMessage(res, t) ?? data?.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
+          setSelected(new Set([...stillPending, ...allIds.slice(i)]));
+          refreshList();
+          return;
+        }
+        // A 200 can still carry rows whose Radarr/Sonarr push failed and were rolled
+        // back to PENDING. Keep exactly those selected, so the bar (and the reason in
+        // it) stays up and they can be retried or declined without re-picking them.
+        const data = (await res.json().catch(() => null)) as { arrError?: string; failed?: { id?: unknown }[] } | null;
+        for (const f of data?.failed ?? []) if (typeof f.id === "string") stillPending.push(f.id);
+        arrError = arrError ?? data?.arrError;
       }
-      // A 200 can still carry rows whose Radarr/Sonarr push failed and were rolled
-      // back to PENDING. Keep exactly those selected, so the bar (and the reason in
-      // it) stays up and they can be retried or declined without re-picking them.
-      const data = (await res.json().catch(() => null)) as { arrError?: string; failed?: { id?: unknown }[] } | null;
-      const stillPending = (data?.failed ?? [])
-        .map((f) => f.id)
-        .filter((id): id is string => typeof id === "string");
       setSelected(new Set(stillPending));
-      if (data?.arrError) setBatchError(data.arrError);
+      if (arrError) setBatchError(arrError);
       setShowBatchNote(null);
       setBatchNote("");
       setConfirmingApprove(false);

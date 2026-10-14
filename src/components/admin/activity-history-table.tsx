@@ -104,6 +104,24 @@ export function ActivityHistoryTable({
 
   const abortRef = useRef<AbortController | null>(null);
 
+  // Keep the URL's seeded filters in step with the table's own. The period
+  // selector copies the current query string, so a from/to/watched the user has
+  // since cleared would otherwise ride along and re-seed the remounted table.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    let changed = false;
+    for (const [key, value] of [["from", fromDate], ["to", toDate], ["watched", watched]] as const) {
+      if (value === "" && url.searchParams.has(key)) {
+        url.searchParams.delete(key);
+        changed = true;
+      } else if (value !== "" && url.searchParams.has(key) && url.searchParams.get(key) !== value) {
+        url.searchParams.set(key, value);
+        changed = true;
+      }
+    }
+    if (changed) window.history.replaceState(window.history.state, "", url);
+  }, [fromDate, toDate, watched]);
+
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search), 350);
     return () => clearTimeout(timer);
@@ -689,7 +707,7 @@ export function ActivityHistoryTable({
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {fmtDuration(r.duration)}
+                          {fmtDuration(r.duration, locale)}
                         </td>
                         <td
                           style={{

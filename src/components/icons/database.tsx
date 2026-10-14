@@ -12,6 +12,7 @@ export function Database({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <ellipse cx="12" cy="5" rx="9" ry="3" />

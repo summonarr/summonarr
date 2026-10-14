@@ -1367,18 +1367,32 @@ test("claim: an ABSENT expectedClaimedBy keeps the ORIGINAL contract — a body-
   assert.equal((await emptyBody.json() as { claimedBy: string }).claimedBy, admin.userId);
 });
 
-test("claim: a literal JSON `null` (or primitive) body is treated as no body, never a 500", async () => {
+test("claim: a literal JSON `null` (or primitive) body toggles exactly like an empty body — no precondition, no 500", async () => {
+  // The distinguishing case is an issue ALREADY claimed by someone else: a body
+  // of `null` must NOT be read as `{ expectedClaimedBy: null }` ("I saw it
+  // unclaimed"), which would 409 this legitimate take-over; and it must not
+  // reach the `in` operator raw (a TypeError → 500).
   const admin = await mintSession({ role: "ISSUE_ADMIN" });
   for (const [i, body] of ([null, 5, "x"] as unknown[]).entries()) {
     ops.length = 0;
     issueRow = {
       id: `issue-claim-null-${i}`, status: "OPEN", reportedBy: "reporter-n", title: "Tenet",
-      claimedBy: null, claimedUser: null,
+      claimedBy: "admin-other", claimedUser: { name: "Ada", email: "ada@example.com" },
     };
     const res = await postClaim(admin.token, `issue-claim-null-${i}`, body);
     assert.equal(res.status, 200, `body ${JSON.stringify(body)} must behave like an absent body`);
+    assert.equal((await res.json() as { claimedBy: string }).claimedBy, admin.userId, "the take-over happened");
     assert.equal(opsOf("issue.updateMany").length, 1);
   }
+  // And a self-held claim is released by a `null` body, as by an empty one.
+  ops.length = 0;
+  issueRow = {
+    id: "issue-claim-null-self", status: "OPEN", reportedBy: "reporter-n", title: "Tenet",
+    claimedBy: admin.userId, claimedUser: { name: "Me", email: "me@example.com" },
+  };
+  const released = await postClaim(admin.token, "issue-claim-null-self", null);
+  assert.equal(released.status, 200);
+  assert.equal((await released.json() as { claimedBy: string | null }).claimedBy, null);
 });
 
 test("claim: a present-but-non-string, non-null expectedClaimedBy → 400 before any read or write", async () => {

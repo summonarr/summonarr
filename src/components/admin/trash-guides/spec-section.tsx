@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useDelayed } from "@/hooks/use-delayed";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/design";
@@ -112,6 +113,7 @@ export function SpecSection({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [details, setDetails] = useState<Map<string, SpecDetail>>(new Map());
   const [applyState, setApplyState] = useState<"idle" | "running" | "ok" | "error">("idle");
+  const later = useDelayed();
   const [applyLog, setApplyLog] = useState<ApplyResult[]>([]);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "managed" | "unmanaged" | "errored">("all");
@@ -234,7 +236,7 @@ export function SpecSection({
     // Clear a success message after 3s; an error stays until dismissed or the
     // next Apply (the sibling cards' RefreshErrorBanner rule) — a 409/429
     // reason that vanished after 3s left no trace of why nothing happened.
-    setTimeout(() => setApplyState((s) => (s === "error" ? s : "idle")), 3000);
+    later(() => setApplyState((s) => (s === "error" ? s : "idle")), 3000);
   }
 
   async function toggleManagement(appId: string, enabled: boolean) {

@@ -441,9 +441,12 @@ async function notifyUser(
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { discordId: true, notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true, notifyOnIssue: true, locale: true },
+      select: { discordId: true, notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true, notifyOnIssue: true, locale: true, deactivatedAt: true },
     });
     if (!user?.discordId) return;
+    // Guardrail 33: a disabled account keeps its Discord link. Gated here, the single-user
+    // chokepoint, so every notifyUserX sender (issues, download-check) is covered.
+    if (user.deactivatedAt) return;
     if (prefKey && user[prefKey] === false) return;
 
     const locale = recipientLocale(!!cfg.channelId, user);

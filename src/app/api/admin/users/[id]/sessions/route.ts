@@ -5,6 +5,7 @@ import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
+import { assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -80,7 +81,16 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   // Strict `=== true`: a stray truthy value (e.g. the string "false") must not
   // sign the user out of every device.
   if (body.all === true) {
-    await revokeAllUserSessions(id);
+    try {
+      await revokeAllUserSessions(id, (tx) =>
+        assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN)),
+      );
+    } catch (err) {
+      if (err instanceof TargetBecameAdminError) {
+        return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
+      }
+      throw err;
+    }
 
     void logAudit({
       userId:    session.user.id,
@@ -108,7 +118,16 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     }
 
-    await revokeSessionById(body.sessionId);
+    try {
+      await revokeSessionById(body.sessionId, (tx) =>
+        assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN)),
+      );
+    } catch (err) {
+      if (err instanceof TargetBecameAdminError) {
+        return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
+      }
+      throw err;
+    }
 
     void logAudit({
       userId:    session.user.id,

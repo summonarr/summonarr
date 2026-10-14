@@ -9,6 +9,7 @@ import {
 } from "@/components/icons";
 import { Permission, PRESETS, parsePermissions } from "@/lib/permissions";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { CONTENT_RATING_CAPS } from "@/lib/content-rating";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
@@ -239,7 +240,7 @@ export function PermissionsModal({
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         rollback();
-        setError(data?.error ?? t("adminManage.notif.failed", { status: res.status }));
+        setError(rateLimitMessage(res, t) ?? data?.error ?? t("adminManage.notif.failed", { status: res.status }));
         return;
       }
       router.refresh();
@@ -255,10 +256,14 @@ export function PermissionsModal({
   }
 
   function toggle(bit: bigint) {
-    const prev = perms;
-    const next = (perms & bit) !== 0n ? perms & ~bit : perms | bit;
+    const wasSet = (perms & bit) !== 0n;
+    const next = wasSet ? perms & ~bit : perms | bit;
     setPerms(next);
-    void patchUser({ permissions: next.toString() }, () => setPerms(prev));
+    // Roll back ONLY this bit: restoring a captured whole mask would also undo
+    // a different checkbox clicked while this PATCH was in flight.
+    void patchUser({ permissions: next.toString() }, () =>
+      setPerms((cur) => (wasSet ? cur | bit : cur & ~bit)),
+    );
   }
 
   function applyPreset() {

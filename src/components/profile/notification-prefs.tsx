@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell, Smartphone } from "@/components/icons";
 import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
@@ -166,7 +167,7 @@ export function NotificationPrefs({
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         rollBack();
-        setSaveError(data?.error ?? t("profile.error.saveFailed"));
+        setSaveError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.error.saveFailed"));
         return;
       }
       savedPrefsRef.current = updated;
@@ -210,7 +211,7 @@ export function NotificationPrefs({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setEmailError(data?.error ?? t("profile.notifications.error.sendVerification"));
+        setEmailError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.notifications.error.sendVerification"));
         setEmailSavingState("error");
         return;
       }
@@ -234,7 +235,7 @@ export function NotificationPrefs({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setEmailError(data?.error ?? t("profile.notifications.error.removeEmail"));
+        setEmailError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.notifications.error.removeEmail"));
         setEmailSavingState("error");
         return;
       }

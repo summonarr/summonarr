@@ -234,3 +234,28 @@ test("rotation is still the DEFAULT — every request-scoped caller keeps it", a
   assert.notEqual(result.claims.sessionId, "sess-rotate-2", "the default must still rotate");
   assert.ok(dbUser.sessionsRevokedAt, "the default must still stamp the cutoff");
 });
+
+test("rotation's cutoff is the old token's own second: a sibling token minted one second later survives, the old token dies", async () => {
+  const userId = "user-rotation-sibling";
+  dbSessionId = "sess-old-sib";
+  dbUser = makeDbUser({ role: "ISSUE_ADMIN" });
+  const iat = Math.floor(Date.now() / 1000) - 5;
+  const mk = (sessionId: string, role: string, at: number) =>
+    signSessionJwt(
+      { id: userId, role, permissions: "0", provider: "credentials", sessionId, expiresAt: at + 86_400 },
+      { expiresInSeconds: 7_200, iat: at },
+    );
+  const token = await mk(dbSessionId, "USER", iat);
+  markUserForceRevalidate(userId);
+  const first = await verifyAndRefreshSession(token);
+  assert.ok(first?.refreshed);
+  assert.equal(dbUser.sessionsRevokedAt?.getTime(), iat * 1000, "cutoff = the old token's iat, not iat + 1");
+  // A sibling device's token (already carrying the new role, other session) minted at iat + 1.
+  const sibling = await mk("sess-sibling", "ISSUE_ADMIN", iat + 1);
+  const savedId = dbSessionId;
+  dbSessionId = "sess-sibling";
+  const sib = await verifyAndRefreshSession(sibling);
+  dbSessionId = savedId;
+  assert.ok(sib, "a sibling token minted the second after the old iat must not be signed out");
+  assert.equal(await verifyAndRefreshSession(token), null, "the pre-rotation token still dies");
+});

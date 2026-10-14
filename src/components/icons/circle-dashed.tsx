@@ -12,6 +12,7 @@ export function CircleDashed({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <path d="M10.1 2.182a10 10 0 0 1 3.8 0" />

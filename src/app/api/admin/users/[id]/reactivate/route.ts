@@ -5,7 +5,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
-import { reactivateUser, isPurgedRow } from "@/lib/account-lifecycle";
+import { reactivateUser, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/admin/users/[id]/reactivate — re-enable a disabled account.
@@ -52,7 +52,20 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   }
   if (!target.deactivatedAt) return NextResponse.json({ ok: true }); // idempotent
 
-  const restored = await reactivateUser(id);
+  let restored: boolean;
+  try {
+    restored = await prisma.$transaction(async (tx) => {
+      // Role re-read under lock 42: a promotion after the read above must not let a
+      // delegate switch an admin back on.
+      await assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN));
+      return reactivateUser(id, tx);
+    });
+  } catch (err) {
+    if (err instanceof TargetBecameAdminError) {
+      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminReenable") }, { status: 403 });
+    }
+    throw err;
+  }
   if (!restored) {
     // Lost a race with a concurrent purge/reactivate — the row no longer matches
     // the (disabled AND not purged) precondition.

@@ -589,7 +589,7 @@ export async function notifyUserIssueMessagePush(data: {
     if (!ctx) return;
 
     const subs = await prisma.pushSubscription.findMany({
-      where: { userId: data.userId, user: { notifyOnIssue: true } },
+      where: { userId: data.userId, user: { notifyOnIssue: true, deactivatedAt: null } }, // guardrail 33
       include: WITH_LOCALE,
     });
     if (!subs.length) return;
@@ -621,7 +621,7 @@ export async function notifyUserIssueResolvedPush(data: {
     if (!ctx) return;
 
     const subs = await prisma.pushSubscription.findMany({
-      where: { userId: data.userId, user: { notifyOnIssue: true } },
+      where: { userId: data.userId, user: { notifyOnIssue: true, deactivatedAt: null } }, // guardrail 33
       include: WITH_LOCALE,
     });
     if (!subs.length) return;

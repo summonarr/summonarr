@@ -48,9 +48,9 @@ export function DetailRow({
   const details: [string, React.ReactNode][] = [
     [t("adminActivity.field.started"), fmtTimestamp(startedAt, mounted, locale)],
     [t("adminActivity.field.stopped"), fmtTimestamp(stoppedAt, mounted, locale)],
-    [t("adminActivity.field.totalDuration"), fmtDuration(play.duration)],
-    [t("adminActivity.kpi.watchTime"), fmtDuration(effectivePlay)],
-    [t("adminActivity.field.paused"), effectivePaused ? fmtDuration(effectivePaused) : "—"],
+    [t("adminActivity.field.totalDuration"), fmtDuration(play.duration, locale)],
+    [t("adminActivity.kpi.watchTime"), fmtDuration(effectivePlay, locale)],
+    [t("adminActivity.field.paused"), effectivePaused ? fmtDuration(effectivePaused, locale) : "—"],
     [t("adminActivity.field.progress"), `${pct}%`],
     ...(segments > 1
       ? ([[t("adminActivity.field.segments"), t("adminActivity.detail.segmentsValue", { count: segments })]] as [string, React.ReactNode][])

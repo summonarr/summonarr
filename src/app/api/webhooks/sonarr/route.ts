@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
@@ -237,7 +238,7 @@ export async function POST(req: NextRequest) {
     const rawTvdb = payload.series.tvdbId;
     const rawTmdb = payload.series.tmdbId;
     const delTvdbId = Number.isInteger(rawTvdb) && rawTvdb > 0 ? rawTvdb : null;
-    let delTmdbId = typeof rawTmdb === "number" && Number.isInteger(rawTmdb) && rawTmdb > 0 ? rawTmdb : null;
+    let delTmdbId = typeof rawTmdb === "number" && isTmdbIdInRange(rawTmdb) ? rawTmdb : null;
     if (delTmdbId === null && delTvdbId !== null) {
       delTmdbId = await resolveSingleTvdbToTmdb(delTvdbId);
     }
@@ -260,7 +261,7 @@ export async function POST(req: NextRequest) {
   const { tvdbId, tmdbId } = payload.series;
 
   const safeVdbId = Number.isInteger(tvdbId) && tvdbId > 0 ? tvdbId : null;
-  const safeMdbId = typeof tmdbId === "number" && Number.isInteger(tmdbId) && tmdbId > 0 ? tmdbId : null;
+  const safeMdbId = typeof tmdbId === "number" && isTmdbIdInRange(tmdbId) ? tmdbId : null;
 
   // Never trust the payload's ids on their own. The webhook secret authenticates
   // the request but does NOT prove the named series was actually downloaded: anyone

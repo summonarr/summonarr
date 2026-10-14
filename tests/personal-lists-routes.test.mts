@@ -267,6 +267,7 @@ const hidden = await import("../src/app/api/hidden/route.ts");
 const watchlist = await import("../src/app/api/watchlist/route.ts");
 const requestsToken = await import("../src/app/api/requests/token/route.ts");
 const requestsUsers = await import("../src/app/api/requests/users/route.ts");
+const requestsInstances = await import("../src/app/api/requests/instances/route.ts");
 const health = await import("../src/app/api/health/route.ts");
 
 // ── synthetic request scope ──────────────────────────────────────────────────
@@ -667,6 +668,7 @@ for (const [label, q] of [
   ["a zero tmdbId", "?tmdbId=0&mediaType=MOVIE"],
   ["a negative tmdbId", "?tmdbId=-2&mediaType=MOVIE"],
   ["a non-numeric tmdbId", "?tmdbId=abc&mediaType=MOVIE"],
+  ["a tmdbId one past INT4", "?tmdbId=2147483648&mediaType=MOVIE"],
   ["a missing mediaType", "?tmdbId=603"],
   ["an unknown mediaType", "?tmdbId=603&mediaType=ANIME"],
 ] as const) {
@@ -675,6 +677,19 @@ for (const [label, q] of [
     const res = await inScope(() => requestsToken.GET(mk("/api/requests/token", me.token, { method: "GET", query: q }), undefined));
     assert.equal(res.status, 400);
     assert.ok(!("token" in (await res.json())));
+  });
+}
+
+for (const [label, q] of [
+  ["a zero tmdbId", "?tmdbId=0&mediaType=MOVIE"],
+  ["a tmdbId one past INT4", "?tmdbId=2147483648&mediaType=MOVIE"],
+  ["a huge tmdbId", "?tmdbId=99999999999&mediaType=TV"],
+] as const) {
+  test(`requests/instances with ${label} is 400 before any resolve`, async () => {
+    const me = await mintSession();
+    const res = await inScope(() => requestsInstances.GET(mk("/api/requests/instances", me.token, { method: "GET", query: q }), undefined));
+    assert.equal(res.status, 400);
+    assert.ok(!("instances" in (await res.json())));
   });
 }
 

@@ -768,6 +768,30 @@ test("POST rejects an invalid serverInstance with 400 before touching the DB or 
   assert.equal(opsOf("plexLibraryItem.findFirst").length, 0);
 });
 
+test("POST / candidates / file-info refuse a tmdbId past INT4 with 400 — never a Prisma 500 — before any read or fetch", async () => {
+  const a = await admin();
+  configureServers();
+  const TOO_BIG = 2_147_483_648;
+  for (const [field, body] of [
+    ["tmdbId", { server: "plex", tmdbId: TOO_BIG, mediaType: "MOVIE", correctTmdbId: 222 }],
+    ["correctTmdbId", { server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: TOO_BIG }],
+  ] as const) {
+    const res = await fixMatch(postBody(body, a.header), undefined);
+    assert.equal(res.status, 400, `POST ${field}`);
+  }
+  for (const params of [
+    { server: "plex", tmdbId: String(TOO_BIG), mediaType: "MOVIE", correctTmdbId: "222" },
+    { server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: String(TOO_BIG) },
+  ]) {
+    const res = await candidates(req(candidatesUrl(params), { headers: a.header }), undefined);
+    assert.equal(res.status, 400, `candidates ${JSON.stringify(params)}`);
+  }
+  const fi = await fileInfo(req(fileInfoUrl({ tmdbId: String(TOO_BIG), mediaType: "MOVIE" }), { headers: a.header }), undefined);
+  assert.equal(fi.status, 400, "file-info");
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(opsOf("plexLibraryItem.findFirst").length, 0);
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // Backward compatibility — omitting serverInstance is today's behaviour
 // ════════════════════════════════════════════════════════════════════════════

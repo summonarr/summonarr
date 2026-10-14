@@ -537,7 +537,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {fmtDuration(p.playDuration)}
+                        {fmtDuration(p.playDuration, locale)}
                       </td>
                       <td
                         className="ds-mono"

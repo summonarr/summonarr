@@ -346,7 +346,7 @@ test("users: a plain USER is 403 and reaches no query", async () => {
 test("users: a MANAGE_USERS holder who is NOT an admin can list and create", async () => {
   // The bit is deliberately MANAGE_USERS, not withAdmin, so the same capability
   // that gates the [id] PATCH/DELETE also gates listing and creating.
-  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
   assert.equal((await listUsers(t)).status, 200);
   assert.equal((await createUser(t, { email: "new@example.com", password: "password12345" })).status, 201);
 });
@@ -370,15 +370,23 @@ test("users: a full ADMIN CAN create an ADMIN account", async () => {
 });
 
 test("users: a MANAGE_USERS holder can create USER accounts, and ISSUE_ADMIN only if it holds MANAGE_ISSUES", async () => {
-  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
   assert.equal((await createUser(t, { email: "u1@example.com", password: "password12345", role: "USER" })).status, 201);
   // ISSUE_ADMIN seeds MANAGE_ISSUES, which this delegate does not hold: grant only what you hold.
   ops = [];
   const denied = await createUser(t, { email: "u2@example.com", password: "password12345", role: "ISSUE_ADMIN" });
   assert.equal(denied.status, 403);
   assert.equal(opsOf("user.create").length, 0);
-  const t2 = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.MANAGE_ISSUES });
+  const t2 = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.MANAGE_ISSUES | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
   assert.equal((await createUser(t2, { email: "u3@example.com", password: "password12345", role: "ISSUE_ADMIN" })).status, 201);
+});
+
+test("users: a delegate lacking the baseline REQUEST bits cannot seed them into a new account (grant only what you hold)", async () => {
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
+  ops = [];
+  const res = await createUser(t, { email: "nb@example.com", password: "password12345", role: "USER" });
+  assert.equal(res.status, 403);
+  assert.equal(opsOf("user.create").length, 0);
 });
 
 test("users: an unknown role is rejected before any privilege check", async () => {

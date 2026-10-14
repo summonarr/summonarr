@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { foldQueueRecords } from "../src/lib/arr-queue.ts";
 import { episodeSummary } from "../src/components/admin/queue-format.ts";
 
@@ -24,6 +25,15 @@ test("a four-episode pack folds to one row carrying all four episodes", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].episodes.length, 4);
   assert.deepEqual(rows[0].ids, [1, 2, 3, 4]);
+});
+
+test("a multi-episode pack row shows its episode COUNT (plural key present in every locale)", () => {
+  const src = readFileSync(new URL("../src/components/admin/download-queue.tsx", import.meta.url), "utf8");
+  assert.match(src, /r\.episodes\.length > 1 &&[^\n]*t\("adminManage\.queue\.episodeCount", \{ count: r\.episodes\.length \}\)/);
+  for (const loc of ["en", "es", "fr", "de", "pt", "it", "zh"]) {
+    const json = JSON.parse(readFileSync(new URL(`../src/lib/i18n/messages/${loc}/adminManage.json`, import.meta.url), "utf8"));
+    assert.ok(json["adminManage.queue.episodeCount_one"] && json["adminManage.queue.episodeCount_other"], `${loc} has both plural forms`);
+  }
 });
 
 test("four single-episode downloads stay four rows", () => {

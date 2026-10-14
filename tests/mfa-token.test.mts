@@ -189,6 +189,23 @@ test("a step-up token binds user, session and challenge and is its own purpose",
   assert.equal(await verifySessionJwt(token), null, "never a session");
 });
 
+test("global cap: the oldest entry is skipped when it is IN FLIGHT — the next-oldest live one is evicted instead", async () => {
+  resetMfaTokenLedgerForTests(3);
+  try {
+    const a = await signMfaSigninToken({ ...INPUT, userId: "a" });
+    const b = await signMfaSigninToken({ ...INPUT, userId: "b" });
+    const c = await signMfaSigninToken({ ...INPUT, userId: "c" });
+    assert.equal(reserveToken(a.jti), true); // oldest, being verified right now
+    const d = await signMfaSigninToken({ ...INPUT, userId: "d" });
+    assert.equal(commitToken(a.jti), true, "the in-flight oldest survives global eviction");
+    assert.equal(isTokenUsable(b.jti), false, "the oldest NON-in-flight entry went instead");
+    assert.ok(isTokenUsable(c.jti));
+    assert.ok(isTokenUsable(d.jti));
+  } finally {
+    resetMfaTokenLedgerForTests();
+  }
+});
+
 test("global cap: a full ledger evicts EXPIRED entries first, then the oldest live one — it never refuses the newcomer", async () => {
   resetMfaTokenLedgerForTests(4);
   try {

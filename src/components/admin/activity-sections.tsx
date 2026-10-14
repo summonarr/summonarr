@@ -420,7 +420,7 @@ export function Leaderboards({
                     >
                       {dec1.format(u.hours)}{hoursSuffix}{" "}
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        · {t("adminActivity.common.plays", { count: u.plays })}
+                        · {t("adminActivity.common.playsFormatted", { count: u.plays, n: u.plays.toLocaleString(locale) })}
                       </span>
                     </span>
                   </div>
@@ -541,7 +541,7 @@ export function Leaderboards({
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {m.plays}{" "}
+                      {m.plays.toLocaleString(locale)}{" "}
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
                         · {t("adminActivity.common.viewers", { count: m.viewers })}
                       </span>

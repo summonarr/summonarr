@@ -5,6 +5,7 @@ import { Loader2, Check } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useT } from "@/components/i18n/i18n-provider";
 
 interface ChangePasswordProps {
@@ -45,7 +46,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(data.error ?? t("profile.password.error.failed"));
+        setError(rateLimitMessage(res, t) ?? data.error ?? t("profile.password.error.failed"));
         return;
       }
       const data = await res.json().catch(() => ({}));

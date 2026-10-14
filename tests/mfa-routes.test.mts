@@ -1218,6 +1218,17 @@ test("admin reset: needs MANAGE_USERS, an ADMIN target needs the ADMIN bit, and 
   assert.equal(totps.length, 1, "nothing was removed");
 });
 
+test("admin reset: a target carrying the ADMIN BIT with a non-ADMIN role is still an admin target", async () => {
+  const manager = await seedUser({ role: "USER", permissions: Permission.MANAGE_USERS });
+  const bitAdmin = await seedUser({ role: "USER", permissions: Permission.ADMIN });
+  seedTotp(bitAdmin.id as string);
+  const res = await call(adminReset.DELETE as never, `/api/admin/users/${bitAdmin.id}/mfa`, {
+    method: "DELETE", headers: bearer(await sessionFor(manager)), ctx: { params: Promise.resolve({ id: bitAdmin.id }) },
+  });
+  assert.equal(res.status, 403, "the ADMIN superbit marks an admin even when the role column says USER");
+  assert.equal(totps.length, 1, "nothing was removed");
+});
+
 test("L2: a target promoted to ADMIN while the reset is in flight is refused — the role is re-read under advisory lock 42", async () => {
   const manager = await seedUser({ role: "USER", permissions: Permission.MANAGE_USERS });
   const target = await seedUser();

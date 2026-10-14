@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
 
@@ -50,7 +51,7 @@ export function AutoRequestPrefs({
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setOn(!next);
-        setError(data?.error ?? t("profile.error.saveFailed"));
+        setError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.error.saveFailed"));
       } else {
         setOptedIn(next);
       }

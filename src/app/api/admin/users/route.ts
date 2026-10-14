@@ -7,7 +7,7 @@ import { Prisma } from "@/generated/prisma";
 import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { normalizeEmail } from "@/lib/email-normalize";
 import { sanitizeOptional } from "@/lib/sanitize";
-import { Permission, hasPermission, defaultPermissionsForRole, rolePresetExceeds } from "@/lib/permissions";
+import { Permission, hasPermission, defaultPermissionsForRole, rolePresetExceeds, presetExceeds } from "@/lib/permissions";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { deriveUserSource } from "@/lib/user-source";
@@ -159,7 +159,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   // Subset rule: the role seeds the new account's bitmask, so a delegate may only
   // create a role whose management bits it holds itself (ISSUE_ADMIN needs
   // MANAGE_ISSUES) — else it mints a sock-puppet carrying bits it was never given.
-  if (rolePresetExceeds(role, session.user.permissions)) {
+  if (rolePresetExceeds(role, session.user.permissions) || presetExceeds(role, session.user.permissions)) {
     return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
   }
 

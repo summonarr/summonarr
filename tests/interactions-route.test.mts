@@ -38,7 +38,7 @@
 //
 // Harness: the real handler, real Ed25519 signing, in-memory prisma stubs,
 // scripted discord.com + TMDB. No DB, no network.
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
 import dns from "node:dns/promises";
@@ -134,9 +134,13 @@ const opsOf = (name: string) => ops.filter((o) => o.op === name);
 
 // ── stores ───────────────────────────────────────────────────────────────────
 const settings = new Map<string, string>();
+// A test can park handleCommand's first awaited read (and then fail it) to model
+// a handler that errors AFTER the 25s "taking longer" line went out.
+let welcomeGate: Promise<void> | null = null;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
     rec("setting.findUnique", args.where.key);
+    if (welcomeGate && args.where.key === "discordWelcomeChannelId") await welcomeGate;
     const v = settings.get(args.where.key);
     return v === undefined ? null : { key: args.where.key, value: v };
   },
@@ -460,6 +464,7 @@ beforeEach(async () => {
   watchlistRows = [];
   hiddenRows = [];
   clearRecentlyAddedCache();
+  welcomeGate = null;
 });
 
 // ── 2: unconfigured bot refuses ──────────────────────────────────────────────
@@ -1332,4 +1337,49 @@ test("pick: an undated TMDB result is stored with releaseYear null, never the di
   await waitFor(pickReplied, 400);
   const data = (opsOf("mediaRequest.create")[0].args as { data: Record<string, unknown> }).data;
   assert.equal(data.releaseYear, null);
+});
+
+// ── editOriginal / status / slow-line boundaries ─────────────────────────────
+
+test("editOriginal caps content at Discord's 2000 characters — an over-long reply is truncated, not sent to 400", async () => {
+  settings.set("discordWelcomeChannelId", "777777777777777777");
+  await run(slash("x".repeat(3000), [], MEMBER, { channel_id: "777777777777777777" }));
+  const content = String(lastEdit().content);
+  assert.ok(content.length > 0 && content.length <= 2000, `content was ${content.length} chars`);
+});
+
+test("/status caps each title line at 80 characters", async () => {
+  linkMember();
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...orig,
+    findMany: async () => [{ title: "T".repeat(200), mediaType: "MOVIE", status: "PENDING", tmdbId: 1 }],
+  });
+  try {
+    await run(slash("status", []));
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+  const titleRun = /T+/.exec(String(lastEdit().content))![0];
+  assert.ok(titleRun.length <= 80 && titleRun.length > 10, `title run was ${titleRun.length} chars`);
+});
+
+test("a handler error AFTER the 'taking longer' line is still reported to the user", async () => {
+  let release!: () => void;
+  welcomeGate = new Promise<void>((_, reject) => { release = () => reject(new Error("boom")); });
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    await post(slash("status", []));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    mock.timers.tick(25_000);
+    for (let i = 0; i < 40; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(discordEdits.length, 1, "the slow line went out first");
+    release();
+    for (let i = 0; i < 60 && discordEdits.length < 2; i++) await new Promise((r) => setImmediate(r));
+  } finally {
+    mock.timers.reset();
+  }
+  assert.equal(discordEdits.length, 2, "the failure is reported after the slow line");
+  assert.notEqual(discordEdits[0].content, discordEdits[1].content);
+  assert.ok(errors.some((e) => e.includes("handler error")));
 });

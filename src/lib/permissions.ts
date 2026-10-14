@@ -135,6 +135,17 @@ export function rolePresetExceeds(role: string, callerPerms: bigint): boolean {
   return ((defaultPermissionsForRole(role) & MANAGEMENT_MASK) & ~callerPerms) !== 0n;
 }
 
+// True when seeding `role`'s FULL preset (baseline REQUEST* bits included) would
+// confer ANY bit the caller does not itself hold. rolePresetExceeds deliberately
+// looks at management bits only; account CREATION also seeds the baseline, so a
+// delegate without e.g. REQUEST_TV must not mint accounts that carry it ("grant
+// only what you hold"). Reject rather than mask: a masked 0n would read back as
+// "never seeded" and fall back to the full preset in effectivePermissions.
+export function presetExceeds(role: string, callerPerms: bigint): boolean {
+  if ((callerPerms & Permission.ADMIN) !== 0n) return false;
+  return (defaultPermissionsForRole(role) & ~callerPerms) !== 0n;
+}
+
 // Core check. The ADMIN superbit grants everything. mode "or" (default): any of
 // the required bits satisfies; "and": all required must be set.
 export function hasPermission(

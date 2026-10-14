@@ -230,6 +230,31 @@ export const POST = withPermission([
     );
   }
 
+  // Named-instance grants and media-server grants are NOT permission bits, so the
+  // subset check above cannot see them. A non-ADMIN on-behalf filer may only use a
+  // named instance they could request on / auto-approve on themselves (grant only
+  // what you hold), and only sees "already available" for servers they can view
+  // themselves (the per-item results would otherwise leak a restricted library).
+  const filerChecked = isOnBehalf && !hasPermission(session.user.permissions, Permission.ADMIN);
+  const filerRow = filerChecked
+    ? await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { instanceGrants: true, mediaServerGrants: true },
+      })
+    : null;
+  const filerGrants = parseInstanceGrants(filerRow?.instanceGrants);
+  const filerMay = (
+    inst: { slug: string; restricted: boolean; serverAll: boolean },
+    mediaType: MediaType,
+    serverAll4k: boolean,
+    autoApprove = false,
+  ) =>
+    !filerChecked ||
+    inst.slug === "" ||
+    (autoApprove
+      ? canAutoApproveInstance(session.user.permissions, inst, filerGrants, mediaType)
+      : canRequestInstance(session.user.permissions, inst, filerGrants, mediaType, serverAll4k));
+
   // discordRequireLinkedAccountSite only gates SELF requests — an admin acting on
   // behalf is trusted and shouldn't be blocked by the target's link state.
   if (!isOnBehalf) {
@@ -310,7 +335,7 @@ export const POST = withPermission([
       const routed = slugByKey.get(key);
       if (routed === undefined || routed === "") continue;
       const inst = configuredByType[it.mediaType].find((i) => i.slug === routed) ?? DEFAULT_ACCESS;
-      if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k)) {
+      if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k) || !filerMay(inst, it.mediaType, serverAll4k)) {
         slugByKey.delete(key); // slugOf() now returns "" (default instance)
       }
     }
@@ -322,12 +347,26 @@ export const POST = withPermission([
   // (and vice versa — an admin bulk-requesting on behalf of a plain user must not have their
   // own broader visibility silently swallow the items). Same targetPerms/target-grants rule
   // the instance and quota gates above already follow.
-  const visible = visibleInstancesFor(
+  const targetVisible = visibleInstancesFor(
     targetPerms,
     parseMediaServerGrants(target.mediaServerGrants),
     mediaAccess.plex,
     mediaAccess.jellyfin,
   );
+  const filerVisible = filerChecked
+    ? visibleInstancesFor(
+        session.user.permissions,
+        parseMediaServerGrants(filerRow?.mediaServerGrants),
+        mediaAccess.plex,
+        mediaAccess.jellyfin,
+      )
+    : null;
+  const visible = filerVisible
+    ? {
+        plex: targetVisible.plex.filter((x) => filerVisible.plex.includes(x)),
+        jellyfin: targetVisible.jellyfin.filter((x) => filerVisible.jellyfin.includes(x)),
+      }
+    : targetVisible;
 
   // Authoritative existing-state lookup — never trust client-supplied availability.
   // Every mediaRequest / arr-availability query is scoped to each item's ROUTED
@@ -389,7 +428,7 @@ export const POST = withPermission([
       continue;
     }
     const inst = instOf(it);
-    if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k)) {
+    if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k) || !filerMay(inst, it.mediaType, serverAll4k)) {
       skipped.push({ ...it, result: "no-permission" });
       continue;
     }
@@ -399,7 +438,7 @@ export const POST = withPermission([
     // auto-approved — exactly request-create.ts (`isAutoApprove && arrHasInstance`)
     // and the Discord path (`mayAutoApprove && arrHasInstance`). Everyone else files a
     // normal request, so the sync's arr marking pass can notify them when it lands.
-    const arrCounts = arrAvailSet.has(k) && canAutoApproveInstance(targetPerms, inst, grants, it.mediaType);
+    const arrCounts = arrAvailSet.has(k) && canAutoApproveInstance(targetPerms, inst, grants, it.mediaType) && filerMay(inst, it.mediaType, serverAll4k, true);
     if ((!inst.skipLibraryCheck && libraryAvailSet.has(k)) || arrCounts) {
       skipped.push({ ...it, result: "already-available" });
       continue;
@@ -475,7 +514,9 @@ export const POST = withPermission([
           title: r.meta.title,
           posterPath: r.meta.posterPath,
           releaseYear: r.meta.releaseYear,
-          autoApprove: canAutoApproveInstance(targetPerms, instOf(r.it), grants, r.it.mediaType),
+          autoApprove:
+            canAutoApproveInstance(targetPerms, instOf(r.it), grants, r.it.mediaType) &&
+            filerMay(instOf(r.it), r.it.mediaType, serverAll4k, true),
         }]
       : [],
   );

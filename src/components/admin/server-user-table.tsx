@@ -149,6 +149,14 @@ function LinkPicker({
               : t("adminManage.serverUsers.automaticUnmatched")}
           </option>
           <option value={NONE}>{t("adminManage.serverUsers.notLinked")}</option>
+          {/* A pinned account missing from the list (deactivated, or past the
+              list's cap) must still show as the selection, not fall back to
+              the first option. */}
+          {row.userId && row.user && !accounts.some((a) => a.id === row.userId) && (
+            <option key={row.userId} value={row.userId}>
+              {row.user.name ?? row.user.email}
+            </option>
+          )}
           {accounts.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name ?? a.email}

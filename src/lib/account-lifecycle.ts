@@ -22,6 +22,25 @@ export class LastAdminError extends Error {}
 // that is already disabled — see the note on that function.
 export class NotDeactivatedError extends Error {}
 
+// Raised when the target turned out to be an ADMIN once re-read under lock 42 and
+// the acting delegate lacks the ADMIN bit (a promotion landed after the route's
+// first, unlocked read).
+export class TargetBecameAdminError extends Error {}
+
+type LockTx = {
+  $executeRawUnsafe: (q: string) => Promise<unknown>;
+  user: { findUnique: (a: { where: { id: string }; select: { role: true } }) => Promise<{ role: string } | null> };
+};
+
+// Re-resolve the target's role INSIDE the transaction, under the same advisory
+// lock 42 the role-change / deactivate routes take, and refuse a non-ADMIN caller
+// when it is an ADMIN now. Call it first in the tx that performs the action.
+export async function assertTargetNotAdminInTx(tx: LockTx, id: string, callerIsAdmin: boolean): Promise<void> {
+  await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+  const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
+  if (fresh?.role === "ADMIN" && !callerIsAdmin) throw new TargetBecameAdminError();
+}
+
 // The tombstone address a purge rewrites `email` to. RFC-2606 reserved `.invalid`
 // (never routable) with the row's own id embedded, so it is unique per user AND
 // unforgeable as a real address — which makes it a reliable structural marker
@@ -106,7 +125,10 @@ export async function deactivateUserInTx(
 // active, or purged: a purged row has no identity left to sign in with, so
 // re-enabling it would only resurrect a ghost (and re-add it to the
 // active-admin count).
-export async function reactivateUser(id: string): Promise<boolean> {
+export async function reactivateUser(
+  id: string,
+  db: Pick<typeof prisma, "$executeRaw"> = prisma,
+): Promise<boolean> {
   // Raw SQL because the scrubbed-shape guard compares `email` against a value
   // derived from the row's own id, which Prisma's updateMany filter can't
   // express. Doing it in the statement keeps the check atomic — a read-then-write
@@ -118,7 +140,7 @@ export async function reactivateUser(id: string): Promise<boolean> {
   // The calendar feed URL is cleared too: it is a bearer credential handed out
   // before the account was disabled, and re-enabling must not silently revive a
   // link that may have leaked in the meantime. The user can generate a new one.
-  const rows = await prisma.$executeRaw`
+  const rows = await db.$executeRaw`
     UPDATE "User" SET "deactivatedAt" = NULL,
       "calendarTokenHash" = NULL, "calendarTokenCreatedAt" = NULL
     WHERE id = ${id}

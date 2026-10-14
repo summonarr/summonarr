@@ -180,7 +180,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         <MiniKpi label={t("adminActivity.user.lastActive")} value={when(s.lastActiveIso)} />
         <MiniKpi
           label={t("adminActivity.user.avgSession")}
-          value={fmtDuration(s.avgSessionDuration)}
+          value={fmtDuration(s.avgSessionDuration, locale)}
         />
         <MiniKpi
           label={t("adminActivity.user.directPlay")}

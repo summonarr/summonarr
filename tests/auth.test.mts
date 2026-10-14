@@ -1623,6 +1623,16 @@ test("oidc: an existing (provider, sub) account returns THAT identity regardless
   assert.equal(accounts[0].expires_at, 1_234_567_890);
 });
 
+test("oidc: a returning (provider, sub) user signs in even when the IdP now omits or does not verify the email; a NEW link still needs both", async () => {
+  seedUser({ id: "u-ret", email: "ret@example.com", name: "Ret", role: "USER" });
+  accounts.push({ id: "acc-ret", userId: "u-ret", type: "oidc", provider: "oidc", providerAccountId: "sub-ret", access_token: "a", refresh_token: "b", id_token: "c", expires_at: 1 });
+  const r1 = asUser(await findOrCreateOidcUser(oidcClaims({ sub: "sub-ret", emailVerified: false })));
+  assert.equal(r1.id, "u-ret");
+  const r2 = asUser(await findOrCreateOidcUser(oidcClaims({ sub: "sub-ret", email: null })));
+  assert.equal(r2.id, "u-ret");
+  await assert.rejects(() => findOrCreateOidcUser(oidcClaims({ sub: "sub-other", emailVerified: false })), /not verified/);
+});
+
 test("oidc: email collision with an unbound row is REFUSED (SSO-takeover guard); the create path issues a TOP-LEVEL account.create in one tx", async () => {
   // (a) Collision: an attacker-controlled IdP vouching the victim's email must
   // not inherit the victim's row — even with email_verified=true.
@@ -1989,4 +1999,63 @@ test("revokeAllUserSessions: deletes every row of the user, stamps a fresh cutof
 // re-export still points at the real implementation.
 test("normalizeEmail re-export stays wired to the NFKC/lowercase/trim canonicalizer", () => {
   assert.equal(normalizeEmail("  Ｕser@Example.COM "), "user@example.com"); // fullwidth U folds via NFKC
+});
+
+test("plex sign-in wiring: a token-cache hit never rewrites notificationEmail; a live plex.tv answer does", async () => {
+  const ua = chromeUa("plex-fresh");
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  const FRIENDS_XML =
+    '<?xml version="1.0"?><MediaContainer size="1">' +
+    '<User id="1" email="fresh@example.com"><Server id="1" machineIdentifier="machine-1"/></User>' +
+    "</MediaContainer>";
+  respond = (url) => {
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return jsonResponse({ id: 4242, email: "fresh@example.com", username: "Fresh", thumb: "" });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/ping") return jsonResponse({});
+    if (url.hostname === "203.0.113.10" && url.pathname === "/identity") return jsonResponse({ MediaContainer: { machineIdentifier: "machine-1" } });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/users") return new Response(FRIENDS_XML, { status: 200, headers: { "content-type": "application/xml" } });
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const first = await authorizeWithPlex({ plexToken: "plex-tok-fresh" }, makeReq(ua));
+  assert.ok(first, "live sign-in admits the member");
+  assert.equal(userById(first.id as string).notificationEmail, "fresh@example.com");
+
+  // The user later sets a different notification address (profile).
+  userById(first.id as string).notificationEmail = "custom@example.com";
+  const cached = await authorizeWithPlex({ plexToken: "plex-tok-fresh" }, makeReq(ua));
+  assert.ok(cached, "the cached path still admits");
+  assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/ping"), "this sign-in really took the token-cache path");
+  assert.equal(userById(first.id as string).notificationEmail, "custom@example.com", "a cached (up to 30 days old) email must not overwrite it");
+
+  // Drop the cache: the next sign-in is answered live by plex.tv, which may refresh it.
+  plexCacheRows.clear();
+  assert.ok(await authorizeWithPlex({ plexToken: "plex-tok-fresh" }, makeReq(ua)));
+  assert.equal(userById(first.id as string).notificationEmail, "fresh@example.com", "a live answer still refreshes it");
+});
+
+test("credentials: a successful sign-in refunds ITS OWN reserved hit, not a concurrent attacker's newer failure", async () => {
+  const email = "refund-own@example.com";
+  seedUser({ id: "u-ro", email, passwordHash: PASSWORD_HASH });
+  const key = `login-email:${hashAuditEmail(email)}`;
+  const realNow = Date.now;
+  const T = realNow.call(Date);
+  let clock = T;
+  Date.now = () => clock;
+  try {
+    // A (correct password) reserves at T and parks inside the password hash; B (wrong password,
+    // same account) reserves later, while A is still verifying.
+    const a = authorizeWithCredentials({ email, password: PASSWORD }, makeReq(chromeUa("ro-a")));
+    // Let A get as far as its reservation before the clock moves.
+    while (peekRateLimit(key, 1, ACCOUNT_WINDOW_MS)) await new Promise((r) => setImmediate(r));
+    clock = T + 10_000;
+    const b = authorizeWithCredentials({ email, password: "wrong password" }, makeReq(chromeUa("ro-b")));
+    const [ra, rb] = await Promise.all([a, b]);
+    assert.ok(ra, "the correct password authorizes");
+    assert.equal(rb, null);
+    // Exactly B's (newer) hit must remain. Popping the newest instead leaves A's T-stamped hit,
+    // which has aged out of a 5 s window: the attacker's failed guess would be forgiven early.
+    assert.equal(peekRateLimit(key, 1, 5_000), false, "the attacker's failed attempt is still counted");
+  } finally {
+    Date.now = realNow;
+  }
 });

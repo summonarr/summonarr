@@ -960,6 +960,14 @@ test("radarr Download payload validation: non-positive tmdbId → 400; missing m
   assert.equal(bad.res.status, 400);
   assert.deepEqual(bad.body, { error: "Invalid tmdbId" });
 
+  // An INT4-overflowing id gets the same bad-payload answer (isTmdbIdInRange), never a Prisma 500.
+  const huge = await post(
+    radarrPOST,
+    webhookReq("radarr", { token: RADARR_SECRET, body: { eventType: "Download", movie: { tmdbId: 3_000_000_000, title: "X" } } }),
+  );
+  assert.equal(huge.res.status, 400);
+  assert.deepEqual(huge.body, { error: "Invalid tmdbId" });
+
   const noMovie = await post(
     radarrPOST,
     webhookReq("radarr", { token: RADARR_SECRET, body: { eventType: "Download" } }),

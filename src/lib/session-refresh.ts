@@ -229,7 +229,14 @@ export async function verifyAndRefreshSession(
     } else if (privilegeChanged) {
       const newSessionId = randomUUID();
       const oldIatSec = typeof claims.iat === "number" ? claims.iat : Math.floor(now);
-      const cutoffSec = oldIatSec + 1;
+      // Stamp the cutoff AT the old token's own iat, not one past it. The check is
+      // `iat <= cutoff`, so the presented (pre-change) token is rejected either
+      // way; `+ 1` only added collateral: a sibling device's token minted in the
+      // very next second (a legitimate fresh token) failed `iat <= cutoff` and
+      // signed that device out. Whole-second comparison cannot wrongly KEEP a
+      // revoked token here: every token of the rotated session (any iat) also dies
+      // on the renamed AuthSession row, and the new token is signed past the cutoff.
+      const cutoffSec = oldIatSec;
       const cutoffMs = cutoffSec * 1000;
       const rotated = await prisma.$transaction(async (tx) => {
         const existingRow = await tx.authSession.findUnique({

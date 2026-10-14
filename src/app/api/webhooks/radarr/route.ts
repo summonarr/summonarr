@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
@@ -179,7 +180,7 @@ export async function POST(req: NextRequest) {
     // queue id/progress. ISO value lets the marker be pruned later.
     const stableTmdbId = payload.movie?.tmdbId;
     let shouldNotify = true;
-    if (Number.isInteger(stableTmdbId) && (stableTmdbId as number) > 0) {
+    if (isTmdbIdInRange(stableTmdbId as number)) {
       const manualKey = `manualInteractionNotified:radarr:${arrInstance}:${stableTmdbId}`;
       const claim = await prisma.setting.createMany({
         data: [{ key: manualKey, value: new Date().toISOString() }],
@@ -233,7 +234,7 @@ export async function POST(req: NextRequest) {
     // A file deleted FOR AN UPGRADE is transient — the replacement import is
     // already underway; evicting availability would just flicker the badge.
     const isUpgrade = payload.eventType === "MovieFileDelete" && payload.deleteReason === "upgrade";
-    if (Number.isInteger(delTmdbId) && (delTmdbId as number) > 0 && !isUpgrade) {
+    if (isTmdbIdInRange(delTmdbId as number) && !isUpgrade) {
       await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
         if (payload.eventType === "MovieDelete") {
@@ -256,7 +257,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { tmdbId } = payload.movie;
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  if (!isTmdbIdInRange(tmdbId)) {
     console.warn("[webhook/radarr] 400 invalid tmdbId");
     syncCompleted = true;  // Bad payload from Radarr; retry won't help.
     return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });

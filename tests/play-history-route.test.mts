@@ -1121,9 +1121,10 @@ test("a continuing playing session accrues a playtimeMs increment and takes the 
 // ═══ Jellyfin source coverage (the poller drives both) ══════════════════════
 
 test("the jellyfin path also finalizes a session absent past the grace, keyed on its own source", async () => {
+  const jfLastSeen = agoReal(SESSION_ABSENCE_GRACE_MS + 8_000);
   const stale = seed(makeRow("jf-abs", {
     id: "jellyfin:jf-abs", source: "jellyfin", sessionKey: "jf-abs",
-    lastSeenAt: agoReal(SESSION_ABSENCE_GRACE_MS + 8_000),
+    lastSeenAt: jfLastSeen, state: "playing", progressMs: 10_000n, playtimeMs: 300_000n,
   }));
   // Also seed a plex row present in the plex snapshot so the two source passes
   // don't interfere: the plex row is "seen" and untouched.
@@ -1142,6 +1143,9 @@ test("the jellyfin path also finalizes a session absent past the grace, keyed on
     "guardrail 19: the jellyfin finalize keys on its own sessionKey:startedAt",
   );
   assert.equal(activeStore.has("jellyfin:jf-abs"), false, "the finalized jellyfin row is deleted");
+  const jfRow = historyRows().find((r) => r.source === "jellyfin" && r.sourceSessionId === `jf-abs:${stale.startedAt.toISOString()}`)!;
+  assert.equal(jfRow.playDuration, 300, "no phantom tail: the interval the session was absent is not watch time");
+  assert.equal((jfRow.stoppedAt as Date).getTime(), jfLastSeen.getTime(), "stoppedAt is the last observation, not now");
 });
 
 test("a brand-new jellyfin session is created from the /Sessions snapshot", async () => {

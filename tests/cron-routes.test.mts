@@ -397,10 +397,7 @@ for (const route of LOCKING) {
     assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
     // The skip header is what withCronRunRecording/the run ledger reads: a bare
     // NextResponse.json({skipped}) records a busy lock as a successful run.
-    // (Only the routes already moved onto cronSkippedResponse are pinned; the warm-* routes still answer bare JSON.)
-    if (route.name === "purge-auth-sessions" || route.name === "scrub-audit-pii") {
-      assert.equal(res.headers.get("x-cron-skipped"), "1", `${route.name} must answer through cronSkippedResponse`);
-    }
+    assert.equal(res.headers.get("x-cron-skipped"), "1", `${route.name} must answer through cronSkippedResponse`);
     assert.deepEqual(writeOps(), [], `${route.name} did work while another run held the lock`);
   });
 }
@@ -417,6 +414,21 @@ for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refre
     lockAcquire = () => false;
     const res = await route.POST(authed(route));
     assert.equal(res.headers.get("X-Cron-Skipped"), "1");
+    assert.equal(ops.filter(isBookkeeping).length, 0, `${name} recorded a run it skipped`);
+  });
+}
+
+// Every warm-* route answers a busy lock through cronSkippedResponse (the
+// X-Cron-Skipped marker) and records no run. warm-activity / warm-list-cache are
+// not in LOCKING (lockId null), so they are named explicitly here.
+for (const name of ["warm-recommendations", "warm-library", "warm-activity", "warm-mdblist", "warm-omdb", "warm-list-cache"]) {
+  test(`${name}: a BUSY lock answers X-Cron-Skipped and records no run`, async () => {
+    const route = ROUTES.find((r) => r.name === name)!;
+    lockAcquire = () => false;
+    const res = await route.POST(authed(route));
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
+    assert.equal(res.headers.get("x-cron-skipped"), "1", `${name} must answer through cronSkippedResponse`);
     assert.equal(ops.filter(isBookkeeping).length, 0, `${name} recorded a run it skipped`);
   });
 }

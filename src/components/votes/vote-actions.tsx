@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ThumbsUp, Trash2, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -37,7 +38,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
         router.refresh();
       } else {
         setVoted(true);
-        toast({ title: t("personal.votes.removeFailed"), variant: "error" });
+        toast({ title: rateLimitMessage(res, t) ?? t("personal.votes.removeFailed"), variant: "error" });
       }
     } catch {
       setVoted(true);
@@ -59,7 +60,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
         router.refresh();
       } else {
         setDismissed(false);
-        toast({ title: t("personal.votes.dismissFailed"), variant: "error" });
+        toast({ title: rateLimitMessage(res, t) ?? t("personal.votes.dismissFailed"), variant: "error" });
       }
     } catch {
       setDismissed(false);

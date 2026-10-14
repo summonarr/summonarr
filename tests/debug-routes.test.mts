@@ -368,7 +368,8 @@ test("arr-state: missing tmdbId, bad type, and a non-positive/non-integer tmdbId
   const missingType = await arrStateGET(arrReq(token, "?tmdbId=603"), undefined);
   assert.equal(missingType.status, 400, "type must be present and be movie|tv");
 
-  for (const bad of ["abc", "0", "-5", "1.5"]) {
+  // 2147483648 is one past INT4: an unbounded id would throw out of Prisma as a 500.
+  for (const bad of ["abc", "0", "-5", "1.5", "2147483648", "99999999999"]) {
     const res = await arrStateGET(arrReq(token, `?tmdbId=${bad}&type=movie`), undefined);
     assert.equal(res.status, 400, `tmdbId=${bad} must 400`);
     assert.deepEqual(await bodyOf(res), { error: "tmdbId must be a positive integer" });
@@ -386,9 +387,11 @@ test("ratings-state: the same tmdbId/type validation guards 400 before any provi
   assert.equal(badType.status, 400);
   assert.deepEqual(await bodyOf(badType), { error: "tmdbId and type=movie|tv required" });
 
-  const badId = await ratingsStateGET(ratingsReq(token, "?tmdbId=0&type=movie"), undefined);
-  assert.equal(badId.status, 400);
-  assert.deepEqual(await bodyOf(badId), { error: "tmdbId must be a positive integer" });
+  for (const bad of ["0", "2147483648", "99999999999"]) {
+    const badId = await ratingsStateGET(ratingsReq(token, `?tmdbId=${bad}&type=movie`), undefined);
+    assert.equal(badId.status, 400, `tmdbId=${bad} must 400`);
+    assert.deepEqual(await bodyOf(badId), { error: "tmdbId must be a positive integer" });
+  }
   assert.equal(readLog.length, 0);
   assert.equal(fetchCalls.length, 0);
 });

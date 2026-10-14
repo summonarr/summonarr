@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useDelayed } from "@/hooks/use-delayed";
 import { useRouter } from "next/navigation";
 import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -26,13 +27,14 @@ function TokenLinkFlow() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const later = useDelayed();
 
   async function copyToken() {
     if (!token) return;
     try {
       await navigator.clipboard.writeText(token);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      later(() => setCopied(false), 2000);
     } catch {
       /* clipboard unavailable (insecure context) or blocked — the token is
          rendered beside this button for manual selection */

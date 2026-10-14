@@ -613,7 +613,7 @@ export function IssueActions({
                           <div className="flex items-center gap-3 mt-1 flex-wrap">
                             <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${profileMatch ? "bg-sky-500/10 text-sky-400" : "bg-zinc-800 text-zinc-500"}`}>
                               {rel.quality.quality.name}
-                              {rel.quality.revision.version > 1 && " v2"}
+                              {rel.quality.revision.version > 1 && ` v${rel.quality.revision.version}`}
                             </span>
                             <span className="text-xs text-zinc-500">{formatSize(rel.size)}</span>
                             <span className="text-xs text-zinc-500">{rel.indexer}</span>
