@@ -1,0 +1,7 @@
+# Request watch grades
+
+_Moved verbatim from CLAUDE.md "Core architecture"._
+
+**Request watch grades** — [src/lib/watch-grade.ts](../../src/lib/watch-grade.ts) (pure rules) + [src/lib/watch-grade-data.ts](../../src/lib/watch-grade-data.ts) (prisma)
+- Grades each user A–F (by default A 80%+, B 60%+, C 40%+, D 20%+, once 3 requests are scored) on the share of their APPROVED requests that became AVAILABLE they went on to watch, from `PlayHistory` (approval counts per title on an instance, for everyone who requested it; pending and declined requests, and requests whose title nobody approved, never count — `MediaRequest.approvedAt`). A request they skipped still counts as watched once enough OTHER people watched it (`watchGradeOtherViewers`, default 2). **Display-only** by product decision: a chip on Admin → Users and beside each requester in the request queue, opening the per-request breakdown from `GET /api/admin/users/[id]/watch-grade` (MANAGE_USERS or MANAGE_REQUESTS). Nothing reads it to gate requests, quotas or auto-approve.
+- Computed on demand in one batch (no table, no cron). Tuned by `watchGradeGraceDays` / `watchGradeWindowDays` / `watchGradeTvPercent` / `watchGradeOtherViewers` / `watchGradeBandA`–`D` / `watchGradeMinRequests` (Settings → Media → Watch Grades, which previews the letter spread before saving via ADMIN-only `POST /api/admin/watch-grade/preview`) and switched off by `feature.behavior.watchGrades`; hidden entirely while play history tracking is off. Guardrail 34a has the rules.
