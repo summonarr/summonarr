@@ -369,15 +369,14 @@ const PHASE_ORDER: Record<QueuePhase, number> = {
   downloading: 5, paused: 6, queued: 7, delay: 8, unknown: 9,
 };
 
-/** Rows needing attention first, then by pipeline stage, then the soonest to finish. */
+/** Rows needing attention first, then by pipeline stage, then by title (stable across polls). */
 export function sortQueueItems(items: QueueItem[]): QueueItem[] {
   return items.sort((a, b) => {
     if (a.attention !== b.attention) return a.attention ? -1 : 1;
     if (a.phase !== b.phase) return PHASE_ORDER[a.phase] - PHASE_ORDER[b.phase];
-    const ta = a.timeLeftSeconds ?? Number.POSITIVE_INFINITY;
-    const tb = b.timeLeftSeconds ?? Number.POSITIVE_INFINITY;
-    if (ta !== tb) return ta - tb;
-    return a.mediaTitle.localeCompare(b.mediaTitle);
+    // Never order by time left: it changes on every poll, so rows swapped
+    // places under the admin on each auto-refresh.
+    return a.mediaTitle.localeCompare(b.mediaTitle) || (a.ids[0] ?? 0) - (b.ids[0] ?? 0);
   });
 }
 
