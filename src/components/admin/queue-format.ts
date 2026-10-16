@@ -17,6 +17,17 @@ export function episodeSummary(eps: readonly EpisodeRef[]): string {
   return `${eps.slice(0, 3).map(episodeCode).join(", ")}${eps.length > 3 ? ` +${eps.length - 3}` : ""}`;
 }
 
+// A Sonarr season pack is one queue record per episode, so the row alone can't
+// say "pack". The release name can: a season marker with no episode marker
+// (`Show.S01.1080p`, `Show Season 1`). Returns the seasons it spans, or null.
+export function seasonPackSeasons(releaseTitle: string, eps: readonly EpisodeRef[]): number[] | null {
+  if (eps.length < 2) return null;
+  const hasEpisodeMarker = /S\d{1,2}[ ._-]?E\d{1,3}|\b\d{1,2}x\d{2,3}\b/i.test(releaseTitle);
+  const hasSeasonMarker = /\bS\d{1,2}\b|\bseasons?[ ._-]?\d/i.test(releaseTitle);
+  if (hasEpisodeMarker || !hasSeasonMarker) return null;
+  return [...new Set(eps.map((e) => e.seasonNumber))].sort((a, b) => a - b);
+}
+
 export function queueFormatters(locale: string) {
   const unit = (u: string) => new Intl.NumberFormat(locale, { style: "unit", unit: u, unitDisplay: "narrow", maximumFractionDigits: 1 });
   const gb = unit("gigabyte");

@@ -61,7 +61,7 @@ import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr"
 import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
 import { QueueImportDialog } from "@/components/admin/queue-import-dialog";
 import { ArrTitleManager } from "@/components/admin/arr-title/title-manager";
-import { episodeCode, episodeSummary, queueFormatters } from "@/components/admin/queue-format";
+import { episodeCode, episodeSummary, queueFormatters, seasonPackSeasons } from "@/components/admin/queue-format";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import {
@@ -829,7 +829,12 @@ export function DownloadQueue({
                               </div>
                               {r.episodes.length > 0 && (
                                 <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>
-                                  {episodeSummary(r.episodes)}
+                                  {(() => {
+                                    const seasons = seasonPackSeasons(r.title, r.episodes);
+                                    return seasons
+                                      ? `${seasons.map((n) => t("adminManage.queue.seasonNumber", { n })).join(", ")} · ${t("adminManage.queue.import.releaseTypes.seasonPack")}`
+                                      : episodeSummary(r.episodes);
+                                  })()}
                                   {r.episodes.length > 1 && <span> · {t("adminManage.queue.episodeCount", { count: r.episodes.length })}</span>}
                                 </div>
                               )}

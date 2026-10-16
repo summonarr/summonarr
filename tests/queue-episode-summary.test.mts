@@ -40,3 +40,12 @@ test("four single-episode downloads stay four rows", () => {
   const rec = (id: number, n: number) => ({ id, downloadId: `H${id}`, seriesId: 9, series: { title: "Show" }, episode: { seasonNumber: 1, episodeNumber: n } });
   assert.equal(foldQueueRecords("sonarr", "", [rec(1, 1), rec(2, 2), rec(3, 3), rec(4, 4)]).length, 4);
 });
+
+import { seasonPackSeasons } from "../src/components/admin/queue-format.ts";
+
+test("seasonPackSeasons: a season marker with no episode marker is a pack", () => {
+  const eps = [e(1), e(2), e(3)];
+  assert.deepEqual(seasonPackSeasons("Show.S01.1080p.WEB-DL", eps), [1]);
+  assert.deepEqual(seasonPackSeasons("Show.S01E01E02E03.1080p", eps), null);
+  assert.deepEqual(seasonPackSeasons("Show.S01.1080p", [e(1)]), null);
+});

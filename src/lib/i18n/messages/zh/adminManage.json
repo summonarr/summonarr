@@ -949,6 +949,7 @@
   "adminManage.queue.details.episodes": "剧集",
   "adminManage.queue.episodeCount_one": "{count} 集",
   "adminManage.queue.episodeCount_other": "{count} 集",
+  "adminManage.queue.seasonNumber": "第 {n} 季",
   "adminManage.queue.details.score": "自定义格式得分",
   "adminManage.queue.details.downloaded": "已下载",
   "adminManage.queue.details.left": "剩余待下载",

@@ -949,6 +949,7 @@
   "adminManage.queue.details.episodes": "Episodios",
   "adminManage.queue.episodeCount_one": "{count} episodio",
   "adminManage.queue.episodeCount_other": "{count} episodios",
+  "adminManage.queue.seasonNumber": "Temporada {n}",
   "adminManage.queue.details.score": "Puntuación de formatos personalizados",
   "adminManage.queue.details.downloaded": "Descargado",
   "adminManage.queue.details.left": "Pendiente de descargar",
