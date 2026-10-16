@@ -54,6 +54,7 @@ export const metadata: Metadata = {
   // layout re-derives the pair from the configured siteTitle.
   title: { default: "Summonarr", template: "%s · Summonarr" },
   description: "Media request management",
+  robots: { index: false, follow: false },
   appleWebApp: {
     capable: true,
     title: "Summonarr",

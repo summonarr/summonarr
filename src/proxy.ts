@@ -92,6 +92,9 @@ function isPublicPath(pathname: string): boolean {
     // them unreachable everywhere they were meant to be read. Kept here rather
     // than in the matcher so the Host gate and CSP still apply.
     pathname.startsWith("/.well-known/") ||
+    // Crawlers fetch robots.txt anonymously; a login redirect would hide the
+    // "stay out" rule from exactly the clients it is for.
+    pathname === "/robots.txt" ||
     pathname.startsWith("/login") ||
     pathname.startsWith("/register") ||
     pathname.startsWith("/setup") ||
