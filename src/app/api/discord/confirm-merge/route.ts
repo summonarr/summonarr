@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
+import { DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { assignDiscordRolesOnLink } from "@/lib/discord-notify";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { timingSafeEqual } from "crypto";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { discordMergeCodeMatches, isDiscordMergeCodeMac, normalizeDiscordMergeCode } from "@/lib/discord-merge-code";
 
 // Step 2 of linking a Discord account: the user types in the 12-character code
 // the bot sent them by DM (step 1 is discord/initiate-merge, which also holds
@@ -24,7 +24,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const parsed = await readJsonCapped<{ code?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
-  const code = String(parsed.code ?? "").trim().toUpperCase();
+  const code = normalizeDiscordMergeCode(String(parsed.code ?? ""));
 
   const record = await prisma.discordMergeCode.findUnique({
     where: { userId: session.user.id },
@@ -36,7 +36,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
       { status: 400 }
     );
   }
-  if (record.expiresAt < new Date()) {
+  // A row that holds no MAC was written before codes were stored hashed: its
+  // plaintext is never compared (that would keep the stored value usable as the
+  // credential), so it reads as expired and the user requests a new code.
+  if (record.expiresAt < new Date() || !isDiscordMergeCodeMac(record.code)) {
     // deleteMany (not delete) — on a concurrent double-submit of an expired code
     // the second delete would throw P2025 → 500; deleteMany no-ops. Matches the
     // race-safe pattern used by the rate-limit path above.
@@ -46,24 +49,26 @@ export const POST = withAuth(async (req, _ctx, session) => {
       { status: 400 }
     );
   }
-  // timingSafeEqual throws if the two buffers differ in length, so compare the
-  // BYTE lengths first. A string length check is not enough: a 12-character
-  // code with non-ASCII letters is more than 12 bytes, and the throw would
-  // turn "Incorrect code" into a 500.
-  const expected = Buffer.from(record.code, "utf8");
-  const supplied = Buffer.from(code, "utf8");
-  if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
+  // The row holds an HMAC of the code (discord-merge-code.ts), compared in
+  // constant time. Any input is hashed first, so a multibyte or odd-length
+  // submission is a plain mismatch, never a timingSafeEqual length throw.
+  if (!discordMergeCodeMatches(record.code, session.user.id, record.discordId, code)) {
     return NextResponse.json({ error: t("apiUser.discord.merge.incorrect") }, { status: 400 });
   }
 
   try {
-    const { migrated } = await mergeDiscordIntoWebAccount(session.user.id, record.discordId);
-    // Consume the code only AFTER the merge succeeds — deleting it first meant a
-    // transient merge failure burned the code and the user couldn't retry.
-    // deleteMany (not delete): a concurrent duplicate submit races both callers
-    // past the merge; the loser's bare delete would throw P2025 into the catch
-    // below and turn a SUCCEEDED link into a 409.
-    await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
+    // The code is consumed INSIDE the merge transaction (claimCode): a
+    // concurrent double-submit merges once, and a failed merge rolls the delete
+    // back so the user can retry. The claim names the exact row verified above,
+    // so a code re-sent in between is not consumed by the old one.
+    const { migrated } = await mergeDiscordIntoWebAccount(session.user.id, record.discordId, {
+      claimCode: async (tx) => {
+        const { count } = await tx.discordMergeCode.deleteMany({
+          where: { userId: session.user.id, discordId: record.discordId, code: record.code },
+        });
+        return count === 1;
+      },
+    });
 
     await assignDiscordRolesOnLink(
       record.discordId,
@@ -72,7 +77,17 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
 
     return NextResponse.json({ ok: true, migrated, discordId: record.discordId });
-  } catch {
+  } catch (err) {
+    if (err instanceof DiscordCodeAlreadyUsedError) {
+      // Lost the claim. A double-submit whose twin already linked THIS Discord
+      // account succeeded, so say so; anything else (the code was re-sent or
+      // swept in between) has no pending code left.
+      const now = await prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true } });
+      if (now?.discordId === record.discordId) {
+        return NextResponse.json({ ok: true, migrated: 0, discordId: record.discordId });
+      }
+      return NextResponse.json({ error: t("apiUser.discord.merge.noPending") }, { status: 400 });
+    }
     return NextResponse.json({ error: t("apiUser.discord.merge.linkFailed") }, { status: 409 });
   }
 });

@@ -213,14 +213,31 @@ type LinkToken = { token: string; userId: string; expiresAt: Date; discordId: st
 let linkTokens: LinkToken[] = [];
 const LINK_CODE = "0123456789ABCDEF0123456789ABCDEF";
 const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
+// True while a $transaction callback runs: /link must consume the token inside
+// the merge transaction (so a rollback restores it).
+let inTx = false;
+// Parks /link's token read until `want` redemptions have arrived, so two of them
+// are both past the read before either claims the token.
+let linkReadGate: { want: number; arrived: number; open: Promise<void>; release: () => void } | null = null;
+function gateLinkReads(want: number): void {
+  let release = () => {};
+  const open = new Promise<void>((r) => { release = r; });
+  linkReadGate = { want, arrived: 0, open, release };
+}
 shadowPrismaModel(prisma, "discordLinkToken", {
   findUnique: async (args: { where: { token?: string; userId?: string } }) => {
     rec("discordLinkToken.findUnique", args.where);
-    return linkTokens.find((t) => (args.where.token ? t.token === args.where.token : t.userId === args.where.userId)) ?? null;
+    const hit = linkTokens.find((t) => (args.where.token ? t.token === args.where.token : t.userId === args.where.userId)) ?? null;
+    if (linkReadGate) {
+      const g = linkReadGate;
+      if (++g.arrived >= g.want) g.release();
+      await g.open;
+    }
+    return hit;
   },
   delete: async (args: unknown) => { rec("discordLinkToken.delete", args); return {}; },
   deleteMany: async (args: { where: { token?: string } }) => {
-    rec("discordLinkToken.deleteMany", args.where);
+    rec("discordLinkToken.deleteMany", { ...args.where, inTx });
     const before = linkTokens.length;
     linkTokens = linkTokens.filter((t) => t.token !== args.where.token);
     return { count: before - linkTokens.length };
@@ -291,8 +308,15 @@ for (const m of [
     updateMany: async () => ({ count: 0 }), upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
   });
 }
-shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
-  Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
+shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
+  if (Array.isArray(arg)) return Promise.all(arg);
+  inTx = true;
+  try {
+    return await (arg as (tx: unknown) => Promise<unknown>)(prisma);
+  } finally {
+    inTx = false;
+  }
+});
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => []);
 shadowPrismaClientMethod(prisma, "$executeRaw", async () => 1);
@@ -456,6 +480,8 @@ beforeEach(async () => {
   nonces = new Set();
   nonceWriteThrows = null;
   linkTokens = [];
+  linkReadGate = null;
+  inTx = false;
   appUsers = [];
   fetchCalls.length = 0;
   discordEdits.length = 0;
@@ -943,8 +969,9 @@ test("PIN: /link looks the row up by the SHA-256 of the typed code, normalized f
   const lookups = opsOf("discordLinkToken.findUnique").map((o) => o.args as { token?: string });
   assert.deepEqual(lookups, [{ token: sha256(LINK_CODE) }], "the lookup key is the hash, never the typed code");
   assert.equal(linkTokens.length, 0, "the code redeems");
-  const consumed = opsOf("discordLinkToken.deleteMany").map((o) => o.args);
-  assert.deepEqual(consumed, [{ token: sha256(LINK_CODE) }], "and is consumed by its hash");
+  const consumed = opsOf("discordLinkToken.deleteMany").map((o) => o.args as { token: string; inTx: boolean });
+  assert.equal(consumed.length, 1);
+  assert.equal(consumed[0].token, sha256(LINK_CODE), "and is consumed by its hash");
 });
 
 test("PIN: a code stored before hashing shipped is NOT redeemable — it fails once and the user makes a new one", async () => {
@@ -981,6 +1008,54 @@ test("a malformed code is answered 'invalid' without a DB read", async () => {
     assert.equal(opsOf("discordLinkToken.findUnique").length, 0, `${value} cost a query`);
   }
   assert.equal(linkTokens.length, 1);
+});
+
+// ── single use under concurrency ────────────────────────────────────────────
+
+const linksOf = (discordId: string) =>
+  opsOf("user.update").filter((o) => (o.args as { data?: { discordId?: string } }).data?.discordId === discordId);
+
+test("PIN: /link consumes the token INSIDE the merge transaction, scoped to its owner and still unexpired", async () => {
+  seedLinkToken();
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000005"));
+  await waitFor(() => linkTokens.length === 0);
+  const consumed = opsOf("discordLinkToken.deleteMany").map((o) => o.args as Record<string, unknown>);
+  assert.equal(consumed.length, 1, "consumed exactly once — by the claim, not again afterwards");
+  assert.equal(consumed[0].inTx, true, "a delete outside the merge transaction survives a rolled-back merge");
+  assert.equal(consumed[0].token, sha256(LINK_CODE));
+  assert.equal(consumed[0].userId, "u1");
+  assert.ok((consumed[0].expiresAt as { gt?: unknown })?.gt instanceof Date, "an expired token can't be claimed");
+});
+
+test("PIN: two Discord accounts redeeming one UNBOUND code at once link it ONCE; the loser is told it's invalid", async () => {
+  // Both used to pass the read and both link — the second overwriting the first.
+  seedLinkToken({ discordId: null });
+  appUsers = [{ id: "u1", email: "u1@example.com", name: "One", role: "USER", discordId: null }];
+  gateLinkReads(2);
+  await Promise.all([
+    post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000006")),
+    post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000007")),
+  ]);
+  await waitFor(() => discordEdits.length >= 2);
+  const linked = [...linksOf("200000000000000006"), ...linksOf("200000000000000007")];
+  assert.equal(linked.length, 1, "exactly one Discord account is linked");
+  const replies = discordEdits.map((e) => String(e.content)).sort();
+  assert.equal(replies.filter((r) => r === "Could not link account: Invalid token.").length, 1, replies.join(" | "));
+  assert.equal(replies.filter((r) => /One/.test(r)).length, 1, "the winner is told it worked");
+  assert.equal(linkTokens.length, 0);
+});
+
+test("the same Discord account submitting /link twice at once links once and is told success both times", async () => {
+  seedLinkToken({ discordId: null });
+  appUsers = [{ id: "u1", email: "u1@example.com", name: "One", role: "USER", discordId: null }];
+  gateLinkReads(2);
+  await Promise.all([
+    post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000008")),
+    post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000008")),
+  ]);
+  await waitFor(() => discordEdits.length >= 2);
+  assert.equal(linksOf("200000000000000008").length, 1);
+  for (const e of discordEdits) assert.match(String(e.content), /One/, "a double-submit is not an error");
 });
 
 test("/link with no token argument does not touch the token table", async () => {

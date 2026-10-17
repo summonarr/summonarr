@@ -32,7 +32,10 @@ export type SigningPurpose =
   | "plex-token-cache"
   // hashAuditEmail (auth.ts): the audit-log email hash, which also keys the
   // per-account sign-in limiter. An HMAC key, never a JWT signer.
-  | "audit-email";
+  | "audit-email"
+  // discord-merge-code.ts: the at-rest MAC of a pending confirm-merge code. An
+  // HMAC key, never a JWT signer.
+  | "discord-merge-code";
 
 export interface SigningKey {
   kid: string;

@@ -7,11 +7,43 @@ export interface MergeResult {
   migrated: number;
 }
 
+// The tables a code claim may touch. Typed off the extended client, like
+// session-footholds.ts: the encryption extension in prisma.ts changes it, so the
+// generated Prisma.TransactionClient doesn't fit.
+export type CodeClaimClient = Pick<typeof prisma, "discordLinkToken" | "discordMergeCode">;
+
+export interface MergeOptions {
+  // Consumes the one-time code that authorized this link (the /link token or the
+  // confirm-merge code) INSIDE the merge transaction. Return true when this
+  // caller's conditional delete removed it, false when nothing was left to take.
+  //
+  // Inside, not before or after: two redemptions of one code used to both pass
+  // the route's read and both link (an unbound /link token from two Discord
+  // accounts linked the account twice, the second overwriting the first), and
+  // consuming it before the merge burned the code on a transient failure. A
+  // delete in the same transaction is single-use under concurrency — the loser
+  // waits on the row lock and then deletes nothing — and a failed merge rolls
+  // the delete back, so the user can retry. Required: every link spends a code.
+  claimCode: (tx: CodeClaimClient) => Promise<boolean>;
+}
+
+// Thrown inside the merge transaction when the claim finds nothing to consume:
+// a concurrent redemption of the same code won, or it was replaced or expired
+// in between. The throw rolls the transaction back (guardrail 23), so nothing is
+// linked.
+export class DiscordCodeAlreadyUsedError extends Error {
+  constructor() {
+    super("This link code was already used.");
+    this.name = "DiscordCodeAlreadyUsedError";
+  }
+}
+
 // Links a Discord account to a web user, migrating a bot-created shadow account's
 // requests/issues/votes onto the web user (deduping conflicts) before deleting it.
 export async function mergeDiscordIntoWebAccount(
   webUserId: string,
-  discordUserId: string
+  discordUserId: string,
+  opts: MergeOptions,
 ): Promise<MergeResult> {
 
   const { migrated, previousDiscordId } = await prisma.$transaction(async (tx) => {
@@ -21,6 +53,10 @@ export async function mergeDiscordIntoWebAccount(
     // can occasionally share a key — that only makes one wait, never breaks anything.
     const lockId = BigInt("0x" + Buffer.from(discordUserId).subarray(0, 7).toString("hex"));
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock($1::bigint)`, lockId);
+
+    // The lock above is per DISCORD id, so two Discord accounts redeeming one
+    // unbound code don't share it; the claim's row lock is what serializes them.
+    if (!(await opts.claimCode(tx))) throw new DiscordCodeAlreadyUsedError();
 
     const existing = await tx.user.findUnique({ where: { discordId: discordUserId } });
 

@@ -63,6 +63,7 @@ const PURPOSES: SigningPurpose[] = [
   "request-token",
   "plex-token-cache",
   "audit-email",
+  "discord-merge-code",
 ];
 
 function header(token: string): Record<string, unknown> {

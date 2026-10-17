@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isNativeSession, requireStepUp } from "@/lib/step-up-auth";
+import { generateDiscordMergeCode } from "@/lib/discord-merge-code";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
@@ -82,14 +82,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   // 6 random bytes = 12 hex characters (~48 bits). Together with the rate
-  // limits, that is far too many to guess in the 10-minute window.
-  const code = randomBytes(6).toString("hex").toUpperCase();
+  // limits, that is far too many to guess in the 10-minute window. Only its
+  // HMAC is stored; the code itself goes out in the DM below and nowhere else
+  // (discord-merge-code.ts).
+  const { code, codeMac } = generateDiscordMergeCode(session.user.id, discordId);
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
   await prisma.discordMergeCode.upsert({
     where: { userId: session.user.id },
-    update: { discordId, code, expiresAt },
-    create: { userId: session.user.id, discordId, code, expiresAt },
+    update: { discordId, code: codeMac, expiresAt },
+    create: { userId: session.user.id, discordId, code: codeMac, expiresAt },
   });
 
   // Note: do NOT return a pendingCount for the stub user here. Returning it pre-confirmation lets

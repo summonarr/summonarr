@@ -9,7 +9,7 @@ import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { Prisma } from "@/generated/prisma";
-import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
+import { DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { hashDiscordLinkToken, isWellFormedDiscordLinkToken, normalizeDiscordLinkToken } from "@/lib/discord-link-token";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
@@ -948,24 +948,44 @@ async function handleCommand(interaction: any): Promise<void> {
         return;
       }
 
+      const userName = row.user.name ?? row.user.email;
       let transferNote = "";
       try {
-        const { migrated } = await mergeDiscordIntoWebAccount(row.userId, discordUserId);
+        // The token is consumed INSIDE the merge transaction (claimCode). Two
+        // redemptions of one code used to both get here and both link — an
+        // unbound token typed by two Discord accounts linked the account twice,
+        // the second overwriting the first. Now the loser's conditional delete
+        // finds nothing and the merge rolls back; and a failed merge rolls the
+        // delete back too, so the code survives for a retry.
+        const { migrated } = await mergeDiscordIntoWebAccount(row.userId, discordUserId, {
+          claimCode: async (tx) => {
+            const { count } = await tx.discordLinkToken.deleteMany({
+              where: { token: tokenHash, userId: row.userId, expiresAt: { gt: new Date() } },
+            });
+            return count === 1;
+          },
+        });
         if (migrated > 0) {
           transferNote = ` ${t("notify.bot.link.transferred", { count: migrated })}`;
         }
       } catch (err) {
+        if (err instanceof DiscordCodeAlreadyUsedError) {
+          // Lost the claim. The same Discord account submitting twice already
+          // has its link, so tell it so; any other account gets "invalid".
+          const owner = await prisma.user.findUnique({ where: { id: row.userId }, select: { discordId: true } });
+          await editOriginal(appId, token, {
+            content: owner?.discordId === discordUserId
+              ? t("notify.bot.link.success", { name: escMd(userName), transfer: "" })
+              : t("notify.bot.link.invalid"),
+          });
+          return;
+        }
         console.error("[interactions] link account failed:", (err as Error).message);
         await editOriginal(appId, token, { content: t("notify.bot.link.failed") });
         return;
       }
 
-      // deleteMany (not delete): a concurrent duplicate /link submit races both
-      // callers past the merge; the loser's bare delete would throw P2025 into the
-      // outer catch and report "unexpected error" for a link that SUCCEEDED.
-      await prisma.discordLinkToken.deleteMany({ where: { token: tokenHash } });
       void assignDiscordRolesOnLink(discordUserId, row.user.email, row.user.role);
-      const userName = row.user.name ?? row.user.email;
       await editOriginal(appId, token, { content: t("notify.bot.link.success", { name: escMd(userName), transfer: transferNote }) });
     }
 

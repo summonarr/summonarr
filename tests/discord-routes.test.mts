@@ -25,14 +25,15 @@
 //      a per-(user,target) bucket so an attacker iterating victim ids can't
 //      share their own bucket, PLUS a global per-user cap, because the per-target
 //      bucket alone lets one account DM hundreds of distinct snowflakes.
-//   3. confirm-merge COMPARES BYTES, NOT UTF-16 LENGTH. A 12-character multibyte
-//      submission passes a `.length` check against the 12-char stored code while
-//      producing a 24-byte Buffer, and timingSafeEqual then throws RangeError out
-//      of an un-try'd expression — turning "Incorrect code" into a 500 that still
-//      burns a rate-limit slot. It also consumes the code only AFTER the merge
-//      succeeds (a transient failure must not burn it), and uses deleteMany
-//      rather than delete so a concurrent double-submit can't turn a SUCCEEDED
-//      link into a 409 via P2025.
+//   3. confirm-merge NEVER 500s ON AN ODD SUBMISSION. A 12-character multibyte
+//      submission once passed a `.length` check against the 12-char stored code
+//      while producing a 24-byte Buffer, and timingSafeEqual threw RangeError —
+//      "Incorrect code" became a 500 that still burned a rate-limit slot. The row
+//      now holds an HMAC of the code (discord-merge-code.ts), so any input is a
+//      plain mismatch. The code is consumed INSIDE the merge transaction
+//      (claimCode): a transient merge failure must not burn it, and a concurrent
+//      double-submit must merge once — the loser's conditional deleteMany finds
+//      nothing — while both callers still see the link succeed.
 //   4. unlink READS THE ID BEFORE CLEARING IT and revokes roles only after the
 //      write commits (guardrail 27). Reading after would leave the user holding
 //      every role Summonarr granted, admin included, with no way to lose it.
@@ -105,6 +106,7 @@ const { hashPassword } = await import("../src/lib/password-hash.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { discordMergeCodeMac } = await import("../src/lib/discord-merge-code.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -204,13 +206,32 @@ shadowPrismaModel(prisma, "discordLinkToken", {
   },
 });
 
+// `code` is the stored column: the HMAC of the DM'd code (discord-merge-code.ts).
 type MergeCode = { userId: string; discordId: string; code: string; expiresAt: Date };
 let mergeCodes: MergeCode[] = [];
 let mergeThrows = false;
+// True while a $transaction callback runs: the consuming delete must happen in
+// the merge transaction (so a rollback restores the code).
+let inTx = false;
+// Parks confirm-merge's read until `mergeReadGate.want` requests have arrived,
+// so two submits are both past the read before either claims the code.
+let mergeReadGate: { want: number; arrived: number; open: Promise<void>; release: () => void } | null = null;
+function gateMergeReads(want: number): void {
+  let release = () => {};
+  const open = new Promise<void>((r) => { release = r; });
+  mergeReadGate = { want, arrived: 0, open, release };
+}
 shadowPrismaModel(prisma, "discordMergeCode", {
   findUnique: async (args: { where: { userId: string } }) => {
     rec("discordMergeCode.findUnique", args.where);
-    return mergeCodes.find((c) => c.userId === args.where.userId) ?? null;
+    const hit = mergeCodes.find((c) => c.userId === args.where.userId);
+    const copy = hit ? { ...hit } : null;
+    if (mergeReadGate) {
+      const g = mergeReadGate;
+      if (++g.arrived >= g.want) g.release();
+      await g.open;
+    }
+    return copy;
   },
   upsert: async (args: { where: { userId: string }; create: MergeCode; update: Partial<MergeCode> }) => {
     rec("discordMergeCode.upsert", { where: args.where, update: args.update });
@@ -220,10 +241,12 @@ shadowPrismaModel(prisma, "discordMergeCode", {
     return mergeCodes.find((c) => c.userId === args.where.userId)!;
   },
   delete: async (args: unknown) => { rec("discordMergeCode.delete", args); return {}; },
-  deleteMany: async (args: { where: { userId?: string } }) => {
-    rec("discordMergeCode.deleteMany", args.where);
+  deleteMany: async (args: { where: Partial<MergeCode> }) => {
+    rec("discordMergeCode.deleteMany", { ...args.where, inTx });
     const before = mergeCodes.length;
-    mergeCodes = mergeCodes.filter((c) => c.userId !== args.where.userId);
+    const matches = (c: MergeCode) =>
+      (Object.keys(args.where) as Array<keyof MergeCode>).every((k) => c[k] === args.where[k]);
+    mergeCodes = mergeCodes.filter((c) => !matches(c));
     return { count: before - mergeCodes.length };
   },
 });
@@ -256,7 +279,12 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   rec("$transaction");
   if (mergeThrows) throw new Error("simulated merge failure");
   if (Array.isArray(arg)) return Promise.all(arg);
-  return (arg as (tx: unknown) => Promise<unknown>)(prisma);
+  inTx = true;
+  try {
+    return await (arg as (tx: unknown) => Promise<unknown>)(prisma);
+  } finally {
+    inTx = false;
+  }
 });
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => []);
@@ -393,6 +421,8 @@ beforeEach(async () => {
   registerOk = true;
   roleCallsOk = true;
   mergeThrows = false;
+  inTx = false;
+  mergeReadGate = null;
   userUpdateThrows = false;
 });
 
@@ -705,12 +735,26 @@ test("initiate-merge DMs the code and stores it with a ten-minute TTL", async ()
   await doInitiate(token, { discordId: VALID_SNOWFLAKE });
   const dm = fetchCalls.find((c) => /\/channels\/[^/]+\/messages$/.test(c.url.pathname));
   assert.ok(dm, "no DM was sent");
+  assert.match(String(dm.body), /\b[0-9A-F]{12}\b/, "the DM carries a 12-hex-char code (~48 bits)");
   const stored = mergeCodes[0];
   assert.ok(stored, "no code was stored");
-  assert.match(stored.code, /^[0-9A-F]{12}$/, "12 hex chars (~48 bits)");
-  assert.ok(dm.body?.includes(stored.code), "the DM must carry the stored code");
   const ttl = stored.expiresAt.getTime() - Date.now();
   assert.ok(ttl > 8 * 60_000 && ttl <= 10 * 60_000);
+});
+
+test("PIN: initiate-merge stores only the HMAC of the code it DMs, never the code", async () => {
+  // 48 bits is few enough that a plain hash read from the DB or a backup could
+  // be brute-forced inside the window; the HMAC key is a NEXTAUTH_SECRET subkey
+  // neither holds.
+  const { token, userId } = await mintSession();
+  await doInitiate(token, { discordId: VALID_SNOWFLAKE });
+  const dm = fetchCalls.find((c) => /\/channels\/[^/]+\/messages$/.test(c.url.pathname));
+  const code = String(dm?.body).match(/\b([0-9A-F]{12})\b/)?.[1];
+  assert.ok(code, "the DM must carry the code");
+  const stored = (opsOf("discordMergeCode.upsert")[0].args as { update: { code: string } }).update.code;
+  assert.equal(stored, discordMergeCodeMac(userId, VALID_SNOWFLAKE, code), "the update path stores the MAC");
+  assert.equal(mergeCodes[0].code, stored, "the create path stores the MAC");
+  assert.ok(!JSON.stringify(ops).includes(code), "the plaintext code reaches no DB write");
 });
 
 test("a failed DM DELETES the pending code — a code nobody received must not be redeemable", async () => {
@@ -773,8 +817,12 @@ test("the per-target bucket is scoped per (user, target) — a second user is un
 
 // ── 3: confirm-merge — byte compare, code lifecycle ──────────────────────────
 
+// Stores what initiate-merge stores: the HMAC of `code`, never the code.
 function seedCode(userId: string, code = "ABCDEF123456", ttlMs = 10 * 60_000): void {
-  mergeCodes.push({ userId, discordId: VALID_SNOWFLAKE, code, expiresAt: new Date(Date.now() + ttlMs) });
+  mergeCodes.push({
+    userId, discordId: VALID_SNOWFLAKE, code: discordMergeCodeMac(userId, VALID_SNOWFLAKE, code),
+    expiresAt: new Date(Date.now() + ttlMs),
+  });
 }
 
 test("confirm-merge with no pending code is a 400", async () => {
@@ -871,6 +919,73 @@ test("the success path consumes the code with deleteMany, not delete", async () 
   await doConfirm(token, { code: "ABCDEF123456" });
   assert.ok(opsOf("discordMergeCode.deleteMany").length > 0);
   assert.equal(opsOf("discordMergeCode.delete").length, 0);
+});
+
+test("PIN: a row stored before codes were hashed reads as EXPIRED and is deleted — its plaintext never redeems", async () => {
+  // The documented upgrade behaviour: one resend. Comparing the plaintext would
+  // keep a path where a stored value is the credential.
+  const { token, userId } = await mintSession();
+  mergeCodes.push({ userId, discordId: VALID_SNOWFLAKE, code: "ABCDEF123456", expiresAt: new Date(Date.now() + 60_000) });
+  const res = await doConfirm(token, { code: "ABCDEF123456" });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /expired/i);
+  assert.equal(mergeCodes.length, 0, "the legacy row is cleared so a new code can be sent");
+  assert.equal(opsOf("$transaction").length, 0, "nothing is merged");
+});
+
+test("PIN: the stored MAC itself is not a redeemable code, and the MAC binds the user and the Discord id", async () => {
+  const { token, userId } = await mintSession();
+  seedCode(userId);
+  const asTyped = await doConfirm(token, { code: mergeCodes[0].code });
+  assert.equal(asTyped.status, 400);
+  assert.equal((await asTyped.json()).error, "Incorrect code.");
+  // The same code, but the row now names a different Discord account.
+  mergeCodes[0].discordId = "876543210987654321";
+  const moved = await doConfirm(token, { code: "ABCDEF123456" });
+  assert.equal(moved.status, 400);
+  assert.equal((await moved.json()).error, "Incorrect code.");
+  assert.equal(opsOf("$transaction").length, 0);
+});
+
+test("PIN: the code is consumed INSIDE the merge transaction, by the exact row that was verified", async () => {
+  const { token, userId } = await mintSession();
+  seedCode(userId);
+  const stored = mergeCodes[0].code;
+  assert.equal((await doConfirm(token, { code: "ABCDEF123456" })).status, 200);
+  const deletes = opsOf("discordMergeCode.deleteMany").map((o) => o.args);
+  assert.deepEqual(deletes, [{ userId, discordId: VALID_SNOWFLAKE, code: stored, inTx: true }]);
+});
+
+test("PIN: a concurrent double-submit merges ONCE, and both callers are told the link succeeded", async () => {
+  const { token, userId } = await mintSession();
+  seedCode(userId);
+  gateMergeReads(2); // both requests are past the read before either claims
+  const [a, b] = await Promise.all([
+    doConfirm(token, { code: "ABCDEF123456" }),
+    doConfirm(token, { code: "ABCDEF123456" }),
+  ]);
+  assert.deepEqual([a.status, b.status], [200, 200]);
+  const links = opsOf("user.update").filter((o) => (o.args as { data?: { discordId?: string } }).data?.discordId === VALID_SNOWFLAKE);
+  assert.equal(links.length, 1, "the loser's claim finds nothing, so it never links");
+  assert.equal(mergeCodes.length, 0);
+});
+
+test("a code RE-SENT between the check and the claim is not consumed by the old one", async () => {
+  // The claim names the verified row; a fresh initiate-merge replaced it, so the
+  // claim takes nothing and the newer code stays redeemable.
+  const { token, userId } = await mintSession();
+  seedCode(userId);
+  gateMergeReads(2); // only one request comes, so the read stays parked until released
+  const pending = doConfirm(token, { code: "ABCDEF123456" });
+  for (let i = 0; i < 50 && mergeReadGate?.arrived !== 1; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(mergeReadGate?.arrived, 1, "the confirm must have read the old code");
+  // Replace the code the way initiate-merge's upsert does, then let it continue.
+  mergeCodes[0].code = discordMergeCodeMac(userId, VALID_SNOWFLAKE, "111111111111");
+  mergeReadGate?.release();
+  const res = await pending;
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /request a code/i);
+  assert.equal(mergeCodes.length, 1, "the newer code survives");
 });
 
 test("confirm-merge is rate-limited, and hitting the limit WIPES the pending code", async () => {
