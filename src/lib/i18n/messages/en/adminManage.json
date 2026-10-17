@@ -579,7 +579,7 @@
   "adminManage.serverUsers.autoDisable": "Auto-disable downloads for new Jellyfin users",
   "adminManage.serverUsers.autoDisableHint": "New Jellyfin accounts discovered on sync have downloads disabled. Manually re-enabled users are left alone.",
   "adminManage.serverUsers.serverAdmin": "Server admin",
-  "adminManage.serverUsers.departedTitle": "No longer on the media server. Listed because their watch history is still here and can be attributed.",
+  "adminManage.serverUsers.departedTitle": "Removed from or disabled on the media server. Listed because their watch history is still here and can be attributed.",
   "adminManage.serverUsers.departed": "departed",
   "adminManage.serverUsers.empty": "No media server users synced yet.",
   "adminManage.serverUsers.filterPlaceholder": "Filter by username or email…",

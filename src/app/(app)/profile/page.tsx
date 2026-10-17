@@ -245,6 +245,7 @@ export default async function ProfilePage() {
           )}
 
           <ProfileCard
+            id="sessions"
             title={t("profile.sessions.title")}
             description={t("profile.sessions.description")}
           >

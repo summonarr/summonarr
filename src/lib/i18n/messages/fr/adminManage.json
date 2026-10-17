@@ -579,7 +579,7 @@
   "adminManage.serverUsers.autoDisable": "Désactiver automatiquement les téléchargements des nouveaux utilisateurs Jellyfin",
   "adminManage.serverUsers.autoDisableHint": "Les nouveaux comptes Jellyfin découverts lors de la synchronisation ont les téléchargements désactivés. Les utilisateurs réactivés manuellement ne sont pas modifiés.",
   "adminManage.serverUsers.serverAdmin": "Administrateur du serveur",
-  "adminManage.serverUsers.departedTitle": "N'est plus sur le serveur multimédia. Affiché car son historique de visionnage est toujours là et peut être attribué.",
+  "adminManage.serverUsers.departedTitle": "Supprimé ou désactivé sur le serveur multimédia. Affiché car son historique de visionnage est toujours là et peut être attribué.",
   "adminManage.serverUsers.departed": "parti",
   "adminManage.serverUsers.empty": "Aucun utilisateur de serveur multimédia synchronisé pour l'instant.",
   "adminManage.serverUsers.filterPlaceholder": "Filtrer par nom d'utilisateur ou e-mail…",

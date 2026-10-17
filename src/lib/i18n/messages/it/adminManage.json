@@ -579,7 +579,7 @@
   "adminManage.serverUsers.autoDisable": "Disattiva automaticamente i download per i nuovi utenti Jellyfin",
   "adminManage.serverUsers.autoDisableHint": "I nuovi account Jellyfin rilevati durante la sincronizzazione hanno i download disattivati. Gli utenti riattivati manualmente non vengono modificati.",
   "adminManage.serverUsers.serverAdmin": "Amministratore del server",
-  "adminManage.serverUsers.departedTitle": "Non è più sul media server. Elencato perché la sua cronologia visioni è ancora qui e può essere attribuita.",
+  "adminManage.serverUsers.departedTitle": "Rimosso o disattivato sul media server. Elencato perché la sua cronologia visioni è ancora qui e può essere attribuita.",
   "adminManage.serverUsers.departed": "rimosso",
   "adminManage.serverUsers.empty": "Nessun utente dei media server ancora sincronizzato.",
   "adminManage.serverUsers.filterPlaceholder": "Filtra per nome utente o email…",

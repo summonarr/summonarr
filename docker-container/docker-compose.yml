@@ -53,6 +53,10 @@ services:
     tmpfs:
       - /tmp:size=128m,mode=1777
     ports:
+      # Every interface, so a LAN setup works as-is. Behind a reverse proxy
+      # (TRUST_PROXY=true) publish to the proxy only — "127.0.0.1:3001:3000" —
+      # or nothing reaching this port around the proxy is stopped from forging
+      # X-Forwarded-For. See README.md, "Reach the app only through the reverse proxy".
       - "3001:3000"
     environment:
       PORT: "3000"

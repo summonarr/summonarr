@@ -2,10 +2,11 @@ import "server-only";
 
 // Owner-facing email for account security events outside two-factor (those are
 // src/lib/mfa/notify.ts): a password change, signing out everywhere, a Discord
-// account being linked, and password sign-in being paused after too many wrong
-// passwords (guardrail 6i). Best-effort by contract, like the MFA notice —
-// always called with `void`, swallows every error, never blocks or fails the
-// change it reports, and is a no-op while notification email is off.
+// account being linked, password sign-in being paused after too many wrong
+// passwords (guardrail 6i), and a native app signing in. Best-effort by
+// contract, like the MFA notice — always called with `void`, swallows every
+// error, never blocks or fails the change it reports, and is a no-op while
+// notification email is off.
 //
 // For a password change or a sign-out-everywhere the notice also LISTS what is
 // still connected to the account (a Discord link, a Trakt connection). Those
@@ -20,14 +21,23 @@ import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { notifyUserSecurityEventEmail } from "@/lib/email";
 import { translatorForUser } from "@/lib/i18n/server-locale";
 import { processSingleton } from "@/lib/process-singleton";
-import type { TranslateVars, Translator } from "@/lib/i18n/translate";
+import type { Translator } from "@/lib/i18n/translate";
 
 export type AccountSecurityEvent =
   | "password-changed"
   | "signed-out-all"
   | "signed-out-others"
   | "discord-linked"
-  | "sign-in-locked";
+  | "sign-in-locked"
+  | "app-signed-in";
+
+// Per-event extras for the sentence. Only the events that use them read them.
+export interface AccountSecurityDetail {
+  /** app-signed-in: the new session's device label (UA-derived — untrusted text). */
+  device?: string | null;
+  /** sign-in-locked: how long password sign-in stays paused, in minutes. */
+  minutes?: number;
+}
 
 // Pure so the wording rules are testable without a mailer: the event sentence,
 // plus — for the compromise-response events only — what is still connected.
@@ -35,10 +45,17 @@ export function accountSecurityMessage(
   t: Translator,
   event: AccountSecurityEvent,
   linked: { discordId: string | null; traktUsername: string | null },
-  vars?: TranslateVars,
+  detail: AccountSecurityDetail = {},
 ): string {
-  const sentence = t(`notify.account.event.${event}`, vars);
-  if (event === "discord-linked" || event === "sign-in-locked") return sentence;
+  if (event === "app-signed-in") {
+    const device = detail.device?.trim();
+    return t("notify.account.event.app-signed-in", { device: device || t("notify.account.unknownDevice") });
+  }
+  if (event === "sign-in-locked") {
+    return t("notify.account.event.sign-in-locked", detail.minutes !== undefined ? { minutes: detail.minutes } : undefined);
+  }
+  const sentence = t(`notify.account.event.${event}`);
+  if (event === "discord-linked") return sentence;
   const items: string[] = [];
   if (linked.discordId) items.push(t("notify.account.linked.discord", { id: linked.discordId }));
   if (linked.traktUsername) items.push(t("notify.account.linked.trakt", { name: linked.traktUsername }));
@@ -49,7 +66,7 @@ export function accountSecurityMessage(
 export async function notifyAccountSecurityEvent(
   userId: string,
   event: AccountSecurityEvent,
-  vars?: TranslateVars,
+  detail: AccountSecurityDetail = {},
 ): Promise<void> {
   try {
     const user = await prisma.user.findUnique({
@@ -68,12 +85,16 @@ export async function notifyAccountSecurityEvent(
     const t = translatorForUser(user);
     // A lockout changed nothing on the account and the owner can still sign in
     // once it lifts, so its advice is the password + two-factor one, not "contact
-    // your administrator".
+    // your administrator". A new app sign-in is ended from the Sessions list; the
+    // owner can still sign in, so the advice is to sign that device out.
     const locked = event === "sign-in-locked";
+    const signIn = event === "app-signed-in";
     await notifyUserSecurityEventEmail({
       toEmail: to,
-      subject: t("notify.account.subject"),
-      heading: t(locked ? "notify.account.lockedHeading" : "notify.account.heading"),
+      subject: signIn ? t("notify.account.subject.app-signed-in") : t("notify.account.subject"),
+      heading: signIn
+        ? t("notify.account.heading.app-signed-in")
+        : t(locked ? "notify.account.lockedHeading" : "notify.account.heading"),
       message: accountSecurityMessage(
         t,
         event,
@@ -81,11 +102,11 @@ export async function notifyAccountSecurityEvent(
           discordId: user.discordId ?? null,
           traktUsername: user.traktConnection?.username ?? null,
         },
-        vars,
+        detail,
       ),
       locale: user.locale ?? null,
-      ctaPath: "/profile",
-      advice: locked ? "mfa" : "account",
+      ctaPath: signIn ? "/profile#sessions" : "/profile",
+      advice: signIn ? "sign-in" : locked ? "mfa" : "account",
     });
   } catch (err) {
     console.error("[account] security notification failed:", err instanceof Error ? err.message : err);

@@ -1309,11 +1309,13 @@ test("terminate: a whitespace-only reason skips the command, and a failed Stop r
 
 // ── getJellyfinAllUsers / getJellyfinUserCount ──────────────────────────────
 
-test("all users (plain array): elevated header, email @-gate, IsAdministrator===true, only explicit false disables downloads, rows missing Id/Name dropped", async () => {
+test("all users (plain array): elevated header, email @-gate, IsAdministrator===true, IsDisabled===true, only explicit false disables downloads, rows missing Id/Name dropped", async () => {
   const B = nextBase();
   respond = () => okJson([
     { Id: "u1", Name: "alice", Email: "alice@example.com", Policy: { IsAdministrator: true, EnableContentDownloading: true } },
-    { Id: "u2", Name: "bob", Email: "not-an-email", Policy: { IsAdministrator: false, EnableContentDownloading: false } },
+    // IsDisabled: the account exists but can't sign in — the user sync treats it
+    // as departed (guardrail 6j).
+    { Id: "u2", Name: "bob", Email: "not-an-email", Policy: { IsAdministrator: false, IsDisabled: true, EnableContentDownloading: false } },
     { Id: "u3", Name: "carol" },      // no Policy at all → Jellyfin defaults
     { Name: "no-id" },                // dropped
     { Id: "no-name" },                // dropped
@@ -1323,9 +1325,9 @@ test("all users (plain array): elevated header, email @-gate, IsAdministrator===
   assert.equal(sent[0].url, `${B}/Users`);
   assert.equal(sent[0].headers.get("authorization"), adminAuthHeader("key-9"), "GET /Users requires elevation — the token header alone is not enough");
   assert.deepEqual(users, [
-    { id: "u1", name: "alice", email: "alice@example.com", isAdmin: true, downloadsEnabled: true },
-    { id: "u2", name: "bob", email: undefined, isAdmin: false, downloadsEnabled: false },
-    { id: "u3", name: "carol", email: undefined, isAdmin: false, downloadsEnabled: true },
+    { id: "u1", name: "alice", email: "alice@example.com", isAdmin: true, isDisabled: false, downloadsEnabled: true },
+    { id: "u2", name: "bob", email: undefined, isAdmin: false, isDisabled: true, downloadsEnabled: false },
+    { id: "u3", name: "carol", email: undefined, isAdmin: false, isDisabled: false, downloadsEnabled: true },
   ]);
   assert.equal(warns.length, 0);
 });
@@ -1334,7 +1336,7 @@ test("all users: the Jellyfin 10.9 QueryResult {Items} wrapper parses too; zero 
   const B = nextBase();
   respond = () => okJson({ Items: [{ Id: "u1", Name: "dave", Policy: {} }] });
   const users = await getJellyfinAllUsers(B, "k");
-  assert.deepEqual(users, [{ id: "u1", name: "dave", email: undefined, isAdmin: false, downloadsEnabled: true }]);
+  assert.deepEqual(users, [{ id: "u1", name: "dave", email: undefined, isAdmin: false, isDisabled: false, downloadsEnabled: true }]);
 
   respond = () => okJson([]);
   assert.deepEqual(await getJellyfinAllUsers(B, "k"), []);

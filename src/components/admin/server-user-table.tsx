@@ -48,6 +48,10 @@ interface ServerUserTableProps {
   hasJellyfin: boolean;
   autoDisableNew: boolean;
   accounts: LinkableAccount[];
+  // Linking an identity hands its watch history to the chosen account, so it is
+  // ADMIN-only (guardrail 34d — the route refuses a MANAGE_USERS delegate). A
+  // delegate sees the binding read-only and keeps the download controls.
+  canLink: boolean;
 }
 
 // Sentinels for the picker's two non-account options. Prefixed so they can
@@ -55,10 +59,11 @@ interface ServerUserTableProps {
 const AUTO = "__auto__";
 const NONE = "__none__";
 
-// One message for every control's failed write. Every route this table calls
-// is ADMIN-gated, while the Users page admits MANAGE_USERS delegates, so a 403
-// is "you need an administrator", translated — never the route's raw English
-// `{ error: "Forbidden" }` echoed into a French or Spanish UI.
+// One message for every control's failed write. Most routes this table calls
+// are ADMIN-gated (and the link picker is shown to admins only), while the Users
+// page admits MANAGE_USERS delegates, so a 403 is "you need an administrator",
+// translated — never the route's raw English `{ error: "Forbidden" }` echoed
+// into a French or Spanish UI.
 function failureMessage(status: number, serverError: string | undefined, t: Translator): string {
   if (status === 403) return t("adminManage.serverUsers.requiresAdmin");
   return serverError ?? t("adminManage.notif.failed", { status });
@@ -168,6 +173,30 @@ function LinkPicker({
         <span className="text-[10px] text-amber-400">{t("adminManage.serverUsers.pinned")}</span>
       )}
       {error && <span role="alert" className="text-[10px] text-red-400">{error}</span>}
+    </div>
+  );
+}
+
+// The binding as a delegate sees it: the same wording as the picker's selected
+// option, without the picker (guardrail 34d — linking is ADMIN-only).
+function LinkedAccountLabel({ row }: { row: ServerUser }) {
+  const t = useT();
+  const label = !row.manualUserLink
+    ? row.user
+      ? t("adminManage.serverUsers.automaticMatched", { name: row.user.name ?? row.user.email })
+      : t("adminManage.serverUsers.automaticUnmatched")
+    : row.user
+      ? (row.user.name ?? row.user.email)
+      : t("adminManage.serverUsers.notLinked");
+  return (
+    <div className="flex flex-col gap-1" title={t("adminManage.serverUsers.requiresAdmin")}>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <Link className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
+        <span className="max-w-[170px] truncate text-xs text-zinc-300">{label}</span>
+      </div>
+      {row.manualUserLink && (
+        <span className="text-[10px] text-amber-400">{t("adminManage.serverUsers.pinned")}</span>
+      )}
     </div>
   );
 }
@@ -456,7 +485,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   );
 }
 
-export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }: ServerUserTableProps) {
+export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, canLink }: ServerUserTableProps) {
   const t = useT();
   const [search, setSearch] = useState("");
 
@@ -522,7 +551,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
                   <Badge className={`sm:hidden text-[10px] ${sourceStyles[source] ?? ""}`}>
                     {mediaInstanceLabel(source, u.serverInstance)}
                   </Badge>
-                  <LinkPicker row={u} accounts={accounts} />
+                  {canLink ? <LinkPicker row={u} accounts={accounts} /> : <LinkedAccountLabel row={u} />}
                 </div>
               </div>
             </div>
@@ -540,7 +569,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
 
           {/* Linked Summonarr account — whose watch history this identity feeds */}
           <td className="py-2.5 px-3 hidden md:table-cell">
-            <LinkPicker row={u} accounts={accounts} />
+            {canLink ? <LinkPicker row={u} accounts={accounts} /> : <LinkedAccountLabel row={u} />}
           </td>
 
           {/* Downloads toggle (Jellyfin only — Plex sharing API does not support

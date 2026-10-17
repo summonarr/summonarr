@@ -822,9 +822,17 @@ export async function notifyAdminsDeletionVoteThreshold(data: {
   }
 }
 
-// Account-security notice (two-factor changed / locked). Best-effort like every
-// notifier here: gated on the same email switch, never throws. Plain text only
-// in `message` — it is escaped, so no caller can inject markup.
+// The "if this wasn't you" sentence for each advice kind (see `advice` below).
+const SECURITY_ADVICE_SUBHEADING = {
+  mfa: "notify.email.security.subheading",
+  account: "notify.email.account.subheading",
+  "sign-in": "notify.email.signin.subheading",
+} as const;
+
+// Account-security notice (two-factor changed / locked, account events, a new
+// app sign-in). Best-effort like every notifier here: gated on the same email
+// switch, never throws. Plain text only in `message` — it is escaped, so no
+// caller can inject markup.
 export async function notifyUserSecurityEventEmail(data: {
   toEmail: string;
   subject: string;
@@ -838,9 +846,10 @@ export async function notifyUserSecurityEventEmail(data: {
    * The "if this wasn't you" advice. "mfa" (default) says to change the password
    * and review two-factor; "account" says to contact an administrator — after a
    * password change or a sign-out-everywhere the recipient may no longer be able
-   * to sign in at all.
+   * to sign in at all; "sign-in" says to sign the new device out and change the
+   * password — after a new sign-in the owner is still signed in themselves.
    */
-  advice?: "mfa" | "account";
+  advice?: "mfa" | "account" | "sign-in";
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
@@ -852,10 +861,7 @@ export async function notifyUserSecurityEventEmail(data: {
       preheader: data.message,
       accent: "amber",
       heading: data.heading,
-      subheading: t(
-        data.advice === "account" ? "notify.email.account.subheading" : "notify.email.security.subheading",
-        { message: esc(data.message) },
-      ),
+      subheading: t(SECURITY_ADVICE_SUBHEADING[data.advice ?? "mfa"], { message: esc(data.message) }),
       ctaLabel: cfg.siteUrl ? t("notify.email.security.cta") : undefined,
       ctaHref: cfg.siteUrl ? buildSiteUrl(cfg.siteUrl, data.ctaPath ?? "/profile#two-factor") : undefined,
       siteUrl: cfg.siteUrl,

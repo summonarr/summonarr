@@ -6,7 +6,7 @@ import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, peekRateLimit, reserveRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
-import { claimSignInLockoutNotice, notifySignInLockout } from "@/lib/account-security-notify";
+import { claimSignInLockoutNotice, notifyAccountSecurityEvent, notifySignInLockout } from "@/lib/account-security-notify";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
 import { signSessionJwt, type SessionClaims, type SessionTransport } from "@/lib/session-jwt";
@@ -1491,6 +1491,19 @@ export async function signInAndMintSession(params: {
     },
     { expiresInSeconds },
   );
+
+  // A NATIVE session was just minted (the X-Summonarr-Client caller, whose
+  // deadline is the never-reached sentinel — guardrail 6c). Nothing time-based
+  // will ever end it, so a stolen password or media-server credential used from
+  // a native client would hold the account until someone notices: email the
+  // owner on every one, with the device, so they can sign it out. Best-effort
+  // and never awaited — it can't fail or slow the sign-in, and it runs only
+  // after initializeTokenOnSignIn has written the AuthSession row it reports.
+  if (userId && expiresAt === NEVER_EXPIRES_AT_SEC) {
+    void notifyAccountSecurityEvent(userId, "app-signed-in", {
+      device: (token.deviceLabel as string | undefined) ?? null,
+    });
+  }
 
   return {
     token: jwt,
