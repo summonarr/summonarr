@@ -207,6 +207,13 @@ const authSessionModel = {
 };
 shadowPrismaModel(prisma, "authSession", authSessionModel);
 
+// The password route asks whether the account has a second factor (guardrail
+// 6i). None of these accounts has one; the two-factor branch is pinned in
+// tests/auth-passwords.test.mts.
+shadowPrismaModel(prisma, "userTotp", { findUnique: async () => null });
+shadowPrismaModel(prisma, "webAuthnCredential", { findMany: async () => [] });
+shadowPrismaModel(prisma, "mfaRecoveryCode", { count: async () => 0 });
+
 // Settings drive maintenanceGuard (maintenance keys), isNotificationEmailEnabled
 // (EMAIL_KEYS), and the feature-flag read. Map-based like requests-route.test.mts.
 const settings = new Map<string, string>();

@@ -97,6 +97,7 @@
   "apiAuth.profile.lastAdmin": "You are the last admin. Promote another user to admin before deleting your account.",
   "apiAuth.profile.newPasswordRequired": "New password is required",
   "apiAuth.profile.newPasswordTooLong": "New password must be at most {max} characters",
+  "apiAuth.profile.secondFactorRequired": "Your account uses two-factor authentication: confirm this change with a code from your authenticator app, a recovery code or a passkey. If this app can't ask for one, change your password on the Summonarr website.",
   "apiAuth.profile.newPasswordTooShort": "New password must be at least 12 characters",
   "apiAuth.profile.noValidFields": "No valid fields provided",
   "apiAuth.profile.notificationEmailReadOnly": "notificationEmail is read-only for this sign-in method",

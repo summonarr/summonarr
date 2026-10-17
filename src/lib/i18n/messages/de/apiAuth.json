@@ -97,6 +97,7 @@
   "apiAuth.profile.lastAdmin": "Sie sind der letzte Admin. Ernennen Sie einen anderen Benutzer zum Admin, bevor Sie Ihr Konto löschen.",
   "apiAuth.profile.newPasswordRequired": "Ein neues Passwort ist erforderlich",
   "apiAuth.profile.newPasswordTooLong": "Das neue Passwort darf höchstens {max} Zeichen lang sein",
+  "apiAuth.profile.secondFactorRequired": "Ihr Konto verwendet die Zwei-Faktor-Authentifizierung: Bestätigen Sie diese Änderung mit einem Code aus Ihrer Authenticator-App, einem Wiederherstellungscode oder einem Passkey. Falls diese App nicht danach fragen kann, ändern Sie Ihr Passwort auf der Summonarr-Website.",
   "apiAuth.profile.newPasswordTooShort": "Das neue Passwort muss mindestens 12 Zeichen lang sein",
   "apiAuth.profile.noValidFields": "Keine gültigen Felder angegeben",
   "apiAuth.profile.notificationEmailReadOnly": "notificationEmail ist für diese Anmeldemethode schreibgeschützt",

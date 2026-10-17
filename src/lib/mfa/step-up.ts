@@ -141,14 +141,18 @@ function stepUpMethods(state: MfaState): string[] {
   return methods;
 }
 
-// Call AFTER mfaReauthStepUp succeeded. Returns the proof, or the response to
-// send. `state` may be passed in when the route already read it.
+// Call AFTER mfaReauthStepUp succeeded (or the route's own password step-up).
+// Returns the proof, or the response to send. `state` may be passed in when the
+// route already read it. `requiredMessage` replaces the `error` text of the
+// missing-proof 400 — only the human-readable text; the rest of the shape is the
+// same wire contract on every route.
 export async function mfaSecondFactorStepUp(
   req: Request,
   session: SummonarrSession,
   user: StepUpUser,
   raw: unknown,
   state?: MfaState,
+  opts: { requiredMessage?: string } = {},
 ): Promise<SecondFactorProof | NextResponse> {
   const t = translatorForRequest(req);
   const current = state ?? (await getMfaState(user.id));
@@ -157,7 +161,11 @@ export async function mfaSecondFactorStepUp(
   const parsed = parseStepUpFactor(raw);
   if (!parsed) {
     return NextResponse.json(
-      { error: t("apiAuth.mfa.secondFactorRequired"), secondFactorRequired: true, methods: stepUpMethods(current) },
+      {
+        error: opts.requiredMessage ?? t("apiAuth.mfa.secondFactorRequired"),
+        secondFactorRequired: true,
+        methods: stepUpMethods(current),
+      },
       { status: 400 },
     );
   }

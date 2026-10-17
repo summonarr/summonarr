@@ -97,6 +97,7 @@
   "apiAuth.profile.lastAdmin": "Vous êtes le dernier administrateur. Promouvez un autre utilisateur administrateur avant de supprimer votre compte.",
   "apiAuth.profile.newPasswordRequired": "Le nouveau mot de passe est requis",
   "apiAuth.profile.newPasswordTooLong": "Le nouveau mot de passe doit comporter au maximum {max} caractères",
+  "apiAuth.profile.secondFactorRequired": "Votre compte utilise l'authentification à deux facteurs : confirmez cette modification avec un code de votre application d'authentification, un code de récupération ou une clé d'accès. Si cette application ne peut pas vous le demander, changez votre mot de passe sur le site web de Summonarr.",
   "apiAuth.profile.newPasswordTooShort": "Le nouveau mot de passe doit comporter au moins 12 caractères",
   "apiAuth.profile.noValidFields": "Aucun champ valide fourni",
   "apiAuth.profile.notificationEmailReadOnly": "notificationEmail est en lecture seule pour cette méthode de connexion",

@@ -204,7 +204,18 @@ export default async function ProfilePage() {
               title={t("profile.password.title")}
               description={t("profile.password.description")}
             >
-              <ChangePassword hasPassword={hasPassword} />
+              <ChangePassword
+                hasPassword={hasPassword}
+                secondFactor={
+                  mfaState
+                    ? {
+                        enabled: mfaState.enabled,
+                        hasPasskeys: mfaState.passkeys.length > 0,
+                        webauthnAvailable: webAuthnConfigFromEnv() !== null,
+                      }
+                    : undefined
+                }
+              />
             </ProfileCard>
           )}
 
