@@ -89,6 +89,7 @@
   "apiAdmin.fixMatch.mediaTypeQuoted": "mediaType deve ser 'MOVIE' ou 'TV'",
   "apiAdmin.fixMatch.missingParams": "Parâmetros obrigatórios ausentes",
   "apiAdmin.fixMatch.missingParamsShort": "Parâmetros ausentes",
+  "apiAdmin.fixMatch.plexPartial": "BD atualizado para TMDB #{tmdbId}, e {applied} de {total} cópias deste título foram reassociadas no Plex. {failed} não puderam ser: essas cópias ainda mostram a correspondência antiga, que uma sincronização posterior pode trazer de volta. Tente novamente ou corrija-as diretamente no Plex.",
   "apiAdmin.fixMatch.plexConflated": "Banco de dados atualizado para TMDB #{tmdbId}. Porém, o banco de metadados do Plex mesclou permanentemente os dois IDs do TMDB em uma única entrada — o Plex continuará exibindo os metadados antigos. Para corrigir a exibição no Plex, exclua os pacotes de metadados conflitantes do diretório Metadata/Movies do servidor Plex e execute uma varredura completa do Plex.",
   "apiAdmin.fixMatch.plexRatingKeyNotFound": "Rating key do Plex não encontrada — ressincronize primeiro",
   "apiAdmin.fixMatch.sameIds": "Os IDs do TMDB já são iguais",

@@ -89,6 +89,7 @@
   "apiAdmin.fixMatch.mediaTypeQuoted": "mediaType 必须是 'MOVIE' 或 'TV'",
   "apiAdmin.fixMatch.missingParams": "缺少必需参数",
   "apiAdmin.fixMatch.missingParamsShort": "缺少参数",
+  "apiAdmin.fixMatch.plexPartial": "数据库已更新为 TMDB #{tmdbId}，此标题的 {total} 个副本中有 {applied} 个已在 Plex 中重新匹配。{failed} 个未能完成——这些副本仍显示旧的匹配，之后的库同步可能会将其恢复。请重试，或直接在 Plex 中修正。",
   "apiAdmin.fixMatch.plexConflated": "数据库已更新为 TMDB #{tmdbId}。但是 Plex 的元数据库已将两个 TMDB ID 永久合并为一个条目——Plex 将继续显示旧的元数据。要修正 Plex 的显示，请从 Plex 服务器的 Metadata/Movies 目录中删除冲突的元数据包，然后执行完整的 Plex 扫描。",
   "apiAdmin.fixMatch.plexRatingKeyNotFound": "未找到 Plex rating key——请先重新同步",
   "apiAdmin.fixMatch.sameIds": "TMDB ID 已经相同",

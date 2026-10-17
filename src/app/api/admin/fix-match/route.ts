@@ -23,6 +23,7 @@ import {
 } from "@/lib/media-instances";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { carryMeta, JELLYFIN_META_KEYS, LIBRARY_META_KEYS, remainingOnOldRow, unionKeys } from "@/lib/fix-match-rows";
 import { dropMatchFlagInTx, findMatchFlag, moveItemToTitleInTx, readLibraryMatchReport } from "@/lib/library-match-data";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
@@ -252,13 +253,18 @@ async function fixPlexMatch(
 
   if (canonicalGuid) {
     const res = await applyMatch(canonicalGuid, matchName, matchYear);
-    if (!res.ok) throw new Error(`Plex fix-match failed with canonical guid: ${res.status}`);
+    if (!res.ok) {
+      const msg = `Plex fix-match failed with canonical guid: ${res.status}`;
+      // The unmatch already landed, so the item is UNMATCHED now, not unchanged.
+      throw unmatched ? new PlexUnmatchedError(msg) : new Error(msg);
+    }
   } else {
     const modernRes = await applyMatch(`tmdb://${correctTmdbId}`, title, year);
     if (!modernRes.ok) {
       const legacyRes = await applyMatch(`com.plexapp.agents.themoviedb://${correctTmdbId}?lang=en`, title, year);
       if (!legacyRes.ok) {
-        throw new Error(`Plex fix-match failed: ${modernRes.status} (tmdb://), ${legacyRes.status} (legacy) — and match search returned no result for TMDB #${correctTmdbId}`);
+        const msg = `Plex fix-match failed: ${modernRes.status} (tmdb://), ${legacyRes.status} (legacy) — and match search returned no result for TMDB #${correctTmdbId}`;
+        throw unmatched ? new PlexUnmatchedError(msg) : new Error(msg);
       }
     }
   }
@@ -412,6 +418,27 @@ async function fixPlexMatch(
     `Try a different candidate from the picker, or fix the match manually in Plex.`;
   if (unmatched) throw new PlexUnmatchedError(`${detail} The item is now UNMATCHED in Plex.`);
   throw new Error(detail);
+}
+
+// Whether a Plex item currently carries `tmdbId` among its guids. A title's
+// `plexRatingKeys` also holds keys that merely ride along (a conflated item that
+// claims several titles, guardrail 37c) — remapping one of those would rewrite an
+// item that belongs to another title, so a copy is only touched when Plex itself
+// says it still carries the id being replaced. null = could not be read.
+async function plexCopyCarriesTmdb(instance: MediaInstanceKey, ratingKey: string, tmdbId: number): Promise<boolean | null> {
+  const cfg = await getPlexConfig(instance);
+  if (!cfg.url || !cfg.token) return null;
+  const safeKey = String(parseInt(ratingKey, 10) || 0);
+  const res = await safeFetchAdminConfigured(`${cfg.url.replace(/\/$/, "")}/library/metadata/${safeKey}?includeGuids=1`, {
+    headers: { Accept: "application/json", "X-Plex-Token": cfg.token, "X-Plex-Client-Identifier": "summonarr-server", "X-Plex-Product": "Summonarr", "User-Agent": "Summonarr/1.0 (Node.js)" },
+    timeoutMs: 15_000,
+  }).catch(() => null);
+  if (!res?.ok) return null;
+  const json = await res.json().catch(() => null) as { MediaContainer?: { Metadata?: Array<{ guid?: string; Guid?: Array<{ id: string }> }> } } | null;
+  const item = json?.MediaContainer?.Metadata?.[0];
+  if (!item) return null;
+  const id = String(tmdbId);
+  return (item.Guid ?? []).some((g) => g.id === `tmdb://${id}`) || new RegExp(`themoviedb://${id}(?![0-9])`).test(item.guid ?? "");
 }
 
 type JellyfinVirtualFolder = {
@@ -810,15 +837,44 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
     if (server === "plex") {
       const item = await prisma.plexLibraryItem.findFirst({
         where: { tmdbId, mediaType, serverInstance },
-        select: { plexRatingKey: true, filePath: true },
+        select: { plexRatingKey: true, plexRatingKeys: true, filePath: true },
       });
       if (!item?.plexRatingKey) {
         throw new FixMatchError(t("apiAdmin.fixMatch.plexRatingKeyNotFound"), 404);
       }
       opts.report?.({ phase: "applying", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 });
       const plexRatingKey = item.plexRatingKey;
+      // The canonical copy is the one the admin picked a candidate for; its
+      // failure aborts the job exactly as before.
       const plexResult = await fixPlexMatch(plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
       remoteRemapped = true;
+
+      // Every OTHER copy of the title (guardrail 37c) — the Plex twin of the
+      // Jellyfin loop. Left on the old match, the next sync could elect an
+      // unfixed copy and revert the correction. Serial, like Jellyfin's, and a
+      // copy is only touched if Plex says it still carries the old id.
+      const extraKeys = unionKeys(item.plexRatingKeys).filter((k) => k !== plexRatingKey);
+      const movedKeys = new Set<string>([plexRatingKey]);
+      const failedKeys: string[] = [];
+      for (const key of extraKeys) {
+        try {
+          const carries = await plexCopyCarriesTmdb(serverInstance, key, tmdbId);
+          if (carries === null) { failedKeys.push(key); continue; }
+          // Not the old id: it belongs to another title — nothing to fix, and it
+          // keeps whatever row that title has.
+          if (!carries) { movedKeys.add(key); continue; }
+          await fixPlexMatch(key, correctTmdbId, mediaType, serverInstance, canonicalGuid);
+          movedKeys.add(key);
+        } catch (err) {
+          console.error("[fix-match]", `plex copy ${key} failed:`, err instanceof Error ? err.message : err);
+          failedKeys.push(key);
+        }
+      }
+      if (failedKeys.length > 0) {
+        partialWarning = t("apiAdmin.fixMatch.plexPartial", {
+          tmdbId: correctTmdbId, applied: movedKeys.size, total: movedKeys.size + failedKeys.length, failed: failedKeys.length,
+        });
+      }
 
       await prisma.$transaction(async (tx) => {
         // Take the same advisory locks the sync orchestrator uses (2001 library, 2002
@@ -826,23 +882,40 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         // remap. Acquire 2001 before 2002 (one consistent global order → no deadlock).
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-        // deleteMany, NOT delete: the confirmation poll above ran UNLOCKED for
-        // up to minutes, so a library sync may already have reconciled this row
-        // under the corrected id. `delete` on a missing unique row throws P2025
-        // and would report a landed remap as a failed job (guardrail 37a).
-        await tx.plexLibraryItem.deleteMany({ where: { tmdbId, mediaType, serverInstance } });
+        // Read both rows BEFORE touching either: the removed row's descriptive
+        // columns carry over, and the target's own keys are merged, not replaced.
+        const oldWhere = { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } };
+        const targetWhere = { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } };
+        const removed = await tx.plexLibraryItem.findUnique({ where: oldWhere });
+        const target = await tx.plexLibraryItem.findUnique({ where: targetWhere });
+        const remainder = remainingOnOldRow(plexRatingKey, [plexRatingKey, ...extraKeys], movedKeys);
+        if (remainder.delete) {
+          // deleteMany, NOT delete: the confirmation poll above ran UNLOCKED for
+          // up to minutes, so a library sync may already have reconciled this row
+          // under the corrected id. `delete` on a missing unique row throws P2025
+          // and would report a landed remap as a failed job (guardrail 37a).
+          await tx.plexLibraryItem.deleteMany({ where: { tmdbId, mediaType, serverInstance } });
+        } else {
+          // Copies that could not be remapped still carry the old match: they stay
+          // on the old row so their plays keep resolving, minus the moved file path.
+          await tx.plexLibraryItem.update({ where: oldWhere, data: { plexRatingKey: remainder.canonicalKey, plexRatingKeys: remainder.keys, filePath: null } });
+        }
+        const movedList = [...movedKeys];
+        const mergedKeys = unionKeys([target?.plexRatingKey ?? plexRatingKey], target?.plexRatingKeys, movedList);
+        const meta = carryMeta(LIBRARY_META_KEYS, target, removed);
         await tx.plexLibraryItem.upsert({
-          where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
-          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, plexRatingKey: item.plexRatingKey },
+          where: targetWhere,
+          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, plexRatingKey, plexRatingKeys: mergedKeys, ...meta },
           // filePath follows the ratingKey: a pre-existing row for the corrected
           // id (a correctly matched copy) otherwise kept ANOTHER file's path
-          // beside this item's key until the next full sync.
-          update: { plexRatingKey: item.plexRatingKey, filePath: item.filePath },
+          // beside this item's key until the next full sync. The target's own
+          // canonical key stays canonical; this run's keys join its set.
+          update: { plexRatingKey: target?.plexRatingKey ?? plexRatingKey, plexRatingKeys: mergedKeys, filePath: target?.plexRatingKey ? (target.filePath ?? item.filePath) : item.filePath, ...meta },
         });
         // Re-attribute the plays recorded under the wrong id (see
         // playReattributionWhere). Same tx as the row rewrite so the cache and
         // the history never disagree about which title this item is.
-        const reattribute = playReattributionWhere("plex", serverInstance, mediaType, tmdbId, [plexRatingKey]);
+        const reattribute = playReattributionWhere("plex", serverInstance, mediaType, tmdbId, movedList);
         await tx.playHistory.updateMany({ where: reattribute, data: { tmdbId: correctTmdbId } });
         await tx.activeSession.updateMany({ where: reattribute, data: { tmdbId: correctTmdbId } });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID.
@@ -880,10 +953,8 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
       }
 
       if (plexResult.conflated) {
-        return {
-          ok: true,
-          warning: t("apiAdmin.fixMatch.plexConflated", { tmdbId: correctTmdbId }),
-        };
+        const conflated = t("apiAdmin.fixMatch.plexConflated", { tmdbId: correctTmdbId });
+        return { ok: true, warning: partialWarning ? `${conflated} ${partialWarning}` : conflated };
       }
 
     } else {
@@ -954,6 +1025,9 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         // have reconciled this row under the corrected id. `delete` on a missing
         // unique row throws P2025 and would report a landed remap as a failed
         // job (guardrail 37a).
+        const removedRow = await tx.jellyfinLibraryItem.findUnique({
+          where: { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } },
+        });
         await tx.jellyfinLibraryItem.deleteMany({ where: { tmdbId, mediaType, serverInstance } });
         // The target row may already exist — a correctly matched copy of the
         // same title, or the copy a previous partial run DID move (the retry the
@@ -964,14 +1038,14 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         // guardrail 37's exact failure. Write the UNION.
         const existingTarget = await tx.jellyfinLibraryItem.findUnique({
           where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
-          select: { jellyfinItemIds: true },
         });
+        const meta = carryMeta(JELLYFIN_META_KEYS, existingTarget, removedRow);
         const mergedItemIds = Array.from(new Set([...(existingTarget?.jellyfinItemIds ?? []), ...resolvedItemIds]));
         await tx.jellyfinLibraryItem.upsert({
           where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
-          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item?.filePath ?? null, jellyfinItemId: resolvedItemId, jellyfinItemIds: resolvedItemIds },
+          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item?.filePath ?? null, jellyfinItemId: resolvedItemId, jellyfinItemIds: resolvedItemIds, ...meta },
           // filePath follows the canonical item id (see the Plex twin).
-          update: { jellyfinItemId: resolvedItemId, jellyfinItemIds: mergedItemIds, filePath: item?.filePath ?? null },
+          update: { jellyfinItemId: resolvedItemId, jellyfinItemIds: mergedItemIds, filePath: item?.filePath ?? null, ...meta },
         });
         // Re-attribute the plays recorded under the wrong id (see
         // playReattributionWhere): the ids a play could carry are the copies as
