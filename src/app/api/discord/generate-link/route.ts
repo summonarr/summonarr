@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { requireStepUp } from "@/lib/step-up-auth";
 import { logAudit, auditContext } from "@/lib/audit";
+import { generateDiscordLinkToken } from "@/lib/discord-link-token";
 
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 
@@ -52,13 +52,15 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (denied) return denied;
 
   // 16 random bytes = 128 bits (32 hex characters), far too many to guess.
-  const token = randomBytes(16).toString("hex").toUpperCase();
+  // Only its SHA-256 is stored: the code itself exists only in this response
+  // (discord-link-token.ts).
+  const { token, tokenHash } = generateDiscordLinkToken();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
   await prisma.discordLinkToken.upsert({
     where: { userId: session.user.id },
-    update: { token, expiresAt, discordId },
-    create: { token, userId: session.user.id, expiresAt, discordId },
+    update: { token: tokenHash, expiresAt, discordId },
+    create: { token: tokenHash, userId: session.user.id, expiresAt, discordId },
   });
 
   void logAudit({

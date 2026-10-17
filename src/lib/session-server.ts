@@ -26,8 +26,8 @@ export async function readSummonarrSession(): Promise<SessionClaims | null> {
 // this routes through verifyAndRefreshSession so a revoked AuthSession row, a
 // sessionsRevokedAt/passwordChangedAt cutoff, or a role demotion is honored
 // promptly (within the same dbCheckedAt fast-path window proxy.ts uses: 10s for
-// admins, 60s for everyone else). Returns the DB-reconciled claims (role
-// refreshed) or null.
+// a token with admin-area access, 60s for everyone else). Returns the
+// DB-reconciled claims (role refreshed) or null.
 //
 // It does not send back a refreshed cookie — these callers only need the authz
 // decision. That is also why rotation is disabled: rotating would kill the token

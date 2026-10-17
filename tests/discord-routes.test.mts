@@ -44,6 +44,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import dns from "node:dns/promises";
+import { createHash } from "node:crypto";
 
 (globalThis as { AsyncLocalStorage?: unknown }).AsyncLocalStorage = AsyncLocalStorage;
 
@@ -497,6 +498,21 @@ test("generate-link with NO body mints an unbound token — the web UI flow", as
   assert.match(body.token, /^[0-9A-F]{32}$/, "128 bits of entropy, uppercase hex");
   const stored = (opsOf("discordLinkToken.upsert")[0].args as { update: { discordId: string | null } }).update;
   assert.equal(stored.discordId, null, "omitting the field keeps the null binding");
+});
+
+test("PIN: generate-link stores only the SHA-256 of the code it hands back, never the code", async () => {
+  // The row is a live credential for 10 minutes and lands in every backup; /link
+  // hashes what it is handed, so a value read from either is not redeemable.
+  const { token } = await mintSession();
+  const res = await doGenerate(token);
+  assert.equal(res.status, 200);
+  const code = (await res.json()).token as string;
+  const sha = createHash("sha256").update(code, "utf8").digest("hex");
+  const stored = (opsOf("discordLinkToken.upsert")[0].args as { update: { token: string } }).update;
+  assert.equal(stored.token, sha, "the update path stores the hash");
+  assert.equal(linkTokens.length, 1);
+  assert.equal(linkTokens[0].token, sha, "the create path stores the hash");
+  assert.ok(!JSON.stringify(ops).includes(code), "the plaintext code reaches no DB write");
 });
 
 test("generate-link with a VALID snowflake binds the token to it", async () => {

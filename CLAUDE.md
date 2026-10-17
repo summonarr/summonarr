@@ -268,6 +268,8 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 6a. **User-session API routes must wrap their handlers with `withAuth`/`withAdmin`/`withIssueAdmin` from [src/lib/api-auth.ts](src/lib/api-auth.ts).** The wrapper runs the auth check before the handler body and returns 401/403 itself, so the guard can never be forgotten or mis-returned (the failure mode that the older inline `requireAuth(...) + if (session instanceof NextResponse) return session;` pattern allowed). Do not re-implement `auth() + isTokenExpired() + role` boilerplate inline. Callsite:
 
     Detail and rationale: [docs/guardrails/6a.md](docs/guardrails/6a.md).
+
+    - `npm run audit:routes` counts a bare `requireAuth` as AUTHENTICATION only: an `/api/admin/*` route guarded by it alone fails unless it is listed in `INLINE_GUARDED_ADMIN_ROUTES` ([scripts/audit-routes.mts](scripts/audit-routes.mts)), which also demands that route's own capability check. NEVER re-add a whole-subtree allowlist entry for a session-routed prefix: `discord/` used to be one, so a new route there shipped ungated. Only `/api/interactions` (Discord-signed) is allowlisted.
 6b. **Session auth is dual-transport: HttpOnly cookie (web) OR `Authorization: Bearer <session-jwt>` (native/mobile clients).** Added for the iOS app (Phase 0). The bearer token is the *same* session JWT the cookie carries — there is no separate token type.
 
     Detail and rationale: [docs/guardrails/6b.md](docs/guardrails/6b.md).
@@ -280,6 +282,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - No refresh for bearer clients
     - That forbids handing the CLIENT a new token; it does NOT forbid the server-internal forwarded-header rewrite, which is REQUIRED for both transports.
     - A privilege change ROTATES the session only where the replacement is delivered: the cookie transport through the proxy, `withAuth` and `/api/auth/me` (`allowRotation: !bearer`). Bearer requests, `requireAuth()` and the server-component readers pass `allowRotation: false`, and rotation never stamps the per-user `sessionsRevokedAt` cutoff.
+    - The 10s `dbCheckedAt` window follows the token's PERMISSIONS (`recheckIntervalSeconds`): the ADMIN bit or any management bit gets it, as do the ADMIN/ISSUE_ADMIN labels; everyone else gets 60s. NEVER key it on the role label alone — a role=USER delegate kept a cleared management bit for up to 60s.
 6c. **A session lives until its sign-in deadline — nothing shortens it, nothing caps it, and a native session has no deadline at all.** `verifyAndRefreshSession` rejects a token past the `expiresAt` claim and otherwise re-signs with `exp` AT that claim; `initializeTokenOnSignIn` sets the claim to the admin-configured desktop/mobile/remember-me duration for browsers and to `NEVER_EXPIRES_AT_SEC` ([session-lifetime.ts](src/lib/session-lifetime.ts)) for a caller presenting `X-Summonarr-Client`.
 
     Detail and rationale: [docs/guardrails/6c.md](docs/guardrails/6c.md).
@@ -338,6 +341,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Every step-up password goes through `verifyStepUpPassword`: the protected `step-up-pw:` bucket (6e), a refund on success, `AUTH_LOGIN_FAILED` `reason: "step_up_password"` on a miss. `tests/step-up-auth.test.mts` scans `src` for any other `verifyPassword(` caller (sign-in in auth.ts excepted).
     - `requireStepUp` (password, or an SSO sign-in younger than 5 minutes) guards `generate-link`, the Trakt device start, and `initiate-merge` for WEB sessions. A native session is exempt there because the shipped app has no prompt (guardrail 25). "Native" is `isNativeSession`, the session's never-expiring deadline fixed at sign-in, NEVER the transport: a stolen browser cookie replayed as a bearer token is still a web session.
     - Every completed Discord link (`mergeDiscordIntoWebAccount`, the one chokepoint for `/link` and confirm-merge) is audited and mailed to the owner after the commit.
+    - A pending link code is stored as its SHA-256 ONLY (`DiscordLinkToken.token`, [discord-link-token.ts](src/lib/discord-link-token.ts)), and `/link` looks the row up by the hash of what was typed — NEVER by the typed value, which would let a value read from the DB or a backup redeem it. A code minted before this shipped (plaintext in that column) therefore fails once and the user generates a new one; it expires within 10 minutes. `tests/discord-link-token.test.mts` scans every `discordLinkToken` query that names the column.
     - A DB restore deletes every AuthSession row and stamps every user's `sessionsRevokedAt` inside the restore transaction (backup-import.ts).
     - Boot refuses NEXTAUTH_SECRET, CRON_SECRET and TOKEN_ENCRYPTION_KEY sharing a value (`secretReuseError`, [boot-secrets.ts](src/lib/boot-secrets.ts)).
     - A user's quota counts what they requested AND what they filed on others' behalf (`MediaRequest.filedBy`, `quotaUsageWhere` in [quota.ts](src/lib/quota.ts)). Every quota counter uses it; `tests/quota.test.mts` fails on an inline one.
@@ -601,7 +605,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 27a. **Every in-memory auth ledger is process-wide (`processSingleton`), NEVER a module-level `Set`/`Map`.**
 
     Why:
-    - Turbopack copies a lib module into every server chunk that imports it ([process-singleton.ts](src/lib/process-singleton.ts)). `session-revocation.ts`'s force-revalidate Sets were plain module state: the revoke routes marked in THEIR chunk, while the proxy and every page render read their own copies, which nothing ever wrote. So "revocation takes effect on the next request" held for `withAuth` API routes only, and a revoked session kept rendering pages for the whole dbCheckedAt window (10s admin / 60s user).
+    - Turbopack copies a lib module into every server chunk that imports it ([process-singleton.ts](src/lib/process-singleton.ts)). `session-revocation.ts`'s force-revalidate Sets were plain module state: the revoke routes marked in THEIR chunk, while the proxy and every page render read their own copies, which nothing ever wrote. So "revocation takes effect on the next request" held for `withAuth` API routes only, and a revoked session kept rendering pages for the whole dbCheckedAt window (10s with admin-area access / 60s otherwise).
 
     Rules:
     - Any state that means "remember across the whole server" goes through `processSingleton`: revocation marks, rate-limit buckets, the MFA token ledger.

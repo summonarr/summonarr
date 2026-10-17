@@ -17,7 +17,9 @@
 //   - the dbCheckedAt FAST PATH: a recent check skips the DB entirely (pinned
 //     with THROWING model stubs) and returns the original claims un-resigned;
 //     the 60s USER vs 10s ADMIN/ISSUE_ADMIN window differential (admin
-//     revocations propagate faster); the window's deliberate blindness to a
+//     revocations propagate faster) — keyed on the token's effective
+//     permissions too, so a role=USER delegate holding a management bit gets
+//     the 10s window; the window's deliberate blindness to a
 //     revocation — and markSessionForceRevoked overriding it on the issuing
 //     replica; an 8-day-old ADMIN session passing the fast path untouched (the
 //     former 7d ceiling is gone);
@@ -94,6 +96,7 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { verifyAndRefreshSession } = await import("../src/lib/session-refresh.ts");
 const { markSessionForceRevoked } = await import("../src/lib/session-revocation.ts");
 const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
+const { Permission, PRESETS } = await import("../src/lib/permissions.ts");
 
 const DAY = 86_400;
 const SEVEN_DAYS = 7 * DAY;
@@ -371,6 +374,79 @@ test("the fast window is role-tiered: 30s-old check is fresh for USER but stale 
   const result = await verifyAndRefreshSession(issueAdmin.token, COOKIE);
   assert.ok(result);
   assert.ok(dbReads > before, "ISSUE_ADMIN at 30s must take the slow (DB-checked) path");
+});
+
+test("PIN: the fast window follows the PERMISSIONS: a role=USER token holding ADMIN or any management bit rechecks at 10s", async () => {
+  // The window used to key on the role label alone, so a USER granted a
+  // management bit (a delegate admin) kept a 60s window — and with it the bit,
+  // or a revoked session, for up to 60s after an admin took it away.
+  const now0 = nowSec();
+  for (const [name, bit] of [
+    ["MANAGE_USERS", Permission.MANAGE_USERS],
+    ["MANAGE_REQUESTS", Permission.MANAGE_REQUESTS],
+    ["MANAGE_ISSUES", Permission.MANAGE_ISSUES],
+    ["ADMIN", Permission.ADMIN],
+  ] as const) {
+    const mask = String(PRESETS.USER | bit);
+    const revoked = await mint({ role: "USER", permissions: mask, dbCheckedAt: now0 - 30 });
+    sessionRows.delete(revoked.sessionId);
+    assert.equal(
+      await verifyAndRefreshSession(revoked.token, COOKIE),
+      null,
+      `a revoked role=USER session holding ${name} must be caught once the 10s window lapses`,
+    );
+
+    // The finding itself: the admin clears the bit; 30s later the claims the
+    // request gates on no longer carry it.
+    const demoted = await mint({
+      role: "USER",
+      permissions: mask,
+      dbPermissions: PRESETS.USER,
+      dbCheckedAt: now0 - 30,
+    });
+    const result = await verifyAndRefreshSession(demoted.token, COOKIE);
+    assert.ok(result, `the ${name} demotion must still verify, as an ordinary user`);
+    assert.equal(
+      result.claims.permissions,
+      String(PRESETS.USER),
+      `a cleared ${name} bit must be gone from the claims 30s after the last DB check`,
+    );
+  }
+});
+
+test("the role label still counts: an ISSUE_ADMIN token whose mask lacks every management bit keeps the 10s window", async () => {
+  // requireAuth's role option and the proxy's /api/admin backstop read the
+  // label, so keying on permissions must widen the fast window, never narrow it.
+  const now0 = nowSec();
+  const { sessionId, token } = await mint({
+    role: "ISSUE_ADMIN",
+    permissions: String(PRESETS.USER),
+    dbCheckedAt: now0 - 30,
+  });
+  sessionRows.delete(sessionId);
+  assert.equal(
+    await verifyAndRefreshSession(token, COOKIE),
+    null,
+    "a revoked ISSUE_ADMIN session must be caught at 30s whatever its mask",
+  );
+});
+
+test("a role=USER token with only non-management bits keeps the 60s window", async () => {
+  // Control for the pin above: the fast window is for admin-area capability,
+  // not for every non-default grant (auto-approve, on-behalf, quota, 4K, …).
+  const now0 = nowSec();
+  const mask =
+    PRESETS.USER |
+    Permission.AUTO_APPROVE |
+    Permission.REQUEST_ON_BEHALF |
+    Permission.QUOTA_UNLIMITED |
+    Permission.REQUEST_4K |
+    Permission.REQUEST_ADVANCED |
+    Permission.AUTO_REQUEST;
+  const { token } = await mint({ role: "USER", permissions: String(mask), dbCheckedAt: now0 - 30 });
+  throwOnDb = true;
+  assert.ok(await verifyAndRefreshSession(token, COOKIE), "a non-management grant stays inside the 60s window");
+  assert.equal(dbReads, 0);
 });
 
 test("the cache window is deliberately blind to a revocation — and markSessionForceRevoked closes it on the issuing replica", async () => {

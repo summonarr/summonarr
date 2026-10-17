@@ -120,10 +120,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   // Close the dbCheckedAt fast-path window on THIS replica immediately. The rows
   // are gone, but a session validated within the last cache interval (≤60s, ≤10s
-  // admin) would otherwise keep riding the cached state. A per-user mark forces a
-  // DB re-check for all of this user's sessions on the next request; the surviving
-  // caller row still passes. Other replicas converge via the row deletion +
-  // sessionsRevokedAt cutoff.
+  // with admin-area access) would otherwise keep riding the cached state. A
+  // per-user mark forces a DB re-check for all of this user's sessions on the
+  // next request; the surviving caller row still passes. Other replicas
+  // converge via the row deletion + sessionsRevokedAt cutoff.
   markUserForceRevalidate(session.user.id);
   void notifyAccountSecurityEvent(session.user.id, includeCurrent ? "signed-out-all" : "signed-out-others");
 

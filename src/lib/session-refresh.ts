@@ -9,7 +9,13 @@ import {
 } from "@/lib/session-jwt";
 import { markSessionForceRevoked, shouldForceDbCheck } from "@/lib/session-revocation";
 import { getCachedPlexAllowlist } from "@/lib/plex-membership";
-import { serializePermissions } from "@/lib/permissions";
+import {
+  MANAGEMENT_MASK,
+  Permission,
+  effectivePermissions,
+  parsePermissions,
+  serializePermissions,
+} from "@/lib/permissions";
 import { coalesce } from "@/lib/concurrency";
 
 // Verify-and-refresh for the Summonarr session JWT.
@@ -38,8 +44,9 @@ import { coalesce } from "@/lib/concurrency";
 //      lives until it is revoked.
 //
 // dbCheckedAt skip optimization keeps the hot path off the DB: if the token was
-// validated against the DB within the last 60s (10s for ADMIN/ISSUE_ADMIN, so
-// role demotions propagate quickly), skip the DB hit entirely.
+// validated against the DB within the last 60s (10s for a privileged token — see
+// recheckIntervalSeconds — so demotions propagate quickly), skip the DB hit
+// entirely.
 
 export interface RefreshedToken {
   token: string;
@@ -53,6 +60,27 @@ export interface VerifyAndRefreshResult {
 
 const FAST_CHECK_INTERVAL_SECONDS = 10;
 const SLOW_CHECK_INTERVAL_SECONDS = 60;
+
+// The bits whose loss must propagate inside the fast window: the ADMIN superbit
+// and every admin-area capability.
+const PRIVILEGED_MASK = Permission.ADMIN | MANAGEMENT_MASK;
+
+// How long a DB check vouches for this token. A token that can act on the admin
+// surface gets the 10s window, so revoking that access (a demotion, a cleared
+// management bit, a revoked session) bites within ~10s instead of ~60s.
+//
+// Keyed on the token's EFFECTIVE permissions, not just the role label: the
+// bitmask is the authoritative capability check (permissions.ts), so a role=USER
+// account granted MANAGE_USERS, MANAGE_REQUESTS or MANAGE_ISSUES acts as a
+// delegate admin, and keying on the role alone kept those bits alive for up to
+// 60s after an admin cleared them. The ADMIN/ISSUE_ADMIN labels still count too
+// — requireAuth's role option and the proxy's /api/admin backstop read the
+// label — so the window is never wider than it was.
+export function recheckIntervalSeconds(claims: Pick<SessionClaims, "role" | "permissions">): number {
+  if (claims.role === "ADMIN" || claims.role === "ISSUE_ADMIN") return FAST_CHECK_INTERVAL_SECONDS;
+  const effective = effectivePermissions(claims.role, parsePermissions(claims.permissions));
+  return (effective & PRIVILEGED_MASK) !== 0n ? FAST_CHECK_INTERVAL_SECONDS : SLOW_CHECK_INTERVAL_SECONDS;
+}
 
 export interface VerifyAndRefreshOptions {
   // The transport the token ARRIVED on: "bearer" when it came from the
@@ -96,10 +124,7 @@ export async function verifyAndRefreshSession(
   // Fast path: if the token was DB-validated recently, skip the DB round trip.
   const dbCheckedAt = (claims as SessionClaims & { dbCheckedAt?: number })
     .dbCheckedAt;
-  const checkInterval =
-    claims.role === "ADMIN" || claims.role === "ISSUE_ADMIN"
-      ? FAST_CHECK_INTERVAL_SECONDS
-      : SLOW_CHECK_INTERVAL_SECONDS;
+  const checkInterval = recheckIntervalSeconds(claims);
   // Honor the cache window only if this replica hasn't locally revoked the
   // session/user since — otherwise force a DB hit so a "revoke this device" /
   // "log out everywhere" issued here takes effect on the next request rather

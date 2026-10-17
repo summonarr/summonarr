@@ -40,7 +40,7 @@
 // scripted discord.com + TMDB. No DB, no network.
 import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign as cryptoSign } from "node:crypto";
 import dns from "node:dns/promises";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
@@ -207,8 +207,12 @@ for (const m of ["radarrAvailableItem", "sonarrAvailableItem"]) {
   });
 }
 
+// `token` is the stored column, which holds the SHA-256 of the /link code
+// (discord-link-token.ts); tests type LINK_CODE and seed sha256(LINK_CODE).
 type LinkToken = { token: string; userId: string; expiresAt: Date; discordId: string | null; user: Record<string, unknown> };
 let linkTokens: LinkToken[] = [];
+const LINK_CODE = "0123456789ABCDEF0123456789ABCDEF";
+const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 shadowPrismaModel(prisma, "discordLinkToken", {
   findUnique: async (args: { where: { token?: string; userId?: string } }) => {
     rec("discordLinkToken.findUnique", args.where);
@@ -678,7 +682,7 @@ test("server gate: a /request from ANOTHER server is refused ephemerally and not
 
 test("server gate: a DM (no guild_id) is refused — /link from a DM doesn't redeem the token", async () => {
   appUsers.push({ id: "web-1", email: "web@example.com", name: "Web", discordId: null, role: "USER", deactivatedAt: null });
-  linkTokens.push({ token: "a".repeat(32), userId: "web-1", expiresAt: new Date(Date.now() + 60_000), discordId: null, user: appUsers[0] });
+  linkTokens.push({ token: sha256("A".repeat(32)), userId: "web-1", expiresAt: new Date(Date.now() + 60_000), discordId: null, user: appUsers[0] });
   const dm = { ...command("link", [{ name: "token", value: "a".repeat(32) }]), member: undefined, user: { id: "123456789012345678", username: "someone" }, guild_id: undefined };
   const body = await (await post(dm)).json();
   assert.equal(body.type, 4);
@@ -761,7 +765,8 @@ test("with no usable Discord locale, the linked account's stored language is use
 test("a disabled integration runs NO command work", async () => {
   settings.set("feature.integration.discord", "false");
   invalidateFeatureFlagCache();
-  await post(command("link", [{ name: "token", value: "ABC" }]));
+  // A well-formed code, so only the gate (not the code's shape) stops the lookup.
+  await post(command("link", [{ name: "token", value: LINK_CODE }]));
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(opsOf("discordLinkToken.findUnique").length, 0);
 });
@@ -791,9 +796,9 @@ test("DISTINCT interaction ids are both accepted", async () => {
 });
 
 test("a replayed interaction does NO command work", async () => {
-  const payload = command("link", [{ name: "token", value: "TOKEN123" }]);
+  const payload = command("link", [{ name: "token", value: LINK_CODE }]);
   linkTokens = [{
-    token: "TOKEN123", userId: "u1", expiresAt: new Date(Date.now() + 60_000), discordId: null,
+    token: sha256(LINK_CODE), userId: "u1", expiresAt: new Date(Date.now() + 60_000), discordId: null,
     user: { id: "u1", email: "u1@example.com", name: "One", role: "USER" },
   }];
   await post(payload);
@@ -851,7 +856,7 @@ test("an unknown interaction type is a 400", async () => {
 
 function seedLinkToken(over: Partial<LinkToken> = {}): LinkToken {
   const t: LinkToken = {
-    token: "TOKEN123", userId: "u1", expiresAt: new Date(Date.now() + 60_000), discordId: null,
+    token: sha256(LINK_CODE), userId: "u1", expiresAt: new Date(Date.now() + 60_000), discordId: null,
     user: { id: "u1", email: "u1@example.com", name: "One", role: "USER" },
     ...over,
   };
@@ -863,7 +868,7 @@ test("a token BOUND to another Discord account is refused", async () => {
   // The counterpart to generate-link's binding: without this check the token is
   // a bearer credential and whoever sees it inherits the victim's history.
   seedLinkToken({ discordId: "999999999999999999" });
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(linkTokens.length, 1, "a mismatched binding must not consume the token");
   assert.equal(opsOf("user.update").length, 0, "and must not link anything");
@@ -871,21 +876,21 @@ test("a token BOUND to another Discord account is refused", async () => {
 
 test("a token bound to the REDEEMING account is accepted", async () => {
   seedLinkToken({ discordId: "123456789012345678" });
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await waitFor(() => linkTokens.length === 0);
   assert.equal(linkTokens.length, 0, "a matching binding should redeem");
 });
 
 test("an UNBOUND token is redeemable by the caller (the web-UI flow)", async () => {
   seedLinkToken({ discordId: null });
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await waitFor(() => linkTokens.length === 0);
   assert.equal(linkTokens.length, 0);
 });
 
 test("an unknown token is refused without touching any account", async () => {
   seedLinkToken();
-  await post(command("link", [{ name: "token", value: "WRONGTOKEN" }]));
+  await post(command("link", [{ name: "token", value: "F".repeat(32) }]));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(linkTokens.length, 1);
   assert.equal(opsOf("user.update").length, 0);
@@ -893,7 +898,7 @@ test("an unknown token is refused without touching any account", async () => {
 
 test("an EXPIRED token is deleted rather than left redeemable", async () => {
   seedLinkToken({ expiresAt: new Date(Date.now() - 1000) });
-  await post(command("link", [{ name: "token", value: "TOKEN123" }]));
+  await post(command("link", [{ name: "token", value: LINK_CODE }]));
   await waitFor(() => opsOf("discordLinkToken.delete").length > 0);
   assert.ok(opsOf("discordLinkToken.delete").length > 0, "an expired token must be cleaned up");
 });
@@ -903,7 +908,7 @@ test("a successful redemption consumes the token with deleteMany, never a bare d
   // bare delete would throw P2025 and report "unexpected error" for a link that
   // actually SUCCEEDED.
   seedLinkToken();
-  await post(command("link", [{ name: "token", value: "TOKEN123" }]));
+  await post(command("link", [{ name: "token", value: LINK_CODE }]));
   await waitFor(() => opsOf("discordLinkToken.deleteMany").length > 0);
   assert.ok(opsOf("discordLinkToken.deleteMany").length > 0);
 });
@@ -911,7 +916,7 @@ test("a successful redemption consumes the token with deleteMany, never a bare d
 test("a Discord id already linked to a REAL other account blocks the redemption", async () => {
   seedLinkToken();
   appUsers = [{ id: "other", email: "other@example.com", discordId: "123456789012345678", role: "USER" }];
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(linkTokens.length, 1, "the token must survive a blocked redemption");
 });
@@ -920,9 +925,62 @@ test("a @discord.local SHADOW account does NOT block the redemption", async () =
   // Merging the shadow account is the whole point of linking.
   seedLinkToken();
   appUsers = [{ id: "shadow", email: "123456789012345678@discord.local", discordId: "123456789012345678", role: "USER" }];
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await waitFor(() => linkTokens.length === 0);
   assert.equal(linkTokens.length, 0);
+});
+
+// ── the code is stored hashed ───────────────────────────────────────────────
+
+test("PIN: /link looks the row up by the SHA-256 of the typed code, normalized first", async () => {
+  // A lower-case, space-padded copy of the code must still redeem: normalize,
+  // then hash, then look up.
+  seedLinkToken();
+  // Own Discord ids from here on: /link is rate-limited per Discord user (10 a
+  // minute), and the tests above have spent the default id's budget.
+  await post(command("link", [{ name: "token", value: `  ${LINK_CODE.toLowerCase()} ` }], "200000000000000001"));
+  await waitFor(() => linkTokens.length === 0);
+  const lookups = opsOf("discordLinkToken.findUnique").map((o) => o.args as { token?: string });
+  assert.deepEqual(lookups, [{ token: sha256(LINK_CODE) }], "the lookup key is the hash, never the typed code");
+  assert.equal(linkTokens.length, 0, "the code redeems");
+  const consumed = opsOf("discordLinkToken.deleteMany").map((o) => o.args);
+  assert.deepEqual(consumed, [{ token: sha256(LINK_CODE) }], "and is consumed by its hash");
+});
+
+test("PIN: a code stored before hashing shipped is NOT redeemable — it fails once and the user makes a new one", async () => {
+  // The documented upgrade behaviour: a row minted by the old route holds the
+  // plaintext code. Accepting it would need a lookup by the typed value, which
+  // is exactly what would let a value read from the DB be redeemed.
+  seedLinkToken({ token: LINK_CODE });
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000002"));
+  await waitFor(() => discordEdits.length > 0);
+  assert.equal(discordEdits[0].content, "Could not link account: Invalid token.");
+  assert.equal(linkTokens.length, 1, "the legacy row is left for the purge cron");
+  assert.equal(opsOf("user.update").length, 0);
+});
+
+test("PIN: the stored hash itself is not a redeemable code", async () => {
+  // What a database read or a backup file yields. It is refused by shape before
+  // any lookup, and its own hash names no row either.
+  seedLinkToken();
+  await post(command("link", [{ name: "token", value: sha256(LINK_CODE) }], "200000000000000003"));
+  await waitFor(() => discordEdits.length > 0);
+  assert.equal(discordEdits[0].content, "Could not link account: Invalid token.");
+  assert.equal(linkTokens.length, 1);
+  assert.equal(opsOf("user.update").length, 0);
+});
+
+test("a malformed code is answered 'invalid' without a DB read", async () => {
+  seedLinkToken();
+  for (const value of ["ABC", "G".repeat(32), `${LINK_CODE}0`]) {
+    discordEdits.length = 0;
+    ops = [];
+    await post(command("link", [{ name: "token", value }], "200000000000000004"));
+    await waitFor(() => discordEdits.length > 0);
+    assert.equal(discordEdits[0].content, "Could not link account: Invalid token.", value);
+    assert.equal(opsOf("discordLinkToken.findUnique").length, 0, `${value} cost a query`);
+  }
+  assert.equal(linkTokens.length, 1);
 });
 
 test("/link with no token argument does not touch the token table", async () => {
@@ -945,7 +1003,7 @@ test("the endpoint never echoes the bot token or the public key", async () => {
 test("every refusal path answers before any command work runs", async () => {
   for (const opts of [{ signed: false }, { timestamp: String(Math.floor(Date.now() / 1000) - 60) }] as PostOpts[]) {
     ops = [];
-    const res = await post(command("link", [{ name: "token", value: "TOKEN123" }]), opts);
+    const res = await post(command("link", [{ name: "token", value: LINK_CODE }]), opts);
     assert.equal(res.status, 401);
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(opsOf("discordLinkToken.findUnique").length, 0, "a refused interaction must not run its command");

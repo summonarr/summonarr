@@ -10,6 +10,7 @@ import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { Prisma } from "@/generated/prisma";
 import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
+import { hashDiscordLinkToken, isWellFormedDiscordLinkToken, normalizeDiscordLinkToken } from "@/lib/discord-link-token";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
@@ -901,19 +902,29 @@ async function handleCommand(interaction: any): Promise<void> {
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tokenValue = (data.options?.find((o: any) => o.name === "token")?.value as string ?? "").trim().toUpperCase();
+      const tokenValue = normalizeDiscordLinkToken(data.options?.find((o: any) => o.name === "token")?.value as string ?? "");
       if (!tokenValue) {
         await editOriginal(appId, token, { content: t("notify.bot.link.missingToken") });
         return;
       }
+      if (!isWellFormedDiscordLinkToken(tokenValue)) {
+        await editOriginal(appId, token, { content: t("notify.bot.link.invalid") });
+        return;
+      }
 
-      const row = await prisma.discordLinkToken.findUnique({ where: { token: tokenValue }, include: { user: true } });
+      // Only the code's SHA-256 is stored, so the row is looked up by the hash of
+      // what was typed — never by the typed value itself, which would let a
+      // value read from the DB or a backup redeem the row. A code minted before
+      // hashing shipped (plaintext in the column) therefore misses here and the
+      // user generates a new one (discord-link-token.ts).
+      const tokenHash = hashDiscordLinkToken(tokenValue);
+      const row = await prisma.discordLinkToken.findUnique({ where: { token: tokenHash }, include: { user: true } });
       if (!row) {
         await editOriginal(appId, token, { content: t("notify.bot.link.invalid") });
         return;
       }
       if (row.expiresAt < new Date()) {
-        await prisma.discordLinkToken.delete({ where: { token: tokenValue } });
+        await prisma.discordLinkToken.delete({ where: { token: tokenHash } });
         await editOriginal(appId, token, { content: t("notify.bot.link.expired") });
         return;
       }
@@ -952,7 +963,7 @@ async function handleCommand(interaction: any): Promise<void> {
       // deleteMany (not delete): a concurrent duplicate /link submit races both
       // callers past the merge; the loser's bare delete would throw P2025 into the
       // outer catch and report "unexpected error" for a link that SUCCEEDED.
-      await prisma.discordLinkToken.deleteMany({ where: { token: tokenValue } });
+      await prisma.discordLinkToken.deleteMany({ where: { token: tokenHash } });
       void assignDiscordRolesOnLink(discordUserId, row.user.email, row.user.role);
       const userName = row.user.name ?? row.user.email;
       await editOriginal(appId, token, { content: t("notify.bot.link.success", { name: escMd(userName), transfer: transferNote }) });

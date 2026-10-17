@@ -370,6 +370,8 @@ model AuthSession {
 // ─── Discord Linking ──────────────────────────────────────────────────────────
 
 model DiscordLinkToken {
+  // The SHA-256 (hex) of the one-time /link code, never the code itself — the
+  // VerificationToken.token pattern (src/lib/discord-link-token.ts).
   token     String   @id
   userId    String   @unique
   discordId String?
