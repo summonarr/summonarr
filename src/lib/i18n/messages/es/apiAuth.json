@@ -97,6 +97,7 @@
   "apiAuth.profile.lastAdmin": "Eres el último administrador. Asciende a otro usuario a administrador antes de eliminar tu cuenta.",
   "apiAuth.profile.newPasswordRequired": "Se requiere la nueva contraseña",
   "apiAuth.profile.newPasswordTooLong": "La nueva contraseña debe tener como máximo {max} caracteres",
+  "apiAuth.profile.secondFactorRequired": "Tu cuenta usa autenticación en dos pasos: confirma este cambio con un código de tu aplicación de autenticación, un código de recuperación o una llave de acceso. Si esta aplicación no puede pedírtelo, cambia tu contraseña en el sitio web de Summonarr.",
   "apiAuth.profile.newPasswordTooShort": "La nueva contraseña debe tener al menos 12 caracteres",
   "apiAuth.profile.noValidFields": "No se proporcionó ningún campo válido",
   "apiAuth.profile.notificationEmailReadOnly": "notificationEmail es de solo lectura para este método de inicio de sesión",

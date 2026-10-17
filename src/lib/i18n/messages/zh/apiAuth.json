@@ -97,6 +97,7 @@
   "apiAuth.profile.lastAdmin": "你是最后一位管理员。删除账户前，请先将其他用户提升为管理员。",
   "apiAuth.profile.newPasswordRequired": "需要新密码",
   "apiAuth.profile.newPasswordTooLong": "新密码最多 {max} 个字符",
+  "apiAuth.profile.secondFactorRequired": "你的账户已启用双重验证：请使用身份验证器应用中的验证码、恢复码或通行密钥确认此更改。如果此应用无法要求输入验证码，请在 Summonarr 网站上修改密码。",
   "apiAuth.profile.newPasswordTooShort": "新密码至少需要 12 个字符",
   "apiAuth.profile.noValidFields": "未提供有效字段",
   "apiAuth.profile.notificationEmailReadOnly": "此登录方式的 notificationEmail 为只读",

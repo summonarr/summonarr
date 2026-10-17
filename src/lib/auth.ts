@@ -1,11 +1,12 @@
 import { prisma } from "@/lib/prisma";
 import { headers } from "next/headers";
-import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { dummyVerify, hashPassword, needsRehash, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { createHash } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { checkRateLimit, reserveRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
+import { checkRateLimit, peekRateLimit, reserveRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
+import { claimSignInLockoutNotice, notifySignInLockout } from "@/lib/account-security-notify";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
 import { signSessionJwt, type SessionClaims, type SessionTransport } from "@/lib/session-jwt";
@@ -25,7 +26,9 @@ import { getPlexConfig } from "@/lib/plex-config";
 // Wherever User.passwordHash is updated (e.g. src/app/api/profile/password/route.ts
 // and admin password-set endpoints), the same code path must also call
 // revokeAllUserSessions(userId) so the AuthSession rows are deleted and stale
-// JWTs cannot refresh on any replica. This file does not write passwordHash directly.
+// JWTs cannot refresh on any replica. The one write in this file is the sign-in
+// rehash (rehashPassword), which stores the SAME password at a higher cost and so
+// deliberately revokes nothing.
 
 import { normalizeEmail } from "@/lib/email-normalize";
 // Re-exported so existing imports of `normalizeEmail` from "@/lib/auth"
@@ -674,6 +677,21 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
 }
 
 
+// Replaces a hash written with older parameters by one at the current cost
+// (guardrail 6i). The password itself is unchanged, so — unlike a password change —
+// nothing is revoked and passwordChangedAt is left alone. Conditional on the stored
+// hash still being the one just verified, so a password change landing in between
+// is never overwritten with the old password. Best-effort: on failure the old hash
+// stays (it still verifies) and the sign-in carries on.
+async function rehashPassword(userId: string, verifiedHash: string, password: string): Promise<void> {
+  try {
+    const passwordHash = await hashPassword(password);
+    await prisma.user.updateMany({ where: { id: userId, passwordHash: verifiedHash }, data: { passwordHash } });
+  } catch (err) {
+    console.error("[auth] password rehash failed:", err instanceof Error ? err.message : err);
+  }
+}
+
 export async function authorizeWithCredentials(
   credentials: Partial<Record<string, unknown>>,
   req: Request,
@@ -748,12 +766,34 @@ export async function authorizeWithCredentials(
     // The hit was already reserved at the gate above — a genuine wrong password (or an
     // unknown account, which also reached the dummyVerify branch) simply keeps it.
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
+    // This failure spent the last of the account's budget of wrong passwords, so
+    // the owner's own password sign-in is refused from now on too: tell them, ONCE
+    // per window however many attempts follow (guardrail 6i). Noticed here, where
+    // the row is already loaded, so a refused attempt still never reads the DB; the
+    // claim is synchronous and the mail detached, so the caller's response and
+    // timing don't change. Only a live local-password account has one to guess.
+    if (
+      user?.passwordHash &&
+      !user.deactivatedAt &&
+      !peekRateLimit(accountKey, accountLimit, accountWindowMs) &&
+      claimSignInLockoutNotice(emailHash, accountWindowMs)
+    ) {
+      void notifySignInLockout(user.id, accountWindowMs);
+    }
     return null;
   }
 
   // Successful sign-in: give the reserved slot back so the account bucket still counts
   // only failures, exactly as the peek/record split intended.
   refundHit(accountKey, accountHitAt);
+
+  // The plaintext is in hand and proven, so upgrade a hash written with older
+  // parameters (guardrail 6i). AWAITED on purpose: the two-factor challenge minted
+  // next fingerprints the stored hash (passwordVersion), so a rehash landing after
+  // it would kill the challenge and fail the owner's sign-in once.
+  if (user.passwordHash && needsRehash(user.passwordHash)) {
+    await rehashPassword(user.id, user.passwordHash, credentials.password as string);
+  }
 
   const device = buildDeviceMeta(headers);
   return { id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device };

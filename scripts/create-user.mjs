@@ -40,14 +40,29 @@ import { promisify } from "node:util";
 
 const scrypt = promisify(scryptCb);
 
-// Mirrors hashPassword() in src/lib/password-hash.ts.
-const SCRYPT_N = 1 << 15;
+// >>> password-hash — mirrors hashPassword() in src/lib/password-hash.ts: the
+// scrypt:2 format at OWASP's N=2^17, r=8, p=1. tests/password-hash.test.mts runs
+// this block and checks its output with the app's own verifyPassword/needsRehash,
+// so a drifted copy fails the suite instead of writing a hash sign-in rejects.
+const SCRYPT_LN = 17; // N = 2^17
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_SALT_BYTES = 16;
-const SCRYPT_MAXMEM = 64 * 1024 * 1024;
-const PREFIX = "scrypt:1:";
+// Node refuses a derivation whose memory (~128·N·r) reaches maxmem.
+const SCRYPT_MAXMEM = 2 * 128 * 2 ** SCRYPT_LN * SCRYPT_R;
+
+async function hashPassword(password) {
+  const salt = randomBytes(SCRYPT_SALT_BYTES);
+  const key = await scrypt(password, salt, SCRYPT_KEYLEN, {
+    N: 2 ** SCRYPT_LN,
+    r: SCRYPT_R,
+    p: SCRYPT_P,
+    maxmem: SCRYPT_MAXMEM,
+  });
+  return `scrypt:2:${SCRYPT_LN}:${SCRYPT_R}:${SCRYPT_P}:${salt.toString("base64")}:${key.toString("base64")}`;
+}
+// <<< password-hash
 
 // Mirrors PRESETS in src/lib/permissions.ts (kept as plain decimals, like
 // scripts/migrate-role-permissions.mjs): USER = REQUEST|REQUEST_MOVIE|REQUEST_TV
@@ -55,17 +70,6 @@ const PREFIX = "scrypt:1:";
 // superbit (1). The column is BIGINT so the value is passed as a string + ::bigint.
 const PRESETS = { USER: "112", ISSUE_ADMIN: "120", ADMIN: "1" };
 const ROLES = Object.keys(PRESETS);
-
-async function hashPassword(password) {
-  const salt = randomBytes(SCRYPT_SALT_BYTES);
-  const key = await scrypt(password, salt, SCRYPT_KEYLEN, {
-    N: SCRYPT_N,
-    r: SCRYPT_R,
-    p: SCRYPT_P,
-    maxmem: SCRYPT_MAXMEM,
-  });
-  return `${PREFIX}${salt.toString("base64")}:${key.toString("base64")}`;
-}
 
 // Mirrors src/lib/email-normalize.ts so the stored email matches sign-in lookup.
 function normalizeEmail(email) {

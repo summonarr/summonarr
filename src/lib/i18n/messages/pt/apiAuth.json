@@ -97,6 +97,7 @@
   "apiAuth.profile.lastAdmin": "Você é o último administrador. Promova outro usuário a administrador antes de excluir sua conta.",
   "apiAuth.profile.newPasswordRequired": "A nova senha é obrigatória",
   "apiAuth.profile.newPasswordTooLong": "A nova senha deve ter no máximo {max} caracteres",
+  "apiAuth.profile.secondFactorRequired": "Sua conta usa autenticação em dois fatores: confirme esta alteração com um código do seu app autenticador, um código de recuperação ou uma chave de acesso. Se este app não puder pedir um, altere sua senha no site do Summonarr.",
   "apiAuth.profile.newPasswordTooShort": "A nova senha deve ter pelo menos 12 caracteres",
   "apiAuth.profile.noValidFields": "Nenhum campo válido informado",
   "apiAuth.profile.notificationEmailReadOnly": "notificationEmail é somente leitura para este método de login",
