@@ -1,6 +1,6 @@
 // Next calls register() once at server startup. Everything inside is gated on
 // the Node.js runtime, so it is safe to use Node APIs and server-only modules.
-import { evaluateLocalOnlyStartup } from "@/lib/local-only";
+import { evaluateLocalOnlyStartup, trustedProxyStartupWarnings } from "@/lib/local-only";
 import { parseAuthUrl } from "@/lib/auth-url";
 import { secretReuseError } from "@/lib/boot-secrets";
 
@@ -93,16 +93,15 @@ export async function register() {
       process.exit(1);
     }
     if (proxyDecision.message) console.warn(proxyDecision.message);
-    if (
-      proxyDecision.mode === "trusted-proxy" &&
-      authUrl?.protocol === "http:" &&
-      process.env.NODE_ENV === "production"
-    ) {
-      console.warn(
-        "[startup] TRUST_PROXY=true but AUTH_URL uses http:// — ensure the reverse proxy strips " +
-        "X-Forwarded-For from untrusted clients; if the app is directly internet-exposed, " +
-        "IP-based rate limiting can be bypassed via header spoofing."
-      );
+    // TRUST_PROXY=true trusts X-Forwarded-For, which is only safe when the port
+    // is reachable through the proxy alone and the proxy overwrites the header.
+    // The rules live in trustedProxyStartupWarnings; this is only the wiring.
+    for (const warning of trustedProxyStartupWarnings({
+      nodeEnv: process.env.NODE_ENV,
+      trustProxy: process.env.TRUST_PROXY,
+      authProtocol: authUrl?.protocol ?? "",
+    })) {
+      console.warn(warning);
     }
 
     if (!process.env.CRON_SECRET || process.env.CRON_SECRET.trim().length < 32) {

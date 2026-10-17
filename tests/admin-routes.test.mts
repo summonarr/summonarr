@@ -1030,114 +1030,52 @@ test("a DEPARTED server user can still be linked — its history outlives the ac
   assert.equal(policy.status, 404);
 });
 
-// ── a MANAGE_USERS delegate (no ADMIN bit) ─────────────────────────────────
+// ── a MANAGE_USERS delegate (no ADMIN bit) — guardrail 34d ─────────────────
 //
 // Linking an identity is what makes its watch history readable by its new owner
-// (/api/play-history/mine*). A delegate could point the server owner's — or any
-// admin's — identity at their OWN account and read every title they watched,
-// while the victim's own history went blank.
+// (/api/play-history/mine*). A delegate can create local accounts with a
+// password they choose, so ANY link a delegate could make was a way to read a
+// member's history: create a puppet account, point the member's identity at it,
+// sign in as the puppet. The older self/admin/server-owner checks didn't stop
+// that, so link, unlink and auto-link are ADMIN-only. Delegates keep the
+// download-policy half of the route.
 
-test("delegate link: may re-attach an ordinary member's identity to an ordinary account", async () => {
+test("delegate link: every link, unlink and auto-link is refused — linking is ADMIN-only", async () => {
   const delegate = await mintSession("USER", Permission.MANAGE_USERS);
-  const targetId = seedUser("USER");
-  const msuId = seedServerUser({ userId: seedUser("USER") });
-  const res = await serverUserPatch(linkReq(msuId, { userId: targetId }, delegate.header), ctxFor(msuId));
-  assert.equal(res.status, 200);
-  assert.equal(serverUsersById.get(msuId)?.userId, targetId);
-});
-
-test("delegate link: can NEVER take an identity for themselves", async () => {
-  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
-  const msuId = seedServerUser({ userId: seedUser("USER") });
-  const before = serverUsersById.get(msuId)?.userId;
-  const res = await serverUserPatch(linkReq(msuId, { userId: delegate.userId }, delegate.header), ctxFor(msuId));
-  assert.equal(res.status, 403);
-  assert.equal(serverUsersById.get(msuId)?.userId, before, "the binding must be untouched");
-});
-
-test("delegate link: can't move, unlink or un-pin an ADMIN's identity, nor the media server's own admin", async () => {
-  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
-  const accomplice = seedUser("USER");
-  const adminOwned = seedServerUser({ userId: seedUser("ADMIN"), manualUserLink: true });
-  for (const body of [{ userId: accomplice }, { userId: null }, { autoLink: true }]) {
-    const res = await serverUserPatch(linkReq(adminOwned, body, delegate.header), ctxFor(adminOwned));
-    assert.equal(res.status, 403, `${JSON.stringify(body)} on an admin's identity`);
+  const memberAccount = seedUser("USER");
+  const puppet = seedUser("USER"); // an ordinary account the delegate could have created
+  const msuId = seedServerUser({ userId: memberAccount, manualUserLink: false });
+  for (const body of [
+    { userId: puppet },
+    { userId: delegate.userId },
+    { userId: null },
+    { autoLink: true },
+    // The policy half riding along must not smuggle a link through.
+    { downloadsEnabled: false, userId: puppet },
+  ]) {
+    const res = await serverUserPatch(linkReq(msuId, body, delegate.header), ctxFor(msuId));
+    assert.equal(res.status, 403, `${JSON.stringify(body)} from a delegate`);
+    assert.match((await res.json()).error, /Only an admin can link or unlink/);
   }
-  assert.notEqual(serverUsersById.get(adminOwned)?.userId, accomplice);
-  assert.equal(serverUsersById.get(adminOwned)?.manualUserLink, true);
-
-  const owner = seedServerUser({ source: "plex", isServerAdmin: true });
-  const res = await serverUserPatch(linkReq(owner, { userId: accomplice }, delegate.header), ctxFor(owner));
-  assert.equal(res.status, 403, "the Plex/Jellyfin server owner's identity");
-  assert.equal(serverUsersById.get(owner)?.userId, null);
+  assert.equal(serverUsersById.get(msuId)?.userId, memberAccount, "the binding must be untouched");
+  assert.equal(serverUsersById.get(msuId)?.manualUserLink, false, "the pin must be untouched");
+  assert.ok(!txOps.some((o) => o.op.startsWith("mediaServerUser.update")), "nothing may be written");
   await flush();
   assert.equal(auditRows.filter((r) => r.action === "SERVER_USER_LINK").length, 0);
 });
 
-test("delegate link: can't hand an identity TO an admin either (role or ADMIN bit)", async () => {
+test("delegate link: refused before the identity is read — an unknown id is 403, not 404", async () => {
   const delegate = await mintSession("USER", Permission.MANAGE_USERS);
-  const msuId = seedServerUser();
-  const adminByRole = seedUser("ADMIN");
-  const adminByBit = seedUser("USER");
-  usersById.get(adminByBit)!.permissions = Permission.ADMIN;
-  for (const target of [adminByRole, adminByBit]) {
-    const res = await serverUserPatch(linkReq(msuId, { userId: target }, delegate.header), ctxFor(msuId));
-    assert.equal(res.status, 403);
-  }
-  assert.equal(serverUsersById.get(msuId)?.userId, null);
+  const res = await serverUserPatch(linkReq("no-such-msu", { userId: seedUser("USER") }, delegate.header), ctxFor("no-such-msu"));
+  assert.equal(res.status, 403);
 });
 
-test("delegate link: the admin check runs on FRESH rows under advisory lock 42", async () => {
-  // The owner is promoted after the route's first read — the in-tx re-read must
-  // see it. Model the promotion as landing exactly when the lock is taken.
+test("delegate policy: a MANAGE_USERS delegate still sets a member's Jellyfin download policy", async () => {
   const delegate = await mintSession("USER", Permission.MANAGE_USERS);
-  const ownerId = seedUser("USER");
-  const msuId = seedServerUser({ userId: ownerId });
-  const savedTx = fakePrisma.$transaction;
-  fakePrisma.$transaction = async (arg: unknown, opts?: { timeout?: number }) => {
-    if (typeof arg !== "function") return savedTx(arg, opts);
-    const tx = makeTx();
-    const exec = tx.$executeRawUnsafe;
-    tx.$executeRawUnsafe = async (sql: string) => {
-      if (sql.includes("pg_advisory_xact_lock(42)")) usersById.get(ownerId)!.role = "ADMIN";
-      return exec(sql);
-    };
-    return (arg as (t: unknown) => Promise<unknown>)(tx);
-  };
-  try {
-    const res = await serverUserPatch(linkReq(msuId, { userId: seedUser("USER") }, delegate.header), ctxFor(msuId));
-    assert.equal(res.status, 403);
-    assert.equal(serverUsersById.get(msuId)?.userId, ownerId);
-    assert.ok(txOps.some((o) => o.op === "$executeRawUnsafe" && String(o.args).includes("pg_advisory_xact_lock(42)")));
-  } finally {
-    fakePrisma.$transaction = savedTx;
-  }
-});
-
-test("delegate link: the identity's CURRENT owner is re-read under the lock too", async () => {
-  // Between the route's first read and the transaction, the 5s poller re-binds
-  // the identity to an admin. Deciding on the first read would let it through.
-  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
-  const adminId = seedUser("ADMIN");
-  const msuId = seedServerUser({ userId: seedUser("USER") });
-  const savedTx = fakePrisma.$transaction;
-  fakePrisma.$transaction = async (arg: unknown, opts?: { timeout?: number }) => {
-    if (typeof arg !== "function") return savedTx(arg, opts);
-    const tx = makeTx();
-    const exec = tx.$executeRawUnsafe;
-    tx.$executeRawUnsafe = async (sql: string) => {
-      if (sql.includes("pg_advisory_xact_lock(42)")) serverUsersById.get(msuId)!.userId = adminId;
-      return exec(sql);
-    };
-    return (arg as (t: unknown) => Promise<unknown>)(tx);
-  };
-  try {
-    const res = await serverUserPatch(linkReq(msuId, { userId: seedUser("USER") }, delegate.header), ctxFor(msuId));
-    assert.equal(res.status, 403);
-    assert.equal(serverUsersById.get(msuId)?.userId, adminId);
-  } finally {
-    fakePrisma.$transaction = savedTx;
-  }
+  const msuId = seedServerUser({ source: "jellyfin", userId: seedUser("USER") });
+  const res = await serverUserPatch(linkReq(msuId, { downloadsEnabled: false }, delegate.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  assert.equal((serverUsersById.get(msuId) as ServerUserRow & { downloadsEnabled?: boolean }).downloadsEnabled, false);
 });
 
 test("an ADMIN may still link anything, including to themselves and the server owner's identity", async () => {

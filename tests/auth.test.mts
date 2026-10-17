@@ -552,6 +552,7 @@ const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { checkRateLimit, peekRateLimit, recordFailure } = await import("../src/lib/rate-limit.ts");
 const { PRESETS, Permission } = await import("../src/lib/permissions.ts");
 const { hashPassword } = await import("../src/lib/password-hash.ts");
+const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 
 // ── fixtures / helpers ──────────────────────────────────────────────────────
 const COOKIE = getSessionCookieName(); // "summonarr-session" under the http AUTH_URL
@@ -1865,6 +1866,50 @@ test("mint TTL table: desktop/mobile/rememberMe pick their configured windows; a
       }),
   );
   assertApprox(spoofed.expiresInSeconds, 2_592_000, "spoofed mobile UA stays at maxDuration");
+});
+
+// Every NATIVE sign-in emails the owner (account-security-notify.ts "app-signed-in").
+// A native session never expires (guardrail 6c), so a stolen credential used
+// from a native client would otherwise hold the account unnoticed. A browser
+// sign-in — even a spoofed mobile UA — sends nothing.
+test("mint: a NATIVE sign-in emails the owner 'app signed in' with the device label; a browser sign-in sends nothing", async () => {
+  invalidateFeatureFlagCache(); // feature.integration.email defaults on
+  settings.set("enableUserEmails", "true");
+  settings.set("emailBackend", "resend");
+  settings.set("resendApiKey", "re_test_key");
+  settings.set("siteUrl", "https://requests.example.com");
+  seedUser({ id: "u-app", email: "app@example.com", name: "App" });
+  const sent: Array<{ to: unknown; subject: string; html: string }> = [];
+  respond = (url, init) => {
+    if (url.hostname === "api.resend.com") {
+      sent.push(JSON.parse(String(init?.body)));
+      return jsonResponse({ id: "email_1" });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const settle = async () => {
+    // The send is fire-and-forget; give it a bounded number of turns.
+    for (let i = 0; i < 50; i++) await flushAsync();
+  };
+
+  await withRequestContext({ headers: { "user-agent": iphoneUa("app-web") } }, () =>
+    signInAndMintSession({ user: mintableUser("u-app", { ua: iphoneUa("app-web"), rememberMe: "true" }), providerId: "credentials" }),
+  );
+  await settle();
+  assert.equal(sent.length, 0, "a browser sign-in is not an app sign-in, whatever its UA");
+
+  const native = await withRequestContext(
+    { headers: { "x-summonarr-client": "ios; build=42", "user-agent": iphoneUa("app-ios") } },
+    () => signInAndMintSession({ user: mintableUser("u-app", { ua: iphoneUa("app-ios") }), providerId: "jellyfin" }),
+  );
+  await settle();
+  assert.equal(sent.length, 1, "exactly one email per native sign-in");
+  assert.ok(authSessions.has(native.sessionId), "the session the email reports exists");
+  assert.equal(sent[0].to, "app@example.com");
+  assert.match(sent[0].subject, /new app sign-in/);
+  assert.match(sent[0].html, /A Summonarr app signed in to your account\. Device: Safari on iPhone\./);
+  assert.match(sent[0].html, /sign that device out under Active Sessions/);
+  assert.match(sent[0].html, /href="https:\/\/requests\.example\.com\/profile#sessions"/, "the button opens the Sessions list");
 });
 
 test("first-admin promotion: fires for credentials pre-setup, is refused for OIDC, and the env flag opts OAuth in", async () => {

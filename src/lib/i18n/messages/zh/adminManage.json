@@ -579,7 +579,7 @@
   "adminManage.serverUsers.autoDisable": "为新的 Jellyfin 用户自动禁止下载",
   "adminManage.serverUsers.autoDisableHint": "同步时发现的新 Jellyfin 账户将被禁止下载。手动重新允许的用户不受影响。",
   "adminManage.serverUsers.serverAdmin": "服务器管理员",
-  "adminManage.serverUsers.departedTitle": "已不在媒体服务器上。之所以列出，是因为其观看历史仍在此处，可以进行归属。",
+  "adminManage.serverUsers.departedTitle": "已从媒体服务器中移除或在其上被停用。之所以列出，是因为其观看历史仍在此处，可以进行归属。",
   "adminManage.serverUsers.departed": "已离开",
   "adminManage.serverUsers.empty": "尚未同步任何媒体服务器用户。",
   "adminManage.serverUsers.filterPlaceholder": "按用户名或邮箱筛选…",

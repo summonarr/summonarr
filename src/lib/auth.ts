@@ -17,6 +17,7 @@ import { defaultPermissionsForRole, effectivePermissions, parsePermissions, seri
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { NEVER_EXPIRES_AT_SEC } from "@/lib/session-lifetime";
+import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, plexSettingKey, mediaInstanceLabel } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -1312,6 +1313,19 @@ export async function signInAndMintSession(params: {
     },
     { expiresInSeconds },
   );
+
+  // A NATIVE session was just minted (the X-Summonarr-Client caller, whose
+  // deadline is the never-reached sentinel — guardrail 6c). Nothing time-based
+  // will ever end it, so a stolen password or media-server credential used from
+  // a native client would hold the account until someone notices: email the
+  // owner on every one, with the device, so they can sign it out. Best-effort
+  // and never awaited — it can't fail or slow the sign-in, and it runs only
+  // after initializeTokenOnSignIn has written the AuthSession row it reports.
+  if (userId && expiresAt === NEVER_EXPIRES_AT_SEC) {
+    void notifyAccountSecurityEvent(userId, "app-signed-in", {
+      device: (token.deviceLabel as string | undefined) ?? null,
+    });
+  }
 
   return {
     token: jwt,

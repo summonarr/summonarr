@@ -4,12 +4,22 @@ import { getJellyfinConfig } from "./jellyfin-config";
 import { normalizeEmail } from "./email-normalize";
 import { type MediaInstanceKey, mediaInstanceLabel } from "./media-instances";
 import { getSyncableMediaInstances } from "./media-instance-registry";
+import { offboardJellyfinIdentities } from "./jellyfin-offboarding";
 
 interface PolicySyncResult {
   source: string;
   upserted: number;
   enforced: number;
   errors: number;
+}
+
+// One instance's sync, plus what the offboarding pass (jellyfin-offboarding.ts)
+// needs from it: the identities this run turned inactive, and whether the
+// server gave an opinion at all (a failed or empty /Users fetch gives none).
+interface InstanceSyncOutcome {
+  result: PolicySyncResult;
+  departed: string[];
+  noOpinion: boolean;
 }
 
 // Pure guard for the Jellyfin user reconcile (soft-delete of departed users).
@@ -50,6 +60,9 @@ const refusedReconciles = new Map<MediaInstanceKey, { signature: string; runs: n
  * - Known users with downloadsEnabled = false: policy is pushed to the server even
  *   if someone re-enabled it directly in Jellyfin.
  * - Admins (isServerAdmin = true) are never touched by enforcement.
+ * - A user removed from the server, or disabled on it, is marked inactive, and
+ *   once that identity is gone from every configured server the Summonarr
+ *   account it signs in as is signed out (jellyfin-offboarding.ts).
  */
 export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   const results: PolicySyncResult[] = [];
@@ -68,24 +81,46 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   // (never library-scaled), so guardrail 31's bounded-concurrency concern
   // doesn't apply — a straightforward loop keeps this simple and avoids two
   // instances' full user-syncs interleaving their own internal work.
+  const departed: string[] = [];
+  const noOpinion: MediaInstanceKey[] = [];
   for (const instance of instances) {
     const cfg = await getJellyfinConfig(instance.slug);
     if (!cfg.url || !cfg.apiKey) continue; // defensive; getSyncableMediaInstances already filters to configured ones
     try {
-      results.push(await syncJellyfinPolicies(instance.slug, cfg.url, cfg.apiKey, autoDisableNew));
+      const outcome = await syncJellyfinPolicies(instance.slug, cfg.url, cfg.apiKey, autoDisableNew);
+      results.push(outcome.result);
+      departed.push(...outcome.departed);
+      if (outcome.noOpinion) noOpinion.push(instance.slug);
     } catch (err) {
       console.warn(`[download-policy] Jellyfin sync task failed for instance "${instance.slug}":`, err instanceof Error ? err.message : String(err));
       // Surface the task-level failure to the caller's error total so the cron
       // run is recorded as not-ok instead of silently reporting green.
       results.push({ source: mediaInstanceLabel("jellyfin", instance.slug), upserted: 0, enforced: 0, errors: 1 });
+      // Whatever it wrote before throwing, this server's answer is not one the
+      // offboarding pass can lean on this run.
+      noOpinion.push(instance.slug);
     }
+  }
+
+  // After EVERY instance has synced, so "gone from every configured server" is
+  // judged on this run's rows (guardrail 35). Never throws out of the sync.
+  try {
+    const offboard = await offboardJellyfinIdentities({ departed, noOpinion });
+    if (offboard.errors > 0) {
+      results.push({ source: "jellyfin-offboarding", upserted: 0, enforced: 0, errors: offboard.errors });
+    }
+  } catch (err) {
+    console.warn("[download-policy] Jellyfin offboarding pass failed:", err instanceof Error ? err.message : String(err));
+    results.push({ source: "jellyfin-offboarding", upserted: 0, enforced: 0, errors: 1 });
   }
 
   return results;
 }
 
-async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<PolicySyncResult> {
+async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<InstanceSyncOutcome> {
   const result: PolicySyncResult = { source: mediaInstanceLabel("jellyfin", instance), upserted: 0, enforced: 0, errors: 0 };
+  // Identities this run turned inactive, for the offboarding pass.
+  const departed: string[] = [];
 
   let users;
   try {
@@ -95,7 +130,7 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
     // Count the fetch failure so the cron run is recorded as not-ok rather than
     // reporting zero errors on a sync that never actually ran.
     result.errors++;
-    return result;
+    return { result, departed, noOpinion: true };
   }
 
   // Batch-load all existing records and all potentially-linked Summonarr accounts
@@ -151,6 +186,16 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
       // For existing users with an explicit value: keep it (honors manual flips to true).
       const defaultForNew = autoDisableNew ? false : u.downloadsEnabled;
       const downloadsEnabled = existing?.downloadsEnabled ?? defaultForNew;
+      // A user DISABLED on the server is as gone as a removed one: Jellyfin
+      // refuses their sign-in, so the row is inactive like a departed user's
+      // (guardrail 28 — soft, never deleted). Unlike a departure this is the
+      // server's explicit answer, not an absence, so the shrink guard below
+      // doesn't apply. Re-enabling them on the server re-activates the row.
+      const active = !u.isDisabled;
+      // Newly inactive — an active row, or one seen for the first time already
+      // disabled. A row that was already inactive was offboarded on that run.
+      // Decided before the write below, from the row as this run first read it.
+      const newlyInactive = !active && existing?.active !== false;
 
       await prisma.mediaServerUser.upsert({
         where: { source_serverInstance_sourceUserId: { source: "jellyfin", serverInstance: instance, sourceUserId: u.id } },
@@ -162,19 +207,21 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
           email: u.email ?? null,
           isServerAdmin: u.isAdmin,
           downloadsEnabled,
+          active,
           ...(userId ? { userId } : {}),
         },
         update: {
           username: u.name,
           ...(u.email ? { email: u.email } : {}),
           isServerAdmin: u.isAdmin,
-          active: true, // re-activate a returning user (soft-deleted on a prior departure)
+          active, // re-activate a returning (or re-enabled) user
           ...(userId ? { userId } : {}),
           // Write server value only when we have no admin-set value yet (null).
           ...(existing === null || existing.downloadsEnabled === null ? { downloadsEnabled } : {}),
         },
       });
       result.upserted++;
+      if (newlyInactive) departed.push(u.id);
 
       // Push only on DRIFT — u.downloadsEnabled is the server's CURRENT value
       // from the same /Users fetch this run already made (absent Policy coerces
@@ -232,6 +279,10 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
   }
   if (safeToReconcile) {
     const currentIds = users.map((u) => u.id);
+    const currentIdSet = new Set(currentIds);
+    const absent = existingRows
+      .filter((r) => r.active && !currentIdSet.has(r.sourceUserId))
+      .map((r) => r.sourceUserId);
     // Scoped by serverInstance — load-bearing (guardrail 28). Without this, a
     // user who exists only on a DIFFERENT Jellyfin server would look "absent"
     // from THIS instance's fetch and get incorrectly soft-deleted, destroying
@@ -245,9 +296,10 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
     // instead of restarting the 3-run countdown behind a log line that already
     // claimed "reconciling".
     refusedReconciles.delete(instance);
+    departed.push(...absent);
   }
 
-  return result;
+  return { result, departed, noOpinion: users.length === 0 };
 }
 
 /**

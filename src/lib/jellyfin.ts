@@ -966,6 +966,8 @@ export interface JellyfinUserInfo {
   name: string;
   email?: string;
   isAdmin: boolean;
+  // Policy.IsDisabled — the account still exists but can't sign in.
+  isDisabled: boolean;
   downloadsEnabled: boolean;
 }
 
@@ -1002,6 +1004,7 @@ export async function getJellyfinAllUsers(baseUrl: string, apiKey: string): Prom
       name: u.Name,
       email,
       isAdmin: u.Policy?.IsAdministrator === true,
+      isDisabled: u.Policy?.IsDisabled === true,
       // Treat an absent Policy or absent EnableContentDownloading as enabled
       // (Jellyfin's default). Only false is explicitly disabled.
       downloadsEnabled: u.Policy?.EnableContentDownloading !== false,

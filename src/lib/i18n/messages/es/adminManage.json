@@ -579,7 +579,7 @@
   "adminManage.serverUsers.autoDisable": "Desactivar automáticamente las descargas de los nuevos usuarios de Jellyfin",
   "adminManage.serverUsers.autoDisableHint": "Las cuentas nuevas de Jellyfin detectadas al sincronizar tienen las descargas desactivadas. No se tocan los usuarios reactivados a mano.",
   "adminManage.serverUsers.serverAdmin": "Administrador del servidor",
-  "adminManage.serverUsers.departedTitle": "Ya no está en el servidor multimedia. Aparece porque su historial de reproducción sigue aquí y se puede atribuir.",
+  "adminManage.serverUsers.departedTitle": "Se eliminó o se desactivó en el servidor multimedia. Aparece porque su historial de reproducción sigue aquí y se puede atribuir.",
   "adminManage.serverUsers.departed": "dado de baja",
   "adminManage.serverUsers.empty": "Aún no se ha sincronizado ningún usuario de servidores multimedia.",
   "adminManage.serverUsers.filterPlaceholder": "Filtrar por nombre de usuario o correo…",

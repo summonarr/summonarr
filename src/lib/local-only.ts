@@ -216,3 +216,54 @@ export function evaluateLocalOnlyStartup(env: LocalOnlyStartupInput): LocalOnlyS
       "internet-facing deployment; keep local-only instances off the public internet.",
   };
 }
+
+// ── trusted-proxy boot warnings ─────────────────────────────────────────────
+
+export type TrustedProxyStartupInput = {
+  /** process.env.NODE_ENV */
+  nodeEnv: string | undefined;
+  /** process.env.TRUST_PROXY */
+  trustProxy: string | undefined;
+  /** AUTH_URL's protocol ("https:" / "http:"); "" when AUTH_URL is unset or unparseable. */
+  authProtocol: string | null | undefined;
+};
+
+/**
+ * The boot warnings for a TRUST_PROXY=true deployment ([] otherwise).
+ *
+ * TRUST_PROXY=true makes getClientIp (rate-limit.ts) read the client address
+ * from X-Forwarded-For — the per-IP rate limits, audit and device rows, and the
+ * machine-session IP allowlist all key on it. That header is only as honest as
+ * the path to the port: anyone who reaches the app port WITHOUT going through
+ * the proxy writes it themselves. The compose files publish "3001:3000" on every
+ * interface (the default is left alone so an existing LAN setup keeps working),
+ * so the operator is told, on every boot, what TRUST_PROXY=true assumes:
+ *
+ *   - the app port is reachable only through the reverse proxy — published on
+ *     loopback ("127.0.0.1:3001:3000") or only on the proxy's private network;
+ *   - the proxy OVERWRITES X-Forwarded-For with the address that connected to
+ *     it, so a forged value never reaches the app whatever TRUSTED_PROXY_HOPS says.
+ *
+ * Plus, in production, the plain-http AUTH_URL warning that used to live inline
+ * in instrumentation.ts. Never fatal — the app can't see how its port is
+ * published.
+ */
+export function trustedProxyStartupWarnings(env: TrustedProxyStartupInput): string[] {
+  if (env.trustProxy !== "true") return [];
+  const warnings = [
+    "[startup] TRUST_PROXY=true — the client IP for rate limiting, audit rows and the machine-session " +
+      "IP allowlist is read from X-Forwarded-For. Make the app port reachable ONLY through your reverse " +
+      'proxy (publish it on loopback, e.g. "127.0.0.1:3001:3000" in docker-compose.yml, or keep it on ' +
+      "the proxy's private network), and have the proxy OVERWRITE X-Forwarded-For with the connecting " +
+      "address (nginx: proxy_set_header X-Forwarded-For $remote_addr;). Anyone who can reach the port " +
+      "directly can otherwise forge their IP.",
+  ];
+  if (env.authProtocol === "http:" && env.nodeEnv === "production") {
+    warnings.push(
+      "[startup] TRUST_PROXY=true but AUTH_URL uses http:// — ensure the reverse proxy strips " +
+        "X-Forwarded-For from untrusted clients; if the app is directly internet-exposed, " +
+        "IP-based rate limiting can be bypassed via header spoofing.",
+    );
+  }
+  return warnings;
+}

@@ -21,7 +21,7 @@ Prefer building from source? See the root [`docker-compose.yml`](../docker-compo
 13. [Upgrading](#upgrading)
 14. [Common commands](#common-commands)
 
-> **Production deployments should sit behind a TLS-terminating reverse proxy** (Nginx, Caddy, Traefik, …). Configure the proxy to forward `Host`, `X-Forwarded-For` / `X-Real-IP`, and `X-Forwarded-Proto`; then set `AUTH_URL=https://your.domain` and `TRUST_PROXY=true` in `.env`. Specific proxy configs are out of scope for this README — consult your proxy's documentation.
+> **Production deployments should sit behind a TLS-terminating reverse proxy** (Nginx, Caddy, Traefik, …). Configure the proxy to forward `Host`, `X-Forwarded-For` / `X-Real-IP`, and `X-Forwarded-Proto`; then set `AUTH_URL=https://your.domain` and `TRUST_PROXY=true` in `.env`. With `TRUST_PROXY=true` the app port must be reachable **only through the proxy**, and the proxy must **overwrite** `X-Forwarded-For` — see [Reach the app only through the reverse proxy](#reach-the-app-only-through-the-reverse-proxy-trust_proxytrue). Specific proxy configs are out of scope for this README — consult your proxy's documentation.
 >
 > **Running without a reverse proxy** (`TRUST_PROXY` unset or `false`) puts the app in **local-only mode**, which is appropriate *only* behind network controls or on a genuinely private host — a LAN-only machine, a loopback-bound port, or one firewalled off from the internet. That mode is gated by the client-supplied `Host` header alone, which is spoofable and therefore not a security boundary, so production requires the explicit `SUMMONARR_ALLOW_LOCAL_ONLY=true` acknowledgement and refuses to start without it.
 
@@ -129,7 +129,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | `CRON_SECRET`          | **≥ 32 chars**                             | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment.                                                                        |
 | `POSTGRES_PASSWORD`    | any; `openssl rand -base64 32` recommended | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically.                                                                     |
 | `TOKEN_ENCRYPTION_KEY` | **exactly 64 hex chars** (32 bytes)        | AES-256-GCM key for encrypting Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts at rest. `openssl rand -hex 32`.                       |
-| `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`. Forwarded client-IP headers (`X-Forwarded-For` / `X-Real-IP`) are read **only** when this is exactly `"true"`. |
+| `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`. Forwarded client-IP headers (`X-Forwarded-For` / `X-Real-IP`) are read **only** when this is exactly `"true"`. With `true`, publish the app port to the proxy only (`"127.0.0.1:3001:3000"`) and have the proxy overwrite `X-Forwarded-For` — see [Reach the app only through the reverse proxy](#reach-the-app-only-through-the-reverse-proxy-trust_proxytrue); the app logs this reminder at every boot. |
 | `SUMMONARR_ALLOW_LOCAL_ONLY` | `"true"` to enable; default off      | **Required whenever `TRUST_PROXY` is not `"true"`** — production refuses to boot in local-only mode without it. Local-only mode is gated solely by the client-supplied, spoofable `Host` header, so it is safe only on a genuinely private host (LAN-only, loopback-bound, or firewalled). Set it to acknowledge that your network provides the access control. It cannot unlock a public `AUTH_URL`. |
 | `SUMMONARR_DEFAULT_LOCALE` | `en` (default), `es`, `fr`, `de`, `pt` (Brazilian), `it` or `zh` (Simplified) | Default interface language for browsers whose language isn't supported, and for emails, push notifications and Discord messages to users who have never picked a language. A region tag (`pt-BR`, `zh-CN`) is accepted and read on its language part. Each user can still choose their own language from the account menu. |
 
@@ -216,7 +216,9 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
 
      proxy_set_header Host              $host;
      proxy_set_header X-Real-IP         $remote_addr;
-     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+     # Overwrite, never pass a client-supplied value through — see
+     # "Reach the app only through the reverse proxy" below.
+     proxy_set_header X-Forwarded-For   $remote_addr;
      proxy_set_header X-Forwarded-Proto $scheme;
    }
    ```
@@ -294,6 +296,24 @@ To add it by hand instead: in Radarr/Sonarr go to **Settings → Connect → + �
 ## Security hardening (operational)
 
 Code-level defenses (CSRF origin checks, SSRF protection via per-request DNS re-resolution, DB-checked session revocation, secrets encrypted at rest, per-IP/-user rate limiting) ship built in. The items below are **deployment-side** hardening that only you can do. None are required for the app to run, but each closes a real exposure on an internet-facing instance.
+
+### Reach the app only through the reverse proxy (`TRUST_PROXY=true`)
+
+With `TRUST_PROXY=true`, Summonarr takes each request's client IP from `X-Forwarded-For` (the `TRUSTED_PROXY_HOPS`-th entry from the right). Per-IP rate limits, audit and device rows, and the machine-session IP allowlist all key on that address. The header is only as honest as the path to the port: **anyone who can reach the app port without going through the proxy writes it themselves**, and gets a fresh rate-limit budget per forged address.
+
+The shipped `docker-compose.yml` publishes `"3001:3000"` on **every** interface. That default is left alone so an existing LAN deployment keeps working, so on an internet-facing host change it yourself:
+
+1. **Publish the port to the proxy only.** When the proxy runs on the same host, bind it to loopback:
+
+   ```yaml
+   ports:
+     - "127.0.0.1:3001:3000"
+   ```
+
+   When the proxy runs in another container, drop `ports:` entirely and put both containers on one Docker network (the proxy then reaches `summonarr:3000`). Either way, check from another machine that `http://<host-ip>:3001` no longer answers.
+2. **Have the proxy overwrite `X-Forwarded-For`** with the address that connected to it, so a client-supplied value never reaches the app whatever `TRUSTED_PROXY_HOPS` says. In nginx that is `proxy_set_header X-Forwarded-For $remote_addr;` (not `$proxy_add_x_forwarded_for`), plus `proxy_set_header X-Real-IP $remote_addr;`. Caddy (v2.5+) and Traefik already discard a client-sent `X-Forwarded-For` by default; keep their trusted-proxy lists empty unless another proxy sits in front of them. With chained proxies (e.g. Cloudflare → nginx), only the internet-facing one overwrites; the ones behind it append, and `TRUSTED_PROXY_HOPS` is the number of proxies.
+
+The app logs a reminder of both points at every boot while `TRUST_PROXY=true`.
 
 ### Keep webhook tokens out of proxy logs
 

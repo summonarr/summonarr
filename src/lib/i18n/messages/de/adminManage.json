@@ -579,7 +579,7 @@
   "adminManage.serverUsers.autoDisable": "Downloads für neue Jellyfin-Benutzer automatisch deaktivieren",
   "adminManage.serverUsers.autoDisableHint": "Bei neuen Jellyfin-Konten, die bei der Synchronisierung gefunden werden, sind Downloads deaktiviert. Manuell wieder aktivierte Benutzer bleiben unverändert.",
   "adminManage.serverUsers.serverAdmin": "Server-Admin",
-  "adminManage.serverUsers.departedTitle": "Nicht mehr auf dem Medienserver. Wird aufgeführt, weil der Wiedergabeverlauf noch vorhanden ist und zugeordnet werden kann.",
+  "adminManage.serverUsers.departedTitle": "Vom Medienserver entfernt oder dort deaktiviert. Wird aufgeführt, weil der Wiedergabeverlauf noch vorhanden ist und zugeordnet werden kann.",
   "adminManage.serverUsers.departed": "ausgeschieden",
   "adminManage.serverUsers.empty": "Noch keine Medienserver-Benutzer synchronisiert.",
   "adminManage.serverUsers.filterPlaceholder": "Nach Benutzername oder E-Mail filtern…",

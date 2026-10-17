@@ -154,6 +154,9 @@ export default async function UsersPage() {
   }
 
   const t = await getTranslator();
+  // Linking a media-server identity to an account is ADMIN-only (guardrail 34d);
+  // a MANAGE_USERS delegate sees the bindings read-only.
+  const canLinkServerUsers = hasPermission(session.user.permissions, Permission.ADMIN);
 
   return (
     <div className="ds-page-enter">
@@ -226,12 +229,15 @@ export default async function UsersPage() {
             users={serverUsers}
             hasJellyfin={hasJellyfin}
             autoDisableNew={autoDisableNew}
-            // Link targets for the manual account picker. Purged accounts are
-            // excluded — they have no identity left to attribute history to
-            // (the route rejects them too).
-            accounts={users
-              .filter((u) => !isPurgedRow(u))
-              .map((u) => ({ id: u.id, name: u.name, email: u.email }))}
+            canLink={canLinkServerUsers}
+            // Link targets for the manual account picker (admins only). Purged
+            // accounts are excluded — they have no identity left to attribute
+            // history to (the route rejects them too).
+            accounts={canLinkServerUsers
+              ? users
+                  .filter((u) => !isPurgedRow(u))
+                  .map((u) => ({ id: u.id, name: u.name, email: u.email }))
+              : []}
           />
         </div>
       )}
