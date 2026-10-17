@@ -1,14 +1,15 @@
-// Unit tests for UA fingerprinting (src/lib/ua-fingerprint.ts). The fingerprint
-// binds a cookie session to browser-family/OS/device-class, so the classifier's
-// precedence rules (Edge/Opera before Chrome, iPad-as-tablet) and the skip rules
-// in matchesStoredFingerprint (machine: prefix, absent fingerprint) are the
-// security-relevant surface.
+// Unit tests for UA fingerprinting (src/lib/ua-fingerprint.ts). Since guardrail
+// 6h the fingerprint is NOT a security control — nothing compares it with the
+// request's User-Agent (the client writes that header). It feeds the device
+// label and the mobile/desktop session length, so the classifier's precedence
+// rules (Edge/Opera before Chrome, iPad-as-tablet) are still pinned for the
+// labels they produce. The "nothing enforces it" side is pinned in
+// tests/session-transport.test.mts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   extractUaFingerprint,
   serializeFingerprint,
-  matchesStoredFingerprint,
   fingerprintToLabel,
 } from "../src/lib/ua-fingerprint.ts";
 
@@ -67,21 +68,6 @@ test("serializeFingerprint is the browser:os:device triple", () => {
   assert.equal(serializeFingerprint(extractUaFingerprint(UA.chromeWin)), "chrome:windows:desktop");
 });
 
-test("matchesStoredFingerprint: match / mismatch / skip rules", () => {
-  const stored = serializeFingerprint(extractUaFingerprint(UA.chromeWin));
-  // Same browser family matches even across versions (fingerprint has no version).
-  assert.equal(matchesStoredFingerprint(stored, UA.chromeWin.replace("120.0.0.0", "121.0.0.0")), true);
-  // Different browser family on the same OS is a mismatch → deny.
-  assert.equal(matchesStoredFingerprint(stored, UA.edgeWin), false);
-  // A null UA cannot match a real stored fingerprint.
-  assert.equal(matchesStoredFingerprint(stored, null), false);
-  // No fingerprint on the claims → skip (older tokens must keep working).
-  assert.equal(matchesStoredFingerprint(undefined, UA.chromeWin), true);
-  assert.equal(matchesStoredFingerprint("", UA.chromeWin), true);
-  // machine: sessions are bound to CRON_SECRET, not a UA → always skip.
-  assert.equal(matchesStoredFingerprint("machine:abc123", null), true);
-});
-
 test("fingerprintToLabel renders device-aware OS names", () => {
   assert.equal(fingerprintToLabel(extractUaFingerprint(UA.safariIpad)), "Safari on iPad");
   assert.equal(fingerprintToLabel(extractUaFingerprint(UA.safariIphone)), "Safari on iPhone");
@@ -126,17 +112,14 @@ test("Chrome OS (CrOS token) classifies as chromeos, not linux/unknown", () => {
 
 test("iOS Chrome (CriOS/) classifies as safari — pins CURRENT behavior", () => {
   // Chrome on iOS sends CriOS/ instead of Chrome/, so it falls through to the
-  // Safari/ test. This is intentionally pinned: "fixing" the classification to
-  // "chrome" would change serializeFingerprint output and invalidate every
-  // stored fingerprint for iOS Chrome users, forcing them all to re-login.
+  // Safari/ test. Pinned so the device label doesn't change under existing
+  // sessions; since guardrail 6h a reclassification would be cosmetic only.
   assert.deepEqual(extractUaFingerprint(UA.chromeIphone), {
     browser: "safari",
     os: "ios",
     device: "mobile",
   });
-  // And the stored fingerprint keeps matching across requests from that browser.
-  const stored = serializeFingerprint(extractUaFingerprint(UA.chromeIphone));
-  assert.equal(matchesStoredFingerprint(stored, UA.chromeIphone), true);
+  assert.equal(fingerprintToLabel(extractUaFingerprint(UA.chromeIphone)), "Safari on iPhone");
 });
 
 test("fingerprintToLabel splits Android tablet vs phone", () => {

@@ -124,7 +124,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | Variable               | Constraints                                | Purpose                                                                                                                                                                                  |
 | ---------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TMDB_READ_TOKEN`      | v4 bearer token                            | Required TMDB credential. Sent as a header, so the key never leaks into upstream access logs.                                                                                           |
-| `NEXTAUTH_SECRET`      | **≥ 32 chars**                             | Signs JWT session tokens. `openssl rand -base64 32`.                                                                                                                                     |
+| `NEXTAUTH_SECRET`      | **≥ 32 chars**                             | Signs JWT session tokens. `openssl rand -base64 32`. To rotate it without signing everyone out, see `NEXTAUTH_SECRET_PREVIOUS` under [Rotating `NEXTAUTH_SECRET`](#rotating-nextauth_secret).                     |
 | `AUTH_URL`             | Absolute URL incl. scheme                  | Public URL of the app. Pins the app's own base URL (used for redirects, the OIDC callback, trusted-origin/CSRF checks, and cookie-`Secure` detection) and blocks Host-header injection behind a proxy. Use `https://…` in production so session cookies get the `Secure` + `__Host-` treatment. |
 | `CRON_SECRET`          | **≥ 32 chars**                             | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment.                                                                        |
 | `POSTGRES_PASSWORD`    | any; `openssl rand -base64 32` recommended | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically.                                                                     |
@@ -333,6 +333,19 @@ On an internet-facing deployment (`TRUST_PROXY=true`) the pre-auth restore is th
 - If you enable it, **always** set `machineSessionAllowedIps` to the automation host(s) — an empty allowlist accepts any caller IP. (The app now rejects enabling machine sessions with an empty allowlist, but set it deliberately.)
 - Prefer the file mount `/run/secrets/cron_secret` so the secret never appears in `docker inspect`.
 - **Rotate `CRON_SECRET` immediately if it leaks** (compose files, CI logs, backups).
+
+### Rotating `NEXTAUTH_SECRET`
+
+Changing `NEXTAUTH_SECRET` on its own signs every user out. For a **planned** rotation, keep the old value as `NEXTAUTH_SECRET_PREVIOUS` (≥ 32 chars) and restart:
+
+```bash
+NEXTAUTH_SECRET_PREVIOUS=<the current value>
+NEXTAUTH_SECRET=<a new value from: openssl rand -base64 32>
+```
+
+The previous secret only verifies; nothing new is signed with it. Browser sessions move to the new secret on their next request. **iOS sessions are never re-issued**, so a device signed in before the rotation keeps working only while `NEXTAUTH_SECRET_PREVIOUS` is set — removing it later signs those devices out (they sign in again). The app refuses to boot with a previous secret shorter than 32 characters or equal to `CRON_SECRET` / `TOKEN_ENCRYPTION_KEY`.
+
+**If `NEXTAUTH_SECRET` leaked, do not set `NEXTAUTH_SECRET_PREVIOUS`** — it would keep accepting tokens forged with the leaked value. Change `NEXTAUTH_SECRET` alone and accept the global sign-out.
 
 ### APNs relay trust (iOS push)
 

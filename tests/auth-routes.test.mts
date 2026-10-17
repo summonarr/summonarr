@@ -284,6 +284,7 @@ async function mintToken(opts: {
   name?: string;
   provider?: string;
   expiresInSeconds?: number;
+  transport?: "cookie" | "bearer"; // omitted ⇒ a pre-claim token (either transport)
 }): Promise<string> {
   const ttl = opts.expiresInSeconds ?? 7_200;
   const expiresAt = Math.floor(Date.now() / 1000) + ttl;
@@ -296,6 +297,7 @@ async function mintToken(opts: {
       sessionId: opts.sessionId,
       expiresAt,
       ...(opts.name ? { name: opts.name } : {}),
+      ...(opts.transport ? { transport: opts.transport } : {}),
     },
     { expiresInSeconds: ttl },
   );
@@ -588,6 +590,32 @@ test("sign-out is bearer-first: a bearer sign-out revokes the bearer's session, 
   assert.equal(authSessions.has("sess-ck"), true, "the cookie's session must be untouched (bearer-first, no fallback)");
 });
 
+test("sign-out (guardrail 6h): a token on the wrong transport revokes NOTHING, but the cookies are still cleared", async () => {
+  const t = new Date(Date.now() - 1000);
+  seedSession("sess-wt-browser", "u-wt-browser", t);
+  seedSession("sess-wt-native", "u-wt-native", t);
+  seedUser({ id: "u-wt-browser", createdAt: t });
+  seedUser({ id: "u-wt-native", createdAt: t });
+  const browser = await mintToken({ id: "u-wt-browser", sessionId: "sess-wt-browser", transport: "cookie" });
+  const native = await mintToken({ id: "u-wt-native", sessionId: "sess-wt-native", transport: "bearer" });
+
+  const asBearer = await signOutPost(signOutReq({ authorization: `Bearer ${browser}` }));
+  assert.equal(asBearer.status, 200);
+  assert.ok(asBearer.headers.getSetCookie().some((c) => c.includes("Max-Age=0")));
+  const asCookie = await signOutPost(signOutReq({ cookie: `${COOKIE}=${native}` }));
+  assert.equal(asCookie.status, 200);
+  await flush();
+  assert.equal(authSessions.has("sess-wt-browser"), true, "a cookie-bound token presented as a bearer is no session");
+  assert.equal(authSessions.has("sess-wt-native"), true, "a bearer-bound token presented as a cookie is no session");
+  assert.equal(auditRows.length, 0, "and no AUTH_LOGOUT is written for either");
+
+  // On its own transport each one signs out.
+  await signOutPost(signOutReq({ cookie: `${COOKIE}=${browser}` }));
+  await signOutPost(signOutReq({ authorization: `Bearer ${native}` }));
+  assert.equal(authSessions.has("sess-wt-browser"), false);
+  assert.equal(authSessions.has("sess-wt-native"), false);
+});
+
 test("sign-out (guardrail 6b): appends only cleared cookies — no sliding-refresh token — plus no-store headers", async () => {
   const t = new Date(Date.now() - 1000);
   seedSession("sess-b6", "u-b6", t);
@@ -705,6 +733,10 @@ test("machine-session mint: a valid request mints an admin-provider JWT delivere
   assert.equal(claims.id, "admin-1");
   assert.equal(claims.role, "ADMIN");
   assert.equal(claims.provider, "machine");
+  // Delivered only as a cookie, so bound to that transport: the same token
+  // presented as `Authorization: Bearer` is no session (guardrail 6h).
+  assert.equal(claims.transport, "cookie");
+  assert.equal(await verifySessionJwt(cookieToken, "bearer"), null);
   // The AuthSession row was persisted under the minted sessionId.
   assert.ok(claims.sessionId && authSessions.has(claims.sessionId), "the AuthSession row must be created");
 });

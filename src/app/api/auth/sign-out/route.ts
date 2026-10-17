@@ -12,12 +12,13 @@ import { logAudit } from "@/lib/audit";
 // clears both Summonarr session cookie variants in the browser.
 export async function POST(req: NextRequest) {
   // Bearer (native clients) preferred over the cookie (browsers) so a native
-  // sign-out revokes the session server-side, not just client-side.
-  const token =
-    parseBearerToken(req.headers.get("authorization")) ??
-    parseSessionCookie(req.headers.get("cookie"));
+  // sign-out revokes the session server-side, not just client-side. A token
+  // bound to the other transport is not a session here either (guardrail 6h):
+  // nothing is revoked, and the cookies are still cleared below.
+  const bearer = parseBearerToken(req.headers.get("authorization"));
+  const token = bearer ?? parseSessionCookie(req.headers.get("cookie"));
   if (token) {
-    const claims = await verifySessionJwt(token);
+    const claims = await verifySessionJwt(token, bearer ? "bearer" : "cookie");
     if (claims?.sessionId) {
       // revokeSessionById deletes the row and also marks the session as
       // force-revoked in memory, so a copied JWT is rejected on its very next

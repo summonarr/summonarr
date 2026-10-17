@@ -25,8 +25,10 @@
 //      request — cookie header for browsers, Authorization for bearer — so the
 //      second verify rides the dbCheckedAt fast path instead of repeating the
 //      whole DB-checked slow path;
-//   6. the UA-fingerprint cookie binding (mismatch → cleared-cookie login
-//      redirect) and its bearer/machine-session skips;
+//   6. the transport binding (guardrail 6h: a cookie-bound token is no
+//      session as a bearer, a bearer-bound one none as a cookie), the absence
+//      of any UA-fingerprint check, and `private, no-store` on a response that
+//      carries a refreshed session cookie;
 //   7. the /api/admin/* defense-in-depth backstop (403 only for principals
 //      with NO admin-surface access; ISSUE_ADMIN and granular MANAGE_* bits
 //      pass — the per-route wrapper stays the fine-grained authority) and the
@@ -201,8 +203,8 @@ const EVIL = "https://evil.example";
 const COOKIE = getSessionCookieName(); // "summonarr-session" under the http AUTH_URL above
 const STALE_BUILD = MIN_CLIENT.ios - 1; // positively below the iOS floor
 
-const CHROME_WIN_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+// A User-Agent of a different browser family from the fingerprint some tests
+// mint with ("chrome:windows:desktop"); nothing may reject on it (guardrail 6h).
 const FIREFOX_MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0";
 
@@ -217,6 +219,7 @@ async function mintSession(opts: {
   uaFingerprint?: string;
   iatOffset?: number;
   expiresInSeconds?: number;
+  transport?: "cookie" | "bearer"; // omitted ⇒ a pre-claim token (either transport)
 } = {}): Promise<{ userId: string; sessionId: string; token: string }> {
   seq++;
   const userId = `user-${seq}`;
@@ -243,6 +246,7 @@ async function mintSession(opts: {
       sessionId,
       expiresAt: iat + 86_400,
       ...(opts.uaFingerprint ? { uaFingerprint: opts.uaFingerprint } : {}),
+      ...(opts.transport ? { transport: opts.transport } : {}),
     },
     { expiresInSeconds: opts.expiresInSeconds ?? 7_200, iat },
   );
@@ -949,46 +953,55 @@ test("the /admin page matrix honors granular bits: ISSUE_ADMIN reaches /admin/is
   assertPassedThrough(full);
 });
 
-// ── the UA-fingerprint cookie binding ───────────────────────────────────────
+// ── no UA fingerprint; the transport binding (guardrail 6h) ─────────────────
 
-test("a cookie session bound to a UA fingerprint is bounced to login (cookies cleared) from a different browser family; the matching family passes", async () => {
+test("the UA fingerprint is NOT enforced (guardrail 6h): a fingerprinted cookie session passes from a different browser family", async () => {
+  // The client writes the User-Agent, so the old comparison stopped no replay —
+  // it only bounced real users whose browser changed its UA.
   const bound = await mintSession({ uaFingerprint: "chrome:windows:desktop" });
-
-  const mismatch = await proxy(
-    req("/movies", { headers: { ...asCookie(bound.token), "user-agent": FIREFOX_MAC_UA } }),
+  assertPassedThrough(
+    await proxy(req("/movies", { headers: { ...asCookie(bound.token), "user-agent": FIREFOX_MAC_UA } })),
+    "a page render must not be bounced over the User-Agent",
   );
-  assert.equal(mismatch.status, 302);
-  assert.ok(
-    mismatch.headers.get("location")?.startsWith(`${SELF}/login`),
-    "a fingerprint mismatch is treated as a stolen-cookie replay → re-authenticate",
+  assertPassedThrough(
+    await proxy(req("/api/requests", { headers: { ...asCookie(bound.token), "user-agent": FIREFOX_MAC_UA } })),
+    "nor an API call",
   );
-  assert.ok(
-    setCookies(mismatch).some((c) => c.startsWith(`${COOKIE}=;`)),
-    "the suspect cookie must be cleared, not left to retry forever",
-  );
-
-  const match = await proxy(
-    req("/movies", { headers: { ...asCookie(bound.token), "user-agent": CHROME_WIN_UA } }),
-  );
-  assertPassedThrough(match, "the matching browser family must still pass");
 });
 
-test("the fingerprint binding skips bearer transport and machine: sessions (guardrail 6b)", async () => {
-  // A bearer JWT lives in app-secure storage, not an ambiently-replayed
-  // cookie, so the device-class binding doesn't apply — same fingerprinted
-  // token, 'wrong' UA, bearer transport: passes.
-  const bound = await mintSession({ uaFingerprint: "chrome:windows:desktop" });
-  const bearer = await proxy(
-    req("/movies", { headers: { ...asBearer(bound.token), "user-agent": FIREFOX_MAC_UA } }),
-  );
-  assertPassedThrough(bearer, "bearer sessions deliberately drop UA-binding");
+test("a COOKIE-bound token replayed as a bearer is no session (guardrail 6h): 401, and it can't skip the CSRF Origin check either", async () => {
+  const browser = await mintSession({ transport: "cookie" });
+  assertPassedThrough(await proxy(req("/api/requests", { headers: asCookie(browser.token) })));
+  dbReads = 0;
+  const replayed = await proxy(req("/api/requests", { headers: { ...asBearer(browser.token), "user-agent": FIREFOX_MAC_UA } }));
+  assert.equal(replayed.status, 401);
+  assert.equal(dbReads, 0, "the binding is a claim check — refused before any DB read");
+  // A mutation that would have ridden the bearer CSRF skip: still 401, never 200.
+  const mutation = await proxy(req("/api/requests", { method: "POST", headers: asBearer(browser.token) }));
+  assert.equal(mutation.status, 401);
+});
 
-  // machine: fingerprints are CRON_SECRET-bound, not browser-bound.
-  const machine = await mintSession({ uaFingerprint: "machine:cron" });
-  const viaCookie = await proxy(
-    req("/movies", { headers: { ...asCookie(machine.token), "user-agent": FIREFOX_MAC_UA } }),
-  );
-  assertPassedThrough(viaCookie, "machine sessions are exempt from the UA binding");
+test("a BEARER-bound (native) token planted as a cookie is no session (guardrail 6h): login redirect, cookies cleared", async () => {
+  const native = await mintSession({ transport: "bearer" });
+  assertPassedThrough(await proxy(req("/movies", { headers: asBearer(native.token) })));
+  const planted = await proxy(req("/movies", { headers: asCookie(native.token) }));
+  assert.equal(planted.status, 302);
+  assert.ok(planted.headers.get("location")?.startsWith(`${SELF}/login`));
+  assert.ok(setCookies(planted).some((c) => c.startsWith(`${COOKIE}=;`)), "the planted cookie is cleared");
+  assert.equal((await proxy(req("/api/requests", { headers: asCookie(native.token) }))).status, 401);
+});
+
+test("a pass-through carrying a refreshed session Set-Cookie is private, no-store; a bearer pass-through gets no such stamp", async () => {
+  // Page renders included — next.config.ts's /api/* header rule doesn't reach
+  // them, and Next keeps a Cache-Control the proxy already set.
+  const { token } = await mintSession();
+  const page = await proxy(req("/movies", { headers: asCookie(token) }));
+  assertPassedThrough(page);
+  assert.ok(setCookies(page).some((c) => c.startsWith(`${COOKIE}=`) && !c.startsWith(`${COOKIE}=;`)));
+  assert.equal(page.headers.get("cache-control"), "private, no-store");
+  const bearer = await proxy(req("/movies", { headers: asBearer(token) }));
+  assertPassedThrough(bearer);
+  assert.equal(bearer.headers.get("cache-control"), null);
 });
 
 // ── CSP nonce stamping ──────────────────────────────────────────────────────

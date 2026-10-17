@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+import { type JWTPayload } from "jose";
 import { type MediaInstanceKey } from "@/lib/media-instances";
+import { signPurposeJwt, verifyPurposeJwt } from "@/lib/signing-keys";
 
 // Server-side state binding for the Jellyfin QuickConnect sign-in flow.
 //
@@ -17,13 +18,10 @@ import { type MediaInstanceKey } from "@/lib/media-instances";
 
 export const QC_FLOW_COOKIE = "summonarr-qc-flow";
 const QC_FLOW_TTL_SECONDS = 10 * 60;
-const ENCODER = new TextEncoder();
-
-function getSecret(): Uint8Array {
-  const s = process.env.NEXTAUTH_SECRET;
-  if (!s) throw new Error("[qc-flow] NEXTAUTH_SECRET must be set");
-  return ENCODER.encode(s);
-}
+// Signed with the "qc-flow" subkey, its own typ and audience (guardrail 6h),
+// never the raw NEXTAUTH_SECRET. A flow in progress when that changed fails
+// once; it lives ten minutes.
+const QC_FLOW_JWT = { typ: "summonarr-qc-flow+jwt", audience: "summonarr:qc-flow" };
 
 export interface QcFlowState {
   // SHA-256 of the QuickConnect secret — never store the secret itself in the
@@ -43,24 +41,18 @@ export function hashQuickConnectSecret(secret: string): string {
 }
 
 export async function signQcFlowCookie(state: QcFlowState): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ ...state } as JWTPayload)
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuedAt(now)
-    .setExpirationTime(now + QC_FLOW_TTL_SECONDS)
-    .sign(getSecret());
+  return signPurposeJwt("qc-flow", { ...state } as JWTPayload, {
+    ...QC_FLOW_JWT,
+    ttlSeconds: QC_FLOW_TTL_SECONDS,
+  });
 }
 
 export async function verifyQcFlowCookie(token: string): Promise<QcFlowState | null> {
-  try {
-    const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
-    if (typeof payload.secretHash !== "string" || typeof payload.instance !== "string") {
-      return null;
-    }
-    return { secretHash: payload.secretHash, instance: payload.instance };
-  } catch {
+  const payload = await verifyPurposeJwt("qc-flow", token, QC_FLOW_JWT);
+  if (!payload || typeof payload.secretHash !== "string" || typeof payload.instance !== "string") {
     return null;
   }
+  return { secretHash: payload.secretHash, instance: payload.instance };
 }
 
 export function readQcFlowCookie(cookieHeader: string | null): string | null {

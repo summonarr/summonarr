@@ -202,12 +202,15 @@ const oidcStart = await import("../src/app/api/auth/oidc/start/route.ts");
 const oidcCallback = await import("../src/app/api/auth/oidc/callback/route.ts");
 
 // ── scope ────────────────────────────────────────────────────────────────────
-function inScope<T>(fn: () => Promise<T>): Promise<T> {
+// `headers` is what next/headers sees. The mint reads X-Summonarr-Client there
+// (initializeTokenOnSignIn), so a native sign-in test passes it to BOTH the
+// scope and the request, exactly as Next does for a real one.
+function inScope<T>(fn: () => Promise<T>, headers: Record<string, string> = {}): Promise<T> {
   const workStore = {
     route: "/auth-signin.test", forceStatic: false, dynamicShouldError: false,
     afterContext: { after: () => {} },
   };
-  const reqHeaders = new Headers();
+  const reqHeaders = new Headers(headers);
   const requestStore = {
     type: "request", phase: "render",
     headers: HeadersAdapter.seal(reqHeaders),
@@ -343,23 +346,52 @@ test("a successful web sign-in sets an HttpOnly session cookie and returns NO to
   assert.equal(res.headers.get("cache-control"), "no-store");
 });
 
-test("a NATIVE sign-in receives the token in the body as well as the cookie", async () => {
+test("a NATIVE sign-in receives a bearer-bound token in the body and NO session cookie (guardrail 6h)", async () => {
+  dbUsers.push({
+    id: "u1", email: "real@example.com", name: "Real", role: "USER", permissions: 0n,
+    passwordHash: await hashPassword("correct-password"), mediaServer: null,
+    sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null, notificationEmail: null,
+  });
+  const native = { [NATIVE_CLIENT_HEADER]: "ios; build=42" };
+  const res = await inScope(
+    () =>
+      credentials.POST(
+        post("/api/auth/sign-in/credentials", JSON.stringify({ email: "real@example.com", password: "correct-password" }), native),
+      ),
+    native,
+  );
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(typeof body.token, "string", "a native client needs the JWT for its Keychain");
+  assert.equal(res.headers.get("cache-control"), "no-store", "the token-bearing body must be no-store");
+  assert.ok(
+    !setCookies(res).some((c) => c.startsWith(`${COOKIE}=`)),
+    "the bearer-bound token must not also go out as a session cookie",
+  );
+  const { verifySessionJwt } = await import("../src/lib/session-jwt.ts");
+  const claims = await verifySessionJwt(body.token);
+  assert.equal(claims?.transport, "bearer", "the native mint is bound to the bearer transport");
+  assert.equal(await verifySessionJwt(body.token, "cookie"), null, "and refused as a cookie");
+});
+
+test("a BROWSER sign-in's session cookie is bound to the cookie transport (guardrail 6h)", async () => {
   dbUsers.push({
     id: "u1", email: "real@example.com", name: "Real", role: "USER", permissions: 0n,
     passwordHash: await hashPassword("correct-password"), mediaServer: null,
     sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null, notificationEmail: null,
   });
   const res = await inScope(() =>
-    credentials.POST(
-      post("/api/auth/sign-in/credentials", JSON.stringify({ email: "real@example.com", password: "correct-password" }), {
-        [NATIVE_CLIENT_HEADER]: "ios; build=42",
-      }),
-    ),
+    credentials.POST(post("/api/auth/sign-in/credentials", JSON.stringify({ email: "real@example.com", password: "correct-password" }))),
   );
   assert.equal(res.status, 200);
   const body = await res.json();
-  assert.equal(typeof body.token, "string", "a native client needs the JWT for its Keychain");
-  assert.equal(res.headers.get("cache-control"), "no-store", "the token-bearing body must be no-store");
+  assert.equal(body.token, undefined, "a browser never sees the JWT in a body");
+  const cookie = setCookies(res).find((c) => c.startsWith(`${COOKIE}=`));
+  assert.ok(cookie, "the browser gets the session cookie");
+  const token = cookie.split(";")[0].slice(COOKIE.length + 1);
+  const { verifySessionJwt } = await import("../src/lib/session-jwt.ts");
+  assert.equal((await verifySessionJwt(token))?.transport, "cookie");
+  assert.equal(await verifySessionJwt(token, "bearer"), null, "and refused as a bearer");
 });
 
 test("a DISABLED account is refused at the mint chokepoint, not by identity scrubbing", async () => {
@@ -715,8 +747,8 @@ test("plex pin PATCH refuses a connect cookie another admin started", async () =
 
 test("plex pin PATCH refuses a token signed for another purpose (sign-in flow cookie)", async () => {
   const t = await mintAdminSession();
-  // The full connect claim shape (uid included), but signed with the RAW secret
-  // the sign-in flow cookie uses — only the purpose-bound key tells them apart.
+  // The full connect claim shape (uid included), but signed with the sign-in
+  // flow cookie's own "plex-flow" key — only the purpose-bound key tells them apart.
   const wrongKey = await signPlexFlowCookie(
     { pinId: 4242, clientId: "summonarr-connect-x", uid: await adminIdOf(t) } as unknown as { pinId: number; clientId: string });
   const res = await inScope(() =>

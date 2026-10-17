@@ -118,10 +118,9 @@ export async function POST(req: NextRequest) {
   const nowSec = Math.floor(Date.now() / 1000);
   const expiresAt = nowSec + expiresIn;
 
-  // Bind the JWT to a per-session fingerprint. proxy.ts skips the browser-style
-  // fingerprint check for any "machine:" value (replay defense relies on the short
-  // lifetime). Deriving from the unique sessionId (not the static CRON_SECRET) gives
-  // each token a distinct fingerprint a future enforcement path can distinguish.
+  // A per-session "machine:" fingerprint, so the claim never reads as a browser
+  // family. Informational only — nothing compares fingerprints since guardrail
+  // 6h; replay defence is the short lifetime and the IP allowlist claim below.
   const uaFingerprint =
     "machine:" + createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
 
@@ -157,6 +156,9 @@ export async function POST(req: NextRequest) {
       isMobile: false,
       deviceLabel: "Machine (API)",
       expiresAt,
+      // Delivered only as Set-Cookie (below), so it is bound to the cookie
+      // transport and refused as a bearer (guardrail 6h).
+      transport: "cookie",
       // Bind the mint-time allowlist into the signed claims so the auth guards
       // re-check the caller's IP on every request, not just at mint. A leaked
       // token is then useless from an off-allowlist address. Empty when no

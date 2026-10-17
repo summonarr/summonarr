@@ -1,5 +1,6 @@
 import { hkdfSync, randomUUID } from "node:crypto";
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+import { signPurposeJwt, verifyPurposeJwt } from "@/lib/signing-keys";
 
 // Server-side state binding for the Plex PIN sign-in flow.
 //
@@ -15,13 +16,10 @@ import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 
 export const PLEX_FLOW_COOKIE = "summonarr-plex-flow";
 const PLEX_FLOW_TTL_SECONDS = 10 * 60;
-const ENCODER = new TextEncoder();
-
-function getSecret(): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET;
-  if (!secret) throw new Error("[plex-flow] NEXTAUTH_SECRET must be set");
-  return ENCODER.encode(secret);
-}
+// Signed with the "plex-flow" subkey, its own typ and audience (guardrail 6h),
+// never the raw NEXTAUTH_SECRET the session JWT used to share. A flow token in
+// flight when that changed fails once; it lives ten minutes.
+const PLEX_FLOW_JWT = { typ: "summonarr-plex-flow+jwt", audience: "summonarr:plex-flow" };
 
 export interface PlexFlowState {
   pinId: number;
@@ -29,30 +27,25 @@ export interface PlexFlowState {
 }
 
 export async function signPlexFlowCookie(state: PlexFlowState): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ ...state } as JWTPayload)
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuedAt(now)
-    .setExpirationTime(now + PLEX_FLOW_TTL_SECONDS)
-    .sign(getSecret());
+  return signPurposeJwt("plex-flow", { ...state } as JWTPayload, {
+    ...PLEX_FLOW_JWT,
+    ttlSeconds: PLEX_FLOW_TTL_SECONDS,
+  });
 }
 
 export async function verifyPlexFlowCookie(token: string): Promise<PlexFlowState | null> {
-  try {
-    const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
-    if (
-      typeof payload.pinId !== "number" ||
-      typeof payload.clientId !== "string"
-    ) {
-      return null;
-    }
-    return {
-      pinId: payload.pinId,
-      clientId: payload.clientId,
-    };
-  } catch {
+  const payload = await verifyPurposeJwt("plex-flow", token, PLEX_FLOW_JWT);
+  if (
+    !payload ||
+    typeof payload.pinId !== "number" ||
+    typeof payload.clientId !== "string"
+  ) {
     return null;
   }
+  return {
+    pinId: payload.pinId,
+    clientId: payload.clientId,
+  };
 }
 
 export function readPlexFlowCookie(cookieHeader: string | null): string | null {

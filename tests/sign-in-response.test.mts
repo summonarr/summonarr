@@ -3,11 +3,14 @@
 // may reach a response BODY only when the caller positively identifies as a
 // native client via X-Summonarr-Client; a browser login must never see the
 // token in JSON (that would defeat HttpOnly). The contract pinned here:
-//   - the HttpOnly session cookie is ALWAYS set (web AND native — the module
-//     deliberately keeps the web flow unchanged for native callers),
+//   - the token goes out on exactly ONE transport, the one it is bound to
+//     (guardrail 6h): the HttpOnly session cookie for a browser sign-in, the
+//     body for a native one — and a native sign-in gets NO session cookie;
 //   - token/tokenType/expiresInSeconds appear in the body ONLY on the native
-//     header (presence of Authorization: Bearer alone does NOT unlock it),
-//   - extraSetCookies append after the session cookie, in order.
+//     header AND a bearer-bound token (presence of Authorization: Bearer alone
+//     does NOT unlock it); a header/binding mismatch delivers nothing;
+//   - extraSetCookies append after the session cookie, in order (and still go
+//     out on a native sign-in).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { NextRequest } from "next/server";
@@ -24,6 +27,7 @@ const RESULT: SignInResult = {
   token: TOKEN,
   expiresInSeconds: 3600,
   sessionId: "sess_1",
+  transport: "cookie",
   user: {
     id: "u_alice",
     role: "USER",
@@ -62,10 +66,13 @@ test("web sign-in (no native header): token never reaches the body, cookie carri
   );
 });
 
+// What signInAndMintSession returns for a caller presenting X-Summonarr-Client.
+const NATIVE_RESULT: SignInResult = { ...RESULT, transport: "bearer" };
+
 test("native client header: JWT + Bearer metadata land in the body", async () => {
   const res = buildSignInResponse(
     makeRequest({ "X-Summonarr-Client": "ios; build=42" }),
-    RESULT,
+    NATIVE_RESULT,
   );
   assert.equal(res.status, 200);
 
@@ -77,18 +84,29 @@ test("native client header: JWT + Bearer metadata land in the body", async () =>
   assert.equal(body.expiresInSeconds, 3600);
 });
 
-test("native response STILL sets the session cookie (web flow unchanged by design)", () => {
-  const res = buildSignInResponse(makeRequest({ "x-summonarr-client": "ios" }), RESULT);
-  const cookies = res.headers.getSetCookie();
-  assert.equal(cookies.length, 1);
-  assert.equal(
-    cookies[0],
-    `summonarr-session=${TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600`,
-  );
+test("a native sign-in sets NO session cookie — the bearer-bound token goes out in the body only (guardrail 6h)", () => {
+  // The token is refused on the cookie transport, so a cookie copy could only
+  // be one more place a never-expiring credential sits. The iOS apps keep no
+  // cookie jar (NetworkSession.swift), so nothing relied on it.
+  const res = buildSignInResponse(makeRequest({ "x-summonarr-client": "ios" }), NATIVE_RESULT);
+  assert.deepEqual(res.headers.getSetCookie(), []);
+  assert.equal(res.headers.get("cache-control"), "no-store");
+});
+
+test("a header/binding mismatch delivers the token on NEITHER transport", async () => {
+  // Can't happen through signInAndMintSession (one header decides both), but a
+  // token on the wrong transport would be refused on every request anyway.
+  const cookieBoundToNative = buildSignInResponse(makeRequest({ "x-summonarr-client": "ios" }), RESULT);
+  assert.deepEqual(cookieBoundToNative.headers.getSetCookie(), []);
+  assert.equal(JSON.stringify(await cookieBoundToNative.json()).includes(TOKEN), false);
+
+  const bearerBoundToBrowser = buildSignInResponse(makeRequest(), NATIVE_RESULT);
+  assert.deepEqual(bearerBoundToBrowser.headers.getSetCookie(), []);
+  assert.equal(JSON.stringify(await bearerBoundToBrowser.json()).includes(TOKEN), false);
 });
 
 test("native header name is case-insensitive (client may send any casing)", async () => {
-  const res = buildSignInResponse(makeRequest({ "X-SUMMONARR-CLIENT": "ios" }), RESULT);
+  const res = buildSignInResponse(makeRequest({ "X-SUMMONARR-CLIENT": "ios" }), NATIVE_RESULT);
   const body = (await res.json()) as Record<string, unknown>;
   assert.equal(body.token, TOKEN);
 });
@@ -97,7 +115,7 @@ test("blank / whitespace-only native header does not unlock the token", async ()
   // Fetch header normalization strips outer whitespace, so " " arrives as "";
   // hasNativeClientHeader must treat both as absent.
   for (const value of ["", " "]) {
-    const res = buildSignInResponse(makeRequest({ "x-summonarr-client": value }), RESULT);
+    const res = buildSignInResponse(makeRequest({ "x-summonarr-client": value }), NATIVE_RESULT);
     const body = (await res.json()) as Record<string, unknown>;
     assert.ok(!("token" in body), `value ${JSON.stringify(value)} must not unlock the token`);
     assert.equal(JSON.stringify(body).includes(TOKEN), false);
@@ -107,11 +125,19 @@ test("blank / whitespace-only native header does not unlock the token", async ()
 test("Authorization: Bearer alone does NOT unlock the body token — the gate is X-Summonarr-Client", async () => {
   const res = buildSignInResponse(
     makeRequest({ authorization: `Bearer ${TOKEN}` }),
-    RESULT,
+    NATIVE_RESULT,
   );
   const body = (await res.json()) as Record<string, unknown>;
   assert.ok(!("token" in body));
   assert.equal(JSON.stringify(body).includes(TOKEN), false);
+});
+
+test("extraSetCookies still go out on a native sign-in (only the session cookie is withheld)", () => {
+  const extras = ["summonarr-plex-flow=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Lax"];
+  const res = buildSignInResponse(makeRequest({ "x-summonarr-client": "ios" }), NATIVE_RESULT, {
+    extraSetCookies: extras,
+  });
+  assert.deepEqual(res.headers.getSetCookie(), extras);
 });
 
 test("extraSetCookies append after the session cookie, in order", () => {
@@ -129,13 +155,17 @@ test("extraSetCookies append after the session cookie, in order", () => {
 
 test("cookie Max-Age tracks result.expiresInSeconds exactly (rememberMe long TTL)", async () => {
   const longLived: SignInResult = { ...RESULT, expiresInSeconds: 2_592_000 };
-  const res = buildSignInResponse(makeRequest({ "x-summonarr-client": "ios" }), longLived);
+  const res = buildSignInResponse(makeRequest(), longLived);
   const cookies = res.headers.getSetCookie();
   assert.equal(
     cookies[0],
     `summonarr-session=${TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
   );
-  const body = (await res.json()) as Record<string, unknown>;
+  const native = buildSignInResponse(makeRequest({ "x-summonarr-client": "ios" }), {
+    ...NATIVE_RESULT,
+    expiresInSeconds: 2_592_000,
+  });
+  const body = (await native.json()) as Record<string, unknown>;
   assert.equal(body.expiresInSeconds, 2_592_000);
 });
 

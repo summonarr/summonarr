@@ -2,7 +2,7 @@
 // the Node.js runtime, so it is safe to use Node APIs and server-only modules.
 import { evaluateLocalOnlyStartup } from "@/lib/local-only";
 import { parseAuthUrl } from "@/lib/auth-url";
-import { secretReuseError } from "@/lib/boot-secrets";
+import { previousSecretProblem, secretReuseError } from "@/lib/boot-secrets";
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
@@ -121,12 +121,26 @@ export async function register() {
     // decrypt stored credentials. Same production-only exit as the length checks.
     const reuse = secretReuseError({
       nextAuthSecret: process.env.NEXTAUTH_SECRET,
+      nextAuthSecretPrevious: process.env.NEXTAUTH_SECRET_PREVIOUS,
       cronSecret: process.env.CRON_SECRET,
       tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
     });
     if (reuse) {
       console.error(reuse);
       if (process.env.NODE_ENV === "production") process.exit(1);
+    }
+
+    // The verify-only rotation key (guardrail 6h): too short is fatal in
+    // production like NEXTAUTH_SECRET itself; equal to it is only a warning.
+    const previous = previousSecretProblem({
+      nextAuthSecret: process.env.NEXTAUTH_SECRET,
+      nextAuthSecretPrevious: process.env.NEXTAUTH_SECRET_PREVIOUS,
+    });
+    if (previous?.fatal) {
+      console.error(previous.message);
+      if (process.env.NODE_ENV === "production") process.exit(1);
+    } else if (previous) {
+      console.warn(previous.message);
     }
 
     if (!process.env.TMDB_READ_TOKEN) {

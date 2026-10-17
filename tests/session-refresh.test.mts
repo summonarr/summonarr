@@ -97,6 +97,12 @@ const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 
 const DAY = 86_400;
 const SEVEN_DAYS = 7 * DAY;
+// The transport each verify says the token arrived on (guardrail 6h). Every
+// token this file mints is a pre-claim shape (no `transport`), so the binding
+// is inferred: browser-length deadlines read as either transport, the native
+// sentinel as bearer only.
+const COOKIE = { transport: "cookie" } as const;
+const BEARER = { transport: "bearer" } as const;
 
 // ── in-memory DB state ──────────────────────────────────────────────────────
 type DbUser = {
@@ -301,7 +307,7 @@ beforeEach(() => {
 
 test("a token without a sessionId claim is rejected before any DB read", async () => {
   const { token } = await mint({ omitSessionId: true });
-  assert.equal(await verifyAndRefreshSession(token), null);
+  assert.equal(await verifyAndRefreshSession(token, COOKIE), null);
   assert.equal(dbReads, 0);
 });
 
@@ -311,7 +317,7 @@ test("a fresh dbCheckedAt skips the DB entirely: throwing stubs, original claims
   const now0 = nowSec();
   const { userId, sessionId, token } = await mint({ dbCheckedAt: now0 - 5 });
   throwOnDb = true; // any model read on this path would reject the whole call
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result, "the cached check must be honored without a DB round trip");
   assert.equal(result.claims.id, userId);
   assert.equal(result.claims.sessionId, sessionId);
@@ -322,7 +328,7 @@ test("a fresh dbCheckedAt skips the DB entirely: throwing stubs, original claims
 test("a stale dbCheckedAt (past the 60s USER window) hits the DB and always re-signs; the fresh token rides the fast path", async () => {
   const now0 = nowSec();
   const { userId, sessionId, token } = await mint({ dbCheckedAt: now0 - 65 });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result);
   assert.ok(dbReads >= 2, "the stale window must force the AuthSession + User reads");
   assert.equal(result.claims.sessionId, sessionId, "no privilege change ⇒ sessionId unrotated");
@@ -336,7 +342,7 @@ test("a stale dbCheckedAt (past the 60s USER window) hits the DB and always re-s
   // The re-signed token is immediately fast-path eligible: DB unavailable, yet
   // it verifies — this is the optimization keeping the hot path off the DB.
   throwOnDb = true;
-  const second = await verifyAndRefreshSession(result.refreshed.token);
+  const second = await verifyAndRefreshSession(result.refreshed.token, COOKIE);
   assert.ok(second, "the refreshed token must ride the fast path");
   assert.equal(second.refreshed, undefined);
 });
@@ -346,7 +352,7 @@ test("the fast window is role-tiered: 30s-old check is fresh for USER but stale 
   // USER: 30s < 60s window — no DB needed even with throwing stubs.
   const user = await mint({ role: "USER", dbCheckedAt: now0 - 30 });
   throwOnDb = true;
-  assert.ok(await verifyAndRefreshSession(user.token), "USER must still be inside the 60s window");
+  assert.ok(await verifyAndRefreshSession(user.token, COOKIE), "USER must still be inside the 60s window");
   throwOnDb = false;
 
   // ADMIN: 30s > 10s window — the DB IS consulted, so a revoked admin session
@@ -354,7 +360,7 @@ test("the fast window is role-tiered: 30s-old check is fresh for USER but stale 
   const admin = await mint({ role: "ADMIN", dbCheckedAt: now0 - 30 });
   sessionRows.delete(admin.sessionId);
   assert.equal(
-    await verifyAndRefreshSession(admin.token),
+    await verifyAndRefreshSession(admin.token, COOKIE),
     null,
     "a revoked ADMIN session must be caught once the 10s window lapses",
   );
@@ -362,7 +368,7 @@ test("the fast window is role-tiered: 30s-old check is fresh for USER but stale 
   // ISSUE_ADMIN shares the fast 10s interval.
   const issueAdmin = await mint({ role: "ISSUE_ADMIN", dbCheckedAt: now0 - 30 });
   const before = dbReads;
-  const result = await verifyAndRefreshSession(issueAdmin.token);
+  const result = await verifyAndRefreshSession(issueAdmin.token, COOKIE);
   assert.ok(result);
   assert.ok(dbReads > before, "ISSUE_ADMIN at 30s must take the slow (DB-checked) path");
 });
@@ -374,14 +380,14 @@ test("the cache window is deliberately blind to a revocation — and markSession
 
   // Within the window and unmarked, the replica honors the cached check: the
   // revocation is NOT seen yet (the documented ≤60s propagation trade-off).
-  const blind = await verifyAndRefreshSession(token);
+  const blind = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(blind, "inside the window an unmarked replica serves the cached validation");
   assert.equal(dbReads, 0);
 
   // The issuing replica marks the session; the very next verify must bypass
   // the window, hit the DB, and see the deleted row.
   markSessionForceRevoked(sessionId);
-  const after = await verifyAndRefreshSession(token);
+  const after = await verifyAndRefreshSession(token, COOKIE);
   assert.equal(after, null, "a locally-marked session must be re-checked and rejected");
   assert.ok(dbReads > 0, "the mark must force the DB read despite the fresh dbCheckedAt");
 });
@@ -400,7 +406,7 @@ test("an 8-day-old ADMIN session with a live exp passes the fast path untouched 
     dbCheckedAt: now0 - 5, // inside the admin fast window
   });
   throwOnDb = true;
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result, "an old-but-unexpired ADMIN token must still ride the fast path");
   assert.equal(result.claims.id, userId);
   assert.equal(dbReads, 0);
@@ -418,7 +424,7 @@ test("a long-TTL (rememberMe/mobile) token is re-signed out to EXACTLY its sign-
     expiresInSeconds: 30 * DAY,
     expiresAt: now0 + 30 * DAY,
   });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result?.refreshed);
   assert.ok(
     Math.abs(result.refreshed.expiresInSeconds - 30 * DAY) <= 2,
@@ -441,7 +447,7 @@ test("a token whose JWT exp drifted below its deadline is re-extended back out t
     expiresInSeconds: 1800, // the old inactivity-window exp
     expiresAt: now0 + DAY, // the deadline is a day out
   });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result?.refreshed);
   assert.ok(
     Math.abs(result.refreshed.expiresInSeconds - DAY) <= 2,
@@ -455,7 +461,7 @@ test("the re-sign never reaches past the sign-in session deadline (expiresAt cap
     expiresInSeconds: DAY, // exp alone would allow a day
     expiresAt: now0 + 600, // …but the device session deadline is 10 min away
   });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result?.refreshed);
   assert.ok(
     result.refreshed.expiresInSeconds <= 600 && result.refreshed.expiresInSeconds >= 500,
@@ -471,7 +477,7 @@ test("a session past its expiresAt deadline is rejected for EVERY role, even tho
       expiresInSeconds: 7_200, // exp two hours out — signature/exp verify fine
       expiresAt: now0 - 10, // …but the sign-in deadline already passed
     });
-    assert.equal(await verifyAndRefreshSession(token), null, `${role} must honour the deadline`);
+    assert.equal(await verifyAndRefreshSession(token, COOKIE), null, `${role} must honour the deadline`);
   }
 });
 
@@ -508,7 +514,7 @@ test("an IDLE rememberMe session survives a multi-day gap and dies only at its d
     let current = token;
     for (const elapsed of [2 * 3600, 3 * DAY, 12 * DAY, 29 * DAY]) {
       fakeNowMs = (start + elapsed) * 1000;
-      const step = await verifyAndRefreshSession(current);
+      const step = await verifyAndRefreshSession(current, COOKIE);
       assert.ok(step?.refreshed, `an idle remember-me session must still verify at t+${elapsed}s`);
       assert.ok(
         Math.abs(step.refreshed.expiresInSeconds - (deadline - (start + elapsed))) <= 2,
@@ -522,7 +528,7 @@ test("an IDLE rememberMe session survives a multi-day gap and dies only at its d
     // rejects the token outright.
     fakeNowMs = (deadline + 1) * 1000;
     assert.equal(
-      await verifyAndRefreshSession(current),
+      await verifyAndRefreshSession(current, COOKIE),
       null,
       "past the sign-in deadline the session must end",
     );
@@ -545,7 +551,7 @@ test("ADMIN follows the same deadline rule as every other role: re-signed out to
     expiresInSeconds: 9 * DAY,
     expiresAt: now0 + 20 * DAY,
   });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result, "an 8-day-old ADMIN session with a live deadline must survive the slow path");
   assert.ok(dbReads >= 2, "…after the full DB reconciliation");
   assert.ok(result.refreshed);
@@ -567,7 +573,7 @@ test("a NATIVE session (deadline = the never-expires sentinel) re-signs to the s
     expiresInSeconds: NEVER_EXPIRES_AT_SEC - now0,
     expiresAt: NEVER_EXPIRES_AT_SEC,
   });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, BEARER);
   assert.ok(result?.refreshed, "a native session must verify on the slow path");
   assert.ok(
     Math.abs(result.refreshed.expiresInSeconds - (NEVER_EXPIRES_AT_SEC - now0)) <= 2,
@@ -582,12 +588,12 @@ test("a NATIVE session (deadline = the never-expires sentinel) re-signs to the s
 
   // The ORIGINAL token (what a bearer client keeps presenting) still verifies
   // on a later slow-path check…
-  const again = await verifyAndRefreshSession(token);
+  const again = await verifyAndRefreshSession(token, BEARER);
   assert.ok(again, "the original never-expiring token must keep verifying");
 
   // …until the device is revoked.
   sessionRows.delete(sessionId);
-  assert.equal(await verifyAndRefreshSession(token), null, "revocation is the only end of a native session");
+  assert.equal(await verifyAndRefreshSession(token, BEARER), null, "revocation is the only end of a native session");
 });
 
 // ── sessionsRevokedAt / passwordChangedAt cutoffs ───────────────────────────
@@ -598,20 +604,20 @@ test("passwordChangedAt cutoff: tokens minted before or in the same second die; 
 
   const before = await mint({ iat: now0 - 100, passwordChangedAt: changedAt });
   assert.equal(
-    await verifyAndRefreshSession(before.token),
+    await verifyAndRefreshSession(before.token, COOKIE),
     null,
     "a token minted before the password change must be rejected",
   );
 
   const sameSecond = await mint({ iat: now0 - 50, passwordChangedAt: changedAt });
   assert.equal(
-    await verifyAndRefreshSession(sameSecond.token),
+    await verifyAndRefreshSession(sameSecond.token, COOKIE),
     null,
     "iat == cutoff must be rejected (the deliberately inclusive <=)",
   );
 
   const after = await mint({ iat: now0 - 49, passwordChangedAt: changedAt });
-  const result = await verifyAndRefreshSession(after.token);
+  const result = await verifyAndRefreshSession(after.token, COOKIE);
   assert.ok(result, "iat == cutoff + 1 is the smallest accepted iat");
   assert.equal(result.claims.id, after.userId);
 });
@@ -628,7 +634,7 @@ test("the cutoff is max(sessionsRevokedAt, passwordChangedAt) — a newer passwo
     sessionsRevokedAt: revokedAt,
     passwordChangedAt: changedAt,
   });
-  assert.equal(await verifyAndRefreshSession(caught.token), null);
+  assert.equal(await verifyAndRefreshSession(caught.token, COOKIE), null);
 
   // Control: minted after BOTH cutoffs → accepted.
   const fresh = await mint({
@@ -636,7 +642,7 @@ test("the cutoff is max(sessionsRevokedAt, passwordChangedAt) — a newer passwo
     sessionsRevokedAt: revokedAt,
     passwordChangedAt: changedAt,
   });
-  assert.ok(await verifyAndRefreshSession(fresh.token));
+  assert.ok(await verifyAndRefreshSession(fresh.token, COOKIE));
 });
 
 // ── privilege-change rotation (the permissions leg + failure modes) ─────────
@@ -652,7 +658,7 @@ test("a permissions-only change (same role) rotates the sessionId and propagates
     permissions: "0",
     dbPermissions: 8n,
   });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result, "the permissions change must not reject the live session");
   assert.equal(result.claims.role, "USER");
   assert.equal(result.claims.permissions, "8", "the claims must carry the DB mask");
@@ -676,7 +682,7 @@ test("after a rotation, a copy of the OLD token riding a fresh dbCheckedAt is se
   // the rest of the window. The rotation marks the old sessionId, so the next
   // presentation goes to the DB, finds the renamed row gone, and is refused.
   const { userId, sessionId, token, iat, expiresAt } = await mint({ role: "USER", permissions: "0", dbPermissions: 8n });
-  const rotated = await verifyAndRefreshSession(token);
+  const rotated = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(rotated);
   assert.notEqual(rotated.claims.sessionId, sessionId);
   const staleCopy = await signSessionJwt(
@@ -686,7 +692,7 @@ test("after a rotation, a copy of the OLD token riding a fresh dbCheckedAt is se
     } as Omit<SessionClaims, "iat" | "exp">,
     { expiresInSeconds: 7_200, iat },
   );
-  assert.equal(await verifyAndRefreshSession(staleCopy), null);
+  assert.equal(await verifyAndRefreshSession(staleCopy, COOKIE), null);
 });
 
 test("a rotation that cannot complete fails CLOSED: missing row mid-transaction and a throwing transaction both yield null", async () => {
@@ -695,7 +701,7 @@ test("a rotation that cannot complete fails CLOSED: missing row mid-transaction 
   txRowMissing = true;
   const lostRow = await mint({ role: "USER", permissions: "0", dbPermissions: 8n });
   assert.equal(
-    await verifyAndRefreshSession(lostRow.token),
+    await verifyAndRefreshSession(lostRow.token, COOKIE),
     null,
     "the row vanishing inside the tx must reject the request",
   );
@@ -704,7 +710,7 @@ test("a rotation that cannot complete fails CLOSED: missing row mid-transaction 
   txThrows = true;
   const txFail = await mint({ role: "USER", permissions: "0", dbPermissions: 8n });
   assert.equal(
-    await verifyAndRefreshSession(txFail.token),
+    await verifyAndRefreshSession(txFail.token, COOKIE),
     null,
     "a thrown transaction must be swallowed into a rejection, not a stale session",
   );
@@ -737,8 +743,8 @@ test("concurrent slow-path verifies of the same token share ONE rotation — eve
   const { sessionId, token } = await mint({ role: "USER", permissions: "0", dbPermissions: 8n });
   let release!: () => void;
   holdAuthSessionRead = new Promise<void>((resolve) => { release = resolve; });
-  const a = verifyAndRefreshSession(token);
-  const b = verifyAndRefreshSession(token);
+  const a = verifyAndRefreshSession(token, COOKIE);
+  const b = verifyAndRefreshSession(token, COOKIE);
   await parked(1); // coalesced: only ONE read is ever issued; the twin joins it
   release();
   const [ra, rb] = await Promise.all([a, b]);
@@ -761,8 +767,8 @@ test("a rotating and a NON-rotating verify of the same token in flight together 
   const { sessionId, token } = await mint({ role: "USER", permissions: "0", dbPermissions: 8n });
   let release!: () => void;
   holdAuthSessionRead = new Promise<void>((resolve) => { release = resolve; });
-  const rotating = verifyAndRefreshSession(token);
-  const reading = verifyAndRefreshSession(token, { allowRotation: false });
+  const rotating = verifyAndRefreshSession(token, COOKIE);
+  const reading = verifyAndRefreshSession(token, { ...COOKIE, allowRotation: false });
   await parked(2); // different modes ⇒ two independent reads, both parked
   release();
   const [rr, rn] = await Promise.all([rotating, reading]);
@@ -780,14 +786,14 @@ test("a rotating and a NON-rotating verify of the same token in flight together 
 test("credentials sessions refresh mediaServer from the DB in both directions", async () => {
   // Claim says "plex", the DB link was removed → the claim must be cleared.
   const cleared = await mint({ mediaServer: "plex", dbMediaServer: null });
-  const clearedResult = await verifyAndRefreshSession(cleared.token);
+  const clearedResult = await verifyAndRefreshSession(cleared.token, COOKIE);
   assert.ok(clearedResult?.refreshed);
   assert.equal(clearedResult.claims.mediaServer, null);
   assert.equal(decodePayload(clearedResult.refreshed.token).mediaServer, null);
 
   // No claim, the DB gained a link → the claim must pick it up.
   const gained = await mint({ dbMediaServer: "jellyfin" });
-  const gainedResult = await verifyAndRefreshSession(gained.token);
+  const gainedResult = await verifyAndRefreshSession(gained.token, COOKIE);
   assert.ok(gainedResult);
   assert.equal(gainedResult.claims.mediaServer, "jellyfin");
 });
@@ -800,7 +806,7 @@ test("jellyfin-provider sessions keep the mediaServer pinned at sign-in, ignorin
     mediaServer: "jellyfin",
     dbMediaServer: "plex",
   });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result);
   assert.equal(result.claims.mediaServer, "jellyfin");
 });
@@ -816,7 +822,7 @@ test("a plex-provider session fails OPEN when membership can't be determined (un
     mediaServer: "plex",
     dbMediaServer: "plex",
   });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result, "an indeterminate allowlist must fail open");
   assert.equal(result.claims.id, userId);
   assert.ok(settingReads > 0, "the membership hook must actually have been consulted");
@@ -879,7 +885,7 @@ test("membership TEETH: a plex USER shared on NO instance is revoked on the slow
 
   const { userId, token } = await mint({ provider: "plex", role: "USER" });
   assert.equal(
-    await verifyAndRefreshSession(token),
+    await verifyAndRefreshSession(token, COOKIE),
     null,
     "an email absent from every instance's set must be rejected",
   );
@@ -920,7 +926,7 @@ test("ACCEPTED TRADE-OFF: membership on ANY instance keeps a plex session — ev
 
   const warnsBefore = warns.length;
   const { userId, token } = await mint({ provider: "plex", role: "USER" });
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, COOKIE);
   assert.ok(result, "membership on a sibling instance must keep the session alive");
   assert.equal(result.claims.id, userId);
   assert.equal(

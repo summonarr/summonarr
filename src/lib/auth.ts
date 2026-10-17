@@ -1,14 +1,15 @@
 import { prisma } from "@/lib/prisma";
 import { headers } from "next/headers";
 import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
-import { createHash, createHmac } from "crypto";
+import { createHash } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, reserveRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
-import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
-import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
+import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
+import { signSessionJwt, type SessionClaims, type SessionTransport } from "@/lib/session-jwt";
+import { purposeHmacHex, signingKey } from "@/lib/signing-keys";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { machineIpAllowed } from "@/lib/api-auth";
@@ -16,7 +17,7 @@ import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
-import { NEVER_EXPIRES_AT_SEC } from "@/lib/session-lifetime";
+import { MAX_CONFIGURABLE_SESSION_SECONDS, NEVER_EXPIRES_AT_SEC } from "@/lib/session-lifetime";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, plexSettingKey, mediaInstanceLabel } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -355,7 +356,10 @@ const DEFAULT_MAX_SESSION_SECONDS    = 2_592_000;
 // Hard ceiling for ADMIN-CONFIGURABLE durations (the sessionDefault/Mobile/Max settings)
 // — prevents an admin from configuring an unbounded JWT lifetime. The native sentinel
 // above is a deliberate code-level constant and is intentionally not bound by this.
-const MAX_ALLOWED_SESSION_SECONDS = 90 * 24 * 60 * 60;
+// Shared with session-jwt.ts, which tells a legacy native token from a browser one
+// by a deadline past this horizon (guardrail 6h), so the value lives in
+// session-lifetime.ts.
+const MAX_ALLOWED_SESSION_SECONDS = MAX_CONFIGURABLE_SESSION_SECONDS;
 
 type SessionDurations = { desktopDuration: number; mobileDuration: number; maxDuration: number };
 
@@ -436,16 +440,13 @@ export async function auth(): Promise<SummonarrSession | null> {
 // role-based redirect cannot assume the proxy's DB check has run. Same
 // SummonarrSession shape as auth(), so it is a drop-in replacement at the guard.
 export async function authActive(): Promise<SummonarrSession | null> {
+  // Cookie transport (page renders are cookie/SSR only), so a bearer-bound
+  // native token is refused inside the read (guardrail 6h). There is no
+  // User-Agent fingerprint check: the client writes that header, so it never
+  // stopped a replayed cookie (guardrail 6h retired it everywhere).
   const claims = await readActiveSummonarrSession();
   if (!claims) return null;
-  // UA-fingerprint replay check — parity with the proxy and the withAuth/withAdmin
-  // wrappers ([api-auth.ts]). The proxy's matcher skips prefetch requests, so the
-  // page-render path must re-enforce the cookie→device binding here too: otherwise a
-  // stolen cookie replayed with a prefetch-looking header could render protected
-  // pages. Page renders are cookie/SSR only (no bearer); machine:/no-fingerprint
-  // sessions are skipped inside the helper.
   const h = await headers();
-  if (!matchesStoredFingerprint(claims.uaFingerprint, h.get("user-agent"))) return null;
   // A machine session carries a mint-time IP allowlist; the API guards + isCronAuthorized
   // enforce it, so bind the page-render path too — else a leaked machine JWT could render
   // admin pages from a disallowed IP. Absent/empty allowlist ⇒ true (no restriction).
@@ -635,6 +636,11 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
     expiresAt = Math.floor(Date.now() / 1000) + ttl;
   }
   token.expiresAt = expiresAt;
+  // The transport binding (guardrail 6h), decided by the same header as the
+  // deadline: the never-expiring native session is presented as a bearer and
+  // nothing else, a browser session as the cookie and nothing else. Every
+  // reader refuses the token on the other one.
+  token.transport = isNativeClient ? "bearer" : "cookie";
 
   const userId = user.id as string | undefined;
   if (!token.mediaServer && userId) {
@@ -780,9 +786,10 @@ export async function authorizeWithPlex(
       : undefined;
 
     const plexToken = credentials.plexToken as string;
-    const plexTokenHashSecret = process.env.NEXTAUTH_SECRET;
-    if (!plexTokenHashSecret) throw new Error("[auth] NEXTAUTH_SECRET required for plex token hashing");
-    const tokenHash = createHmac("sha256", plexTokenHashSecret).update(plexToken).digest("hex");
+    // Keyed with the cache's own subkey, never the raw NEXTAUTH_SECRET
+    // (guardrail 6h). Rows hashed under an older key simply miss, and the miss
+    // path below re-verifies the token against plex.tv and writes a fresh row.
+    const tokenHash = purposeHmacHex(signingKey("plex-token-cache"), plexToken);
 
     const CACHE_TTL_DAYS = 30;
     const cacheCutoff = new Date(Date.now() - CACHE_TTL_DAYS * 24 * 60 * 60 * 1000);
@@ -1139,6 +1146,10 @@ export interface SignInResult {
   token: string;
   expiresInSeconds: number;
   sessionId: string;
+  // The transport the token is bound to (guardrail 6h). buildSignInResponse
+  // delivers it on exactly this one: the body for "bearer", Set-Cookie for
+  // "cookie".
+  transport: SessionTransport;
   user: {
     id: string;
     role: string;
@@ -1294,6 +1305,7 @@ export async function signInAndMintSession(params: {
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = token.expiresAt as number;
   const expiresInSeconds = Math.max(60, expiresAt - now);
+  const transport: SessionTransport = token.transport === "bearer" ? "bearer" : "cookie";
 
   const jwt = await signSessionJwt(
     {
@@ -1309,6 +1321,7 @@ export async function signInAndMintSession(params: {
       isMobile: token.isMobile as boolean | undefined,
       deviceLabel: token.deviceLabel as string | undefined,
       expiresAt,
+      transport,
     },
     { expiresInSeconds },
   );
@@ -1317,6 +1330,7 @@ export async function signInAndMintSession(params: {
     token: jwt,
     expiresInSeconds,
     sessionId: token.sessionId as string,
+    transport,
     user: {
       id: token.id as string,
       role: token.role as string,
