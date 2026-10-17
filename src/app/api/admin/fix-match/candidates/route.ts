@@ -8,6 +8,7 @@ import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 import { arrFetch } from "@/lib/arr";
 import { configuredArrCfg, enabledArrInstances } from "@/lib/arr-admin";
 import { processSingleton } from "@/lib/process-singleton";
+import { candidateCacheKey, getCachedCandidates, setCachedCandidates } from "@/lib/fix-match-candidate-cache";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
 import { settleLimit } from "@/lib/concurrency";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
@@ -64,6 +65,10 @@ export type CandidatesResponse = {
   // the caller can POST the fix back against the SAME server (a ratingKey is
   // server-local — see the fix-match POST route).
   serverInstance:      string;
+  // What the library row is matched to NOW (the wrong title), so the dialog can
+  // show "currently X → will become Y" instead of two bare ids.
+  currentTitle:        string | null;
+  currentYear:         string | null;
 };
 
 // 0-100 similarity of two titles via normalized Levenshtein edit distance.
@@ -463,7 +468,7 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     const [jfItem, plexRows] = await Promise.all([
       prisma.jellyfinLibraryItem.findFirst({
         where: { tmdbId, mediaType, serverInstance },
-        select: { jellyfinItemId: true, filePath: true },
+        select: { jellyfinItemId: true, filePath: true, title: true, year: true },
       }),
       // Cross-server display hint — deliberately unscoped, mirroring (and for
       // the same reason as) the Jellyfin read in the Plex mode below.
@@ -490,13 +495,15 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
       plexFilePath: plexHint?.filePath ?? null,
       jellyfinFilePath: jfItem.filePath ?? null,
       serverInstance,
+      currentTitle: jfItem.title ?? null,
+      currentYear: jfItem.year ?? null,
     } satisfies CandidatesResponse);
   }
 
   const [item, jellyfinRows] = await Promise.all([
     prisma.plexLibraryItem.findFirst({
       where: { tmdbId, mediaType, serverInstance },
-      select: { plexRatingKey: true, filePath: true },
+      select: { plexRatingKey: true, filePath: true, title: true, year: true },
     }),
     // Deliberately NOT scoped by `serverInstance`: that slug names the PLEX
     // server this listing is for, and the two sides of a bad match are
@@ -524,6 +531,9 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
   if (!item?.plexRatingKey) {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.plexRatingKeyNotFound") }, { status: 404 });
   }
+  const cacheKey = candidateCacheKey({ serverInstance, ratingKey: item.plexRatingKey, correctTmdbId, arrHint: arrTmdbIdHint });
+  const cached = getCachedCandidates<CandidatesResponse>(cacheKey);
+  if (cached) return NextResponse.json(cached);
   // Coerce to break taint from the DB-read string before interpolating into the
   // Plex admin-token URL below (rating keys are always integers).
   const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
@@ -703,7 +713,7 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     c.suggested = c.guid === finalSuggestedGuid;
   }
 
-  return NextResponse.json({
+  const responseBody = {
     candidates,
     targetTitle,
     targetYear,
@@ -721,5 +731,9 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     plexFilePath: item.filePath ?? null,
     jellyfinFilePath: jellyfinItem?.filePath ?? null,
     serverInstance,
-  } satisfies CandidatesResponse);
+    currentTitle: item.title ?? null,
+    currentYear: item.year ?? null,
+  } satisfies CandidatesResponse;
+  setCachedCandidates(cacheKey, responseBody);
+  return NextResponse.json(responseBody);
 });

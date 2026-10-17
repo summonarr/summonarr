@@ -632,6 +632,7 @@
   "adminManage.library.diff.fixAll": "Alle {count} korrigieren, bei denen Arr übereinstimmt",
   "adminManage.library.diff.stop": "Stopp",
   "adminManage.library.diff.fixStopped": "Gestoppt – {fixed}/{total} korrigiert",
+  "adminManage.library.diff.yearHint": "Das Ordnerjahr {year} passt zu {right} – {wrong} ist daher wahrscheinlich die falsche Zuordnung.",
   "adminManage.library.diff.fixing": "Korrektur {done}/{total}…",
   "adminManage.library.diff.fixDone": "Fertig – {fixed}/{total} korrigiert",
   "adminManage.library.diff.plexHasAll": "Plex enthält alle Inhalte von Jellyfin.",

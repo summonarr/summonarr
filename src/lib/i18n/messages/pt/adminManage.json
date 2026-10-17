@@ -632,6 +632,7 @@
   "adminManage.library.diff.fixAll": "Corrigir todos os {count} em que o Arr concorda",
   "adminManage.library.diff.stop": "Parar",
   "adminManage.library.diff.fixStopped": "Interrompido — {fixed}/{total} corrigidos",
+  "adminManage.library.diff.yearHint": "O ano da pasta ({year}) combina com {right}, então {wrong} provavelmente é a correspondência errada.",
   "adminManage.library.diff.fixing": "Corrigindo {done}/{total}…",
   "adminManage.library.diff.fixDone": "Concluído — {fixed}/{total} corrigidos",
   "adminManage.library.diff.plexHasAll": "O Plex tem todo o conteúdo do Jellyfin.",

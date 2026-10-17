@@ -297,6 +297,8 @@ const { GET: candidates } = await import("../src/app/api/admin/fix-match/candida
 const { GET: fileInfo } = await import("../src/app/api/admin/fix-match/file-info/route.ts");
 const { GET: thumb } = await import("../src/app/api/admin/fix-match/thumb/route.ts");
 const { GET: fixMatchStatus } = await import("../src/app/api/admin/fix-match/status/route.ts");
+const { clearCandidateCache } = await import("../src/lib/fix-match-candidate-cache.ts");
+const { GET: fixMatchJobs } = await import("../src/app/api/admin/fix-match/jobs/route.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -354,6 +356,7 @@ function configureServers() {
 const origins = () => [...new Set(fetchCalls.map((c) => c.url.origin))];
 
 beforeEach(() => {
+  clearCandidateCache();
   ops = [];
   fetchCalls.length = 0;
   settingReads.length = 0;
@@ -1943,4 +1946,75 @@ test("candidates: the arr cross-check reads EVERY enabled instance — a title o
   assert.equal(body.arrConfirmedTitle, "Right Film");
   assert.ok(arrHits.includes("/api/v3/movie?tmdbId=222"));
   assert.ok(settingReads.every((k) => k !== "radarrUrl" && k !== "radarrApiKey"), "the default-instance keys are no longer read raw");
+});
+
+test("jobs feed: lists recent jobs with a title and outcome, coarse only — no ratingKey, path or key — and needs a session", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/secret/path/a.mkv", plexRatingKey: "1001", title: "Dune", year: "2021" } as LibRow);
+  respond = plexRemapResponder(PLEX_DEFAULT, "1001", 222);
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz", async: true }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const { jobId } = await res.json() as { jobId: string };
+  for (let i = 0; i < 400; i++) {
+    await flush();
+    const st = await (await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined)).json() as { status: string };
+    if (st.status !== "running") break;
+  }
+  const feed = await fixMatchJobs(req("http://localhost:3000/api/admin/fix-match/jobs", { headers: a.header }), undefined);
+  assert.equal(feed.status, 200);
+  const text = await feed.text();
+  const body = JSON.parse(text) as { jobs: Array<{ id: string; status: string; title: string | null; server: string }> };
+  const job = body.jobs.find((j) => j.id === jobId);
+  assert.equal(job?.status, "done");
+  assert.equal(job?.title, "Dune (2021)");
+  assert.equal(job?.server, "plex");
+  for (const secret of ["1001", "/secret/path", "plex://movie/xyz", PLEX_DEFAULT, TOKEN_DEFAULT]) {
+    assert.ok(!text.includes(secret), `the feed must not leak ${secret}`);
+  }
+  assert.equal((await fixMatchJobs(req("http://localhost:3000/api/admin/fix-match/jobs"), undefined)).status, 401);
+});
+
+test("candidates (plex): a re-open inside the TTL is served from memory with ZERO Plex calls, and a fix-match run clears it", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001" });
+  respond = (url) => {
+    if (url.pathname === "/library/metadata/1001/matches") return okJson({ MediaContainer: { SearchResult: [{ guid: "plex://movie/aaa", name: "Right", year: 2010 }] } });
+    throw new Error(`unexpected ${url}`);
+  };
+  const call = () => candidates(req(candidatesUrl({ server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222" }), { headers: a.header }), undefined);
+  const first = await call();
+  assert.equal(first.status, 200);
+  const callsAfterFirst = fetchCalls.length;
+  assert.ok(callsAfterFirst > 0);
+  const second = await call();
+  assert.deepEqual(await second.json(), await first.json());
+  assert.equal(fetchCalls.length, callsAfterFirst, "the second open made no upstream call");
+
+  // A fix-match run (even a failing one) drops the cached list.
+  respond = (url) => { throw new Error(`unexpected ${url}`); };
+  await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/aaa" }, a.header), undefined);
+  respond = (url) => {
+    if (url.pathname === "/library/metadata/1001/matches") return okJson({ MediaContainer: { SearchResult: [] } });
+    throw new Error(`unexpected ${url}`);
+  };
+  const before = fetchCalls.length;
+  await call();
+  assert.ok(fetchCalls.length > before, "after a fix-match run the list is fetched fresh");
+});
+
+test("candidates: the payload names what the row is matched to NOW (current title + year) for both servers", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/m/w.mkv", jellyfinItemId: "aaaaaaaa", title: "Wrong Film", year: "1995" } as LibRow);
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/m/w.mkv", plexRatingKey: "1001", title: "Wrong Film", year: "1995" } as LibRow);
+  const jf = await (await candidates(req(candidatesUrl({ server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222" }), { headers: a.header }), undefined)).json() as { currentTitle: string | null; currentYear: string | null };
+  assert.deepEqual([jf.currentTitle, jf.currentYear], ["Wrong Film", "1995"]);
+  respond = (url) => {
+    if (url.pathname === "/library/metadata/1001/matches") return okJson({ MediaContainer: { SearchResult: [] } });
+    throw new Error(`unexpected ${url}`);
+  };
+  const px = await (await candidates(req(candidatesUrl({ server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222" }), { headers: a.header }), undefined)).json() as { currentTitle: string | null; currentYear: string | null };
+  assert.deepEqual([px.currentTitle, px.currentYear], ["Wrong Film", "1995"]);
 });

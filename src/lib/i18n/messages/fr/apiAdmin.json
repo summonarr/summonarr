@@ -94,7 +94,7 @@
   "apiAdmin.fixMatch.plexRatingKeyNotFound": "Rating key Plex introuvable — resynchronisez d’abord",
   "apiAdmin.fixMatch.sameIds": "Les ID TMDB sont déjà identiques",
   "apiAdmin.fixMatch.tooMany": "Trop de corrections d’association — réessayez dans une minute.",
-  "apiAdmin.fixMatch.tooManyRunning": "Trop de corrections d’association sont déjà en cours — attendez qu’une se termine et réessayez.",
+  "apiAdmin.fixMatch.tooManyRunning": "Trop d'opérations de correction sont déjà en file d'attente — attendez que certaines se terminent, puis réessayez.",
   "apiAdmin.fixMatch.unknownJob": "Tâche de correction d’association inconnue ou expirée",
   "apiAdmin.heatmap.day": "day doit être au format YYYY-MM-DD",
   "apiAdmin.heatmap.dow": "dow doit être compris entre 0 et 6",

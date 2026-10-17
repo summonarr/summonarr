@@ -12,7 +12,7 @@ import type { Translator } from "./i18n/translate";
 // Deployment section of CLAUDE.md): nothing here survives a restart, and the
 // status route answers 404 for a job it no longer knows.
 
-export type FixMatchJobStatus = "running" | "done" | "failed";
+export type FixMatchJobStatus = "queued" | "running" | "done" | "failed";
 export type FixMatchJobResult = { ok: true; warning?: string };
 
 // Live progress a runner reports while it works, so the UI can tell "waiting
@@ -48,6 +48,8 @@ export type FixMatchJob = {
   // The HTTP status the synchronous path would have answered with (404/502).
   errorStatus: number | null;
   progress: FixMatchProgress | null;
+  // What the job is about, for the job tray ("Dune (2021) · plex"). Display only.
+  title: string | null;
 };
 
 // A failure the client may see verbatim. Anything else that escapes a runner
@@ -82,12 +84,18 @@ const MAX_JOBS = 500;
 // with admin count, so the registry itself must bound admission; the Fix-all
 // loop is sequential and never approaches this.
 const MAX_RUNNING_JOBS = 4;
+// Jobs past the running cap WAIT their turn instead of being refused, so someone
+// who clicks several Fix buttons gets them all, one slot at a time. The bound
+// only stops a script from queueing without limit.
+const MAX_QUEUED_JOBS = 50;
 
 // Process-wide (see process-singleton.ts). The POST route that starts a job and
 // the status route that polls it are separate route bundles; a plain module-level
 // Map could give each bundle its own copy, so the status route would answer 404
 // for a job the POST route is still running.
 const jobs = processSingleton("fix-match-jobs:jobs", () => new Map<string, FixMatchJob>());
+type QueuedRun = { job: FixMatchJob; run: (report: FixMatchReport) => Promise<FixMatchJobResult>; t?: Translator };
+const waiting = processSingleton("fix-match-jobs:waiting", () => [] as QueuedRun[]);
 
 function prune(now: number): void {
   for (const [id, job] of jobs) {
@@ -112,47 +120,75 @@ function prune(now: number): void {
 // cannot race another request on the single-threaded event loop.
 export function findRunningFixMatchJob(key: string): FixMatchJob | null {
   for (const job of jobs.values()) {
-    if (job.key === key && job.status === "running") return job;
+    if (job.key === key && (job.status === "running" || job.status === "queued")) return job;
   }
   return null;
 }
 
+/** How many queued jobs are ahead of this one (0 = next in line); null when it is not queued. */
+export function fixMatchQueueAhead(id: string): number | null {
+  const idx = waiting.findIndex((w) => w.job.id === id);
+  return idx === -1 ? null : idx;
+}
+
+/** Every job the registry still holds, newest first — the job tray's feed. */
+export function listFixMatchJobs(now: number = Date.now()): FixMatchJob[] {
+  prune(now);
+  return [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
+}
+
 // Starts `run` detached (in the background) and returns the job record
-// immediately. `t` (the starting request's translator) phrases the registry's
-// own client-facing messages; without it they stay English. A job with the same key that is still running is returned
-// instead of started twice — a double-click or the Fix-all loop must never drive
-// two concurrent remaps of one title.
+// immediately; past MAX_RUNNING_JOBS it is queued and starts when a slot frees.
+// `t` (the starting request's translator) phrases the registry's own
+// client-facing messages; without it they stay English. A job with the same key
+// that is still active (running or queued) is returned instead of started twice
+// — a double-click or the Fix-all loop must never drive two concurrent remaps of
+// one title.
 export function startFixMatchJob(
   key: string,
   run: (report: FixMatchReport) => Promise<FixMatchJobResult>,
   now: number = Date.now(),
   t?: Translator,
+  title: string | null = null,
 ): FixMatchJob {
   prune(now);
   let running = 0;
   for (const job of jobs.values()) {
-    if (job.key === key && job.status === "running") return job;
+    if (job.key === key && (job.status === "running" || job.status === "queued")) return job;
     if (job.status === "running") running += 1;
-  }
-  if (running >= MAX_RUNNING_JOBS) {
-    throw new FixMatchError(
-      t
-        ? t("apiAdmin.fixMatch.tooManyRunning")
-        : "Too many fix-match operations are already running — wait for one to finish and try again.",
-      429,
-    );
   }
   const job: FixMatchJob = {
     id: randomUUID(), key, status: "running", startedAt: now,
-    finishedAt: null, result: null, error: null, errorStatus: null, progress: null,
+    finishedAt: null, result: null, error: null, errorStatus: null, progress: null, title,
   };
+  if (running >= MAX_RUNNING_JOBS) {
+    if (waiting.length >= MAX_QUEUED_JOBS) {
+      throw new FixMatchError(
+        t
+          ? t("apiAdmin.fixMatch.tooManyRunning")
+          : "Too many fix-match operations are already queued — wait for some to finish and try again.",
+        429,
+      );
+    }
+    job.status = "queued";
+    jobs.set(job.id, job);
+    waiting.push({ job, run, t });
+    return job;
+  }
   jobs.set(job.id, job);
+  launch({ job, run, t });
+  return job;
+}
+
+function launch({ job, run, t }: QueuedRun): void {
+  job.status = "running";
   const report: FixMatchReport = (progress) => { job.progress = { ...progress, updatedAt: Date.now() }; };
   void Promise.resolve().then(() => run(report)).then(
     (result) => {
       job.status = "done";
       job.result = result;
       job.finishedAt = Date.now();
+      pump();
     },
     (err: unknown) => {
       job.status = "failed";
@@ -165,9 +201,20 @@ export function startFixMatchJob(
         job.error = t ? t("apiAdmin.fixMatch.failed") : "Fix-match operation failed";
         job.errorStatus = 502;
       }
+      pump();
     },
   );
-  return job;
+}
+
+// A slot freed: start queued jobs, oldest first, while there is room.
+function pump(): void {
+  let running = 0;
+  for (const job of jobs.values()) if (job.status === "running") running += 1;
+  while (running < MAX_RUNNING_JOBS && waiting.length > 0) {
+    const next = waiting.shift() as QueuedRun;
+    running += 1;
+    launch(next);
+  }
 }
 
 export function getFixMatchJob(id: string, now: number = Date.now()): FixMatchJob | null {
@@ -178,4 +225,5 @@ export function getFixMatchJob(id: string, now: number = Date.now()): FixMatchJo
 // Test seam: the registry is module state.
 export function _resetFixMatchJobsForTests(): void {
   jobs.clear();
+  waiting.length = 0;
 }

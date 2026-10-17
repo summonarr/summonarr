@@ -5330,9 +5330,19 @@ const spec = {
         summary: "Status of a background fix-match job started with `async: true` (ADMIN / ISSUE_ADMIN)",
         parameters: [{ name: "id", in: "query", required: true, schema: { type: "string", format: "uuid" } }],
         responses: {
-          "200": { description: "`status` is running | done | failed; `result` when done (same shape as the synchronous POST), `error` + `errorStatus` when failed" },
+          "200": { description: "`status` is queued | running | done | failed (`queueAhead` while queued, `progress` while running); `result` when done (same shape as the synchronous POST), `error` + `errorStatus` when failed" },
           "400": { description: "Missing or malformed id" },
           "404": { description: "Unknown or expired job — jobs are in-process and do not survive a restart; re-sync to see whether the remap landed" },
+        },
+      },
+    },
+    "/admin/fix-match/jobs": {
+      get: {
+        tags: ["Admin – Fix Match"],
+        summary: "Recent fix-match jobs for the job tray (ADMIN / ISSUE_ADMIN)",
+        description: "Every job the in-process registry still holds — queued, running, and finished within the last hour — newest first. Coarse by design: id, status, title, server, timestamps, progress counters and the outcome; never a ratingKey, path or token. A restart empties it.",
+        responses: {
+          "200": { description: "`{ jobs: [{ id, status, title, server, startedAt, finishedAt, queueAhead?, progress?, warning?, error? }] }`" },
         },
       },
     },

@@ -94,7 +94,7 @@
   "apiAdmin.fixMatch.plexRatingKeyNotFound": "未找到 Plex rating key——请先重新同步",
   "apiAdmin.fixMatch.sameIds": "TMDB ID 已经相同",
   "apiAdmin.fixMatch.tooMany": "修正匹配操作过多——请一分钟后重试。",
-  "apiAdmin.fixMatch.tooManyRunning": "正在运行的修正匹配操作过多——请等待其中一个完成后重试。",
+  "apiAdmin.fixMatch.tooManyRunning": "已有过多修复匹配操作在排队——请等待部分完成后重试。",
   "apiAdmin.fixMatch.unknownJob": "修正匹配任务未知或已过期",
   "apiAdmin.heatmap.day": "day 必须是 YYYY-MM-DD 格式",
   "apiAdmin.heatmap.dow": "dow 必须是 0-6",

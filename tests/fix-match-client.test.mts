@@ -119,3 +119,25 @@ test("runFixMatch keeps polling past 20 minutes while the job's progress keeps m
     globalThis.fetch = realFetch; Date.now = realNow; globalThis.setTimeout = realSetTimeout;
   }
 });
+
+test("a QUEUED job is never a stall: 30 minutes in line still completes, and the UI is told its position", async () => {
+  const realFetch = globalThis.fetch, realNow = Date.now, realSetTimeout = globalThis.setTimeout;
+  let clock = 5_000_000;
+  Date.now = () => clock;
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  let polls = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (String(input).endsWith("/api/admin/fix-match")) return json({ ok: true, jobId: "00000000-0000-0000-0000-000000000000" }, 202);
+    polls++;
+    return polls <= 600 ? json({ status: "queued", queueAhead: 2 }) : json({ status: "done", result: { ok: true } });
+  }) as typeof fetch;
+  const seen: Array<{ phase: string; queueAhead?: number }> = [];
+  try {
+    const out = await runFixMatch({ server: "plex", mediaType: "MOVIE", correctTmdbId: 5, tmdbId: 4 }, { onProgress: (p) => seen.push({ phase: p.phase, queueAhead: p.queueAhead }) });
+    assert.deepEqual(out, { ok: true });
+    assert.deepEqual(seen[0], { phase: "queued", queueAhead: 2 });
+  } finally {
+    globalThis.fetch = realFetch; Date.now = realNow; globalThis.setTimeout = realSetTimeout;
+  }
+});

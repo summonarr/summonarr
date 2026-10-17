@@ -632,6 +632,7 @@
   "adminManage.library.diff.fixAll": "修正 Arr 认可的全部 {count} 个",
   "adminManage.library.diff.stop": "停止",
   "adminManage.library.diff.fixStopped": "已停止——已修复 {fixed}/{total}",
+  "adminManage.library.diff.yearHint": "文件夹年份 {year} 与 {right} 相符，因此 {wrong} 很可能是错误匹配。",
   "adminManage.library.diff.fixing": "正在修正 {done}/{total}…",
   "adminManage.library.diff.fixDone": "完成——已修正 {fixed}/{total}",
   "adminManage.library.diff.plexHasAll": "Plex 拥有 Jellyfin 的全部内容。",

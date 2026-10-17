@@ -632,6 +632,7 @@
   "adminManage.library.diff.fixAll": "Corregir los {count} en los que Arr coincide",
   "adminManage.library.diff.stop": "Detener",
   "adminManage.library.diff.fixStopped": "Detenido: {fixed}/{total} corregidos",
+  "adminManage.library.diff.yearHint": "El año de la carpeta ({year}) coincide con {right}, así que {wrong} probablemente es la coincidencia errónea.",
   "adminManage.library.diff.fixing": "Corrigiendo {done}/{total}…",
   "adminManage.library.diff.fixDone": "Listo: {fixed}/{total} corregidos",
   "adminManage.library.diff.plexHasAll": "Plex tiene todo el contenido de Jellyfin.",

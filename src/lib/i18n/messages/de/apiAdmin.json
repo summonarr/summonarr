@@ -94,7 +94,7 @@
   "apiAdmin.fixMatch.plexRatingKeyNotFound": "Plex-Rating-Key nicht gefunden – zuerst neu synchronisieren",
   "apiAdmin.fixMatch.sameIds": "Die TMDB-IDs sind bereits identisch",
   "apiAdmin.fixMatch.tooMany": "Zu viele Zuordnungskorrekturen – bitte in einer Minute erneut versuchen.",
-  "apiAdmin.fixMatch.tooManyRunning": "Es laufen bereits zu viele Zuordnungskorrekturen – warten Sie, bis eine abgeschlossen ist, und versuchen Sie es erneut.",
+  "apiAdmin.fixMatch.tooManyRunning": "Zu viele Korrekturvorgänge sind bereits in der Warteschlange – warte, bis einige fertig sind, und versuche es erneut.",
   "apiAdmin.fixMatch.unknownJob": "Unbekannter oder abgelaufener Fix-Match-Job",
   "apiAdmin.heatmap.day": "day muss im Format YYYY-MM-DD sein",
   "apiAdmin.heatmap.dow": "dow muss zwischen 0 und 6 liegen",

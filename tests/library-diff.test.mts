@@ -47,3 +47,22 @@ test("bulk Fix all asks first, can be stopped, and stops on unmount", () => {
   assert.match(fixAll, /if \(stopRef\.current\) break;/, "the loop checks the stop flag between titles");
   assert.match(fixAll, /abortRef\.current\?\.abort\(\)/, "unmount aborts the status poll");
 });
+
+import { folderYear, suggestWrongSide } from "../src/lib/library-diff.ts";
+test("folderYear reads the deepest folder's (YYYY), never the file name", () => {
+  assert.equal(folderYear("Ghost in the Shell (2017)/Ghost.mkv"), 2017);
+  assert.equal(folderYear("Shows/Foo (2013)/Season 1/e01.mkv"), 2013);
+  assert.equal(folderYear("Film.2017.1080p.mkv"), null);
+  assert.equal(folderYear("NoYear/Film.mkv"), null);
+});
+
+test("suggestWrongSide: only when one side fits the folder year and the other is 2+ years off", () => {
+  const p = "Ghost in the Shell (2017)/g.mkv";
+  assert.deepEqual(suggestWrongSide(p, "1995", "2017"), { wrong: "plex", year: 2017 });
+  assert.deepEqual(suggestWrongSide(p, "2017", "1995"), { wrong: "jellyfin", year: 2017 });
+  assert.equal(suggestWrongSide(p, "2016", "2017"), null, "both fit");
+  assert.equal(suggestWrongSide(p, "1990", "1995"), null, "neither fits");
+  assert.deepEqual(suggestWrongSide(p, "2015", "2017"), { wrong: "plex", year: 2017 }, "two years off counts");
+  assert.equal(suggestWrongSide(p, null, "2017"), null, "an unknown year is never guessed");
+  assert.equal(suggestWrongSide("NoYear/f.mkv", "1995", "2017"), null);
+});

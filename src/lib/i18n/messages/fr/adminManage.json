@@ -632,6 +632,7 @@
   "adminManage.library.diff.fixAll": "Corriger les {count} où Arr est d'accord",
   "adminManage.library.diff.stop": "Arrêter",
   "adminManage.library.diff.fixStopped": "Arrêté — {fixed}/{total} corrigés",
+  "adminManage.library.diff.yearHint": "L'année du dossier ({year}) correspond à {right} ; {wrong} est donc probablement la mauvaise correspondance.",
   "adminManage.library.diff.fixing": "Correction {done}/{total}…",
   "adminManage.library.diff.fixDone": "Terminé — {fixed}/{total} corrigés",
   "adminManage.library.diff.plexHasAll": "Plex possède tout le contenu de Jellyfin.",

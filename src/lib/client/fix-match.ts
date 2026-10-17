@@ -35,11 +35,13 @@ export type FixMatchOutcome = { ok: true; warning?: string; joined?: boolean };
 // wall-clock elapsed since the job started, so "Applying…" can become
 // "Jellyfin accepted the match — waiting for its refresh (3:20)".
 export type FixMatchProgressView = {
-  phase: "searching" | "applying" | "confirming";
+  phase: "queued" | "searching" | "applying" | "confirming";
   remoteApplied: boolean;
   attempt: number;
   attempts: number;
   readFailures: number;
+  // Jobs ahead of this one while it waits for a slot (phase "queued" only).
+  queueAhead?: number;
   // Which copy of a multi-copy title the server is on (1-based); absent for one item.
   copy?: number;
   copies?: number;
@@ -95,12 +97,16 @@ export function fixMatchWarningMessage(outcome: FixMatchOutcome, t: Translator):
 
 type StartBody = { ok?: boolean; jobId?: string; warning?: string; error?: string; joined?: boolean };
 type StatusBody = {
-  status?: "running" | "done" | "failed";
+  status?: "queued" | "running" | "done" | "failed";
+  queueAhead?: number;
   startedAt?: number;
   progress?: Omit<FixMatchProgressView, "elapsedMs">;
   result?: FixMatchOutcome;
   error?: string;
 };
+
+/** Fired on `window` when a job has been accepted, so the job tray refreshes at once. */
+export const FIX_MATCH_STARTED_EVENT = "fix-match:started";
 
 const POLL_INTERVAL_MS = 3_000;
 // Absolute ceiling. A multi-copy Jellyfin series runs its copies one after
@@ -150,6 +156,8 @@ export async function runFixMatch(
 
   // Only a caller that PICKED a candidate can have had its pick ignored.
   const joined = Boolean(started.joined && body.canonicalGuid);
+  // Tell the job tray there is something new to show without waiting for its poll.
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(FIX_MATCH_STARTED_EVENT));
 
   const statusUrl = withBasePath(`/api/admin/fix-match/status?id=${encodeURIComponent(started.jobId)}`);
   const deadline = Date.now() + MAX_WAIT_MS;
@@ -188,6 +196,15 @@ export async function runFixMatch(
       return joined ? { ...result, joined: true } : result;
     }
     if (job.status === "failed") throw new FixMatchClientError("failed", { message: job.error ?? "" });
+    // Waiting for a slot is not a stall, however long the jobs ahead take.
+    if (job.status === "queued") {
+      lastChangeAt = Date.now();
+      opts.onProgress?.({
+        phase: "queued", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0,
+        queueAhead: job.queueAhead ?? 0, elapsedMs: Date.now() - startedLocally,
+      });
+      continue;
+    }
     const signature = progressSignature(job.progress);
     if (signature !== lastSignature) {
       lastSignature = signature;

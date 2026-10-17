@@ -675,6 +675,10 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The synchronous default (no `async`) is a **wire contract the iOS app pins** — keep it byte-identical; gate a native switch on the reported `apiVersion` (guardrail 25), never by changing the default.
     - The same key (server + instance + mediaType + from→to) already running ⇒ the same job is returned, never a second remap of one title.
     - A job's `error` is the client-safe message only — the route still logs the real detail before throwing `FixMatchError`.
+    - Jobs past `MAX_RUNNING_JOBS` QUEUE (status `queued`, `queueAhead` on the status route; a bounded queue 429s past `MAX_QUEUED_JOBS`) — they are not refused. A queued job is never a stall.
+    - The client gives up on a RUNNING job only when its progress signature stops changing (`STALL_LIMIT_MS`), never on a fixed wall-clock window: copies run serially and a multi-copy series legitimately outlasts any fixed number. Every runner therefore reports each attempt, phase and copy (`copy`/`copies`) through `report`.
+    - A Plex title remaps EVERY copy in `plexRatingKeys` (the twin of the Jellyfin loop), touching a rider key only when Plex says it still carries the old id; copies that fail stay on the old row. Both servers carry the removed row's descriptive columns to the corrected row and UNION item keys into an existing target row (`fix-match-rows.ts`) — a remap never replaces keys or drops `addedAt`.
+    - The job tray (`GET /api/admin/fix-match/jobs`, `FixMatchTray`) is coarse: title, server, status, outcome — never a ratingKey, path or token.
 37b. **Exactly one TMDB id may keep a `PlexLibraryItem` row per conflated Plex ratingKey, and WHICH one must resolve the same way on every run.** The Plex twin of 37's `prefersCandidate`. One definition — [plex-dedupe.ts](src/lib/plex-dedupe.ts) — called by BOTH writers, the orchestrator's Plex arm and the admin Resync route.
 
     Detail and rationale: [docs/guardrails/37b.md](docs/guardrails/37b.md).

@@ -332,14 +332,17 @@ export function IssueFixMatchButton({
     }
   }
 
-  async function resolveIssue(correctedTitle: string) {
-    await fetch(withBasePath(`/api/issues/${issueId}`), {
+  // true when the issue was closed. A failure used to be swallowed, so a fix that
+  // landed left the issue open with nothing on screen to say so.
+  async function resolveIssue(correctedTitle: string): Promise<boolean> {
+    const res = await fetch(withBasePath(`/api/issues/${issueId}`), {
       method:  "PATCH",
       headers: { "Content-Type": "application/json" },
       // Stored on the Issue and shown to the reporter — written in the admin's
       // UI language rather than hardcoded English.
       body:    JSON.stringify({ status: "RESOLVED", resolution: t("adminQueue.fixMatch.resolutionNote", { title: correctedTitle }) }),
     }).catch(() => null);
+    return res?.ok === true;
   }
 
   async function applyPlex(canonicalGuid: string) {
@@ -354,8 +357,8 @@ export function IssueFixMatchButton({
         server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, canonicalGuid,
         ...(plexInstance ? { serverInstance: plexInstance } : {}),
       }, { signal: ac.signal });
-      setPlexState({ status: "done", warning: fixMatchWarningMessage(outcome, t) ?? undefined });
-      await resolveIssue(selected.title);
+      const resolved = await resolveIssue(selected.title);
+      setPlexState({ status: "done", warning: [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")].filter(Boolean).join(" ") || undefined });
       router.refresh();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
@@ -375,8 +378,8 @@ export function IssueFixMatchButton({
         server: "jellyfin", tmdbId, mediaType, correctTmdbId: selected.id,
         ...(jellyfinInstance ? { serverInstance: jellyfinInstance } : {}),
       }, { signal: ac.signal });
-      setJellyfinState({ status: "done", warning: fixMatchWarningMessage(outcome, t) ?? undefined });
-      await resolveIssue(selected.title);
+      const resolved = await resolveIssue(selected.title);
+      setJellyfinState({ status: "done", warning: [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")].filter(Boolean).join(" ") || undefined });
       router.refresh();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on

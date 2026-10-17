@@ -117,3 +117,38 @@ export function diffCollator(locale: string): Intl.Collator {
     return new Intl.Collator("en", { numeric: true, sensitivity: "base" });
   }
 }
+
+/**
+ * The "(YYYY)" in a path's folder names, deepest folder first — Radarr/Sonarr's
+ * "Title (2017)" layout. null when no folder carries one (a file name is not
+ * read: "Film.2017.1080p.mkv" years are too often a different number).
+ */
+export function folderYear(relativePath: string): number | null {
+  const folders = relativePath.replace(/\\/g, "/").split("/").filter(Boolean).slice(0, -1);
+  for (let i = folders.length - 1; i >= 0; i--) {
+    const m = /\((\d{4})\)\s*$/.exec(folders[i]) ?? /\((\d{4})\)/.exec(folders[i]);
+    if (m) return Number(m[1]);
+  }
+  return null;
+}
+
+/**
+ * When Radarr/Sonarr can't referee a bad match, the folder's year often can: one
+ * side's year fits it and the other's is two or more years off. A hint only —
+ * the admin still picks which side to fix. null whenever it isn't clear-cut.
+ */
+export function suggestWrongSide(
+  relativePath: string,
+  plexYear: string | null,
+  jellyfinYear: string | null,
+): { wrong: "plex" | "jellyfin"; year: number } | null {
+  const fy = folderYear(relativePath);
+  const py = plexYear ? Number.parseInt(plexYear, 10) : NaN;
+  const jy = jellyfinYear ? Number.parseInt(jellyfinYear, 10) : NaN;
+  if (fy === null || Number.isNaN(py) || Number.isNaN(jy)) return null;
+  const plexFits = Math.abs(py - fy) <= 1;
+  const jellyfinFits = Math.abs(jy - fy) <= 1;
+  if (plexFits && !jellyfinFits && Math.abs(jy - fy) >= 2) return { wrong: "jellyfin", year: fy };
+  if (jellyfinFits && !plexFits && Math.abs(py - fy) >= 2) return { wrong: "plex", year: fy };
+  return null;
+}

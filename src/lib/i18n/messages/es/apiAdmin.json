@@ -94,7 +94,7 @@
   "apiAdmin.fixMatch.plexRatingKeyNotFound": "No se encontró la rating key de Plex: sincroniza de nuevo primero",
   "apiAdmin.fixMatch.sameIds": "Los ID de TMDB ya son iguales",
   "apiAdmin.fixMatch.tooMany": "Demasiadas correcciones de coincidencia: inténtalo de nuevo en un minuto.",
-  "apiAdmin.fixMatch.tooManyRunning": "Ya hay demasiadas correcciones de coincidencia en curso: espera a que termine alguna e inténtalo de nuevo.",
+  "apiAdmin.fixMatch.tooManyRunning": "Ya hay demasiadas correcciones en cola: espera a que terminen algunas e inténtalo de nuevo.",
   "apiAdmin.fixMatch.unknownJob": "Tarea de corrección de coincidencia desconocida o caducada",
   "apiAdmin.heatmap.day": "day debe tener el formato AAAA-MM-DD",
   "apiAdmin.heatmap.dow": "dow debe estar entre 0 y 6",

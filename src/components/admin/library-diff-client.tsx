@@ -9,7 +9,7 @@ import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { rich } from "@/components/settings/forms/rich";
-import type { DiffSource } from "@/lib/library-diff";
+import { suggestWrongSide, type DiffSource } from "@/lib/library-diff";
 
 interface RequestSummary {
   total: number;
@@ -444,6 +444,8 @@ function sideLabel(service: "plex" | "jellyfin", serverInstance: string): string
 function BadMatchCard({ match }: { match: ClientBadMatch }) {
   const t = useT();
   const { arrVerdict, arrTmdbId } = match;
+  // No arr verdict: the folder's year may still say which side is off.
+  const yearHint = suggestWrongSide(match.relativePath, match.plex.releaseYear, match.jellyfin.releaseYear);
   const plexCorrectId     = arrTmdbId ?? match.jellyfin.tmdbId;
   const jellyfinCorrectId = arrTmdbId ?? match.plex.tmdbId;
 
@@ -505,6 +507,16 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
               : t("adminManage.library.diff.arrDisagree")}
           </p>
         </div>
+      )}
+
+      {!arrVerdict && yearHint && (
+        <p className="ds-mono" style={{ margin: "0 0 10px", fontSize: 11, color: "var(--ds-warning)" }}>
+          {t("adminManage.library.diff.yearHint", {
+            year: yearHint.year,
+            right: yearHint.wrong === "plex" ? "Jellyfin" : "Plex",
+            wrong: yearHint.wrong === "plex" ? "Plex" : "Jellyfin",
+          })}
+        </p>
       )}
 
       <div className="flex gap-3 flex-wrap md:flex-nowrap">

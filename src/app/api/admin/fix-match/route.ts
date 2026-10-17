@@ -23,6 +23,7 @@ import {
 } from "@/lib/media-instances";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { clearCandidateCache } from "@/lib/fix-match-candidate-cache";
 import { carryMeta, JELLYFIN_META_KEYS, LIBRARY_META_KEYS, remainingOnOldRow, unionKeys } from "@/lib/fix-match-rows";
 import { dropMatchFlagInTx, findMatchFlag, moveItemToTitleInTx, readLibraryMatchReport } from "@/lib/library-match-data";
 
@@ -801,6 +802,16 @@ type FixMatchActor = { userId: string; userName: string | null | undefined };
 // handler either awaits it inline (the synchronous contract) or hands it to the
 // job registry (guardrail 37a); both paths see exactly the same outcomes.
 async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { background: boolean; report?: FixMatchReport }, t: Translator): Promise<FixMatchJobResult> {
+  try {
+    return await runFixMatchOnce(input, actor, opts, t);
+  } finally {
+    // Whatever happened, Plex's answer for this title may have changed — a cached
+    // candidate list would describe the item as it was before the attempt.
+    clearCandidateCache();
+  }
+}
+
+async function runFixMatchOnce(input: FixMatchInput, actor: FixMatchActor, opts: { background: boolean; report?: FixMatchReport }, t: Translator): Promise<FixMatchJobResult> {
   const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance } = input;
 
   // The remap is inherently two-phase: the remote library server must be
@@ -1153,6 +1164,20 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
   }
 }
 
+// "Title (Year)" of the row being remapped, for the job tray only — best effort,
+// never a reason to refuse the job.
+async function libraryTitleFor(input: FixMatchInput): Promise<string | null> {
+  try {
+    const where = { tmdbId: input.tmdbId, mediaType: input.mediaType, serverInstance: input.serverInstance };
+    const row = input.server === "plex"
+      ? await prisma.plexLibraryItem.findFirst({ where, select: { title: true, year: true } })
+      : await prisma.jellyfinLibraryItem.findFirst({ where, select: { title: true, year: true } });
+    return row?.title ? `${row.title}${row.year ? ` (${row.year})` : ""}` : null;
+  } catch {
+    return null;
+  }
+}
+
 // withIssueAdmin, not withAdmin: an ISSUE_ADMIN may fix a wrong match to
 // resolve a reported issue without holding full admin rights.
 export const POST = withIssueAdmin(async (request, _ctx, session) => {
@@ -1198,6 +1223,8 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   }
   const serverInstance = body.serverInstance ?? DEFAULT_MEDIA_INSTANCE;
   let input: FixMatchInput = { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance };
+  // Shown in the job tray; the match check's flag already carries a title.
+  let flaggedTitle: string | null = null;
   if (itemMode) {
     // The key only NAMES an item the last match check flagged on this server;
     // everything else about it is read from that stored flag, never the body.
@@ -1214,6 +1241,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       return NextResponse.json({ error: t("apiAdmin.fixMatch.sameIds") }, { status: 400 });
     }
     input = { ...input, tmdbId: flag.serverTmdbId ?? 0, mediaType: flag.mediaType, itemKey, itemPath: flag.path };
+    flaggedTitle = flag.title ? `${flag.title}${flag.year ? ` (${flag.year})` : ""}` : null;
   }
   const actor: FixMatchActor = { userId: session.user.id, userName: session.user.name ?? session.user.email };
 
@@ -1231,7 +1259,8 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       return NextResponse.json({ ok: true, jobId: existing.id, status: existing.status, joined: true }, { status: 202 });
     }
     try {
-      const job = startFixMatchJob(key, (report) => runFixMatch(input, actor, { background: true, report }, t), Date.now(), t);
+      const title = flaggedTitle ?? await libraryTitleFor(input);
+      const job = startFixMatchJob(key, (report) => runFixMatch(input, actor, { background: true, report }, t), Date.now(), t, title);
       return NextResponse.json({ ok: true, jobId: job.id, status: job.status }, { status: 202 });
     } catch (err) {
       // The registry's concurrent-running cap (429) — map like the sync branch.

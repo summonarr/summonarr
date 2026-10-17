@@ -139,6 +139,14 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
           </div>
         </div>
 
+        <div className="mx-6 mt-3 flex-shrink-0 flex items-baseline gap-2 flex-wrap text-xs">
+          <span className="text-zinc-500">{t("adminQueue.fixMatch.currentlyMatched")}</span>
+          <span className="font-medium text-zinc-200">
+            {data.currentTitle ?? `TMDB #${currentTmdbId}`}{data.currentYear ? ` (${data.currentYear})` : ""}
+          </span>
+          <span className="font-mono text-zinc-500">TMDB #{currentTmdbId}</span>
+        </div>
+
         {(plexFileName || jellyfinFileName) && (
           <div className="mx-6 mt-3 flex-shrink-0 space-y-1.5">
             {plexFileName && (
@@ -536,7 +544,9 @@ export function FixMatchButton({
           {phase === "fetching"
             ? t("adminQueue.fixMatch.loading")
             : phase === "applying"
-              ? (progress?.remoteApplied
+              ? (progress?.phase === "queued"
+                ? t("adminQueue.fixMatch.queued", { ahead: progress.queueAhead ?? 0 })
+                : progress?.remoteApplied
                 ? t("adminQueue.fixMatch.confirming", { elapsed: formatElapsed(progress.elapsedMs) }) +
                   ((progress.copies ?? 0) > 1 ? ` · ${t("adminQueue.fixMatch.copyOf", { copy: progress.copy ?? 1, copies: progress.copies ?? 1 })}` : "")
                 : t("adminQueue.fixMatch.applying"))
