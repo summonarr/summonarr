@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { headers } from "next/headers";
 import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
-import { createHash, createHmac } from "crypto";
+import { createHash, createHmac, hkdfSync } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
@@ -27,15 +27,35 @@ import { getPlexConfig } from "@/lib/plex-config";
 // JWTs cannot refresh on any replica. This file does not write passwordHash directly.
 
 import { normalizeEmail } from "@/lib/email-normalize";
+import { passwordVersion } from "@/lib/mfa/mfa-store";
 // Re-exported so existing imports of `normalizeEmail` from "@/lib/auth"
 // continue to work.
 export { normalizeEmail };
 
-// Hashes the lowercased email for audit storage. Truncated to 16 hex chars so a
-// password accidentally typed in the email field can't be recovered from logs while
+// Keyed fingerprint of the lowercased email for audit storage (and the
+// per-account login bucket key). Truncated to 16 hex chars so a password
+// accidentally typed in the email field can't be recovered from logs, while
 // still letting an operator correlate failed-login attempts on the same input.
+//
+// An HMAC under an HKDF subkey of NEXTAUTH_SECRET, not a bare SHA-256: an
+// unkeyed hash of an email is reversed by hashing a list of candidate
+// addresses, so anyone holding an audit export (or a backup) could confirm
+// which addresses had tried to sign in. The subkey has its own label (never
+// the raw secret, which signs session JWTs). Rows written before this used the
+// unkeyed form; they no longer correlate with new ones, which the retention
+// scrub makes moot (auth-event details are cleared once aged).
+let auditEmailKeyCache: { secret: string; key: Buffer } | null = null;
+function auditEmailKey(): Buffer {
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret) throw new Error("[auth] NEXTAUTH_SECRET must be set");
+  if (auditEmailKeyCache?.secret !== secret) {
+    auditEmailKeyCache = { secret, key: Buffer.from(hkdfSync("sha256", secret, "summonarr-audit-email", "summonarr:audit-email:v1", 32)) };
+  }
+  return auditEmailKeyCache.key;
+}
+
 export function hashAuditEmail(email: string): string {
-  return createHash("sha256").update(email).digest("hex").slice(0, 16);
+  return createHmac("sha256", auditEmailKey()).update(email).digest("hex").slice(0, 16);
 }
 
 // Sentinel returned when a provider-bound lookup refuses sign-in due to an email
@@ -732,13 +752,18 @@ export async function authorizeWithCredentials(
   const user = await prisma.user.findUnique({ where: { email } });
 
   let valid = false;
+  // The exact hash the password was checked against — the two-factor challenge
+  // fingerprints THIS one (guardrail 6d), never a later re-read that a password
+  // change landing in between could have replaced.
+  let verifiedHash: string | null = null;
   if (user?.passwordHash) {
     valid = await verifyPassword(credentials.password as string, user.passwordHash);
+    if (valid) verifiedHash = user.passwordHash;
   } else {
     await dummyVerify();
   }
 
-  if (!valid || !user) {
+  if (!valid || !user || !verifiedHash) {
     // The hit was already reserved at the gate above — a genuine wrong password (or an
     // unknown account, which also reached the dummyVerify branch) simply keeps it.
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
@@ -750,7 +775,11 @@ export async function authorizeWithCredentials(
   refundHit(accountKey, accountHitAt);
 
   const device = buildDeviceMeta(headers);
-  return { id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device };
+  return {
+    id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device,
+    // A keyed fingerprint, never the hash itself (it rides along to the mint).
+    _passwordVersion: passwordVersion(verifiedHash),
+  };
 }
 
 export async function authorizeWithPlex(

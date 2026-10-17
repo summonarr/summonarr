@@ -141,6 +141,16 @@ function stepUpMethods(state: MfaState): string[] {
   return methods;
 }
 
+// The "a fresh second factor is required" answer. Also sent by an enrollment
+// route whose in-transaction re-read finds the account gained a factor after
+// its step-up judged it factor-less (totp/setup).
+export function secondFactorRequiredResponse(t: Translator, state: MfaState): NextResponse {
+  return NextResponse.json(
+    { error: t("apiAuth.mfa.secondFactorRequired"), secondFactorRequired: true, methods: stepUpMethods(state) },
+    { status: 400 },
+  );
+}
+
 // Call AFTER mfaReauthStepUp succeeded. Returns the proof, or the response to
 // send. `state` may be passed in when the route already read it.
 export async function mfaSecondFactorStepUp(
@@ -155,12 +165,7 @@ export async function mfaSecondFactorStepUp(
   if (!current.enabled) return { proved: false, state: current };
 
   const parsed = parseStepUpFactor(raw);
-  if (!parsed) {
-    return NextResponse.json(
-      { error: t("apiAuth.mfa.secondFactorRequired"), secondFactorRequired: true, methods: stepUpMethods(current) },
-      { status: 400 },
-    );
-  }
+  if (!parsed) return secondFactorRequiredResponse(t, current);
 
   let webauthnChallenge: string | undefined;
   let reservedJti: string | null = null;
@@ -196,7 +201,10 @@ export async function mfaSecondFactorStepUp(
     throw err;
   }
   if (reservedJti) {
-    // A step-up challenge is single-use either way: a failed assertion burns it.
+    // Single-use on success. A failed assertion does NOT burn the challenge: it
+    // counts one failure against it (releaseToken), like a wrong answer on a
+    // sign-in challenge, and the challenge dies after MAX_TOKEN_FAILURES or its
+    // five-minute expiry, whichever comes first.
     if (verdict.ok) commitToken(reservedJti);
     else releaseToken(reservedJti, { failed: true });
   }

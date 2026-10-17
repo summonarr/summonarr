@@ -3,6 +3,7 @@ import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/l
 import { prisma } from "@/lib/prisma";
 import { logAudit, getAuditPiiRetentionDays } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { scrubTargetPiiFromAudit } from "@/lib/audit-scrub";
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -17,7 +18,8 @@ export async function POST(request: NextRequest) {
 
       // Scrubs the same fields as the admin DELETE /api/admin/audit-log handler:
       // IP address, user agent and user name on every old row, plus the details
-      // of login/logout events (below), once they pass the retention cutoff.
+      // of login/logout events and the target-user names in admin-action
+      // details (below), once they pass the retention cutoff.
       const piiResult = await prisma.auditLog.updateMany({
         where: {
           createdAt: { lt: cutoff },
@@ -39,6 +41,10 @@ export async function POST(request: NextRequest) {
         data: { details: null },
       });
 
+      // Admin-action rows name their TARGET user in details (targetUser /
+      // legacy targetEmail) — audit-scrub.ts. Same cutoff, same promise.
+      const adminDetailsScrubbed = await scrubTargetPiiFromAudit(prisma, { createdAt: { lt: cutoff } });
+
       await logAudit({
         userId: "system",
         userName: "cron",
@@ -47,6 +53,7 @@ export async function POST(request: NextRequest) {
         details: {
           scrubbed: piiResult.count,
           authDetailsCleared: detailsResult.count,
+          adminDetailsScrubbed,
           cutoff: cutoff.toISOString(),
           retentionDays,
         },
@@ -56,6 +63,7 @@ export async function POST(request: NextRequest) {
         ok: true,
         scrubbed: piiResult.count,
         authDetailsCleared: detailsResult.count,
+        adminDetailsScrubbed,
         cutoff: cutoff.toISOString(),
         timestamp: new Date().toISOString(),
       });

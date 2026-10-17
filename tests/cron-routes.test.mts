@@ -565,6 +565,49 @@ test("scrub-audit-pii: the auth-details clear is narrowed to the login-event act
   assert.deepEqual([...actions].sort(), ["AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT"]);
 });
 
+test("scrub-audit-pii: aged admin-action rows lose the TARGET user's name/email from their details; recent rows keep them", async () => {
+  type Row = { id: string; createdAt: Date; action: string; details: string | null };
+  const aged = new Date(Date.now() - 200 * 86_400_000);
+  const rows: Row[] = [
+    { id: "a1", createdAt: aged, action: "USER_ROLE_CHANGE", details: JSON.stringify({ targetUser: "Alice", targetEmail: "alice@example.com", before: { role: "USER" } }) },
+    { id: "a2", createdAt: new Date(), action: "USER_ROLE_CHANGE", details: JSON.stringify({ targetUser: "Bob", targetEmail: "bob@example.com" }) },
+    { id: "a3", createdAt: aged, action: "USER_PURGE", details: JSON.stringify({ targetUser: "Carol", targetEmail: "carol@example.com", historyPreserved: { mediaRequests: 2 } }) },
+  ];
+  const aged_ = (r: Row, w: { createdAt?: { lt?: Date } }) => !w.createdAt?.lt || r.createdAt < w.createdAt.lt;
+  shadowPrismaModel(prisma, "auditLog", {
+    ...counter("auditLog"),
+    findMany: async (args: { where: { createdAt?: { lt?: Date }; OR?: Array<{ details: { contains: string } }> }; cursor?: { id: string } }) => {
+      rec("auditLog.findMany", args.where);
+      if (args.cursor) return [];
+      return rows
+        .filter((r) => aged_(r, args.where) && (args.where.OR ?? []).some((o) => r.details?.includes(o.details.contains)))
+        .map((r) => ({ id: r.id, details: r.details }));
+    },
+    updateMany: async (args: { where: { createdAt?: { lt?: Date }; id?: string; details?: string }; data: { details?: string | null } }) => {
+      rec("auditLog.updateMany", args.where);
+      if (args.where.id === undefined) return { count: 0 };
+      const r = rows.find((x) => x.id === args.where.id && x.details === args.where.details && aged_(x, args.where));
+      if (!r) return { count: 0 };
+      r.details = args.data.details ?? null;
+      return { count: 1 };
+    },
+  });
+  try {
+    const res = await scrub.POST(authed(scrub));
+    const body = await res.json();
+    assert.equal(body.adminDetailsScrubbed, 2);
+    assert.deepEqual(JSON.parse(rows[0].details!), { before: { role: "USER" } });
+    assert.deepEqual(JSON.parse(rows[2].details!), { historyPreserved: { mediaRequests: 2 } }, "a purge record keeps what happened, not who it was");
+    assert.match(rows[1].details!, /bob@example\.com/, "a row inside the retention window is untouched");
+    // The audit scrub's every write stays cutoff-bounded (the test above pins it for the column passes).
+    for (const u of opsOf("auditLog.updateMany")) {
+      assert.ok((u.args as { createdAt?: { lt?: Date } }).createdAt?.lt instanceof Date);
+    }
+  } finally {
+    shadowPrismaModel(prisma, "auditLog", counter("auditLog"));
+  }
+});
+
 // ── 5: purge-auth-sessions failure isolation ─────────────────────────────────
 
 test("purge-auth-sessions: one failing delete does NOT abort the other nine", async () => {

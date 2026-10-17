@@ -123,10 +123,13 @@ function applyData(row: Row, data: Row): void {
   }
 }
 
+// A test can land a concurrent write "between" two reads of a user row.
+let onUserRead: ((where: Where) => void | Promise<void>) | null = null;
 shadowPrismaModel(prisma, "user", {
   // A snapshot, like a real read: a later write must not show through an
   // object the route already holds (the L2 re-read test depends on it).
   findUnique: async ({ where }: { where: Where }) => {
+    await onUserRead?.(where);
     const u = users.find((x) => matches(x, where));
     return u ? { ...u } : null;
   },
@@ -360,7 +363,7 @@ async function sessionFor(user: Row): Promise<string> {
 const bearer = (jwt: string) => ({ authorization: `Bearer ${jwt}` });
 
 beforeEach(() => {
-  users = []; totps = []; codes = []; passkeys = []; sessions = []; audit = []; rawSql = []; onRaw = null;
+  users = []; totps = []; codes = []; passkeys = []; sessions = []; audit = []; rawSql = []; onRaw = null; onUserRead = null;
   settings = new Map([["setup_completed_at", "2026-01-01T00:00:00.000Z"]]);
   sessionWrites = 0;
   errors.length = 0;
@@ -807,9 +810,8 @@ test("removing the last factor removes the recovery codes and signs out OTHER se
   const recovery = () => ({ method: "recovery", code: "AAAA-BBBB-CCCC-DDDD" });
   const removeTheirs = await call(passkeyItem.DELETE as never, "/api/profile/mfa/passkeys/pk-theirs", { method: "DELETE", body: { password: PASSWORD, secondFactor: recovery() }, headers: bearer(jwt), ctx: ctx("pk-theirs") });
   assert.equal(removeTheirs.status, 404);
-  assert.equal(codes.find((c) => c.userId === u.id)!.usedAt instanceof Date, true, "the proof was consumed even though the target was not found");
-  seedRecoveryCodes(u.id as string, ["EEEE-FFFF-GGGG-HHHH"]);
-  const remove = await call(passkeyItem.DELETE as never, "/api/profile/mfa/passkeys/pk-mine", { method: "DELETE", body: { password: PASSWORD, secondFactor: { method: "recovery", code: "EEEE-FFFF-GGGG-HHHH" } }, headers: bearer(jwt), ctx: ctx("pk-mine") });
+  assert.equal(codes.find((c) => c.userId === u.id)!.usedAt, null, "a 404 is answered BEFORE the step-up: the recovery code is not spent");
+  const remove = await call(passkeyItem.DELETE as never, "/api/profile/mfa/passkeys/pk-mine", { method: "DELETE", body: { password: PASSWORD, secondFactor: recovery() }, headers: bearer(jwt), ctx: ctx("pk-mine") });
   assert.equal(remove.status, 200);
   assert.equal(codes.filter((c) => c.userId === u.id).length, 0, "no factor left ⇒ recovery codes go too");
   assert.equal(passkeys.length, 1);
@@ -990,6 +992,171 @@ test("M1: a passkey becoming the FIRST factor discards a pending authenticator s
   const code = hotp(base32Decode(secret)!, totpStep(Date.now()));
   const enable = await call(totpEnable.POST as never, "/api/profile/mfa/totp/enable", { body: { code }, headers: bearer(jwt) });
   assert.equal(enable.status, 400, "it can't be confirmed onto the now-2FA account without a step-up'd setup");
+});
+
+// ── W3: enrollment races, no-spend 404s, the challenge audit ────────────────
+// The first-factor enrollment transactions take the per-user MFA lock FIRST and
+// re-read the factor state inside it. `onRaw` fires when the lock is requested —
+// the moment a parallel enrollment that committed meanwhile becomes visible.
+
+const MFA_LOCK_SQL = (userId: string) => `SELECT pg_advisory_xact_lock(${MFA_USER_LOCK_NAMESPACE}, ${mfaUserLockKey(userId)})`;
+function onFirstLock(userId: string, fn: () => void): void {
+  let fired = false;
+  onRaw = (sql) => {
+    if (!fired && sql === MFA_LOCK_SQL(userId)) {
+      fired = true;
+      fn();
+    }
+  };
+}
+
+test("W3: a password-only passkey registration is refused when a factor lands while it waits for the lock", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  const opts = await (await call(passkeyOptions.POST as never, "/api/profile/mfa/passkeys/options", { body: { password: PASSWORD }, headers: bearer(jwt) })).json();
+  const credential = registrationResponse({ auth: makeAuthenticator("EdDSA"), rpId: "localhost", origin: "http://localhost:3000", challenge: opts.publicKey.challenge });
+  // A parallel first-factor enrollment (another password-only passkey) commits
+  // after this request's own pre-check, before it gets the lock.
+  onFirstLock(u.id as string, () => {
+    passkeys.push({ id: "pk-race", userId: u.id, credentialId: "RACE", publicKey: "x", signCount: 0n, transports: [], name: "Race", createdAt: new Date(), lastUsedAt: null, backedUp: false });
+  });
+  const res = await call(passkeyRegister.POST as never, "/api/profile/mfa/passkeys", { body: { registrationToken: opts.registrationToken, name: "Mine", credential }, headers: bearer(jwt) });
+  assert.equal(res.status, 400, "the in-transaction re-read sees the factor that landed");
+  assert.deepEqual(passkeys.map((p) => p.id), ["pk-race"], "no second password-only factor was written");
+  assert.equal(codes.length, 0, "and no recovery codes were issued for it");
+  assert.equal(rawSql[0], MFA_LOCK_SQL(u.id as string), "the lock is the transaction's FIRST statement");
+});
+
+test("W3: the passkey cap is judged under the lock too", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  const key = seedTotp(u.id as string);
+  for (let i = 0; i < 9; i++) passkeys.push({ id: `pk-${i}`, userId: u.id, credentialId: `C${i}`, publicKey: "x", signCount: 0n, transports: [], name: `K${i}`, createdAt: new Date(), lastUsedAt: null, backedUp: false });
+  const opts = await (await call(passkeyOptions.POST as never, "/api/profile/mfa/passkeys/options", { body: { password: PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } }, headers: bearer(jwt) })).json();
+  assert.ok(opts.registrationToken, "nine passkeys: options still issue a token");
+  const credential = registrationResponse({ auth: makeAuthenticator("EdDSA"), rpId: "localhost", origin: "http://localhost:3000", challenge: opts.publicKey.challenge });
+  onFirstLock(u.id as string, () => {
+    passkeys.push({ id: "pk-10th", userId: u.id, credentialId: "C10", publicKey: "x", signCount: 0n, transports: [], name: "K10", createdAt: new Date(), lastUsedAt: null, backedUp: false });
+  });
+  const res = await call(passkeyRegister.POST as never, "/api/profile/mfa/passkeys", { body: { registrationToken: opts.registrationToken, name: "Eleventh", credential }, headers: bearer(jwt) });
+  assert.equal(res.status, 400);
+  assert.equal(passkeys.filter((p) => p.userId === u.id).length, 10, "never an eleventh");
+});
+
+test("W3: TOTP setup on the password alone is refused when a factor lands while it waits for the lock", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  onFirstLock(u.id as string, () => {
+    passkeys.push({ id: "pk-race", userId: u.id, credentialId: "RACE", publicKey: "x", signCount: 0n, transports: [], name: "Race", createdAt: new Date(), lastUsedAt: null, backedUp: false });
+  });
+  const res = await call(totpSetup.POST as never, "/api/profile/mfa/totp/setup", { body: { password: PASSWORD }, headers: bearer(jwt) });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.secondFactorRequired, true, "the client is asked for a second factor, exactly as if the passkey had been there first");
+  assert.ok(!("secret" in body), "no secret is disclosed");
+  assert.equal(totps.length, 0, "no pending secret was written");
+});
+
+test("W3: TOTP enable waits for the lock — a passkey that became the first factor meanwhile leaves nothing to confirm", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  await sessionFor(u); // a second device
+  const setup = await (await call(totpSetup.POST as never, "/api/profile/mfa/totp/setup", { body: { password: PASSWORD }, headers: bearer(jwt) })).json();
+  const code = hotp(base32Decode(setup.secret)!, totpStep(Date.now()));
+  // What a passkey registration that committed while this request waited does:
+  // it is the first factor, and it deletes the password-only pending secret.
+  onFirstLock(u.id as string, () => {
+    passkeys.push({ id: "pk-first", userId: u.id, credentialId: "FIRST", publicKey: "x", signCount: 0n, transports: [], name: "First", createdAt: new Date(), lastUsedAt: null, backedUp: false });
+    totps = totps.filter((t) => t.userId !== u.id);
+  });
+  const res = await call(totpEnable.POST as never, "/api/profile/mfa/totp/enable", { body: { code }, headers: bearer(jwt) });
+  assert.equal(res.status, 400, "the confirm runs after the lock, so it sees the secret gone");
+  assert.equal(totps.length, 0);
+  assert.equal(sessions.filter((s) => s.userId === u.id).length, 2, "this request revoked nothing");
+});
+
+test("W3: TOTP enable judges 'first factor' from the state read under the lock", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  await sessionFor(u); // a second device
+  const setup = await (await call(totpSetup.POST as never, "/api/profile/mfa/totp/setup", { body: { password: PASSWORD }, headers: bearer(jwt) })).json();
+  const code = hotp(base32Decode(setup.secret)!, totpStep(Date.now()));
+  onFirstLock(u.id as string, () => {
+    // A factor (and its recovery codes) committed while this request waited.
+    passkeys.push({ id: "pk-first", userId: u.id, credentialId: "FIRST", publicKey: "x", signCount: 0n, transports: [], name: "First", createdAt: new Date(), lastUsedAt: null, backedUp: false });
+    seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+  });
+  const res = await call(totpEnable.POST as never, "/api/profile/mfa/totp/enable", { body: { code }, headers: bearer(jwt) });
+  assert.equal(res.status, 200);
+  assert.ok(!("recoveryCodes" in (await res.json())), "not the first factor: no fresh codes");
+  assert.equal(sessions.filter((s) => s.userId === u.id).length, 2, "not the first factor: nobody is signed out");
+  const row = audit.find((a) => a.action === "MFA_CHANGE");
+  assert.equal(JSON.parse(row!.details as string).firstFactor, false);
+});
+
+test("W3: a 404 never spends the proof — PATCH/DELETE of a missing passkey and DELETE of a missing authenticator", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  passkeys.push({ id: "pk-mine", userId: u.id, credentialId: "AAAA", publicKey: "x", signCount: 0n, transports: [], name: "Mine", createdAt: new Date(), lastUsedAt: null, backedUp: false });
+  seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+  const recovery = { method: "recovery", code: "AAAA-BBBB-CCCC-DDDD" };
+  const ctx = { params: Promise.resolve({ id: "pk-gone" }) };
+  const rename = await call(passkeyItem.PATCH as never, "/api/profile/mfa/passkeys/pk-gone", { method: "PATCH", body: { name: "x", password: PASSWORD, secondFactor: recovery }, headers: bearer(jwt), ctx });
+  assert.equal(rename.status, 404);
+  const del = await call(passkeyItem.DELETE as never, "/api/profile/mfa/passkeys/pk-gone", { method: "DELETE", body: { password: PASSWORD, secondFactor: recovery }, headers: bearer(jwt), ctx: { params: Promise.resolve({ id: "pk-gone" }) } });
+  assert.equal(del.status, 404);
+  const totpDel = await call(totpRoute.DELETE as never, "/api/profile/mfa/totp", { method: "DELETE", body: { password: PASSWORD, secondFactor: recovery }, headers: bearer(jwt) });
+  assert.equal(totpDel.status, 404, "no authenticator app (enabled or pending) to remove");
+  assert.equal(codes[0].usedAt, null, "three 404s, and the recovery code is still unused");
+  // The proof still works where there IS a target.
+  const ok = await call(passkeyItem.PATCH as never, "/api/profile/mfa/passkeys/pk-mine", { method: "PATCH", body: { name: "Renamed", password: PASSWORD, secondFactor: recovery }, headers: bearer(jwt), ctx: { params: Promise.resolve({ id: "pk-mine" }) } });
+  assert.equal(ok.status, 200);
+  assert.ok((codes[0].usedAt as unknown) instanceof Date, "spent by the change that had a target");
+});
+
+test("W3: a correct password on a 2FA account is audited — 'challenge issued', with the user id; a wrong one is not", async () => {
+  const u = await seedUser();
+  seedTotp(u.id as string);
+  await challengeFor(u);
+  await new Promise((r) => setTimeout(r, 0));
+  const issued = audit.filter((a) => a.action === "AUTH_LOGIN_FAILED" && JSON.parse(a.details as string).reason === "mfa_challenge_issued");
+  assert.equal(issued.length, 1);
+  assert.equal(issued[0].userId, u.id);
+  assert.equal(issued[0].provider, "credentials");
+  assert.equal(issued[0].ipAddress, IP);
+  assert.deepEqual(JSON.parse(issued[0].details as string).methods, ["totp"]);
+  assert.ok(!(issued[0].details as string).includes(u.email as string), "no email in the row");
+
+  audit = [];
+  await credentialsSignInStep(u, {}, { password: "not-the-password" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(audit.filter((a) => (a.details as string).includes("mfa_challenge_issued")).length, 0);
+
+  // An account WITHOUT 2FA never writes one (its password step mints the session).
+  const plain = await seedUser();
+  audit = [];
+  await credentialsSignInStep(plain);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(audit.filter((a) => (a.details as string)?.includes("mfa_challenge_issued")).length, 0);
+});
+
+test("W3: the challenge fingerprints the hash that was VERIFIED — a password change racing the password step kills it", async () => {
+  const u = await seedUser();
+  const key = seedTotp(u.id as string);
+  // The password verifies against the current hash; the change lands before
+  // the challenge's own read of the row.
+  const changed = await hashPassword("a-brand-new-password");
+  onUserRead = (where) => {
+    if (where.id === u.id) {
+      u.passwordHash = changed;
+      onUserRead = null;
+    }
+  };
+  const ch = await challengeFor(u);
+  const res = await mfa({ mfaToken: ch.mfaToken, method: "totp", code: currentCode(key) });
+  assert.equal(res.status, 401, "the OLD password's challenge must not survive the change");
+  assert.equal((await res.json()).mfaExpired, true);
+  assert.equal(sessionWrites, 0);
 });
 
 // ── M2: persistent second-factor lockout ────────────────────────────────────

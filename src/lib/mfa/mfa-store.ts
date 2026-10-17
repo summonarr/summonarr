@@ -206,20 +206,21 @@ export async function verifySecondFactor(
 
 // Issues (or re-issues) a PENDING TOTP secret. Refuses when TOTP is already
 // enabled — replacing an active secret must go through removal first, which is
-// its own step-up'd, audited change.
-export async function beginTotpEnrollment(userId: string): Promise<{ secret: string } | "already-enabled"> {
-  const existing = await prisma.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } });
+// its own step-up'd, audited change. Runs inside the caller's transaction,
+// which holds lockUserMfaInTx (totp/setup).
+export async function beginTotpEnrollmentInTx(tx: MfaTxClient, userId: string): Promise<{ secret: string } | "already-enabled"> {
+  const existing = await tx.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } });
   if (existing?.enabledAt) return "already-enabled";
   const secret = generateTotpSecret();
   if (existing) {
     // Conditional on still-pending, so a concurrent confirm can't be clobbered.
-    const res = await prisma.userTotp.updateMany({
+    const res = await tx.userTotp.updateMany({
       where: { userId, enabledAt: null },
       data: { secret, lastUsedStep: null },
     });
     if (res.count !== 1) return "already-enabled";
   } else {
-    await prisma.userTotp.create({ data: { userId, secret } });
+    await tx.userTotp.create({ data: { userId, secret } });
   }
   return { secret };
 }
@@ -249,11 +250,19 @@ export async function confirmTotpEnrollmentInTx(
   return res.count === 1 ? "ok" : "invalid";
 }
 
-// Serializes a user's recovery-code writes. Under READ COMMITTED two concurrent
+// Serializes a user's enrollment writes. Under READ COMMITTED two concurrent
 // first-factor enrollments (TOTP enable + passkey registration) both counted
 // zero codes, both deleted, both inserted — and the user was shown a set the
 // other transaction had already deleted. A per-user transaction-scoped advisory
 // lock (released at COMMIT/ROLLBACK) makes count→delete→insert atomic.
+//
+// The first-factor enrollment transactions (passkeys POST, totp/setup,
+// totp/enable) take it FIRST and re-read the factor state (getMfaState with the
+// tx) inside it. Their pre-transaction read is a request old: two password-only
+// registrations racing each other both saw "no factor yet", so the second
+// landed a factor with nothing but the password once the first had committed.
+// Re-entrant within one transaction, so ensureRecoveryCodesInTx taking it again
+// is harmless.
 // Namespace 4610 is MFA's own (others in this repo: 42/43 accounts, 1001 arr,
 // 2000–2021 sync/cron); the key is a 31-bit hash of the user id so the call hits
 // the (int, int) overload. A collision only serializes two unrelated users.

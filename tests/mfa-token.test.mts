@@ -165,6 +165,30 @@ test("per-subject cap: minting a sixth live token for one user evicts THAT user'
   assert.ok(isTokenUsable(other.jti), "another user's token is untouched");
 });
 
+test("per-PURPOSE cap: password-only sign-in challenges can never evict the owner's step-up or passkey-registration token", async () => {
+  // A sign-in challenge needs only the password. With one shared per-user cap,
+  // five sign-ins by anyone holding it evicted the signed-in owner's in-progress
+  // step-up challenge and passkey-registration token.
+  const stepUp = await signMfaStepUpToken({ userId: "owner", sessionId: "s1", challenge: "Y2g" });
+  const reg = await signPasskeyRegisterToken({ userId: "owner", sessionId: "s1", challenge: "Y2g", factorVerified: true });
+  for (let i = 0; i < MAX_LIVE_PER_SUBJECT * 3; i++) await signMfaSigninToken({ ...INPUT, userId: "owner" });
+  assert.ok(isTokenUsable(stepUp.jti), "the step-up challenge survives a flood of sign-in challenges");
+  assert.ok(isTokenUsable(reg.jti), "so does the passkey-registration token");
+  assert.equal(mfaTokenLedgerSizeForTests().forSubject("owner", "mfa-signin"), MAX_LIVE_PER_SUBJECT, "sign-in challenges are still capped");
+  assert.equal(mfaTokenLedgerSizeForTests().forSubject("owner"), MAX_LIVE_PER_SUBJECT + 2);
+  assert.equal(consumeToken(stepUp.jti), true);
+  assert.equal(consumeToken(reg.jti), true);
+});
+
+test("per-PURPOSE cap: each purpose keeps its own five slots — a sixth step-up evicts the oldest step-up, not a sign-in", async () => {
+  const signin = await signMfaSigninToken({ ...INPUT, userId: "u-p" });
+  const first = await signMfaStepUpToken({ userId: "u-p", sessionId: "s", challenge: "Y2g" });
+  for (let i = 0; i < MAX_LIVE_PER_SUBJECT; i++) await signMfaStepUpToken({ userId: "u-p", sessionId: "s", challenge: "Y2g" });
+  assert.equal(isTokenUsable(first.jti), false, "the oldest STEP-UP went");
+  assert.ok(isTokenUsable(signin.jti), "the sign-in challenge is in another bucket");
+  assert.equal(mfaTokenLedgerSizeForTests().forSubject("u-p", "mfa-stepup"), MAX_LIVE_PER_SUBJECT);
+});
+
 test("an IN-FLIGHT token is never evicted by newer mints (its verifier may already have burned a recovery code)", async () => {
   const mine = await signMfaSigninToken({ ...INPUT, userId: "owner" });
   assert.equal(reserveToken(mine.jti), true);

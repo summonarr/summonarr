@@ -55,16 +55,21 @@ function keyFor(purpose: Purpose): Uint8Array {
 // ─── nonce ledger ───────────────────────────────────────────────────────────
 //
 // Every token is REGISTERED when it is signed, keyed by jti and tagged with its
-// subject (the user id). A jti the ledger doesn't know is DEAD — so a restart
-// kills every in-flight token (acceptable: they live five minutes) and an
-// evicted entry can never be "un-burned" by being recreated fresh.
+// subject (the user id) and purpose. A jti the ledger doesn't know is DEAD — so
+// a restart kills every in-flight token (acceptable: they live five minutes)
+// and an evicted entry can never be "un-burned" by being recreated fresh.
 //
-// Bounds (guardrail 6d): at most MAX_LIVE_PER_SUBJECT live tokens per user —
-// minting a new one evicts that user's oldest — and MAX_LEDGER overall, where
-// a full ledger evicts expired entries first, then the oldest live one. The
-// old shape refused EVERY newcomer once the ledger held 50k live entries, so
-// one account (its own password, many IPs) could block all MFA sign-ins; now
-// the most it can fill is its own five slots.
+// Bounds (guardrail 6d): at most MAX_LIVE_PER_SUBJECT live tokens per user PER
+// PURPOSE — minting a new one evicts that user's oldest of the SAME purpose —
+// and MAX_LEDGER overall, where a full ledger evicts expired entries first,
+// then the oldest live one. The old shape refused EVERY newcomer once the
+// ledger held 50k live entries, so one account (its own password, many IPs)
+// could block all MFA sign-ins; now the most it can fill is its own slots.
+//
+// Per purpose, not per user: sign-in challenges are minted on the PASSWORD
+// alone, so a shared per-user cap let anyone holding the password evict the
+// signed-in owner's step-up challenge or passkey-registration token mid-flow
+// just by starting five sign-ins. Each purpose now has its own five slots.
 //
 // Redemption is reserve → verify → commit/release. reserveToken is a
 // synchronous check-and-set (no await between the read and the write), so two
@@ -72,7 +77,8 @@ function keyFor(purpose: Purpose): Uint8Array {
 // which used to let a pair of requests burn two recovery codes for one sign-in.
 
 interface LedgerEntry {
-  sub: string;
+  // `${purpose}\u0000${userId}` — the per-subject cap's bucket.
+  bucket: string;
   expiresAt: number; // ms
   failures: number;
   consumed: boolean;
@@ -84,18 +90,22 @@ export const MAX_LEDGER = 50_000;
 let ledgerCap = MAX_LEDGER;
 export const MAX_LIVE_PER_SUBJECT = 5;
 const ledger = processSingleton("mfa-token:ledger", () => new Map<string, LedgerEntry>());
-// jti list per subject, in mint order (oldest first).
+// jti list per (purpose, subject) bucket, in mint order (oldest first).
 const bySubject = processSingleton("mfa-token:by-subject", () => new Map<string, string[]>());
+
+function bucketFor(purpose: Purpose, sub: string): string {
+  return `${purpose}\u0000${sub}`;
+}
 
 function removeEntry(jti: string): void {
   const entry = ledger.get(jti);
   if (!entry) return;
   ledger.delete(jti);
-  const list = bySubject.get(entry.sub);
+  const list = bySubject.get(entry.bucket);
   if (!list) return;
   const next = list.filter((j) => j !== jti);
-  if (next.length === 0) bySubject.delete(entry.sub);
-  else bySubject.set(entry.sub, next);
+  if (next.length === 0) bySubject.delete(entry.bucket);
+  else bySubject.set(entry.bucket, next);
 }
 
 function sweepExpired(now: number): void {
@@ -103,9 +113,10 @@ function sweepExpired(now: number): void {
 }
 
 // Called by every sign* function below, at mint time.
-function registerToken(jti: string, sub: string, expSec: number): void {
+function registerToken(jti: string, purpose: Purpose, sub: string, expSec: number): void {
   const now = Date.now();
-  const mine = (bySubject.get(sub) ?? []).filter((j) => {
+  const bucket = bucketFor(purpose, sub);
+  const mine = (bySubject.get(bucket) ?? []).filter((j) => {
     const e = ledger.get(j);
     if (!e || e.expiresAt <= now) {
       removeEntry(j);
@@ -113,7 +124,7 @@ function registerToken(jti: string, sub: string, expSec: number): void {
     }
     return true;
   });
-  // Per-subject cap: the newest token wins, the subject's oldest dies. A token
+  // Per-subject cap: the newest token wins, the subject's oldest of this purpose dies. A token
   // another request is verifying RIGHT NOW (inFlight) is never the victim: the
   // verifier may already have burned a single-use factor (a recovery code), and
   // evicting the entry would make commitToken refuse the sign-in afterwards —
@@ -141,10 +152,10 @@ function registerToken(jti: string, sub: string, expSec: number): void {
     if (oldest === undefined) break;
     removeEntry(oldest);
   }
-  ledger.set(jti, { sub, expiresAt: expSec * 1000, failures: 0, consumed: false, inFlight: false });
-  const list = bySubject.get(sub) ?? [];
+  ledger.set(jti, { bucket, expiresAt: expSec * 1000, failures: 0, consumed: false, inFlight: false });
+  const list = bySubject.get(bucket) ?? [];
   list.push(jti);
-  bySubject.set(sub, list.filter((j) => ledger.has(j)));
+  bySubject.set(bucket, list.filter((j) => ledger.has(j)));
 }
 
 function liveEntry(jti: string): LedgerEntry | null {
@@ -213,8 +224,15 @@ export function resetMfaTokenLedgerForTests(cap = MAX_LEDGER): void {
   bySubject.clear();
   ledgerCap = cap;
 }
-export function mfaTokenLedgerSizeForTests(): { total: number; forSubject: (sub: string) => number } {
-  return { total: ledger.size, forSubject: (sub) => (bySubject.get(sub) ?? []).filter((j) => liveEntry(j)).length };
+export function mfaTokenLedgerSizeForTests(): { total: number; forSubject: (sub: string, purpose?: Purpose) => number } {
+  const live = (bucket: string) => (bySubject.get(bucket) ?? []).filter((j) => liveEntry(j)).length;
+  const purposes = Object.keys(AUDIENCE) as Purpose[];
+  return {
+    total: ledger.size,
+    // Without a purpose: every purpose's live tokens for that user.
+    forSubject: (sub, purpose) =>
+      purpose ? live(bucketFor(purpose, sub)) : purposes.reduce((n, p) => n + live(bucketFor(p, sub)), 0),
+  };
 }
 
 // ─── sign-in challenge token ────────────────────────────────────────────────
@@ -255,7 +273,7 @@ export async function signMfaSigninToken(input: Omit<MfaSigninClaims, "jti" | "e
     .setIssuedAt(now)
     .setExpirationTime(exp)
     .sign(keyFor("mfa-signin"));
-  registerToken(jti, input.userId, exp);
+  registerToken(jti, "mfa-signin", input.userId, exp);
   return { token, jti, exp };
 }
 
@@ -315,7 +333,7 @@ export async function signPasskeyRegisterToken(input: { userId: string; sessionI
     .setIssuedAt(now)
     .setExpirationTime(exp)
     .sign(keyFor("passkey-register"));
-  registerToken(jti, input.userId, exp);
+  registerToken(jti, "passkey-register", input.userId, exp);
   return { token, jti, exp };
 }
 
@@ -367,7 +385,7 @@ export async function signMfaStepUpToken(input: { userId: string; sessionId: str
     .setIssuedAt(now)
     .setExpirationTime(exp)
     .sign(keyFor("mfa-stepup"));
-  registerToken(jti, input.userId, exp);
+  registerToken(jti, "mfa-stepup", input.userId, exp);
   return { token, jti, exp };
 }
 

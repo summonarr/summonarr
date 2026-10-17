@@ -40,6 +40,7 @@ export async function POST(req: NextRequest) {
   const challenge = await mfaChallengeFor(req, {
     id: user.id as string,
     rememberMe: user.rememberMe as string | undefined,
+    passwordVersion: user._passwordVersion as string,
   });
   if (challenge) return challenge;
 

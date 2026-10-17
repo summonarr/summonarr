@@ -245,7 +245,11 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     userName: session.user.name ?? session.user.email,
     action: "USER_CREATE",
     target: `user:${user.id}`,
-    details: { targetUser: name ?? normalized, targetEmail: normalized, role },
+    // The account is named by its id (and display name, when it has one) —
+    // never its email: audit details outlive the retention scrub of everything
+    // else unless the scrub reaches them (audit-scrub.ts), and an email is the
+    // one value that identifies the person everywhere.
+    details: { targetUserId: user.id, ...(name ? { targetUser: name } : {}), role },
     ...auditContext(req, session),
   });
 

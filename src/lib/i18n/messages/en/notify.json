@@ -178,6 +178,8 @@
   "notify.discord.issueResolved.description": "The issue you reported with **{media}** has been resolved.",
   "notify.discord.issueResolved.resolution": "**Resolution:** {resolution}",
   "notify.bot.disabled": "The Discord integration is currently disabled.",
+  "notify.bot.wrongServer": "This bot only answers in its own Discord server.",
+  "notify.bot.serverNotConfigured": "This bot isn't set up for a Discord server yet. An admin needs to enter the Guild (Server) ID in Summonarr's Discord settings.",
   "notify.bot.slow": "This is taking longer than expected. Please try again.",
   "notify.bot.unexpected": "An unexpected error occurred. Please try again.",
   "notify.bot.unexpectedShort": "An unexpected error occurred.",

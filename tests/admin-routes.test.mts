@@ -155,6 +155,11 @@ function makeTx() {
     userTotp: { deleteMany: rec("userTotp.deleteMany") },
     webAuthnCredential: { deleteMany: rec("webAuthnCredential.deleteMany") },
     mfaRecoveryCode: { deleteMany: rec("mfaRecoveryCode.deleteMany") },
+    // The purge's audit-trail scrub (audit-scrub.ts): no aged rows here.
+    auditLog: {
+      findMany: async (args?: unknown) => { txOps.push({ op: "auditLog.findMany", args }); return []; },
+      updateMany: rec("auditLog.updateMany"),
+    },
     // The TMDB reset's graph half. Both live in ONE transaction so an unstamped
     // node can never be observed alongside its still-present edges (or, far
     // worse, the reverse) — see the route's comment.
@@ -565,6 +570,12 @@ test("user-delete: happy path → 200 and one USER_DEACTIVATE audit row", async 
   assert.equal(auditRows.length, 1);
   assert.equal(auditRows[0].action, "USER_DEACTIVATE");
   assert.equal(auditRows[0].target, `user:${targetId}`);
+  // Named by id (+ display name), never by email.
+  const details = JSON.parse(auditRows[0].details as string);
+  assert.equal(details.targetUserId, targetId);
+  assert.equal(details.targetUser, usersById.get(targetId)!.name);
+  assert.ok(!("targetEmail" in details));
+  assert.ok(!(auditRows[0].details as string).includes("@example.com"), "no email anywhere in the details");
 });
 
 test("GUARDRAIL 26 (role-change): auditLog throws → 200 kept, the demotion CAS ran, swallow logged", async () => {
@@ -590,6 +601,22 @@ test("role-change: happy path → 200 and exactly one USER_ROLE_CHANGE audit row
   await flush();
   assert.equal(auditRows.length, 1, "a single successful role change must audit exactly once");
   assert.equal(auditRows[0].action, "USER_ROLE_CHANGE");
+  const details = JSON.parse(auditRows[0].details as string);
+  assert.deepEqual(details, { targetUserId: targetId, targetUser: usersById.get(targetId)!.name, before: { role: "ADMIN" }, after: { role: "USER" } });
+});
+
+test("role-change: a target with NO display name is named by id alone — the email never stands in for it", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("ADMIN");
+  usersById.get(targetId)!.name = null;
+  casRows = 1;
+  const res = await userPatch(req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "PATCH", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ role: "USER" }) }), ctxFor(targetId));
+  assert.equal(res.status, 200);
+  await flush();
+  const details = JSON.parse(auditRows[0].details as string);
+  assert.equal(details.targetUserId, targetId);
+  assert.ok(!("targetUser" in details), "no name to record — and the email is not used instead");
+  assert.ok(!(auditRows[0].details as string).includes("@example.com"));
 });
 
 test("GUARDRAIL 26 (Plex terminate): auditLog throws → 200 {ok:true} kept, the terminate fired, swallow logged", async () => {

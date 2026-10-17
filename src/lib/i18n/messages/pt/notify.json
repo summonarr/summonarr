@@ -178,6 +178,8 @@
   "notify.discord.issueResolved.description": "O problema que você relatou (**{media}**) foi resolvido.",
   "notify.discord.issueResolved.resolution": "**Resolução:** {resolution}",
   "notify.bot.disabled": "A integração com o Discord está desativada no momento.",
+  "notify.bot.wrongServer": "Este bot só responde no seu próprio servidor do Discord.",
+  "notify.bot.serverNotConfigured": "Este bot ainda não foi configurado para um servidor do Discord. Um administrador precisa inserir o ID do servidor (Guild) nas configurações do Discord do Summonarr.",
   "notify.bot.slow": "Isso está demorando mais do que o esperado. Tente novamente.",
   "notify.bot.unexpected": "Ocorreu um erro inesperado. Tente novamente.",
   "notify.bot.unexpectedShort": "Ocorreu um erro inesperado.",

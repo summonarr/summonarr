@@ -39,6 +39,8 @@
 // and this file's decryptToken share a key and genuinely round-trip.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createECDH } from "node:crypto";
@@ -113,6 +115,8 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { encryptToken, decryptToken } = await import("../src/lib/token-crypto.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { Prisma } = await import("@/generated/prisma");
+const { apnsEndpointFor, legacyApnsToken, migrateLegacyApnsEndpoints } = await import("../src/lib/apns-endpoint.ts");
 
 // ── Setting stub (feature flags, VAPID keys, relay config, maintenance, cap) ──
 const settings = new Map<string, string>();
@@ -148,13 +152,17 @@ type SubRow = {
 let subRows: SubRow[] = [];
 let subSeq = 0;
 
-type SubWhere = { userId?: string | { in?: string[] }; platform?: string; endpoint?: string; id?: string };
+type SubWhere = { userId?: string | { in?: string[] }; platform?: string; endpoint?: string | { in?: string[]; startsWith?: string }; id?: string };
 function subMatches(row: SubRow, where: SubWhere | undefined): boolean {
   if (!where) return true;
   if (typeof where.userId === "string" && row.userId !== where.userId) return false;
   if (where.userId && typeof where.userId === "object" && where.userId.in && !where.userId.in.includes(row.userId ?? "")) return false;
   if (where.platform !== undefined && row.platform !== where.platform) return false;
-  if (where.endpoint !== undefined && row.endpoint !== where.endpoint) return false;
+  if (typeof where.endpoint === "string" && row.endpoint !== where.endpoint) return false;
+  if (where.endpoint && typeof where.endpoint === "object") {
+    if (where.endpoint.in && !where.endpoint.in.includes(row.endpoint)) return false;
+    if (where.endpoint.startsWith !== undefined && !row.endpoint.startsWith(where.endpoint.startsWith)) return false;
+  }
   if (where.id !== undefined && row.id !== where.id) return false;
   return true;
 }
@@ -174,6 +182,15 @@ const pushModel = {
     const before = subRows.length;
     subRows = subRows.filter((r) => !subMatches(r, args.where));
     return { count: before - subRows.length };
+  },
+  // `endpoint` is UNIQUE, like the real column: renaming onto a taken handle is P2002.
+  updateMany: async (args: { where: SubWhere; data: Partial<SubRow> }) => {
+    const hit = subRows.filter((r) => subMatches(r, args.where));
+    if (args.data.endpoint !== undefined && subRows.some((r) => r.endpoint === args.data.endpoint && !hit.includes(r))) {
+      throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed on endpoint", { code: "P2002", clientVersion: "0.0.0-test" });
+    }
+    for (const r of hit) Object.assign(r, args.data);
+    return { count: hit.length };
   },
   upsert: async (args: {
     where: { endpoint: string };
@@ -260,7 +277,7 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
 
 // Route handlers (imported AFTER every stub is in place).
 const { POST: subscribePost, DELETE: subscribeDelete } = await import("../src/app/api/push/subscribe/route.ts");
-const { POST: apnsPost } = await import("../src/app/api/push/apns/route.ts");
+const { POST: apnsPost, DELETE: apnsDelete } = await import("../src/app/api/push/apns/route.ts");
 const { POST: testPost } = await import("../src/app/api/push/test/route.ts");
 const { GET: vapidGet } = await import("../src/app/api/push/vapid-key/route.ts");
 const { POST: announcePost } = await import("../src/app/api/push/announce-update/route.ts");
@@ -306,7 +323,7 @@ function seedIosSub(userId: string, token: string, opts: { label?: string | null
   const row: SubRow = {
     id: `stored-${++subSeq}`,
     createdAt: new Date(),
-    endpoint: opts.endpoint ?? `apns:${token}`,
+    endpoint: opts.endpoint ?? apnsEndpointFor(token),
     platform: "ios",
     p256dh: null,
     auth: null,
@@ -566,7 +583,11 @@ test("POST /api/push/apns stores the APNs deviceToken encrypted (guardrail 7a) w
   const stored = subRows[0];
   assert.equal(stored.userId, userId);
   assert.equal(stored.platform, "ios");
-  assert.equal(stored.endpoint, `apns:${DEVICE_TOKEN}`, "the synthetic apns: handle keys the row");
+  assert.equal(stored.endpoint, apnsEndpointFor(DEVICE_TOKEN), "the synthetic apns: handle keys the row");
+  // The handle is a HASH: the token itself is stored only encrypted — a
+  // plaintext copy beside the ciphertext would make the encryption pointless.
+  assert.ok(!stored.endpoint.includes(DEVICE_TOKEN.slice(0, 16)), "no part of the raw token in the unique key");
+  assert.match(stored.endpoint, /^apns:sha256:[0-9a-f]{64}$/);
   assert.equal(stored.label, "iPhone 15");
 
   // deviceToken: encrypted at rest, single-pass round-trip (guardrail 7a).
@@ -611,6 +632,94 @@ test("POST /api/push/apns rejects a non-hex device token (400) and a token owned
   assert.equal(conflict.status, 409);
   assert.deepEqual(await conflict.json(), { error: "Device already registered to another account" });
   assert.equal(subRows.length, 1, "the other account's device row is untouched");
+});
+
+// ── /api/push/apns — the endpoint handle is a hash, never the raw token ──────
+
+const LEGACY_TOKEN = "0a1b2c3d".repeat(8);
+
+test("POST /api/push/apns: a row still under the legacy plaintext handle is RENAMED onto the hash — same row, no plaintext left", async () => {
+  const { userId, token } = await mintSession();
+  const legacy = seedIosSub(userId, LEGACY_TOKEN, { endpoint: `apns:${LEGACY_TOKEN}`, label: "Old label" });
+  const res = await callRoute(apnsPost, pushReq("apns", { token, body: { deviceToken: LEGACY_TOKEN.toUpperCase(), label: "iPhone" } }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true }, "the iOS wire contract is unchanged");
+  assert.equal(subRows.length, 1, "updated in place, not duplicated");
+  assert.equal(subRows[0].id, legacy.id, "the same row (its createdAt keeps its place in the cap's eviction order)");
+  assert.equal(subRows[0].endpoint, apnsEndpointFor(LEGACY_TOKEN));
+  assert.equal(subRows[0].label, "iPhone");
+  assert.ok(!subRows.some((r) => r.endpoint.includes(LEGACY_TOKEN)), "no row carries the plaintext token any more");
+});
+
+test("POST /api/push/apns: a legacy-handle row owned by ANOTHER account is still a 409 — the hash change opens no hijack", async () => {
+  seedIosSub("someone-else", LEGACY_TOKEN, { endpoint: `apns:${LEGACY_TOKEN}` });
+  const b = await mintSession();
+  const res = await callRoute(apnsPost, pushReq("apns", { token: b.token, body: { deviceToken: LEGACY_TOKEN } }));
+  assert.equal(res.status, 409);
+  assert.equal(subRows.length, 1);
+  assert.equal(subRows[0].userId, "someone-else");
+});
+
+test("POST /api/push/apns: when both handles exist for the caller, the legacy duplicate is dropped", async () => {
+  const { userId, token } = await mintSession();
+  seedIosSub(userId, LEGACY_TOKEN, { endpoint: `apns:${LEGACY_TOKEN}` });
+  seedIosSub(userId, LEGACY_TOKEN);
+  const res = await callRoute(apnsPost, pushReq("apns", { token, body: { deviceToken: LEGACY_TOKEN } }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(subRows.map((r) => r.endpoint), [apnsEndpointFor(LEGACY_TOKEN)]);
+});
+
+test("DELETE /api/push/apns removes the caller's row under EITHER handle, and never another account's", async () => {
+  const { userId, token } = await mintSession();
+  seedIosSub(userId, LEGACY_TOKEN, { endpoint: `apns:${LEGACY_TOKEN}` });
+  const other = "f0f0f0f0".repeat(8);
+  seedIosSub(userId, other);
+  seedIosSub("someone-else", "1e1e1e1e".repeat(8));
+  for (const deviceToken of [LEGACY_TOKEN, other.toUpperCase()]) {
+    const res = await callRoute(apnsDelete, pushReq("apns", { method: "DELETE", token, body: { deviceToken } }));
+    assert.equal(res.status, 200);
+  }
+  assert.deepEqual(subRows.map((r) => r.userId), ["someone-else"]);
+  // Deleting someone else's token from this account does nothing.
+  const res = await callRoute(apnsDelete, pushReq("apns", { method: "DELETE", token, body: { deviceToken: "1e1e1e1e".repeat(8) } }));
+  assert.equal(res.status, 200);
+  assert.equal(subRows.length, 1);
+});
+
+test("boot migration: every legacy plaintext handle becomes the hash; a device that already re-registered loses only its duplicate; web rows are untouched", async () => {
+  const t2 = "2b2b2b2b".repeat(8);
+  const a = seedIosSub("u-a", LEGACY_TOKEN, { endpoint: `apns:${LEGACY_TOKEN}`, label: "A" });
+  seedIosSub("u-b", t2, { endpoint: `apns:${t2}` });
+  const fresh = seedIosSub("u-b", t2); // re-registered under the hash already
+  const already = seedIosSub("u-c", "3c3c3c3c".repeat(8));
+  const web = seedWebSub("u-d", "web-endpoint");
+  const odd = seedIosSub("u-e", "zz", { endpoint: "apns:not-hex" }); // not a token this route ever wrote
+  const out = await migrateLegacyApnsEndpoints();
+  assert.deepEqual(out, { migrated: 1, removed: 1 });
+  assert.equal(subRows.find((r) => r.id === a.id)!.endpoint, apnsEndpointFor(LEGACY_TOKEN), "renamed in place");
+  assert.deepEqual(subRows.filter((r) => r.userId === "u-b").map((r) => r.id), [fresh.id], "the hashed row wins, the legacy duplicate goes");
+  assert.equal(subRows.find((r) => r.id === already.id)!.endpoint, apnsEndpointFor("3c3c3c3c".repeat(8)));
+  assert.equal(subRows.find((r) => r.id === web.id)!.endpoint, web.endpoint);
+  assert.equal(subRows.find((r) => r.id === odd.id)!.endpoint, "apns:not-hex");
+  assert.ok(!subRows.some((r) => /^apns:(?:[0-9a-f]{2}){32,}$/.test(r.endpoint)), "no plaintext token handle is left");
+  assert.deepEqual(await migrateLegacyApnsEndpoints(), { migrated: 0, removed: 0 }, "idempotent");
+  assert.deepEqual(errors, []);
+});
+
+test("boot runs the migration, awaited (instrumentation.ts)", () => {
+  const text = readFileSync(join(process.cwd(), "src/instrumentation.ts"), "utf8");
+  assert.match(
+    text,
+    /await import\("@\/lib\/apns-endpoint"\)\s*\.then\(\(\{ migrateLegacyApnsEndpoints \}\) => migrateLegacyApnsEndpoints\(\)\)/,
+    "the legacy plaintext handles are rewritten on every boot, before the server takes requests",
+  );
+});
+
+test("the hashed handle: stable, distinct per token, never derivable as a prefix of the token", () => {
+  assert.equal(apnsEndpointFor(LEGACY_TOKEN), apnsEndpointFor(LEGACY_TOKEN));
+  assert.notEqual(apnsEndpointFor(LEGACY_TOKEN), apnsEndpointFor("2b2b2b2b".repeat(8)));
+  assert.equal(legacyApnsToken(`apns:${LEGACY_TOKEN}`), LEGACY_TOKEN);
+  assert.equal(legacyApnsToken(apnsEndpointFor(LEGACY_TOKEN)), null, "a hashed handle never reads as a legacy one");
 });
 
 // ── /api/push/vapid-key ──────────────────────────────────────────────────────
@@ -661,7 +770,7 @@ test("POST /api/push/test fans a diagnostic push to the caller's OWN iOS devices
   assert.equal(body.results.length, 1, "only the caller's own device is tested");
   assert.equal(body.results[0].platform, "ios");
   assert.equal(body.results[0].ok, true);
-  assert.ok(body.results[0].endpoint.startsWith("apns:") && body.results[0].endpoint.endsWith("…"), "the endpoint is display-truncated");
+  assert.ok(body.results[0].endpoint.startsWith("apns:sha256:") && body.results[0].endpoint.endsWith("…"), "the endpoint is display-truncated");
 
   // The relay saw exactly one send, carrying the DECRYPTED device token.
   assert.equal(relayCalls.length, 1);

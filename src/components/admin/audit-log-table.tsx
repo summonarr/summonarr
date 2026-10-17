@@ -567,6 +567,10 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
   const media = () => d.mediaType && `(${String(d.mediaType).toLowerCase()})`;
   const reason = () => d.reason && `— ${String(d.reason).slice(0, 80)}`;
   const via = () => d.provider && t("adminManage.audit.summary.via", { provider: String(d.provider) });
+  // Newer user-admin rows name the account by id (+ display name when it has
+  // one) and never carry an email; older rows still have targetUser/targetEmail
+  // until the retention scrub removes them.
+  const targetUser = d.targetUser ?? d.targetUserId;
   switch (action) {
     case "REQUEST_APPROVE":
     case "REQUEST_DECLINE":
@@ -601,12 +605,12 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
     case "USER_ROLE_CHANGE":
     case "USER_PERMISSIONS_CHANGE":
       return [
-        d.targetUser && t("adminManage.audit.summary.user", { user: String(d.targetUser) }),
+        targetUser && t("adminManage.audit.summary.user", { user: String(targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
       ].filter(Boolean).join(" ") || null;
     case "USER_CREATE":
       return [
-        d.targetUser && t("adminManage.audit.summary.created", { user: String(d.targetUser) }),
+        targetUser && t("adminManage.audit.summary.created", { user: String(targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
         d.role && `· ${d.role}`,
       ].filter(Boolean).join(" ") || null;
@@ -617,7 +621,7 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
       ].filter(Boolean).join(" ") || null;
     case "USER_DEACTIVATE":
       return [
-        d.targetUser ? t("adminManage.audit.summary.disabled", { user: String(d.targetUser) }) : null,
+        targetUser ? t("adminManage.audit.summary.disabled", { user: String(targetUser) }) : null,
         d.targetEmail && `(${d.targetEmail})`,
         d.kind === "self-delete" && t("adminManage.audit.summary.closedByUser"),
       ].filter(Boolean).join(" ") || null;

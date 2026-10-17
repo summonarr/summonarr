@@ -10,6 +10,11 @@ import { CATALOGS } from "@/lib/i18n/catalogs";
 // button, the settings save, and the boot-time self-heal below all PUT the canonical
 // DISCORD_SLASH_COMMANDS array, with its localizations, (a FULL REPLACE) to the guild scope when a Guild
 // ID is set — instant, per-server — or the global scope otherwise.
+//
+// A guild-scoped registration also CLEARS the global command set (a PUT of
+// `[]`). A global set left over from before the Guild ID was saved would keep
+// offering the commands in every other server the bot is in (and twice in this
+// one) — and the interactions route refuses those anyway (discord-guild.ts).
 
 const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
@@ -176,14 +181,26 @@ export function discordCommandsUrl(clientId: string, guildId?: string | null): s
     : `${DISCORD_API}/applications/${clientId}/commands`;
 }
 
-export function putDiscordCommands(botToken: string, clientId: string, guildId?: string | null): Promise<Response> {
-  return safeFetchTrusted(discordCommandsUrl(clientId, guildId), {
+function putCommandSet(botToken: string, url: string, commands: readonly unknown[]): Promise<Response> {
+  return safeFetchTrusted(url, {
     method: "PUT",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify(REGISTERED_DISCORD_COMMANDS),
+    body: JSON.stringify(commands),
     allowedHosts: DISCORD_HOSTS,
     timeoutMs: 15_000,
   });
+}
+
+// Registers the commands. Guild-scoped: the guild PUT, then the global clear —
+// the returned Response is the first one that failed, else the guild PUT's, so
+// every caller's `res.ok` means BOTH landed. A failed clear therefore leaves
+// the schema hash unrecorded and the boot self-heal retries the whole
+// (idempotent) registration.
+export async function putDiscordCommands(botToken: string, clientId: string, guildId?: string | null): Promise<Response> {
+  const res = await putCommandSet(botToken, discordCommandsUrl(clientId, guildId), REGISTERED_DISCORD_COMMANDS);
+  if (!res.ok || !guildId) return res;
+  const cleared = await putCommandSet(botToken, discordCommandsUrl(clientId, null), []);
+  return cleared.ok ? res : cleared;
 }
 
 // Hash the schema AND its registration scope: a guild↔global switch changes the

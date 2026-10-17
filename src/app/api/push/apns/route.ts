@@ -8,6 +8,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { isFeatureEnabled } from "@/lib/features";
+import { apnsEndpointFor, legacyApnsEndpointFor } from "@/lib/apns-endpoint";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 // APNs device tokens are 32 bytes (64 hex) today; Apple reserves the right to
@@ -51,11 +52,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   // Synthetic unique handle so upsert/prune can key off `endpoint` for both web
-  // and iOS rows without a second unique column.
-  const endpoint = `apns:${deviceToken}`;
+  // and iOS rows without a second unique column — a HASH of the token, never
+  // the token itself, which is stored only encrypted (apns-endpoint.ts). A row
+  // still under the old plaintext handle (before the boot migration reached
+  // it) counts as this device too, and is moved onto the hashed one below.
+  const endpoint = apnsEndpointFor(deviceToken);
+  const legacyEndpoint = legacyApnsEndpointFor(deviceToken);
 
-  const existing = await prisma.pushSubscription.findUnique({ where: { endpoint } });
-  if (existing && existing.userId !== session.user.id) {
+  const [hashedRow, legacyRow] = await Promise.all([
+    prisma.pushSubscription.findUnique({ where: { endpoint } }),
+    prisma.pushSubscription.findUnique({ where: { endpoint: legacyEndpoint } }),
+  ]);
+  const existing = hashedRow ?? legacyRow;
+  if ([hashedRow, legacyRow].some((row) => row && row.userId !== session.user.id)) {
     // APNs tokens are per-device, but the prior row's ownership is proof the
     // device was registered by another account. Silently reassigning it (no
     // ownership proof from the caller) would let any user hijack another
@@ -95,6 +104,15 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // Cap-check + oldest-eviction + upsert in one transaction so concurrent
   // registrations can't push the user one-over-cap (mirrors /api/push/subscribe).
   await prisma.$transaction(async (tx) => {
+    // The caller's own legacy-handle row: rename it onto the hashed handle (so
+    // the upsert below updates it, keeping its createdAt for the cap's
+    // oldest-first eviction), or drop it if the hashed row already exists. A
+    // concurrent rename's P2002 propagates (guardrail 23) — the device simply
+    // re-registers on its next launch.
+    if (legacyRow) {
+      if (hashedRow) await tx.pushSubscription.deleteMany({ where: { id: legacyRow.id, userId: session.user.id } });
+      else await tx.pushSubscription.updateMany({ where: { id: legacyRow.id, userId: session.user.id }, data: { endpoint } });
+    }
     if (!alreadyOwns && cap > 0) {
       const count = await tx.pushSubscription.count({ where: { userId: session.user.id } });
       if (count >= cap) {
@@ -139,16 +157,17 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  // Same lowercase normalization as POST — the endpoint key is stored lowercased,
-  // so a case-shifted token here would match nothing and leave the row pushing to
-  // a signed-out device.
+  // Same lowercase normalization as POST — the handle is derived from the
+  // lowercased token, so a case-shifted token here would match nothing and leave
+  // the row pushing to a signed-out device.
   const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim().toLowerCase() : "";
   if (!deviceToken) {
     return NextResponse.json({ error: t("apiUser.push.deviceTokenRequired") }, { status: 400 });
   }
 
+  // Both handles: a row the boot migration hasn't reached yet must still go.
   await prisma.pushSubscription.deleteMany({
-    where: { endpoint: `apns:${deviceToken}`, userId: session.user.id },
+    where: { endpoint: { in: [apnsEndpointFor(deviceToken), legacyApnsEndpointFor(deviceToken)] }, userId: session.user.id },
   });
 
   return NextResponse.json({ ok: true });

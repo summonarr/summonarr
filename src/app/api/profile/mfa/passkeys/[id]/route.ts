@@ -10,6 +10,14 @@ import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
+// Scoped to the caller: another user's credential id is simply "not found".
+// Checked BEFORE the second-factor step-up: a recovery code used as proof is
+// consumed, so a stale or mistyped id must not cost one. The write below stays
+// scoped and count-checked (a passkey removed in between is still a 404).
+async function ownsPasskey(userId: string, id: string): Promise<boolean> {
+  return (await prisma.webAuthnCredential.count({ where: { id, userId } })) > 0;
+}
+
 // PATCH /api/profile/mfa/passkeys/[id] — rename one of the caller's passkeys.
 // Body: { password, secondFactor, name } — a passkey exists, so 2FA is on and
 // the fresh second factor is always required (step-up.ts).
@@ -29,6 +37,8 @@ export const PATCH = withAuth(async (
   }
   const user = await mfaReauthStepUp(session, parsed.password, t, req);
   if (user instanceof NextResponse) return user;
+  // Before the second factor, so a 404 never spends a recovery code.
+  if (!(await ownsPasskey(user.id, id))) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;
 
@@ -66,6 +76,8 @@ export const DELETE = withAuth(async (
   if (parsed instanceof NextResponse) return parsed;
   const user = await mfaReauthStepUp(session, parsed.password, t, req);
   if (user instanceof NextResponse) return user;
+  // Before the second factor, so a 404 never spends a recovery code.
+  if (!(await ownsPasskey(user.id, id))) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;
 

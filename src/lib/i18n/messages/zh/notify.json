@@ -178,6 +178,8 @@
   "notify.discord.issueResolved.description": "你报告的这部 **{media}** 的问题已解决。",
   "notify.discord.issueResolved.resolution": "**解决方案：**{resolution}",
   "notify.bot.disabled": "Discord 集成目前已禁用。",
+  "notify.bot.wrongServer": "此机器人只在它自己的 Discord 服务器中响应。",
+  "notify.bot.serverNotConfigured": "此机器人尚未为任何 Discord 服务器完成设置。管理员需要在 Summonarr 的 Discord 设置中填写服务器（Guild）ID。",
   "notify.bot.slow": "处理时间比预期长，请重试。",
   "notify.bot.unexpected": "发生意外错误，请重试。",
   "notify.bot.unexpectedShort": "发生意外错误。",
