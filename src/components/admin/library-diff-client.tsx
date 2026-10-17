@@ -9,6 +9,7 @@ import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { rich } from "@/components/settings/forms/rich";
+import type { DiffSource } from "@/lib/library-diff";
 
 interface RequestSummary {
   total: number;
@@ -38,6 +39,8 @@ export interface DiffItem {
 
   inArr: boolean;
   requests: RequestSummary;
+  // Why the OTHER server lacks this title (mirrored libraries: never random).
+  diffSource: DiffSource;
 }
 
 export interface BadMatchSideData {
@@ -251,6 +254,8 @@ function MediaCard({
           </p>
         )}
 
+        <DiffSourceNote source={item.diffSource} server={server} />
+
         {item.arrMismatch && item.arrTmdbId !== null ? (
           <div style={{ marginTop: 2 }} className="flex items-center gap-2 flex-wrap">
             <span className="ds-mono" style={{ fontSize: 10, color: "var(--ds-warning)" }}>
@@ -299,6 +304,33 @@ function MediaCard({
         )}
       </div>
     </div>
+  );
+}
+
+function DiffSourceNote({ source, server }: { source: DiffSource; server?: "plex" | "jellyfin" }) {
+  const t = useT();
+  const other = server === "plex" ? "Jellyfin" : "Plex";
+  const warn = source.kind === "idMismatch" || source.kind === "unmatched";
+  let text: string;
+  switch (source.kind) {
+    case "idMismatch":
+      text = t("adminManage.library.diff.source.idMismatch", {
+        server: other,
+        title: source.otherTitle || `TMDB #${source.otherTmdbId}`,
+        id: source.otherTmdbId ?? 0,
+      });
+      break;
+    case "unmatched":   text = t("adminManage.library.diff.source.unmatched", { server: other }); break;
+    case "notOnOther":  text = t("adminManage.library.diff.source.notOnOther", { server: other }); break;
+    default:            text = t("adminManage.library.diff.source.noPath", { server: other }); break;
+  }
+  return (
+    <span
+      className="ds-mono"
+      style={{ fontSize: 10, lineHeight: 1.4, color: warn ? "var(--ds-warning)" : "var(--ds-fg-subtle)" }}
+    >
+      {text}
+    </span>
   );
 }
 
@@ -713,6 +745,11 @@ function DiffColumn({
   const otherConfiguredMsg = otherServer === "plex"
     ? t("adminManage.library.diff.plexHasAll")
     : t("adminManage.library.diff.jellyfinHasAll");
+  // A ?tmdbId= deep link lands on a row; float it to the top so it is on screen
+  // instead of buried under the render cap. Stable: the rest keep their order.
+  const ordered = highlightServer === server && highlightKey
+    ? [...items.filter((i) => `${i.tmdbId}:${i.mediaType}` === highlightKey), ...items.filter((i) => `${i.tmdbId}:${i.mediaType}` !== highlightKey)]
+    : items;
   const emptyMsg = !configured
     ? t("adminManage.library.diff.notSynced", { server: server === "plex" ? "Plex" : "Jellyfin" })
     : otherConfiguredMsg;
@@ -769,7 +806,7 @@ function DiffColumn({
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {items.slice(0, RENDER_CAP).map((item) => (
+          {ordered.slice(0, RENDER_CAP).map((item) => (
             <MediaCard
               // serverInstance is part of the key: the same title present on two
               // configured servers is two rows here, and without it React sees a
