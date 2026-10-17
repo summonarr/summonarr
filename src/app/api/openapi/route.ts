@@ -5451,10 +5451,10 @@ const spec = {
       get: {
         tags: ["Admin – Debug"],
         summary: "Check whether the DB schema is up to date (ADMIN)",
-        description: "Admin session only; a bare CRON_SECRET bearer is rejected. For a cookie session the route also demands a same-origin + device-fingerprint check (403 otherwise).",
+        description: "Admin session only; a bare CRON_SECRET bearer is rejected. For a cookie session the route also demands a same-origin check (403 otherwise).",
         responses: {
           "200": { description: "{ allOk, tables: { <table>: { ok, missing, columns } }, allTables }" },
-          "403": { description: "Failed the same-origin / device-fingerprint check" },
+          "403": { description: "Failed the same-origin check" },
         },
       },
     },

@@ -19,6 +19,7 @@ import {
   buildPlexFlowClearedSetCookie,
 } from "../src/lib/plex-flow-state.ts";
 import { signQcFlowCookie } from "../src/lib/jellyfin-flow-state.ts";
+import { signPurposeJwt } from "../src/lib/signing-keys.ts";
 
 const SECRET = "unit-test-plex-flow-secret-0123456789abcdef";
 process.env.NEXTAUTH_SECRET = SECRET;
@@ -29,16 +30,36 @@ function decodePayload(token: string): Record<string, unknown> {
   return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
 }
 
+function decodeHeader(token: string): Record<string, unknown> {
+  return JSON.parse(Buffer.from(token.split(".")[0], "base64url").toString("utf8"));
+}
+
+// A validly-signed flow token with arbitrary claims: the real "plex-flow"
+// subkey, typ and audience (read off a real token), so the shape checks are
+// what gets exercised — not the signature (guardrail 6h).
+async function signAsFlow(claims: Record<string, unknown>): Promise<string> {
+  const sample = await signPlexFlowCookie(STATE);
+  return signPurposeJwt("plex-flow", claims, {
+    typ: decodeHeader(sample).typ as string,
+    audience: decodePayload(sample).aud as string,
+    ttlSeconds: 600,
+  });
+}
+
 test("sign → verify roundtrip returns exactly the stored pinId and clientId", async () => {
   const token = await signPlexFlowCookie(STATE);
   const state = await verifyPlexFlowCookie(token);
   assert.deepEqual(state, STATE);
 });
 
-test("the cookie JWT carries only pinId/clientId plus iat/exp", async () => {
+test("the cookie JWT carries only pinId/clientId plus iat/exp/aud, under its own typ and kid (guardrail 6h)", async () => {
   const token = await signPlexFlowCookie(STATE);
+  const header = decodeHeader(token);
+  assert.equal(header.typ, "summonarr-plex-flow+jwt");
+  assert.equal(typeof header.kid, "string");
   const payload = decodePayload(token);
-  assert.deepEqual(Object.keys(payload).sort(), ["clientId", "exp", "iat", "pinId"]);
+  assert.equal(payload.aud, "summonarr:plex-flow");
+  assert.deepEqual(Object.keys(payload).sort(), ["aud", "clientId", "exp", "iat", "pinId"]);
   assert.equal(payload.pinId, STATE.pinId);
   assert.equal(payload.clientId, STATE.clientId);
 });
@@ -48,6 +69,28 @@ test("cookie lifetime is pinned to 10 minutes (exp - iat)", async () => {
   const payload = decodePayload(token);
   assert.equal(typeof payload.iat, "number");
   assert.equal(payload.exp, (payload.iat as number) + 600);
+});
+
+test("the right key with the wrong typ or audience is refused — the flow checks both on verify", async () => {
+  const sample = await signPlexFlowCookie(STATE);
+  const typ = decodeHeader(sample).typ as string;
+  const audience = decodePayload(sample).aud as string;
+  assert.ok(await verifyPlexFlowCookie(await signPurposeJwt("plex-flow", { ...STATE }, { typ, audience, ttlSeconds: 600 })));
+  assert.equal(await verifyPlexFlowCookie(await signPurposeJwt("plex-flow", { ...STATE }, { typ: "JWT", audience, ttlSeconds: 600 })), null);
+  assert.equal(
+    await verifyPlexFlowCookie(await signPurposeJwt("plex-flow", { ...STATE }, { typ, audience: "summonarr:qc-flow", ttlSeconds: 600 })),
+    null,
+  );
+});
+
+test("a flow token HMAC'd with the RAW NEXTAUTH_SECRET (the pre-6h format) is refused", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const legacy = await new SignJWT({ ...STATE })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuedAt(now)
+    .setExpirationTime(now + 600)
+    .sign(new TextEncoder().encode(SECRET));
+  assert.equal(await verifyPlexFlowCookie(legacy), null);
 });
 
 test("expired flow cookie verifies to null", async () => {
@@ -90,13 +133,9 @@ test("alg:none forgery is rejected (pinned HS256 list)", async () => {
 });
 
 test("validly-signed token with wrong payload types verifies to null", async () => {
-  const key = new TextEncoder().encode(SECRET);
-  const sign = (claims: Record<string, unknown>) =>
-    new SignJWT(claims)
-      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-      .setIssuedAt()
-      .setExpirationTime("10m")
-      .sign(key);
+  const sign = signAsFlow;
+  // sanity: the helper's tokens DO verify when the shape is right.
+  assert.deepEqual(await verifyPlexFlowCookie(await sign({ ...STATE })), STATE);
   // pinId as a string must NOT coerce — fail closed.
   assert.equal(await verifyPlexFlowCookie(await sign({ pinId: "987654321", clientId: "c" })), null);
   // clientId as a number likewise.
@@ -108,8 +147,8 @@ test("validly-signed token with wrong payload types verifies to null", async () 
 });
 
 test("a QC flow cookie does not verify as Plex flow state (cross-flow confusion)", async () => {
-  // Both flow cookies are HS256 JWTs under the same NEXTAUTH_SECRET; the shape
-  // check is what keeps a QuickConnect-flow token out of the Plex path.
+  // Each flow has its own subkey, typ and audience (guardrail 6h), so the
+  // signature alone refuses it; the shape check is the second line.
   const qcToken = await signQcFlowCookie({ secretHash: "a".repeat(64), instance: "" });
   assert.equal(await verifyPlexFlowCookie(qcToken), null);
 });

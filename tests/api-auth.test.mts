@@ -37,9 +37,10 @@
 //     cookie-session responses but withheld from bearer sessions (guardrail
 //     6b: native clients can't read Set-Cookie, so they keep presenting the
 //     token they got at sign-in);
-//   - the UA-fingerprint and machine-IP checks are actually WIRED into
-//     authenticateRequest (mismatch ⇒ 401 before the handler; bearer skips
-//     the fingerprint check).
+//   - the transport binding and machine-IP checks are actually WIRED into
+//     authenticateRequest and requireAuth (mismatch ⇒ 401 before the
+//     handler), there is NO UA-fingerprint check (guardrail 6h), and a
+//     response carrying a refreshed session cookie is never cacheable.
 //   - privilege-change ROTATION per transport: a cookie session rotates and
 //     only its Set-Cookie replacement keeps working; a BEARER session is never
 //     rotated (the app is never handed a new token, so a rotation signed it
@@ -170,6 +171,7 @@ async function mintSession(opts: {
   machineAllowedIps?: string[];
   iatOffset?: number;
   expiresInSeconds?: number;
+  transport?: "cookie" | "bearer"; // omitted ⇒ a pre-claim token (either transport)
 } = {}): Promise<{ userId: string; sessionId: string; token: string; expiresAt: number }> {
   seq++;
   const userId = `user-${seq}`;
@@ -198,6 +200,7 @@ async function mintSession(opts: {
       expiresAt,
       ...(opts.uaFingerprint ? { uaFingerprint: opts.uaFingerprint } : {}),
       ...(opts.machineAllowedIps ? { machineAllowedIps: opts.machineAllowedIps } : {}),
+      ...(opts.transport ? { transport: opts.transport } : {}),
     },
     { expiresInSeconds: opts.expiresInSeconds ?? 7_200, iat },
   );
@@ -507,41 +510,56 @@ test("a cookie session's response gets the slid token appended as Set-Cookie; be
   assert.equal(viaBearer.headers.get("set-cookie"), null);
 });
 
-// ── UA-fingerprint and machine-IP wiring in authenticateRequest ─────────────
-// (The pure matchers are exhaustively covered in tests/ua-fingerprint.test.mts
-// and tests/api-auth-helpers.test.mts; these pin that the wrapper actually
-// calls them and 401s before the handler.)
+// ── transport binding, no UA fingerprint, machine-IP wiring ─────────────────
+// (tests/session-transport.test.mts owns the binding rules themselves; these
+// pin that the wrapper is wired to them and 401s before the handler.)
 
-const CHROME_WIN_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const FIREFOX_MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0";
 
-test("a cookie session bound to a UA fingerprint 401s from a different browser family; bearer skips the check", async () => {
+test("the UA fingerprint is NOT enforced (guardrail 6h): a fingerprinted cookie session authenticates from any browser family", async () => {
   const { calls, handler } = probe();
   const bound = await mintSession({ uaFingerprint: "chrome:windows:desktop" });
-
-  const mismatch = await withAuth(handler)(
+  const res = await withAuth(handler)(
     makeReq({ ...asCookie(bound.token), "user-agent": FIREFOX_MAC_UA }),
     undefined,
   );
-  assert.equal(mismatch.status, 401, "a fingerprint mismatch on the cookie transport must 401");
+  assert.equal(res.status, 200);
+  assert.equal(calls.length, 1);
+});
+
+test("withAuth refuses a token on the wrong transport (guardrail 6h): cookie-bound as a bearer, bearer-bound as a cookie → 401, handler not invoked", async () => {
+  const { calls, handler } = probe();
+  const browser = await mintSession({ transport: "cookie" });
+  const native = await mintSession({ transport: "bearer" });
+  assert.equal((await withAuth(handler)(makeReq(asBearer(browser.token)), undefined)).status, 401);
+  assert.equal((await withAuth(handler)(makeReq(asCookie(native.token)), undefined)).status, 401);
   assert.equal(calls.length, 0);
-
-  const match = await withAuth(handler)(
-    makeReq({ ...asCookie(bound.token), "user-agent": CHROME_WIN_UA }),
-    undefined,
-  );
-  assert.equal(match.status, 200, "the matching browser family must still authenticate");
-
-  // Bearer sessions deliberately drop UA-binding (guardrail 6b) — the same
-  // fingerprinted token from a 'wrong' UA authenticates over bearer.
-  const bearer = await withAuth(handler)(
-    makeReq({ ...asBearer(bound.token), "user-agent": FIREFOX_MAC_UA }),
-    undefined,
-  );
-  assert.equal(bearer.status, 200);
+  assert.equal((await withAuth(handler)(makeReq(asCookie(browser.token)), undefined)).status, 200);
+  assert.equal((await withAuth(handler)(makeReq(asBearer(native.token)), undefined)).status, 200);
   assert.equal(calls.length, 2);
+});
+
+test("a refreshed-cookie response is never cacheable: a handler's public Cache-Control becomes private, no-store, its own no-store is kept, a bearer response is untouched", async () => {
+  const { token } = await mintSession();
+  const cacheable = await withAuth(() =>
+    NextResponse.json({ ok: true }, { headers: { "Cache-Control": "public, max-age=600" } }),
+  )(makeReq(asCookie(token)), undefined);
+  assert.ok(cacheable.headers.getSetCookie().some((c) => c.startsWith(`${COOKIE}=`)), "the refresh rides along");
+  assert.equal(cacheable.headers.get("cache-control"), "private, no-store");
+
+  const alreadyNoStore = await withAuth(() =>
+    NextResponse.json({ ok: true }, { headers: { "Cache-Control": "no-store" } }),
+  )(makeReq(asCookie(token)), undefined);
+  assert.equal(alreadyNoStore.headers.get("cache-control"), "no-store", "no-store already forbids every cache");
+
+  const bare = await withAuth(() => NextResponse.json({ ok: true }))(makeReq(asCookie(token)), undefined);
+  assert.equal(bare.headers.get("cache-control"), "private, no-store");
+
+  const bearer = await withAuth(() =>
+    NextResponse.json({ ok: true }, { headers: { "Cache-Control": "public, max-age=600" } }),
+  )(makeReq(asBearer(token)), undefined);
+  assert.equal(bearer.headers.get("cache-control"), "public, max-age=600", "no session cookie ⇒ the handler decides");
 });
 
 test("a machine session's mint-time IP allowlist is enforced per request: wrong caller IP → 401", async () => {
@@ -642,4 +660,17 @@ test("rotation: requireAuth() NEVER rotates — after a role change the browser'
   const { handler } = probe();
   assert.equal((await withAuth(handler)(makeReq(asCookie(token)), {})).status, 200,
     "the browser's cookie must still work on its next request");
+});
+
+test("requireAuth() refuses a token on the wrong transport too (guardrail 6h) — the SSE / dual-auth reader", async () => {
+  const browser = await mintSession({ transport: "cookie" });
+  const native = await mintSession({ transport: "bearer" });
+  const asBearerScoped = await inRequestScope(asBearer(browser.token), () => requireAuth());
+  assert.ok(asBearerScoped instanceof NextResponse);
+  assert.equal(asBearerScoped.status, 401, "a browser cookie replayed as a bearer");
+  const asCookieScoped = await inRequestScope(asCookie(native.token), () => requireAuth());
+  assert.ok(asCookieScoped instanceof NextResponse);
+  assert.equal(asCookieScoped.status, 401, "a native token planted as a cookie");
+  assert.ok(!((await inRequestScope(asCookie(browser.token), () => requireAuth())) instanceof NextResponse));
+  assert.ok(!((await inRequestScope(asBearer(native.token), () => requireAuth())) instanceof NextResponse));
 });

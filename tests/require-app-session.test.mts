@@ -131,6 +131,7 @@ type MintOpts = {
   expiresInSeconds?: number;
   iat?: number;
   uaFingerprint?: string | null;
+  transport?: "cookie" | "bearer"; // omitted ⇒ a pre-claim token (either transport)
 };
 async function mint(opts: MintOpts = {}): Promise<{ userId: string; sessionId: string; token: string }> {
   seq++;
@@ -159,6 +160,7 @@ async function mint(opts: MintOpts = {}): Promise<{ userId: string; sessionId: s
       sessionId,
       expiresAt: iat + 86_400,
       ...(opts.uaFingerprint === null ? {} : { uaFingerprint: opts.uaFingerprint ?? fpFor(UA) }),
+      ...(opts.transport ? { transport: opts.transport } : {}),
     },
     { expiresInSeconds: opts.expiresInSeconds ?? 7_200, iat },
   );
@@ -331,16 +333,23 @@ test("a PROMOTION is picked up too — the refresh is not one-directional", asyn
   assert.equal(res.kind === "session" && res.session.user.role, "ADMIN");
 });
 
-// ── the UA-fingerprint binding (cookie sessions only) ────────────────────────
+// ── no UA fingerprint; the transport binding (guardrail 6h) ──────────────────
 
-test("a cookie replayed from a DIFFERENT device redirects", async () => {
-  // Page renders are cookie/SSR only, and the proxy's matcher skips prefetch
-  // requests — so this path is one of the few places the cookie→device binding
-  // is enforced at all.
+test("a cookie presented under a DIFFERENT User-Agent still renders — the UA is no gate (guardrail 6h)", async () => {
+  // The client writes the User-Agent, so comparing it stopped no replayed
+  // cookie; it only signed real users out when a browser changed its UA.
   const { token } = await mint({ uaFingerprint: fpFor(UA) });
-  assert.equal((await outcome(token, UA)).kind, "session", "precondition: the original device works");
-  const res = await outcome(token, OTHER_UA);
-  assert.equal(res.kind, "redirect", "a stolen cookie rendered a page from another device");
+  assert.equal((await outcome(token, UA)).kind, "session");
+  assert.equal((await outcome(token, OTHER_UA)).kind, "session");
+});
+
+test("a BEARER-bound (native) token planted as the page cookie redirects (guardrail 6h)", async () => {
+  // Page renders read the cookie, so a token minted for the bearer transport
+  // is no session here even though its signature and DB row are fine.
+  const native = await mint({ transport: "bearer" });
+  assert.equal((await outcome(native.token)).kind, "redirect");
+  const browser = await mint({ transport: "cookie" });
+  assert.equal((await outcome(browser.token)).kind, "session");
 });
 
 test("a token with NO stored fingerprint is not blocked — older tokens keep working", async () => {

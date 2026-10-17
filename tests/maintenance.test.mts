@@ -258,25 +258,24 @@ test("guard: a garbage cookie and an expired JWT both degrade to anonymous (503)
   assert.equal(expired?.status, 503, "an expired admin token must not bypass maintenance");
 });
 
-test("guard: an admin cookie replayed under a different User-Agent loses the bypass (authActive's fingerprint check)", async () => {
+test("guard: the admin bypass does not hinge on the User-Agent any more (guardrail 6h retired the fingerprint)", async () => {
   settings.set("maintenanceEnabled", "true");
   const storedFp = serializeFingerprint(extractUaFingerprint(UA_CHROME));
   const jwt = await mintSessionJwt({ role: "ADMIN", uaFingerprint: storedFp });
 
-  // Positive control: same device class → fingerprint matches → bypass holds.
   const sameUa = await withRequestContext(
     { cookies: { [COOKIE]: jwt }, userAgent: UA_CHROME },
     () => maintenanceGuard(),
   );
   assert.equal(sameUa, null);
 
-  // Replay from a different client → authActive returns null → treated as
-  // anonymous → blocked. A stolen admin cookie can't ride out maintenance.
-  const replay = await withRequestContext(
+  // The client writes the User-Agent, so a replayed cookie would just carry the
+  // right one; the old check only ever caught genuine admins on a new browser.
+  const otherUa = await withRequestContext(
     { cookies: { [COOKIE]: jwt }, userAgent: "curl/8.7.1" },
     () => maintenanceGuard(),
   );
-  assert.equal(replay?.status, 503);
+  assert.equal(otherUa, null);
 });
 
 test("guard: a Settings read failure fails closed — anonymous requests get 503", async () => {

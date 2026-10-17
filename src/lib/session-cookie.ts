@@ -29,6 +29,17 @@ export interface CookieAttrs {
   maxAgeSeconds: number;
 }
 
+// For a response that carries a (re-signed) session cookie: it must never be
+// stored, or a cache replaying it hands this session to the next visitor. A
+// handler that already said `no-store` keeps its own header (no-store already
+// forbids every cache, private ones included); anything else — no header, or a
+// cacheable one — becomes `private, no-store`.
+export function markSessionResponseUncacheable(headers: Headers): void {
+  const existing = headers.get("cache-control");
+  if (existing && /(?:^|,)\s*no-store\s*(?:,|$)/i.test(existing)) return;
+  headers.set("Cache-Control", "private, no-store");
+}
+
 export function serializeSessionCookie(
   token: string,
   attrs: CookieAttrs,

@@ -1726,6 +1726,10 @@ test("mint (credentials): SignInResult + JWT claims, the AuthSession row, an ema
   assert.equal(claims.uaFingerprint, "chrome:windows:desktop");
   assert.equal(claims.deviceLabel, "Chrome on Windows");
   assert.equal(claims.isMobile, false);
+  // No X-Summonarr-Client (no request scope at all here) ⇒ a browser session,
+  // bound to the cookie transport, and the result says so (guardrail 6h).
+  assert.equal(claims.transport, "cookie");
+  assert.equal(result.transport, "cookie");
 
   // The backing AuthSession row carries the device metadata.
   const sessionRow = authSessions.get(result.sessionId);

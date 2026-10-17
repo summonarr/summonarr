@@ -1,7 +1,8 @@
 
 
 // A coarse summary of a User-Agent: browser family, OS and device class only.
-// The raw UA string is never stored, so no identifying detail is kept.
+// The raw UA string is never stored, so no identifying detail is kept. Used for
+// the device label and mobile/desktop session length — never for authorization.
 export interface UaFingerprint {
 
   browser: string;
@@ -56,21 +57,13 @@ export function serializeFingerprint(fp: UaFingerprint): string {
   return `${fp.browser}:${fp.os}:${fp.device}`;
 }
 
-// Checks whether this request's UA matches the fingerprint saved in the session.
-// Returns false on a mismatch (the caller should deny) and true on a match or
-// when the session has no fingerprint. "machine:" fingerprints (from
-// /api/auth/machine-session) are tied to CRON_SECRET, not a browser, so they
-// always pass. Bearer (native app) sessions are skipped by the CALLER, not here:
-// their token lives in the app's secure storage, not in a cookie the browser
-// sends automatically (guardrail 6b).
-export function matchesStoredFingerprint(
-  storedFp: string | undefined,
-  currentUa: string | null,
-): boolean {
-  if (!storedFp || storedFp.startsWith("machine:")) return true;
-  const currentFp = serializeFingerprint(extractUaFingerprint(currentUa ?? ""));
-  return currentFp === storedFp;
-}
+// There is deliberately NO "does this request's UA match the session's
+// fingerprint" check (guardrail 6h). It used to gate every cookie request, but
+// the User-Agent is written by the client: anyone replaying a stolen cookie
+// sends the victim's browser family with it, so the comparison stopped no
+// attacker and only signed real users out when a browser's UA changed class.
+// The fingerprint now feeds the device label (fingerprintToLabel) and the
+// informational fingerprint claim on the session, and nothing else.
 
 export function fingerprintToLabel(fp: UaFingerprint): string {
   const browserLabel: Record<string, string> = {

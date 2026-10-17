@@ -1,6 +1,7 @@
 import * as client from "openid-client";
-import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+import { type JWTPayload } from "jose";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
+import { signPurposeJwt, verifyPurposeJwt } from "@/lib/signing-keys";
 
 // Summonarr's OIDC (OpenID Connect) sign-in client. Configured by the OIDC_*
 // env vars and talks to a single identity provider (IdP).
@@ -126,46 +127,36 @@ interface OidcFlowState {
   returnTo?: string;
 }
 
-const ENCODER = new TextEncoder();
-
-function getSecret(): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET;
-  if (!secret) throw new Error("[oidc] NEXTAUTH_SECRET must be set");
-  return ENCODER.encode(secret);
-}
+// Signed with the "oidc-flow" subkey, its own typ and audience (guardrail 6h),
+// never the raw NEXTAUTH_SECRET. Both the web state cookie and the native app's
+// flowState are this token; one in flight when the key changed fails once.
+const OIDC_FLOW_JWT = { typ: "summonarr-oidc-flow+jwt", audience: "summonarr:oidc-flow" };
 
 export async function signOidcStateCookie(state: OidcFlowState): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ ...state } as JWTPayload)
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuedAt(now)
-    .setExpirationTime(now + OIDC_STATE_TTL_SECONDS)
-    .sign(getSecret());
+  return signPurposeJwt("oidc-flow", { ...state } as JWTPayload, {
+    ...OIDC_FLOW_JWT,
+    ttlSeconds: OIDC_STATE_TTL_SECONDS,
+  });
 }
 
 export async function verifyOidcStateCookie(token: string): Promise<OidcFlowState | null> {
-  try {
-    const { payload } = await jwtVerify(token, getSecret(), {
-      algorithms: ["HS256"],
-    });
-    if (
-      typeof payload.state !== "string" ||
-      typeof payload.nonce !== "string" ||
-      typeof payload.codeVerifier !== "string" ||
-      typeof payload.redirectUri !== "string"
-    ) {
-      return null;
-    }
-    return {
-      state: payload.state,
-      nonce: payload.nonce,
-      codeVerifier: payload.codeVerifier,
-      redirectUri: payload.redirectUri,
-      returnTo: typeof payload.returnTo === "string" ? payload.returnTo : undefined,
-    };
-  } catch {
+  const payload = await verifyPurposeJwt("oidc-flow", token, OIDC_FLOW_JWT);
+  if (
+    !payload ||
+    typeof payload.state !== "string" ||
+    typeof payload.nonce !== "string" ||
+    typeof payload.codeVerifier !== "string" ||
+    typeof payload.redirectUri !== "string"
+  ) {
     return null;
   }
+  return {
+    state: payload.state,
+    nonce: payload.nonce,
+    codeVerifier: payload.codeVerifier,
+    redirectUri: payload.redirectUri,
+    returnTo: typeof payload.returnTo === "string" ? payload.returnTo : undefined,
+  };
 }
 
 export interface OidcAuthorizationStart {

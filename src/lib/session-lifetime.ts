@@ -22,6 +22,15 @@
 export const NEVER_EXPIRES_AT_MS = Date.UTC(9999, 0, 1);
 export const NEVER_EXPIRES_AT_SEC = Math.floor(NEVER_EXPIRES_AT_MS / 1000);
 
+// Hard ceiling on the ADMIN-CONFIGURABLE browser durations (sessionDefault /
+// Mobile / Max), enforced by getSessionDurations() since the first release. So a
+// browser token's deadline is never more than this far past its iat, and a token
+// whose deadline is further out can only be a native one: the never-reached
+// sentinel above, or the fixed 1-year native TTL minted before guardrail 6c.
+// session-jwt.ts reads a pre-transport-claim token's transport off exactly that
+// (guardrail 6h).
+export const MAX_CONFIGURABLE_SESSION_SECONDS = 90 * 24 * 60 * 60;
+
 // True when a deadline is the "never" sentinel (or, defensively, anything past
 // it). Accepts the three shapes the deadline travels in: epoch seconds (JWT
 // claim), a Date (Prisma row) or an ISO string (a Date crossing the RSC /

@@ -25,7 +25,7 @@ import type { SummonarrSession } from "@/lib/api-auth";
 // data, not the proxy/parent-layout alone" rule applied to the whole (app) subtree.
 //
 // authActive() is DB-checked (honors AuthSession revocation, sessionsRevokedAt /
-// passwordChangedAt cutoffs, role demotion, and the UA-fingerprint binding), and is
+// passwordChangedAt cutoffs, role demotion, and the transport binding), and is
 // cheap on the hot path: a normal navigation already ran the layout's authActive(),
 // so the dbCheckedAt fast-path in verifyAndRefreshSession skips the DB round-trip
 // here. Returns the session for personalization reuse so callers need no second read.

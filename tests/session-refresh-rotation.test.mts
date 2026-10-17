@@ -127,7 +127,7 @@ test("rotated token survives its own revocation cutoff (same-second rotation)", 
 
   // First verify: rotation fires (role mismatch) — sessionId rotates and a
   // re-signed token comes back. No per-user cutoff is stamped.
-  const first = await verifyAndRefreshSession(token);
+  const first = await verifyAndRefreshSession(token, { transport: "cookie" });
   assert.ok(first, "rotation verify must succeed");
   assert.ok(first.refreshed, "rotation must re-sign a token");
   assert.equal(first.claims.role, "ISSUE_ADMIN");
@@ -135,12 +135,12 @@ test("rotated token survives its own revocation cutoff (same-second rotation)", 
   assert.equal(dbUser.sessionsRevokedAt, null, "rotation must not stamp the per-user cutoff");
 
   // Second verify with the freshly-minted token, again on the forced slow path.
-  const second = await verifyAndRefreshSession(first.refreshed.token);
+  const second = await verifyAndRefreshSession(first.refreshed.token, { transport: "cookie" });
   assert.ok(second, "the rotated token must verify straight away");
   assert.equal(second.claims.role, "ISSUE_ADMIN");
 
   // The OLD token is genuinely dead: its AuthSession row was renamed.
-  const replayed = await verifyAndRefreshSession(token);
+  const replayed = await verifyAndRefreshSession(token, { transport: "cookie" });
   assert.equal(replayed, null, "the pre-rotation token must be rejected");
 });
 
@@ -165,7 +165,7 @@ test("revoke-all in the same second as sign-in still rejects (the deliberate <= 
   );
   markUserForceRevalidate(userId);
 
-  assert.equal(await verifyAndRefreshSession(token), null);
+  assert.equal(await verifyAndRefreshSession(token, { transport: "cookie" }), null);
 });
 
 // ── the non-persisting caller opt-out ──────────────────────────────────────
@@ -192,7 +192,7 @@ test("allowRotation:false surfaces the fresh role WITHOUT killing the presented 
   );
   markUserForceRevalidate(userId);
 
-  const result = await verifyAndRefreshSession(token, { allowRotation: false });
+  const result = await verifyAndRefreshSession(token, { transport: "cookie", allowRotation: false });
 
   // The authz decision — the only thing this caller needs — is still correct and fresh.
   assert.ok(result, "the session must resolve");
@@ -205,7 +205,7 @@ test("allowRotation:false surfaces the fresh role WITHOUT killing the presented 
 
   // The decisive property: the token the browser holds still works afterwards.
   markUserForceRevalidate(userId);
-  const stillValid = await verifyAndRefreshSession(token, { allowRotation: false });
+  const stillValid = await verifyAndRefreshSession(token, { transport: "cookie", allowRotation: false });
   assert.ok(stillValid, "the presented token must survive — otherwise the next request is a logout");
 });
 
@@ -226,7 +226,7 @@ test("rotation is still the DEFAULT — every request-scoped caller keeps it", a
   );
   markUserForceRevalidate(userId);
 
-  const result = await verifyAndRefreshSession(token);
+  const result = await verifyAndRefreshSession(token, { transport: "cookie" });
   assert.ok(result);
   assert.notEqual(result.claims.sessionId, "sess-rotate-2", "the default must still rotate");
   assert.equal(dbUser.sessionsRevokedAt, null, "…by renaming the row, never by a per-user cutoff");
@@ -250,14 +250,14 @@ test("a rotation signs out NO other device — an OLDER sibling token (every nat
   const olderSibling = await mk("sess-sibling", "ISSUE_ADMIN", now - 3_600);
   const token = await mk(dbSessionId, "USER", now - 5);
   markUserForceRevalidate(userId);
-  const first = await verifyAndRefreshSession(token);
+  const first = await verifyAndRefreshSession(token, { transport: "cookie" });
   assert.ok(first?.refreshed);
   assert.equal(dbUser.sessionsRevokedAt, null, "no per-user cutoff");
   const savedId = dbSessionId;
   dbSessionId = "sess-sibling";
-  const sib = await verifyAndRefreshSession(olderSibling);
+  const sib = await verifyAndRefreshSession(olderSibling, { transport: "cookie" });
   dbSessionId = savedId;
   assert.ok(sib, "another device's older token must not be signed out by this device's rotation");
-  assert.equal(await verifyAndRefreshSession(token), null, "the pre-rotation token still dies");
+  assert.equal(await verifyAndRefreshSession(token, { transport: "cookie" }), null, "the pre-rotation token still dies");
 });
 

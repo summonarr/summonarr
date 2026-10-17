@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import { signSessionJwt, verifySessionJwt, type SessionClaims } from "@/lib/session-jwt";
+import {
+  signSessionJwt,
+  verifySessionToken,
+  isTransportAllowed,
+  type SessionClaims,
+  type SessionTransport,
+} from "@/lib/session-jwt";
 import { markSessionForceRevoked, shouldForceDbCheck } from "@/lib/session-revocation";
 import { getCachedPlexAllowlist } from "@/lib/plex-membership";
 import { serializePermissions } from "@/lib/permissions";
@@ -11,7 +17,9 @@ import { coalesce } from "@/lib/concurrency";
 // Called on every authenticated request (proxy, api-auth, /api/auth/me,
 // server components). On each call:
 //
-//   1. Cryptographically verify the JWT (sig + exp).
+//   1. Cryptographically verify the JWT (sig + exp), and refuse it if it is
+//      bound to the other transport (guardrail 6h): a browser cookie replayed
+//      as `Authorization: Bearer`, or a native token replayed as a cookie.
 //   2. Cross-replica revocation: AuthSession row deleted = logged out everywhere.
 //   3. Defense-in-depth cutoff: reject any token minted before sessionsRevokedAt
 //      or passwordChangedAt.
@@ -47,6 +55,12 @@ const FAST_CHECK_INTERVAL_SECONDS = 10;
 const SLOW_CHECK_INTERVAL_SECONDS = 60;
 
 export interface VerifyAndRefreshOptions {
+  // The transport the token ARRIVED on: "bearer" when it came from the
+  // Authorization header, "cookie" when it came from the session cookie. A token
+  // bound to the other one is refused (guardrail 6h), and the re-sign stamps
+  // this value into a token minted before the transport claim existed.
+  // Required: a reader that doesn't say which transport it read is a bug.
+  transport: SessionTransport;
   // Rotation renames the AuthSession row, so the token the client holds is dead
   // the moment it commits. Pass true ONLY when this caller hands the replacement
   // back as Set-Cookie: the proxy, withAuth and /api/auth/me on the COOKIE
@@ -65,12 +79,17 @@ export interface VerifyAndRefreshOptions {
 
 export async function verifyAndRefreshSession(
   token: string,
-  opts: VerifyAndRefreshOptions = {},
+  opts: VerifyAndRefreshOptions,
 ): Promise<VerifyAndRefreshResult | null> {
   const allowRotation = opts.allowRotation !== false;
-  const claims = await verifySessionJwt(token);
-  if (!claims) return null;
+  const transport = opts.transport;
+  const verified = await verifySessionToken(token);
+  if (!verified) return null;
+  const claims = verified.claims;
   if (!claims.sessionId) return null;
+  // Before anything else, fast path included: the binding is a property of the
+  // token, so a mismatch is refused without a DB read.
+  if (!isTransportAllowed(claims, transport)) return null;
 
   const now = Math.floor(Date.now() / 1000);
 
@@ -85,9 +104,15 @@ export async function verifyAndRefreshSession(
   // session/user since — otherwise force a DB hit so a "revoke this device" /
   // "log out everywhere" issued here takes effect on the next request rather
   // than up to checkInterval later.
+  //
+  // A token signed with anything but the CURRENT session subkey (the previous
+  // secret during a rotation, or the legacy raw secret) never takes the fast
+  // path either: the slow path below re-signs it with the current key, so a
+  // browser migrates on its very next request (guardrail 6h).
   const skipDbCheck =
     typeof dbCheckedAt === "number" &&
     now - dbCheckedAt <= checkInterval &&
+    verified.signedWithCurrentKey &&
     !shouldForceDbCheck(claims.id, claims.sessionId);
 
   if (skipDbCheck) {
@@ -113,8 +138,10 @@ export async function verifyAndRefreshSession(
   // component a rotated one it cannot deliver. `coalesce` drops the entry on
   // settle, so a token is held only while its verify is in flight; a request
   // that arrives after the rotation committed still dies as designed (the
-  // stale cookie is dead the moment the rotation lands).
-  return coalesce(`session-verify:${allowRotation ? "r" : "n"}:${token}`, async () => {
+  // stale cookie is dead the moment the rotation lands). The key carries the
+  // transport too: a pre-claim token that is valid on both gets re-signed bound
+  // to the one it arrived on, so the two results are not interchangeable.
+  return coalesce(`session-verify:${transport}:${allowRotation ? "r" : "n"}:${token}`, async () => {
     const [authSessionRow, dbUser] = await Promise.all([
       prisma.authSession.findUnique({ where: { sessionId: claims.sessionId } }),
       prisma.user.findUnique({
@@ -309,15 +336,18 @@ export async function verifyAndRefreshSession(
         isMobile: workingClaims.isMobile,
         deviceLabel: workingClaims.deviceLabel,
         expiresAt: workingClaims.expiresAt,
+        // The binding (guardrail 6h). isTransportAllowed passed above, so this is
+        // the token's own claim, or — for a token minted before the claim
+        // existed — the transport it arrived on, which is now pinned.
+        transport,
         // Machine sessions carry their mint-time IP allowlist as a claim so
         // machineIpAllowed (api-auth.ts) re-checks the caller IP on EVERY request.
         // Dropping it here would strip the binding on the first re-sign — machine
         // tokens are minted without dbCheckedAt, so their first request always
         // re-signs — leaving the refreshed token usable from any IP.
         ...(workingClaims.machineAllowedIps ? { machineAllowedIps: workingClaims.machineAllowedIps } : {}),
-        // Threading dbCheckedAt through the SessionClaims-as-JWTPayload escape hatch:
         dbCheckedAt: now,
-      } as SessionClaims,
+      },
       { expiresInSeconds: resignExpiresIn },
     );
 

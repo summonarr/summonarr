@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
   getSessionCookieName,
+  markSessionResponseUncacheable,
   parseSessionCookie,
   serializeSessionCookie,
 } from "@/lib/session-cookie";
@@ -13,7 +14,6 @@ import {
   type VerifyAndRefreshResult,
 } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
-import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { isIpAllowed } from "@/lib/ip-allowlist";
 import { getClientIp } from "@/lib/rate-limit";
 import {
@@ -105,18 +105,13 @@ export async function requireAuth(
   // on, so a rotation would rename the AuthSession row out from under the token
   // the browser still holds and sign it out on its next request. That is exactly
   // what the SSE stream's 60s re-auth tick did after any role/permission edit.
-  // The fresh role + permissions are in the claims either way.
-  const result = await verifyAndRefreshSession(token, { allowRotation: false });
+  // The fresh role + permissions are in the claims either way. The transport is
+  // where the token came from; one bound to the other is refused (guardrail 6h).
+  const result = await verifyAndRefreshSession(token, {
+    transport: bearer ? "bearer" : "cookie",
+    allowRotation: false,
+  });
   if (!result) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  // Belt-and-suspenders UA-fingerprint check for direct callers (dual-auth
-  // routes, the play-history export, SSE). The proxy's matcher excludes
-  // prefetch-header requests entirely, so we re-check here so the binding
-  // is enforced on every authenticated path. Matches the duplicate in
-  // authenticateRequest below. Bearer sessions skip it (app-secure storage,
-  // not an ambiently-replayed cookie).
-  if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, h.get("user-agent"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   if (!machineIpAllowed(result.claims, h as unknown as Headers)) {
@@ -155,16 +150,13 @@ async function authenticateRequest(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   // Rotate only for a cookie client — withAuth hands it the replacement as
-  // Set-Cookie. A bearer client is never given a new token (guardrail 6b).
-  const result: VerifyAndRefreshResult | null = await verifyAndRefreshSession(token, { allowRotation: !bearer });
+  // Set-Cookie. A bearer client is never given a new token (guardrail 6b). A
+  // token bound to the other transport is refused (guardrail 6h).
+  const result: VerifyAndRefreshResult | null = await verifyAndRefreshSession(token, {
+    transport: bearer ? "bearer" : "cookie",
+    allowRotation: !bearer,
+  });
   if (!result) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  // UA-fingerprint check. See the matching check in requireAuth above for the
-  // rationale — a second line of defence behind proxy.ts, which skips prefetch
-  // requests entirely.
-  // Bearer sessions skip it (app-secure storage, not an ambient browser cookie).
-  if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   if (!machineIpAllowed(result.claims, req.headers)) {
@@ -210,7 +202,9 @@ export function withAuth<Ctx = unknown>(
     const response = await handler(req, ctx, result.session);
     // Send the re-signed token back as Set-Cookie for browser sessions only. A
     // bearer (native) client can't read Set-Cookie, so it keeps using the token
-    // it got at sign-in (guardrail 6b).
+    // it got at sign-in (guardrail 6b). A response carrying a session token is
+    // never cacheable, whatever the handler set: a cache replaying it would hand
+    // this session to whoever asked next.
     if (result.refreshed && !result.fromBearer) {
       response.headers.append(
         "Set-Cookie",
@@ -218,6 +212,7 @@ export function withAuth<Ctx = unknown>(
           maxAgeSeconds: result.refreshed.expiresInSeconds,
         }),
       );
+      markSessionResponseUncacheable(response.headers);
     }
     return response;
   };

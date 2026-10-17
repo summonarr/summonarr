@@ -30,7 +30,7 @@ const EXPECTED: Record<string, string[]> = {
 
 // withAdmin requires an admin session. The extra isCronAuthorized check does
 // NOT demand the cron token too: for an admin it re-checks the session and, for
-// a cookie session, adds a same-origin + device-fingerprint check. A bare
+// a cookie session, adds a same-origin check. A bare
 // `Bearer <CRON_SECRET>` never gets this far — withAdmin rejects it first (401).
 export const GET = withAdmin(async (request, _ctx, _session) => {
   const t = translatorForRequest(request);

@@ -21,6 +21,7 @@ import {
   buildQcFlowClearedSetCookie,
 } from "../src/lib/jellyfin-flow-state.ts";
 import { signPlexFlowCookie } from "../src/lib/plex-flow-state.ts";
+import { signPurposeJwt } from "../src/lib/signing-keys.ts";
 
 const SECRET = "unit-test-qc-flow-secret-0123456789abcdef";
 process.env.NEXTAUTH_SECRET = SECRET;
@@ -33,6 +34,22 @@ const QC_INSTANCE = "";
 
 function decodePayload(token: string): Record<string, unknown> {
   return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+}
+
+function decodeHeader(token: string): Record<string, unknown> {
+  return JSON.parse(Buffer.from(token.split(".")[0], "base64url").toString("utf8"));
+}
+
+// A validly-signed flow token with arbitrary claims: the real "qc-flow" subkey,
+// typ and audience (read off a real token), so the shape checks are what gets
+// exercised — not the signature (guardrail 6h).
+async function signAsFlow(claims: Record<string, unknown>): Promise<string> {
+  const sample = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
+  return signPurposeJwt("qc-flow", claims, {
+    typ: decodeHeader(sample).typ as string,
+    audience: decodePayload(sample).aud as string,
+    ttlSeconds: 600,
+  });
 }
 
 test("hashQuickConnectSecret is deterministic SHA-256 hex", () => {
@@ -59,7 +76,11 @@ test("sign → verify roundtrip returns exactly the stored secretHash", async ()
 test("the cookie JWT never carries the raw QuickConnect secret", async () => {
   const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
   const payload = decodePayload(token);
-  assert.deepEqual(Object.keys(payload).sort(), ["exp", "iat", "instance", "secretHash"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["aud", "exp", "iat", "instance", "secretHash"]);
+  // Its own typ, audience and kid (guardrail 6h).
+  assert.equal(decodeHeader(token).typ, "summonarr-qc-flow+jwt");
+  assert.equal(typeof decodeHeader(token).kid, "string");
+  assert.equal(payload.aud, "summonarr:qc-flow");
   assert.equal(payload.secretHash, QC_HASH);
   assert.ok(!token.includes(QC_SECRET));
 });
@@ -69,6 +90,29 @@ test("cookie lifetime is pinned to 10 minutes (exp - iat)", async () => {
   const payload = decodePayload(token);
   assert.equal(typeof payload.iat, "number");
   assert.equal(payload.exp, (payload.iat as number) + 600);
+});
+
+test("the right key with the wrong typ or audience is refused — the flow checks both on verify", async () => {
+  const state = { secretHash: QC_HASH, instance: QC_INSTANCE };
+  const sample = await signQcFlowCookie(state);
+  const typ = decodeHeader(sample).typ as string;
+  const audience = decodePayload(sample).aud as string;
+  assert.ok(await verifyQcFlowCookie(await signPurposeJwt("qc-flow", { ...state }, { typ, audience, ttlSeconds: 600 })));
+  assert.equal(await verifyQcFlowCookie(await signPurposeJwt("qc-flow", { ...state }, { typ: "JWT", audience, ttlSeconds: 600 })), null);
+  assert.equal(
+    await verifyQcFlowCookie(await signPurposeJwt("qc-flow", { ...state }, { typ, audience: "summonarr:plex-flow", ttlSeconds: 600 })),
+    null,
+  );
+});
+
+test("a flow token HMAC'd with the RAW NEXTAUTH_SECRET (the pre-6h format) is refused", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const legacy = await new SignJWT({ secretHash: QC_HASH, instance: QC_INSTANCE })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuedAt(now)
+    .setExpirationTime(now + 600)
+    .sign(new TextEncoder().encode(SECRET));
+  assert.equal(await verifyQcFlowCookie(legacy), null);
 });
 
 test("expired flow cookie verifies to null", async () => {
@@ -111,20 +155,13 @@ test("alg:none forgery is rejected (pinned HS256 list)", async () => {
 });
 
 test("validly-signed token without a string secretHash verifies to null", async () => {
-  const key = new TextEncoder().encode(SECRET);
+  // sanity: the helper's tokens DO verify when the shape is right.
+  assert.ok(await verifyQcFlowCookie(await signAsFlow({ secretHash: QC_HASH, instance: QC_INSTANCE })));
   // instance is present and valid on both fixtures — isolates the failure to
   // the secretHash defect being tested, not an incidentally-missing instance.
-  const missing = await new SignJWT({ sub: "not-a-flow", instance: QC_INSTANCE })
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuedAt()
-    .setExpirationTime("10m")
-    .sign(key);
+  const missing = await signAsFlow({ sub: "not-a-flow", instance: QC_INSTANCE });
   assert.equal(await verifyQcFlowCookie(missing), null);
-  const wrongType = await new SignJWT({ secretHash: 12345, instance: QC_INSTANCE })
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuedAt()
-    .setExpirationTime("10m")
-    .sign(key);
+  const wrongType = await signAsFlow({ secretHash: 12345, instance: QC_INSTANCE });
   assert.equal(await verifyQcFlowCookie(wrongType), null);
 });
 
@@ -132,18 +169,9 @@ test("validly-signed token without a string instance verifies to null", async ()
   // Mirrors the secretHash-shape test above, for the instance field added with
   // multi-server support — a missing or wrong-typed instance must fail closed exactly
   // like a missing/wrong-typed secretHash, not be silently defaulted.
-  const key = new TextEncoder().encode(SECRET);
-  const missing = await new SignJWT({ secretHash: QC_HASH })
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuedAt()
-    .setExpirationTime("10m")
-    .sign(key);
+  const missing = await signAsFlow({ secretHash: QC_HASH });
   assert.equal(await verifyQcFlowCookie(missing), null);
-  const wrongType = await new SignJWT({ secretHash: QC_HASH, instance: 42 })
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuedAt()
-    .setExpirationTime("10m")
-    .sign(key);
+  const wrongType = await signAsFlow({ secretHash: QC_HASH, instance: 42 });
   assert.equal(await verifyQcFlowCookie(wrongType), null);
 });
 
@@ -153,8 +181,8 @@ test("a named instance round-trips exactly (not hardcoded to the default)", asyn
 });
 
 test("a Plex flow cookie does not verify as QC flow state (cross-flow confusion)", async () => {
-  // Both flow cookies are HS256 JWTs under the same NEXTAUTH_SECRET; the shape
-  // check is what keeps a Plex-flow token from being replayed into the QC path.
+  // Each flow has its own subkey, typ and audience (guardrail 6h), so the
+  // signature alone refuses it; the shape check is the second line.
   const plexToken = await signPlexFlowCookie({ pinId: 42, clientId: "client-abc" });
   assert.equal(await verifyQcFlowCookie(plexToken), null);
 });

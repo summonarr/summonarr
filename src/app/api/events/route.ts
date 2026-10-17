@@ -46,7 +46,7 @@ function decrementConnection(userId: string) {
 }
 
 export async function GET() {
-  // DB-checked auth (revocation + role-rotation + UA-fingerprint), not JWT-only
+  // DB-checked auth (revocation + role refresh + transport binding), not JWT-only
   // auth(). This route is reachable on the prefetch-header path that proxy.ts's
   // matcher skips, so a plain auth() check would honor a revoked or role-demoted
   // session until its natural exp. requireAuth re-runs verifyAndRefreshSession.

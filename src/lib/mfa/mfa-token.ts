@@ -11,10 +11,12 @@
 //                          a fresh WebAuthn challenge so a PASSKEY can confirm an
 //                          enrollment change (step-up.ts), bound to the session.
 //
-// NONE of these can ever be a session. The session JWT is HS256 over the raw
-// NEXTAUTH_SECRET; these are HS256 over an HKDF-derived subkey (domain-separated
-// by purpose), so verifySessionJwt rejects them on the signature alone — and
-// they carry no `id`/`role` claims either, which verifySessionJwt also requires.
+// NONE of these can ever be a session. The session JWT is HS256 over its own
+// "session" subkey with a kid (or, for a pre-6h legacy token, the raw
+// NEXTAUTH_SECRET with typ "JWT"); these are HS256 over a different HKDF subkey
+// (domain-separated by purpose) with their own typ and no kid, so
+// verifySessionJwt rejects them on the header and the signature — and they
+// carry no `id`/`role` claims either, which verifySessionJwt also requires.
 // Symmetrically, a session JWT (or the other purpose's token) fails here on the
 // signature, the `typ` header and the audience. tests/mfa-token.test.mts pins
 // every direction.
