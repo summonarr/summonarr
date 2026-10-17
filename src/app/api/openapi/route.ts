@@ -104,6 +104,16 @@ const spec = {
         enum: ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"],
       },
       UserRole: { type: "string", enum: ["USER", "ADMIN", "ISSUE_ADMIN"] },
+      OidcAllowlist: {
+        type: "object",
+        properties: {
+          groups: { type: "array", items: { type: "string", maxLength: 256 }, maxItems: 50 },
+          groupsClaim: { type: "string", pattern: "^[A-Za-z0-9_.:/-]{1,128}$", default: "groups" },
+          requestGroupsScope: { type: "boolean", default: false },
+          emailDomains: { type: "array", items: { type: "string" }, maxItems: 50 },
+          existingUsersOnly: { type: "boolean", default: false },
+        },
+      },
       QueueImportFile: {
         type: "object",
         description: "One file of a queued download, chosen by the path Radarr/Sonarr reported, with optional corrections (ids only — the objects are read from the instance)",
@@ -2445,7 +2455,7 @@ const spec = {
       post: {
         tags: ["Admin – Users"],
         summary: "Create a local-credentials user (MANAGE_USERS)",
-        description: "Creating an ADMIN requires the caller to hold the ADMIN bit. Rate-limited 10/min per caller. Body capped at 16 KB.",
+        description: "Creating an ADMIN requires the caller to hold the ADMIN bit. An address in a domain Summonarr mints for itself (@jellyfin.local, @discord.local, @deleted.invalid) is refused for every caller. Rate-limited 10/min per caller. Body capped at 16 KB.",
         requestBody: {
           required: true,
           content: {
@@ -2465,7 +2475,7 @@ const spec = {
         },
         responses: {
           "201": { description: "User created (same shape as a list item)", content: { "application/json": { schema: { type: "object", properties: { id: { type: "string" }, name: { type: "string", nullable: true }, email: { type: "string", nullable: true }, role: { $ref: "#/components/schemas/UserRole" }, createdAt: { type: "string", format: "date-time" }, deactivatedAt: { type: "string", format: "date-time", nullable: true }, purgedAt: { type: "string", format: "date-time", nullable: true }, mediaServer: { type: "string", nullable: true }, maxContentRating: { type: "string", nullable: true }, source: { type: "string", description: "local | oidc | jellyfin | plex | discord (additive set)" }, movieQuotaLimit: { type: "integer", nullable: true }, movieQuotaDays: { type: "integer", nullable: true }, tvQuotaLimit: { type: "integer", nullable: true }, tvQuotaDays: { type: "integer", nullable: true }, permissions: { type: "string", description: "Decimal bitmask" }, notifyOnApproved: { type: "boolean" }, notifyOnAvailable: { type: "boolean" }, notifyOnDeclined: { type: "boolean" }, emailOnApproved: { type: "boolean" }, emailOnAvailable: { type: "boolean" }, emailOnDeclined: { type: "boolean" }, pushOnApproved: { type: "boolean" }, pushOnAvailable: { type: "boolean" }, pushOnDeclined: { type: "boolean" }, notifyOnIssue: { type: "boolean" }, requestCount: { type: "integer" } } } } } },
-          "400": { description: "Validation error" },
+          "400": { description: "Validation error, or a reserved email domain" },
           "403": { description: "Creating an ADMIN requires the ADMIN bit" },
           "409": { description: "Email already in use" },
           "429": { description: "Rate limited" },
@@ -2670,6 +2680,42 @@ const spec = {
           },
           "400": { description: "Invalid service or slug, or `instances` is not an array" },
           "413": { description: "Request body over the 64 KB cap" },
+        },
+      },
+    },
+    "/admin/oidc-allowlist": {
+      get: {
+        tags: ["Admin – Settings"],
+        summary: "Who may sign in through OIDC (ADMIN)",
+        description: "Off by default (empty lists, existingUsersOnly false). `unreadable: true` means the stored value doesn't parse and every OIDC sign-in is being refused until it is saved again; `allowlist` is then the default.",
+        responses: {
+          "200": {
+            description: "The policy in force",
+            content: { "application/json": { schema: { type: "object", properties: {
+              allowlist: { $ref: "#/components/schemas/OidcAllowlist" },
+              unreadable: { type: "boolean" },
+            } } } },
+          },
+          "401": { description: "Not signed in" },
+          "403": { description: "Not ADMIN" },
+        },
+      },
+      patch: {
+        tags: ["Admin – Settings"],
+        summary: "Replace the OIDC allowlist (ADMIN)",
+        description:
+          "The whole policy. groups: the configured claim (default \"groups\", read from the ID token, else userinfo) must name at least one, exact match. " +
+          "emailDomains: the IdP-verified email must be in one (exact domain; a leading @ is dropped, lowercased). existingUsersOnly: never create an account. " +
+          "requestGroupsScope: also ask the IdP for the \"groups\" scope. Groups and domains apply to every OIDC sign-in, existing accounts included, on the web " +
+          "callback and the native route; refusals are audited AUTH_LOGIN_FAILED with the reason. Nothing here ends an existing session. A wrong field refuses the " +
+          "whole body. Lists are trimmed and de-duplicated, at most 50 entries each. Audited SETTINGS_CHANGE.",
+        requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/OidcAllowlist" } } } },
+        responses: {
+          "200": { description: "{ allowlist, unreadable: false } — the policy as saved" },
+          "400": { description: "A field is the wrong type or shape" },
+          "401": { description: "Not signed in" },
+          "403": { description: "Not ADMIN" },
+          "413": { description: "Request body over the 32 KB cap" },
         },
       },
     },

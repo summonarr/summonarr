@@ -138,6 +138,7 @@ type UserRow = {
   passwordHash: string | null;
   plexUserId: string | null;
   jellyfinUserId: string | null;
+  jellyfinInstance: string | null;
   image: string | null;
   notificationEmail: string | null;
   mediaServer: string | null;
@@ -151,6 +152,7 @@ type AccountRow = {
   type: string;
   provider: string;
   providerAccountId: string;
+  issuer: string | null;
   access_token: string | null;
   refresh_token: string | null;
   id_token: string | null;
@@ -174,7 +176,7 @@ type PlexCacheRow = {
   lastUsedAt: Date;
   expiresAt: Date;
 };
-type MsuRow = { id: string; source: string; serverInstance: string; sourceUserId: string; active: boolean };
+type MsuRow = { id: string; source: string; serverInstance: string; sourceUserId: string; active: boolean; createdAt?: Date };
 type AuditRow = {
   userId: string | null;
   userName: string;
@@ -270,6 +272,7 @@ const models = {
         passwordHash: null,
         plexUserId: (d.plexUserId as string | undefined) ?? null,
         jellyfinUserId: (d.jellyfinUserId as string | undefined) ?? null,
+        jellyfinInstance: (d.jellyfinInstance as string | undefined) ?? null,
         image: (d.image as string | null | undefined) ?? null,
         notificationEmail: (d.notificationEmail as string | null | undefined) ?? null,
         mediaServer: null,
@@ -287,17 +290,28 @@ const models = {
       Object.assign(row, args.data);
       return applySelect(row as unknown as Record<string, unknown>, args.select);
     },
-    updateMany: async (args: { where: UserWhere; data: Record<string, unknown> }) => {
+    updateMany: async (args: { where: UserWhere & Record<string, unknown>; data: Record<string, unknown> }) => {
       dbOp("user.updateMany");
       const row = findUserRow(args.where);
-      if (row) Object.assign(row, args.data);
-      return { count: row ? 1 : 0 };
+      // Conditional writes (`{ id, jellyfinInstance: null }`) must only match
+      // when every extra column still holds the expected value — the CAS the
+      // instance adoption relies on.
+      const matches =
+        row !== undefined &&
+        Object.entries(args.where).every(([k, v]) =>
+          k === "id" || k === "email" || k === "plexUserId" || k === "jellyfinUserId" || k === "role"
+            ? true
+            : (row as unknown as Record<string, unknown>)[k] === v,
+        );
+      if (matches) Object.assign(row, args.data);
+      return { count: matches ? 1 : 0 };
     },
   },
   account: {
     findUnique: async (args: {
       where: { id?: string; provider_providerAccountId?: { provider: string; providerAccountId: string } };
       include?: { user?: boolean };
+      select?: Record<string, boolean>;
     }) => {
       dbOp("account.findUnique");
       const w = args.where.provider_providerAccountId;
@@ -305,6 +319,7 @@ const models = {
         ? accounts.find((a) => a.provider === w.provider && a.providerAccountId === w.providerAccountId)
         : accounts.find((a) => a.id === args.where.id);
       if (!row) return null;
+      if (args.select) return applySelect(row as unknown as Record<string, unknown>, args.select);
       const out: Record<string, unknown> = { ...row };
       if (args.include?.user) {
         const u = users.find((x) => x.id === row.userId);
@@ -319,10 +334,26 @@ const models = {
       Object.assign(row, args.data);
       return { ...row };
     },
+    updateMany: async (args: { where: { id: string } & Record<string, unknown>; data: Record<string, unknown> }) => {
+      dbOp("account.updateMany");
+      // The real extension refuses token columns on updateMany (guardrail 7a);
+      // mirror it so a regression that folds the token refresh into the
+      // issuer adoption fails here too.
+      for (const k of ["access_token", "refresh_token", "id_token"]) {
+        if (k in args.data) throw new Error(`account.updateMany with ${k} is forbidden`);
+      }
+      const row = accounts.find((a) => a.id === args.where.id);
+      const matches =
+        row !== undefined &&
+        Object.entries(args.where).every(([k, v]) => k === "id" || (row as unknown as Record<string, unknown>)[k] === v);
+      if (matches) Object.assign(row, args.data);
+      return { count: matches ? 1 : 0 };
+    },
     create: async (args: { data: Record<string, unknown> }) => {
       dbOp("account.create");
       const row: AccountRow = {
         id: `acc-auto-${++accountSeq}`,
+        issuer: null,
         access_token: null,
         refresh_token: null,
         id_token: null,
@@ -430,17 +461,27 @@ const models = {
   mediaServerUser: {
     findFirst: async (args: {
       where?: { source?: string; serverInstance?: string; sourceUserId?: string; active?: boolean };
+      orderBy?: Array<Record<string, "asc" | "desc">>;
       select?: Record<string, boolean>;
     }) => {
       dbOp("mediaServerUser.findFirst");
       const w = args.where ?? {};
-      const row = mediaServerUsers.find(
+      const matching = mediaServerUsers.filter(
         (m) =>
           (w.source === undefined || m.source === w.source) &&
           (w.serverInstance === undefined || m.serverInstance === w.serverInstance) &&
           (w.sourceUserId === undefined || m.sourceUserId === w.sourceUserId) &&
           (w.active === undefined || m.active === w.active),
       );
+      // Only the ordering the first-seen lookup asks for: createdAt, then slug.
+      if (args.orderBy?.some((o) => "createdAt" in o)) {
+        matching.sort(
+          (a, b) =>
+            (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) ||
+            a.serverInstance.localeCompare(b.serverInstance),
+        );
+      }
+      const row = matching[0];
       return row ? applySelect(row as unknown as Record<string, unknown>, args.select) : null;
     },
   },
@@ -543,6 +584,7 @@ const {
   revokeAllUserSessions,
   PROVIDER_REBIND_REQUIRED,
   PROVIDER_SETUP_REQUIRED,
+  ProviderRefusal,
   normalizeEmail,
 } = await import("../src/lib/auth.ts");
 const { signSessionJwt, verifySessionJwt } = await import("../src/lib/session-jwt.ts");
@@ -589,6 +631,7 @@ function seedUser(overrides: Partial<UserRow> & { id: string; email: string }): 
     passwordHash: null,
     plexUserId: null,
     jellyfinUserId: null,
+    jellyfinInstance: null,
     image: null,
     notificationEmail: null,
     mediaServer: null,
@@ -621,9 +664,13 @@ function auditDetails(row: AuditRow = lastAudit()): Record<string, unknown> {
 }
 
 type FocUser = { id: string; email: string; name: string | null; role: string };
-function asUser(result: FocUser | symbol): FocUser {
+function asUser(result: FocUser | symbol | InstanceType<typeof ProviderRefusal>): FocUser {
   if (typeof result === "symbol") throw new Error(`expected a user, got sentinel ${String(result)}`);
+  if (result instanceof ProviderRefusal) throw new Error(`expected a user, got refusal ${result.reason}`);
   return result;
+}
+function refusalReason(result: unknown): string | null {
+  return result instanceof ProviderRefusal ? result.reason : null;
 }
 
 function assertApprox(actual: number, expected: number, label: string, slackSeconds = 5): void {
@@ -1224,6 +1271,7 @@ test("pre-setup bootstrap gate: all three providers refuse to mint the first use
   assert.equal(await findOrCreateJellyfinUser("jf-gate", "Gate"), PROVIDER_SETUP_REQUIRED);
   assert.equal(
     await findOrCreateOidcUser({
+      issuer: "https://idp.example.com",
       sub: "oidc-gate",
       email: "oidc-gate@example.com",
       emailVerified: true,
@@ -1353,6 +1401,7 @@ test("jellyfin: an ACTIVE synced member is provisioned with the synthetic @jelly
   assert.ok(row, "the member must be provisioned");
   assert.equal(row.email, "jellyfin-jf-1@jellyfin.local");
   assert.equal(row.permissions, PRESETS.USER);
+  assert.equal(row.jellyfinInstance, "", "a new identity is bound to the server it signed in through (34e)");
 });
 
 test("jellyfin gate bypasses: a returning BOUND user passes without a member row (name refreshed); restrict=\"false\" opens the gate", async () => {
@@ -1365,6 +1414,7 @@ test("jellyfin gate bypasses: a returning BOUND user passes without a member row
     email: "jellyfin-jf-2@jellyfin.local",
     name: "Old Name",
     jellyfinUserId: "jf-2",
+    jellyfinInstance: "",
   });
   respond = (url) => {
     if (url.pathname === "/Users/AuthenticateByName") {
@@ -1398,28 +1448,32 @@ test("jellyfin gate bypasses: a returning BOUND user passes without a member row
   assert.ok(users.some((u) => u.jellyfinUserId === "jf-3"));
 });
 
-test("jellyfin legacy anchor: a pre-binding row keyed only by the synthetic email is re-used and gets jellyfinUserId backfilled", async () => {
+test("jellyfin (34e): the synthetic address is NOT a lookup key — a row holding it without the binding is refused, never bound", async () => {
   settings.set("jellyfinUrl", "http://10.77.0.5:8096");
-  // A row created before the (provider, sub) columns existed: synthetic email,
-  // no jellyfinUserId. It is NOT a "returning bound user" for the membership
-  // gate, so it needs its active MediaServerUser row to sign in.
-  seedUser({ id: "u-legacy", email: "jellyfin-jf-4@jellyfin.local", name: "Legacy" });
+  // A row carrying jellyfin-jf-4@jellyfin.local but no jellyfinUserId — e.g. a
+  // local account a delegate created before the reserved domains were refused.
+  // Sign-in used to bind to it and hand its creator the Jellyfin user's next
+  // sign-in. (Genuine pre-binding Jellyfin rows were bound once by the boot
+  // backfill, tests/jellyfin-identity.test.mts.)
+  seedUser({ id: "u-squat", email: "jellyfin-jf-4@jellyfin.local", name: "Squatter", passwordHash: PASSWORD_HASH });
   mediaServerUsers.push({ id: "msu-4", source: "jellyfin", serverInstance: "", sourceUserId: "jf-4", active: true });
   respond = (url) => {
     if (url.pathname === "/Users/AuthenticateByName") {
-      return jsonResponse({ User: { Id: "jf-4", Name: "Legacy" } });
+      return jsonResponse({ User: { Id: "jf-4", Name: "Real Owner" } });
     }
     throw new Error(`unexpected fetch to ${url}`);
   };
 
   const result = await authorizeWithJellyfin(
-    { username: "legacy", password: "pw" },
-    makeReq(chromeUa("jf-legacy")),
+    { username: "jf4", password: "pw" },
+    makeReq(chromeUa("jf-squat")),
   );
-  assert.ok(result, "the legacy member must sign in");
-  assert.equal(result.id, "u-legacy", "the existing row must be re-used, not duplicated");
-  assert.equal(users.length, 1);
-  assert.equal(userById("u-legacy").jellyfinUserId, "jf-4", "the sub must be backfilled so future sign-ins bind on it");
+  assert.equal(result, null, "a row holding the placeholder address is not this identity");
+  await flushAsync();
+  assert.equal(auditDetails().reason, "email_collision_needs_rebind");
+  assert.equal(userById("u-squat").jellyfinUserId, null, "sign-in must never bind an account by its address");
+  assert.equal(userById("u-squat").name, "Squatter");
+  assert.equal(users.length, 1, "and must not mint a second row (the address is unique)");
 });
 
 // ── multi-instance (Phase 1.5) ──────────────────────────────────────────────
@@ -1484,29 +1538,121 @@ test("jellyfin multi-instance: restrict-sign-in is independently configurable pe
   assert.ok(admitted, "an instance with restrict-sign-in disabled admits any valid credential on THAT instance");
 });
 
-test("jellyfin multi-instance: the returning-bound-user bypass is GLOBAL, unscoped by instance", async () => {
-  settings.set("jellyfinUrl", "http://10.77.10.5:8096");
-  settings.set("jellyfinRemoteUrl", "http://10.77.10.6:8096");
-  seedUser({ id: "u-jf-global", email: "jellyfin-jf-global@jellyfin.local", name: "Global", jellyfinUserId: "jf-global" });
+function jellyfinSignInAs(id: string, name = "JF User"): void {
   respond = (url) => {
-    if (url.pathname === "/Users/AuthenticateByName") {
-      return jsonResponse({ User: { Id: "jf-global", Name: "Global" } });
-    }
+    if (url.pathname === "/Users/AuthenticateByName") return jsonResponse({ User: { Id: id, Name: name } });
+    if (url.pathname === "/Users/AuthenticateWithQuickConnect") return jsonResponse({ User: { Id: id, Name: name } });
     throw new Error(`unexpected fetch to ${url}`);
   };
+}
 
-  // No MediaServerUser row on EITHER instance — only the User.jellyfinUserId
-  // binding exists. Identity binding is a single cross-instance anchor by
-  // design (the multi-server plan's decision #6), so sign-in via "remote"
-  // must still succeed even though the binding has no per-instance
-  // relationship to it.
-  const result = await authorizeWithJellyfin(
-    { username: "global", password: "pw" },
-    makeReq(chromeUa("jf-global-remote")),
-    "remote",
+test("jellyfin multi-instance (34e): an identity is bound to its server — another configured server can't vouch for it", async () => {
+  settings.set("jellyfinUrl", "http://10.77.10.5:8096");
+  settings.set("jellyfinRemoteUrl", "http://10.77.10.6:8096");
+  // An ADMIN bound through the default server. Whoever runs "remote" controls
+  // its database and has minted a user carrying the same id, which remote's
+  // sync dutifully lists as an active member there.
+  seedUser({ id: "u-jf-bound", email: "jellyfin-jf-global@jellyfin.local", name: "Owner", role: "ADMIN", jellyfinUserId: "jf-global", jellyfinInstance: "" });
+  mediaServerUsers.push({ id: "msu-twin", source: "jellyfin", serverInstance: "remote", sourceUserId: "jf-global", active: true });
+  jellyfinSignInAs("jf-global", "Twin");
+
+  const viaRemote = await authorizeWithJellyfin({ username: "twin", password: "pw" }, makeReq(chromeUa("jf-twin-remote")), "remote");
+  assert.equal(viaRemote, null, "a second server must not sign anyone into an identity bound to the first");
+  await flushAsync();
+  assert.equal(auditDetails().reason, "instance_mismatch");
+  assert.equal(lastAudit().provider, "jellyfin");
+  assert.equal(userById("u-jf-bound").jellyfinInstance, "", "a refused sign-in never moves the binding");
+  assert.equal(userById("u-jf-bound").name, "Owner", "nor touches the row");
+
+  // Through its own server it still signs in.
+  const viaDefault = await authorizeWithJellyfin({ username: "owner", password: "pw" }, makeReq(chromeUa("jf-twin-default")));
+  assert.ok(viaDefault);
+  assert.equal(viaDefault.id, "u-jf-bound");
+});
+
+test("jellyfin multi-instance (34e): the returning-user gate bypass counts only a binding to THIS server", async () => {
+  settings.set("jellyfinUrl", "http://10.77.10.9:8096");
+  settings.set("jellyfinRemoteUrl", "http://10.77.10.10:8096");
+  // Bound through the default server, no MediaServerUser row anywhere; remote
+  // keeps its (default) restrict-sign-in policy. A binding to ANOTHER server
+  // must not open remote's membership gate — refused at the gate itself.
+  seedUser({ id: "u-jf-gate", email: "jellyfin-jf-gate@jellyfin.local", jellyfinUserId: "jf-gate2", jellyfinInstance: "" });
+  jellyfinSignInAs("jf-gate2");
+  assert.equal(
+    await authorizeWithJellyfin({ username: "g", password: "pw" }, makeReq(chromeUa("jf-gate-remote")), "remote"),
+    null,
   );
-  assert.ok(result, "a globally-bound user must be admitted through ANY configured instance");
-  assert.equal(result.id, "u-jf-global");
+  await flushAsync();
+  assert.equal(auditDetails().reason, "not_authorized");
+});
+
+test("jellyfin (34e): a pre-34e row (no instance) adopts the server of its next sign-in when no server reported the id first", async () => {
+  settings.set("jellyfinUrl", "http://10.77.11.1:8096");
+  settings.set("jellyfinRemoteUrl", "http://10.77.11.2:8096");
+  seedUser({ id: "u-jf-legacy", email: "jellyfin-jf-legacy@jellyfin.local", jellyfinUserId: "jf-legacy" });
+  jellyfinSignInAs("jf-legacy");
+
+  const first = await authorizeWithJellyfin({ username: "l", password: "pw" }, makeReq(chromeUa("jf-legacy-remote")), "remote");
+  assert.ok(first, "with no evidence the first sign-in decides");
+  assert.equal(userById("u-jf-legacy").jellyfinInstance, "remote");
+
+  // From then on the binding holds — even through a server whose gate is open
+  // (so it is the binding, not the membership gate, that refuses).
+  settings.set("jellyfinRestrictSignIn", "false");
+  assert.equal(await authorizeWithJellyfin({ username: "l", password: "pw" }, makeReq(chromeUa("jf-legacy-default"))), null);
+  await flushAsync();
+  assert.equal(auditDetails().reason, "instance_mismatch");
+});
+
+test("jellyfin (34e): a pre-34e row belongs to the server its id was FIRST seen on — a later twin elsewhere can't claim it", async () => {
+  settings.set("jellyfinUrl", "http://10.77.11.3:8096");
+  settings.set("jellyfinRemoteUrl", "http://10.77.11.4:8096");
+  seedUser({ id: "u-jf-seen", email: "jellyfin-jf-seen@jellyfin.local", jellyfinUserId: "jf-seen" });
+  // The genuine server reported the id long before the twin appeared on remote.
+  mediaServerUsers.push({ id: "msu-later", source: "jellyfin", serverInstance: "remote", sourceUserId: "jf-seen", active: true, createdAt: new Date("2026-10-01T00:00:00Z") });
+  mediaServerUsers.push({ id: "msu-first", source: "jellyfin", serverInstance: "", sourceUserId: "jf-seen", active: false, createdAt: new Date("2026-01-01T00:00:00Z") });
+  jellyfinSignInAs("jf-seen");
+
+  assert.equal(await authorizeWithJellyfin({ username: "s", password: "pw" }, makeReq(chromeUa("jf-seen-remote")), "remote"), null);
+  await flushAsync();
+  assert.equal(auditDetails().reason, "instance_mismatch");
+  assert.equal(userById("u-jf-seen").jellyfinInstance, null, "the twin's attempt adopts nothing");
+
+  const genuine = await authorizeWithJellyfin({ username: "s", password: "pw" }, makeReq(chromeUa("jf-seen-default")));
+  assert.ok(genuine, "the first-seen server's sign-in is admitted (a soft-deleted row still counts as evidence)");
+  assert.equal(userById("u-jf-seen").jellyfinInstance, "");
+});
+
+test("jellyfin (34e): the adoption is CONDITIONAL — a racing first sign-in through another server wins, this one is refused", async () => {
+  settings.set("jellyfinUrl", "http://10.77.11.5:8096");
+  seedUser({ id: "u-jf-race", email: "jellyfin-jf-race@jellyfin.local", jellyfinUserId: "jf-race" });
+  jellyfinSignInAs("jf-race");
+  // Another sign-in adopts "remote" between this one's read and its write.
+  const realUpdateMany = models.user.updateMany;
+  models.user.updateMany = async (args) => {
+    if ("jellyfinInstance" in args.where) userById("u-jf-race").jellyfinInstance = "remote";
+    return realUpdateMany(args);
+  };
+  try {
+    assert.equal(await authorizeWithJellyfin({ username: "r", password: "pw" }, makeReq(chromeUa("jf-race"))), null);
+  } finally {
+    models.user.updateMany = realUpdateMany;
+  }
+  await flushAsync();
+  assert.equal(auditDetails().reason, "instance_mismatch");
+  assert.equal(userById("u-jf-race").jellyfinInstance, "remote", "the winner's binding is never overwritten");
+});
+
+test("jellyfin QuickConnect (34e): a server the identity isn't bound to is refused with the same audit reason", async () => {
+  settings.set("jellyfinUrl", "http://10.77.11.6:8096");
+  settings.set("jellyfinRemoteUrl", "http://10.77.11.7:8096");
+  settings.set("jellyfinRemoteRestrictSignIn", "false");
+  seedUser({ id: "u-jf-qc", email: "jellyfin-jf-qc@jellyfin.local", jellyfinUserId: "jf-qc", jellyfinInstance: "" });
+  jellyfinSignInAs("jf-qc");
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-bound-elsewhere" }, makeReq(chromeUa("qc-mismatch")), "remote"), null);
+  await flushAsync();
+  assert.equal(lastAudit().provider, "jellyfin-quickconnect");
+  assert.equal(auditDetails().reason, "instance_mismatch");
 });
 
 test("findOrCreateJellyfinUser: a new user anchors on the SYNTHETIC email with zero upstream probes", async () => {
@@ -1522,6 +1668,7 @@ test("findOrCreateJellyfinUser: a new user anchors on the SYNTHETIC email with z
 
   const created = asUser(await findOrCreateJellyfinUser("jf-email-remote", "Remote Email", "remote"));
   assert.equal(created.email, "jellyfin-jf-email-remote@jellyfin.local", "new accounts anchor on the synthetic address");
+  assert.equal(userById(created.id).jellyfinInstance, "remote", "and are bound to the server they signed in through");
   assert.equal(fetchCalls.length, 0, "no upstream call during user creation");
 });
 
@@ -1565,7 +1712,10 @@ test("jellyfin QuickConnect: the per-secret bucket (hashed key) refuses brute re
 
 // ── findOrCreateOidcUser ────────────────────────────────────────────────────
 
+const ISS = "https://idp.example.com";
+
 function oidcClaims(overrides: Partial<{
+  issuer: string;
   sub: string;
   email: string | null;
   emailVerified: boolean;
@@ -1578,6 +1728,7 @@ function oidcClaims(overrides: Partial<{
   expiresAt: number | null;
 }> = {}) {
   return {
+    issuer: ISS,
     sub: "sub-1",
     email: "Oidc.User@Example.com",
     emailVerified: true,
@@ -1592,28 +1743,36 @@ function oidcClaims(overrides: Partial<{
   };
 }
 
-test("oidc: an unverified or missing email throws — the IdP's word is required before any row is touched", async () => {
-  await assert.rejects(() => findOrCreateOidcUser(oidcClaims({ emailVerified: false })), /not verified/);
-  await assert.rejects(() => findOrCreateOidcUser(oidcClaims({ email: null })), /no email/);
-  assert.equal(users.length, 0);
-  assert.equal(accounts.length, 0);
-});
-
-test("oidc: an existing (provider, sub) account returns THAT identity regardless of the reported email, and refreshes the stored tokens", async () => {
-  seedUser({ id: "u-oidc", email: "linked@example.com", name: "Linked", role: "ISSUE_ADMIN" });
-  accounts.push({
-    id: "acc-1",
-    userId: "u-oidc",
+function seedOidcAccount(overrides: Partial<AccountRow> & { userId: string; providerAccountId: string }): AccountRow {
+  const row: AccountRow = {
+    id: `acc-${overrides.providerAccountId}`,
     type: "oidc",
     provider: "oidc",
-    providerAccountId: "sub-1",
+    issuer: ISS,
     access_token: "old-at",
     refresh_token: "old-rt",
     id_token: "old-idt",
     expires_at: 1,
-  });
+    ...overrides,
+  };
+  accounts.push(row);
+  return row;
+}
 
-  // The IdP now reports a completely different email — the sub binding wins.
+test("oidc: an unverified or missing email is REFUSED (returned, not thrown) before any row is touched", async () => {
+  // A throw used to surface as a 500 on the native route; a refusal is a
+  // verdict on the credential and is audited (oidc-signin.ts).
+  assert.equal(refusalReason(await findOrCreateOidcUser(oidcClaims({ emailVerified: false }))), "email_unverified");
+  assert.equal(refusalReason(await findOrCreateOidcUser(oidcClaims({ email: null }))), "email_missing");
+  assert.equal(users.length, 0);
+  assert.equal(accounts.length, 0);
+});
+
+test("oidc: an existing (issuer, sub) account returns THAT identity regardless of the reported email, and refreshes the stored tokens", async () => {
+  seedUser({ id: "u-oidc", email: "linked@example.com", name: "Linked", role: "ISSUE_ADMIN" });
+  seedOidcAccount({ userId: "u-oidc", providerAccountId: "sub-1" });
+
+  // The IdP now reports a completely different email — the subject binding wins.
   const result = await findOrCreateOidcUser(oidcClaims({ sub: "sub-1", email: "totally@different.example" }));
   assert.deepEqual(result, { id: "u-oidc", email: "linked@example.com", name: "Linked", role: "ISSUE_ADMIN" });
   assert.equal(users.length, 1, "no second row may be minted");
@@ -1623,14 +1782,96 @@ test("oidc: an existing (provider, sub) account returns THAT identity regardless
   assert.equal(accounts[0].expires_at, 1_234_567_890);
 });
 
-test("oidc: a returning (provider, sub) user signs in even when the IdP now omits or does not verify the email; a NEW link still needs both", async () => {
+test("oidc: a returning (issuer, sub) user signs in even when the IdP now omits or does not verify the email; a NEW link still needs both", async () => {
   seedUser({ id: "u-ret", email: "ret@example.com", name: "Ret", role: "USER" });
-  accounts.push({ id: "acc-ret", userId: "u-ret", type: "oidc", provider: "oidc", providerAccountId: "sub-ret", access_token: "a", refresh_token: "b", id_token: "c", expires_at: 1 });
+  seedOidcAccount({ userId: "u-ret", providerAccountId: "sub-ret" });
   const r1 = asUser(await findOrCreateOidcUser(oidcClaims({ sub: "sub-ret", emailVerified: false })));
   assert.equal(r1.id, "u-ret");
   const r2 = asUser(await findOrCreateOidcUser(oidcClaims({ sub: "sub-ret", email: null })));
   assert.equal(r2.id, "u-ret");
-  await assert.rejects(() => findOrCreateOidcUser(oidcClaims({ sub: "sub-other", emailVerified: false })), /not verified/);
+  assert.equal(refusalReason(await findOrCreateOidcUser(oidcClaims({ sub: "sub-other", emailVerified: false }))), "email_unverified");
+});
+
+test("oidc (34e): a subject bound under ANOTHER issuer is refused — no token refresh, no takeover, no second account", async () => {
+  // OIDC_ISSUER was pointed at a new IdP whose user happens to carry the old
+  // IdP's subject. A sub is unique only within its issuer.
+  seedUser({ id: "u-old-idp", email: "owner@example.com", role: "ADMIN" });
+  seedOidcAccount({ userId: "u-old-idp", providerAccountId: "sub-shared", issuer: "https://old-idp.example.com" });
+
+  const result = await findOrCreateOidcUser(
+    oidcClaims({ sub: "sub-shared", issuer: "https://new-idp.example.com", email: "someone@new-idp.example.com" }),
+  );
+  assert.equal(refusalReason(result), "issuer_mismatch");
+  assert.equal(accounts[0].issuer, "https://old-idp.example.com");
+  assert.equal(accounts[0].access_token, "old-at", "a refused sign-in must not overwrite the bound account's tokens");
+  assert.equal(users.length, 1);
+  assert.equal(accounts.length, 1);
+});
+
+test("oidc (34e): a pre-34e row (null issuer) adopts the issuer of its next sign-in, then refuses any other", async () => {
+  seedUser({ id: "u-legacy-oidc", email: "legacy@example.com" });
+  seedOidcAccount({ userId: "u-legacy-oidc", providerAccountId: "sub-legacy", issuer: null });
+
+  const first = asUser(await findOrCreateOidcUser(oidcClaims({ sub: "sub-legacy" })));
+  assert.equal(first.id, "u-legacy-oidc");
+  assert.equal(accounts[0].issuer, ISS, "the first sign-in after the upgrade binds the issuer");
+  assert.equal(accounts[0].access_token, "at-raw", "and still refreshes the tokens (a separate update — updateMany refuses token columns)");
+
+  assert.equal(
+    refusalReason(await findOrCreateOidcUser(oidcClaims({ sub: "sub-legacy", issuer: "https://other-idp.example.com" }))),
+    "issuer_mismatch",
+  );
+});
+
+test("oidc (34e): the null-issuer adoption is CONDITIONAL — a racing first sign-in under another issuer wins, this one is refused", async () => {
+  seedUser({ id: "u-race-oidc", email: "race@example.com" });
+  seedOidcAccount({ userId: "u-race-oidc", providerAccountId: "sub-race", issuer: null });
+  const realUpdateMany = models.account.updateMany;
+  models.account.updateMany = async (args) => {
+    accounts[0].issuer = "https://racer.example.com";
+    return realUpdateMany(args);
+  };
+  try {
+    assert.equal(refusalReason(await findOrCreateOidcUser(oidcClaims({ sub: "sub-race" }))), "issuer_mismatch");
+  } finally {
+    models.account.updateMany = realUpdateMany;
+  }
+  assert.equal(accounts[0].issuer, "https://racer.example.com", "the winner's issuer is never overwritten");
+  assert.equal(accounts[0].access_token, "old-at");
+});
+
+test("oidc (34e): an email in a reserved domain is refused before the email lookup — no row, no link", async () => {
+  seedUser({ id: "u-jf-owner", email: "jellyfin-abc@jellyfin.local", jellyfinUserId: "abc" });
+  for (const email of ["jellyfin-zzz@jellyfin.local", "Someone@DISCORD.local", "deleted-u1@deleted.invalid"]) {
+    assert.equal(
+      refusalReason(await findOrCreateOidcUser(oidcClaims({ sub: `sub-${email}`, email }))),
+      "reserved_email",
+      email,
+    );
+  }
+  assert.equal(users.length, 1);
+  assert.equal(accounts.length, 0);
+});
+
+test("oidc (34e): allowCreate:false refuses a NEW account (existing_users_only) but still admits a returning one", async () => {
+  assert.equal(
+    refusalReason(await findOrCreateOidcUser(oidcClaims({ sub: "sub-brand-new", email: "brand-new@example.com" }), { allowCreate: false })),
+    "existing_users_only",
+  );
+  assert.equal(users.length, 0);
+  assert.equal(accounts.length, 0);
+
+  seedUser({ id: "u-existing-oidc", email: "existing@example.com" });
+  seedOidcAccount({ userId: "u-existing-oidc", providerAccountId: "sub-existing" });
+  assert.equal(asUser(await findOrCreateOidcUser(oidcClaims({ sub: "sub-existing" }), { allowCreate: false })).id, "u-existing-oidc");
+});
+
+test("plex (34e): a plex.tv account whose email is in a reserved domain is refused, never minted", async () => {
+  assert.equal(
+    refusalReason(await findOrCreatePlexUser({ plexUserId: "px-reserved", email: "jellyfin-victim@jellyfin.local" })),
+    "reserved_email",
+  );
+  assert.equal(users.length, 0);
 });
 
 test("oidc: email collision with an unbound row is REFUSED (SSO-takeover guard); the create path issues a TOP-LEVEL account.create in one tx", async () => {
@@ -1668,6 +1909,7 @@ test("oidc: email collision with an unbound row is REFUSED (SSO-takeover guard);
   assert.equal(account.type, "oidc");
   assert.equal(account.provider, "oidc");
   assert.equal(account.providerAccountId, "sub-new");
+  assert.equal(account.issuer, ISS, "the account is bound to the issuer it was created under (34e)");
   assert.equal(account.access_token, "at-raw");
   assert.equal(account.refresh_token, "rt-raw");
   assert.equal(account.id_token, "idt-raw");

@@ -22,6 +22,8 @@ import { MAX_CONFIGURABLE_SESSION_SECONDS, NEVER_EXPIRES_AT_SEC } from "@/lib/se
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, plexSettingKey, mediaInstanceLabel } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
+import { jellyfinFirstSeenInstance } from "@/lib/jellyfin-identity";
+import { isReservedEmailDomain } from "@/lib/reserved-email";
 
 // Wherever User.passwordHash is updated (e.g. src/app/api/profile/password/route.ts
 // and admin password-set endpoints), the same code path must also call
@@ -55,6 +57,40 @@ export type ProviderRebindRequired = typeof PROVIDER_REBIND_REQUIRED;
 // first-admin bootstrap — refuse instead. See runFirstAdminPromotion.
 export const PROVIDER_SETUP_REQUIRED = Symbol("provider-setup-required");
 export type ProviderSetupRequired = typeof PROVIDER_SETUP_REQUIRED;
+
+// Every other refusal a provider lookup can return (guardrail 34e). `reason`
+// is what the AUTH_LOGIN_FAILED audit row records; the client only ever sees a
+// coarse message for it.
+export type ProviderRefusalReason =
+  // Jellyfin: the id is bound to a different configured server.
+  | "instance_mismatch"
+  // OIDC: the (provider, sub) row was bound under a different issuer.
+  | "issuer_mismatch"
+  // OIDC: linking or creating needs an IdP-verified email.
+  | "email_unverified"
+  | "email_missing"
+  // The address is in a domain Summonarr mints for itself (reserved-email.ts).
+  | "reserved_email"
+  // OIDC allowlist (oidc-allowlist.ts).
+  | "not_in_allowed_group"
+  | "email_domain_not_allowed"
+  | "existing_users_only"
+  | "allowlist_unreadable";
+
+export class ProviderRefusal {
+  readonly reason: ProviderRefusalReason;
+  constructor(reason: ProviderRefusalReason) {
+    this.reason = reason;
+  }
+}
+
+// Narrows a findOrCreate*User result to the user it resolved, i.e. none of the
+// refusals above.
+export function isAuthorizedDbUser(
+  result: AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal,
+): result is AuthorizedDbUser {
+  return typeof result !== "symbol" && !(result instanceof ProviderRefusal);
+}
 
 export type AuthorizedDbUser = { id: string; email: string; name: string | null; role: string };
 
@@ -91,7 +127,7 @@ export async function findOrCreatePlexUser({
   // must not overwrite notificationEmail, which would revert a newer address the
   // last live sign-in (or the user's profile) had set.
   emailIsFresh?: boolean;
-}): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
+}): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   const normalized = normalizeEmail(email);
   // Provider-supplied display names are untrusted — strip HTML/control chars so
   // the name can't carry markup into any downstream sink (email/Discord/push),
@@ -135,6 +171,14 @@ export async function findOrCreatePlexUser({
     return PROVIDER_REBIND_REQUIRED;
   }
 
+  // A plex.tv account can carry any address, a Summonarr-minted one included
+  // (reserved-email.ts). Minting a row under `jellyfin-<id>@jellyfin.local`
+  // would squat that Jellyfin user's address and block their provisioning.
+  if (isReservedEmailDomain(normalized)) {
+    console.warn("[auth] Refused plex sign-in: the account's email is in a domain Summonarr reserves for its own placeholder addresses.");
+    return new ProviderRefusal("reserved_email");
+  }
+
   // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
   if (await isPreSetupBootstrapBlocked()) {
     console.warn(`[auth] Refused pre-setup plex sign-in for ${normalized}: complete initial setup (create the first admin) first.`);
@@ -161,43 +205,72 @@ export async function findOrCreatePlexUser({
 export async function findOrCreateJellyfinUser(
   jellyfinId: string,
   name: string,
-  // Retained in the signature (the sign-in call sites pass their instance) even
-  // though resolution is now instance-agnostic: it keyed the removed real-email
-  // probe, and a future per-instance branch would want it back.
-  _instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
-): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
+  // The configured Jellyfin server the credential was verified against. The
+  // identity is bound to it (guardrail 34e): a returning id signing in through
+  // any other server is refused.
+  instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   // Provider-supplied display name is untrusted — strip HTML/control chars so it
   // can't carry markup into any downstream sink (email/Discord/push).
   name = sanitizeText(name);
-  // Synthetic address is retained as a backward-compat anchor for users that
-  // signed in before the (provider, sub) binding columns existed.
+  // Jellyfin's API exposes no user email (UserDto carries none in any version),
+  // so every Jellyfin account's login address is this placeholder. It is an
+  // ADDRESS only — never a lookup key (see step 2).
   const syntheticEmail = `jellyfin-${jellyfinId}@jellyfin.local`;
 
-  // 1) Provider-subject lookup wins.
+  // 1) Provider-subject lookup, then the server binding. The id alone is not the
+  //    identity: whoever runs a second registered server controls its database
+  //    and could mint a user carrying another server's id.
   const bySub = await prisma.user.findUnique({ where: { jellyfinUserId: jellyfinId } });
   if (bySub) {
+    if (bySub.jellyfinInstance !== instance) {
+      // A row bound before the column existed (null) adopts THIS instance unless
+      // the id was first seen on another one (jellyfinFirstSeenInstance — the
+      // boot backfill applies the same rule). Conditional on the column still
+      // being null, so two first sign-ins through different servers can't both
+      // adopt; the loser re-reads and compares.
+      let bound = bySub.jellyfinInstance;
+      if (bound === null) {
+        const firstSeen = await jellyfinFirstSeenInstance(jellyfinId);
+        if (firstSeen === null || firstSeen === instance) {
+          const { count } = await prisma.user.updateMany({
+            where: { id: bySub.id, jellyfinInstance: null },
+            data: { jellyfinInstance: instance },
+          });
+          if (count === 1) {
+            bound = instance;
+          } else {
+            const reread = await prisma.user.findUnique({ where: { id: bySub.id }, select: { jellyfinInstance: true } });
+            bound = reread?.jellyfinInstance ?? null;
+          }
+        } else {
+          bound = firstSeen;
+        }
+      }
+      if (bound !== instance) {
+        console.warn(`[auth] Refused jellyfin sign-in through ${mediaInstanceLabel("jellyfin", instance)}: this Jellyfin id is bound to a different configured server.`);
+        return new ProviderRefusal("instance_mismatch");
+      }
+    }
     if (name && name !== bySub.name) {
       await prisma.user.updateMany({ where: { id: bySub.id }, data: { name } }).catch(() => {});
     }
     return { id: bySub.id, email: bySub.email, name: name ?? bySub.name, role: bySub.role };
   }
 
-  // 2) Synthetic-email lookup for legacy rows. Backfill jellyfinUserId so
-  //    subsequent sign-ins use the (sub) path.
-  const bySynthetic = await prisma.user.findUnique({ where: { email: syntheticEmail } });
-  if (bySynthetic) {
-    await prisma.user.update({
-      where: { id: bySynthetic.id },
-      data: { jellyfinUserId: jellyfinId, ...(name ? { name } : {}) },
-    }).catch(() => {});
-    return { id: bySynthetic.id, email: bySynthetic.email, name: name ?? bySynthetic.name, role: bySynthetic.role };
+  // 2) The synthetic address is NOT a lookup key. Sign-in used to bind to ANY
+  //    row carrying it, so a delegate or an OIDC user who created
+  //    `jellyfin-<id>@jellyfin.local` inherited that Jellyfin user's next
+  //    sign-in. Legacy rows that relied on it were bound once by the boot
+  //    backfill (jellyfin-identity.ts), and the reserved domains are refused at
+  //    every account-creating path (reserved-email.ts). A row still holding the
+  //    address is not this identity's: refuse rather than fail the create on
+  //    the unique email.
+  const squatter = await prisma.user.findUnique({ where: { email: syntheticEmail }, select: { id: true } });
+  if (squatter) {
+    console.warn(`[auth] Refused jellyfin sign-in for ${jellyfinId}: an account not bound to this Jellyfin id holds its placeholder address. Manual rebind required.`);
+    return PROVIDER_REBIND_REQUIRED;
   }
-
-  // 3) NOTE on email: Jellyfin's API exposes no user email field (UserDto
-  //    carries none in any version), so the old "real email" probe here always
-  //    came back empty — every Jellyfin account anchors on the synthetic
-  //    address. Email remains never a trusted cross-provider identity anchor;
-  //    only the provider subject id (jellyfinUserId) is.
 
   // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
   if (await isPreSetupBootstrapBlocked()) {
@@ -205,7 +278,7 @@ export async function findOrCreateJellyfinUser(
     return PROVIDER_SETUP_REQUIRED;
   }
 
-  // 4) New user.
+  // 3) New user, bound to the server it signed in through.
   const created = await prisma.user.create({
     data: {
       email: syntheticEmail,
@@ -213,6 +286,7 @@ export async function findOrCreateJellyfinUser(
       role: "USER",
       permissions: defaultPermissionsForRole("USER"),
       jellyfinUserId: jellyfinId,
+      jellyfinInstance: instance,
     },
     select: { id: true, email: true, name: true, role: true },
   });
@@ -220,6 +294,8 @@ export async function findOrCreateJellyfinUser(
 }
 
 export interface OidcUserClaims {
+  // The ID token's `iss` — the namespace `sub` is unique within.
+  issuer: string;
   sub: string;
   email: string | null;
   emailVerified: boolean;
@@ -232,13 +308,19 @@ export interface OidcUserClaims {
   expiresAt: number | null;
 }
 
-// Finds or creates a User for an OIDC sub (the IdP's stable user id), used by
-// the OIDC callback. The Prisma extension auto-encrypts
+// Finds or creates a User for an OIDC identity — (issuer, sub), the IdP's
+// stable user id within its own namespace. Used by both OIDC sign-in routes
+// through resolveOidcSignIn (oidc-signin.ts), which applies the admin allowlist
+// first. The Prisma extension auto-encrypts
 // Account.{access_token,refresh_token,id_token} on write per guardrail 7a —
 // callers must pass raw tokens.
+//
+// `allowCreate: false` is the allowlist's "existing users only" mode: a sign-in
+// that would mint a new account is refused instead.
 export async function findOrCreateOidcUser(
   claims: OidcUserClaims,
-): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
+  { allowCreate = true }: { allowCreate?: boolean } = {},
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   const accountTokens = {
     access_token: claims.accessToken,
     refresh_token: claims.refreshToken,
@@ -251,6 +333,30 @@ export async function findOrCreateOidcUser(
     include: { user: true },
   });
   if (byAccount?.user) {
+    // `sub` is unique only WITHIN an issuer (OIDC Core §2), so the row matches
+    // only under the issuer it was bound to — a changed OIDC_ISSUER must not
+    // sign a different IdP's user into this account (guardrail 34e). A row from
+    // before the column existed adopts this issuer, conditionally, so of two
+    // racing first sign-ins exactly one decides it; the loser re-reads.
+    // (The adoption writes `issuer` alone: account.updateMany refuses token
+    // columns, guardrail 7a.)
+    let boundIssuer = byAccount.issuer;
+    if (boundIssuer === null) {
+      const { count } = await prisma.account.updateMany({
+        where: { id: byAccount.id, issuer: null },
+        data: { issuer: claims.issuer },
+      });
+      if (count === 1) {
+        boundIssuer = claims.issuer;
+      } else {
+        const reread = await prisma.account.findUnique({ where: { id: byAccount.id }, select: { issuer: true } });
+        boundIssuer = reread?.issuer ?? null;
+      }
+    }
+    if (boundIssuer !== claims.issuer) {
+      console.warn("[auth/oidc] Refused sign-in: the subject is bound under a different issuer.");
+      return new ProviderRefusal("issuer_mismatch");
+    }
     // Refresh the stored OAuth tokens — extension handles encryption
     await prisma.account
       .update({ where: { id: byAccount.id }, data: accountTokens })
@@ -264,17 +370,25 @@ export async function findOrCreateOidcUser(
   }
 
   // Email trust is only needed to LINK or CREATE by email. A returning user is
-  // already bound by (provider, sub) above — the sub is the identity, so an IdP that
-  // stops sending email_verified (or the email) must not lock them out. New links and
-  // new accounts keep the strict requirement.
+  // already bound by (issuer, sub) above — the sub is the identity, so an IdP
+  // that stops sending email_verified (or the email) must not lock them out.
+  // New links and new accounts keep the strict requirement.
   if (!claims.emailVerified) {
-    throw new Error("OIDC account email is not verified");
+    return new ProviderRefusal("email_unverified");
   }
   if (!claims.email) {
     console.error("[auth/oidc] provider returned no email — rejecting sign-in for sub:", claims.sub);
-    throw new Error("[auth/oidc] provider returned no email");
+    return new ProviderRefusal("email_missing");
   }
   const normalizedEmail = normalizeEmail(claims.email);
+
+  // An IdP that lets users pick their address could hand back one Summonarr
+  // mints for itself (reserved-email.ts) — e.g. a Jellyfin user's placeholder,
+  // squatting it so that user can never be provisioned.
+  if (isReservedEmailDomain(normalizedEmail)) {
+    console.warn("[auth/oidc] Refused sign-in: the email is in a domain Summonarr reserves for its own placeholder addresses.");
+    return new ProviderRefusal("reserved_email");
+  }
 
   // Same account-takeover guard as the Plex/Jellyfin paths: an existing user with
   // this email but no (provider=oidc, sub=...) Account row is the SSO-takeover
@@ -289,6 +403,8 @@ export async function findOrCreateOidcUser(
     console.warn(`[auth/oidc] Refused sign-in: ${normalizedEmail} matches an existing user with no oidc account binding. Manual rebind required.`);
     return PROVIDER_REBIND_REQUIRED;
   }
+
+  if (!allowCreate) return new ProviderRefusal("existing_users_only");
 
   // Refuse to MINT THE FIRST USER via OIDC before setup has run. With OAuth
   // bootstrap disabled (the default), runFirstAdminPromotion won't promote this
@@ -332,6 +448,7 @@ export async function findOrCreateOidcUser(
         type: "oidc",
         provider: "oidc",
         providerAccountId: claims.sub,
+        issuer: claims.issuer,
         ...accountTokens,
       },
     });
@@ -968,6 +1085,8 @@ export async function authorizeWithPlex(
 
       if (plexDbUser === PROVIDER_REBIND_REQUIRED) {
         void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "email_collision_needs_rebind", emailHash: hashAuditEmail(verifiedEmail) } });
+      } else if (plexDbUser instanceof ProviderRefusal) {
+        void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: plexDbUser.reason, emailHash: hashAuditEmail(verifiedEmail) } });
       } else if (plexDbUser === PROVIDER_SETUP_REQUIRED) {
         void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "setup_required", emailHash: hashAuditEmail(verifiedEmail) } });
       } else {
@@ -1012,12 +1131,12 @@ export async function authorizeWithPlex(
 //
 // Both the restrict-sign-in policy and the membership check are scoped to the
 // instance the credential was verified against — a server B account must not
-// be admitted by server A's MediaServerUser rows (or vice versa). The
-// "already-bound returning user" bypass stays GLOBAL and unscoped: identity
-// binding (User.jellyfinUserId) is a single cross-instance anchor by design
-// (see the multi-server plan's decision #6), so a user who has ever bound to
-// this jellyfinUserId on ANY instance must not be locked out by an instance's
-// restrict policy.
+// be admitted by server A's MediaServerUser rows (or vice versa). So is the
+// "already-bound returning user" bypass (guardrail 34e): an identity is bound
+// to the server it was first seen on (User.jellyfinInstance), and a binding
+// made through server A says nothing about a credential server B vouches for.
+// A pre-34e row (null instance) passes here and findOrCreateJellyfinUser — the
+// chokepoint that refuses a mismatched instance — decides it.
 async function isJellyfinSignInAllowed(jellyfinUserId: string, instance: MediaInstanceKey): Promise<boolean> {
   const restrictRow = await prisma.setting.findUnique({ where: { key: jellyfinSettingKey(instance, "RestrictSignIn") } });
   const restrict = (restrictRow?.value ?? "true").trim().toLowerCase() !== "false";
@@ -1027,9 +1146,18 @@ async function isJellyfinSignInAllowed(jellyfinUserId: string, instance: MediaIn
       where: { source: "jellyfin", serverInstance: instance, sourceUserId: jellyfinUserId, active: true },
       select: { id: true },
     }),
-    prisma.user.findUnique({ where: { jellyfinUserId }, select: { id: true } }),
+    prisma.user.findUnique({ where: { jellyfinUserId }, select: { id: true, jellyfinInstance: true } }),
   ]);
-  return Boolean(member || existing);
+  const boundHere = existing !== null && (existing.jellyfinInstance === instance || existing.jellyfinInstance === null);
+  return Boolean(member || boundHere);
+}
+
+// The AUTH_LOGIN_FAILED reason for a Jellyfin lookup refusal. Shared by the
+// password and QuickConnect paths.
+function jellyfinRefusalReason(result: ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal): string {
+  if (result === PROVIDER_SETUP_REQUIRED) return "setup_required";
+  if (result === PROVIDER_REBIND_REQUIRED) return "email_collision_needs_rebind";
+  return result.reason;
 }
 
 export async function authorizeWithJellyfin(
@@ -1107,10 +1235,9 @@ export async function authorizeWithJellyfin(
     return null;
   }
   const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
-  if (jfDbUser === PROVIDER_REBIND_REQUIRED || jfDbUser === PROVIDER_SETUP_REQUIRED) {
+  if (!isAuthorizedDbUser(jfDbUser)) {
     await dummyVerify();
-    const reason = jfDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason } });
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: jellyfinRefusalReason(jfDbUser) } });
     return null;
   }
   const device = buildDeviceMeta(headers);
@@ -1167,9 +1294,8 @@ export async function authorizeWithJellyfinQuickConnect(
     return null;
   }
   const qcDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
-  if (qcDbUser === PROVIDER_REBIND_REQUIRED || qcDbUser === PROVIDER_SETUP_REQUIRED) {
-    const reason = qcDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason } });
+  if (!isAuthorizedDbUser(qcDbUser)) {
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: jellyfinRefusalReason(qcDbUser) } });
     return null;
   }
   const device = buildDeviceMeta(headers);

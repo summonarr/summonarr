@@ -28,6 +28,9 @@ import { getFeatureFlags, groupFeaturesByCategory, isFeatureEnabled } from "@/li
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
 import { mfaEnforcementDisabledByEnv } from "@/lib/mfa/policy";
 import { RequireAdminMfaToggle } from "@/components/settings/forms/require-admin-mfa-toggle";
+import { OidcAllowlistForm } from "@/components/settings/forms/oidc-allowlist-form";
+import { DEFAULT_OIDC_ALLOWLIST, OIDC_ALLOWLIST_SETTING_KEY, parseOidcAllowlist } from "@/lib/oidc-allowlist";
+import { isOidcConfigured } from "@/lib/oidc";
 import { ArrWatchForm } from "@/components/settings/forms/arr-watch-form";
 import { ARR_WATCH_DISK_LOW_PERCENT_KEY, parseDiskLowPercent } from "@/lib/arr-watch";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
@@ -196,6 +199,7 @@ const ALL_KEYS = [
   "auditPiiRetentionDays",
   "plexWatchlistServerSource", "plexWatchlistServerAutoEnroll", "plexWatchlistServerStatus",
   ARR_WATCH_DISK_LOW_PERCENT_KEY,
+  OIDC_ALLOWLIST_SETTING_KEY,
 ] as const;
 
 // Placeholder a translated sentence is split on so a client-formatted value can
@@ -224,6 +228,9 @@ export default async function SettingsPage({
   // safeDecryptSettingValue clears entries on successful read, so the banner
   // disappears automatically on the next page load after the operator re-saves.
   const decryptFailures = getSettingDecryptFailures();
+  // null ⇒ the stored allowlist doesn't parse, and sign-in is refusing every
+  // OIDC login until it is re-saved (guardrail 34e).
+  const oidcAllowlist = parseOidcAllowlist(cfg[OIDC_ALLOWLIST_SETTING_KEY]);
 
   // Exactly the gates /api/sync/plex and /api/sync/jellyfin apply themselves, so
   // the sync buttons can skip a server that is not there instead of POSTing to
@@ -620,7 +627,7 @@ export default async function SettingsPage({
               description={t("settings.section.authentication.description")}
             >
               {/* The rows carry no spacing or rules of their own; this stack
-                  supplies both, so the four read as one list (the features
+                  supplies both, so the rows read as one list (the features
                   tab's switch list uses the same recipe). */}
               <div className="divide-y divide-[var(--ds-border)] [&>*]:py-3 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0">
                 <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
@@ -632,6 +639,11 @@ export default async function SettingsPage({
                 <EnableMachineSessionToggle
                   initialEnabled={cfg.enableMachineSession === "true"}
                   initialAllowedIps={cfg.machineSessionAllowedIps ?? ""}
+                />
+                <OidcAllowlistForm
+                  initial={oidcAllowlist ?? DEFAULT_OIDC_ALLOWLIST}
+                  initialUnreadable={oidcAllowlist === null}
+                  oidcConfigured={isOidcConfigured()}
                 />
               </div>
             </SettingsCard>

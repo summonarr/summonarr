@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { normalizeEmail } from "@/lib/email-normalize";
+import { isReservedEmailDomain } from "@/lib/reserved-email";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { Permission, hasPermission, defaultPermissionsForRole, rolePresetExceeds, presetExceeds } from "@/lib/permissions";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -180,6 +181,13 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   const domainDot = parts[1]?.lastIndexOf(".") ?? -1;
   if (parts.length !== 2 || !parts[0] || !parts[1] || domainDot < 1 || domainDot === parts[1].length - 1) {
     return NextResponse.json({ error: t("apiAdmin.users.invalidEmail") }, { status: 400 });
+  }
+  // Summonarr mints addresses in these domains for itself (reserved-email.ts,
+  // guardrail 34e). Not even an ADMIN may create one: a local account holding
+  // `jellyfin-<id>@jellyfin.local` blocks that Jellyfin user from ever being
+  // provisioned, and before 34e it inherited their sign-in.
+  if (isReservedEmailDomain(normalized)) {
+    return NextResponse.json({ error: t("apiAdmin.users.reservedEmail") }, { status: 400 });
   }
 
   // A delegate must not create an account under a media-server user's email.

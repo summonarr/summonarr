@@ -389,6 +389,26 @@ test("users: an ADMIN may still create an account under a media-server user's em
   assert.equal((await createUser(t, { email: "friend@example.com", password: "password12345" })).status, 201);
 });
 
+// ── reserved domains (guardrail 34e) ─────────────────────────────────────────
+//
+// A local account holding `jellyfin-<id>@jellyfin.local` squats that Jellyfin
+// user's address (they can never be provisioned), and before 34e Jellyfin
+// sign-in BOUND to whatever row held it — so a delegate could plant one and
+// inherit the Jellyfin user's next sign-in. Refused for everyone, ADMIN included.
+
+test("users: no caller — not even an ADMIN — can create an account in a reserved domain", async () => {
+  const admin = await mintSession({ role: "ADMIN" });
+  const delegate = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
+  for (const t of [admin, delegate]) {
+    for (const email of ["jellyfin-victim@jellyfin.local", "discord_9@Discord.Local", "deleted-x@deleted.invalid"]) {
+      const res = await createUser(t, { email, password: "password12345" });
+      assert.equal(res.status, 400, email);
+      assert.equal((await res.json()).error, "That email address is reserved and can't be used for an account.");
+    }
+  }
+  assert.equal(opsOf("user.create").length, 0);
+});
+
 // ── the self-escalation guard ────────────────────────────────────────────────
 
 test("users: a MANAGE_USERS holder CANNOT create an ADMIN account", async () => {

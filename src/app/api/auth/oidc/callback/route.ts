@@ -1,35 +1,20 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { AccountDeactivatedError, findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED, PROVIDER_SETUP_REQUIRED, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { AccountDeactivatedError, signInAndMintSession, buildDeviceMeta } from "@/lib/auth";
 import {
   buildOidcExchangeUrl,
+  clearOidcStateCookie,
   exchangeOidcCode,
   isNativeOidcState,
   isOidcConfigured,
   NATIVE_OIDC_CALLBACK_URL,
-  OIDC_STATE_COOKIE,
-  OIDC_STATE_COOKIE_PATH,
+  readOidcStateCookie,
   verifyOidcStateCookie,
 } from "@/lib/oidc";
+import { loadOidcAllowlist, oidcExchangeOptionsFor, oidcWebErrorCode, resolveOidcSignIn } from "@/lib/oidc-signin";
 import { serializeSessionCookie } from "@/lib/session-cookie";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { safeInternalPath } from "@/lib/safe-url";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-
-function readStateCookie(req: NextRequest): string | null {
-  const header = req.headers.get("cookie");
-  if (!header) return null;
-  for (const piece of header.split(/;\s*/)) {
-    const eq = piece.indexOf("=");
-    if (eq === -1) continue;
-    if (piece.slice(0, eq) === OIDC_STATE_COOKIE) return piece.slice(eq + 1);
-  }
-  return null;
-}
-
-function clearStateCookieHeader(): string {
-  return `${OIDC_STATE_COOKIE}=; Path=${OIDC_STATE_COOKIE_PATH}; Max-Age=0; HttpOnly; SameSite=Lax`;
-}
 
 // Subpath deployments (BASE_PATH=/request): a root-absolute path resolved against
 // AUTH_URL — `new URL("/login", "https://host/request")` — yields
@@ -49,7 +34,7 @@ function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
   const url = new URL(`${basePath}/login`, base);
   url.searchParams.set("error", code);
   const res = NextResponse.redirect(url.toString());
-  res.headers.append("Set-Cookie", clearStateCookieHeader());
+  res.headers.append("Set-Cookie", clearOidcStateCookie());
   return res;
 }
 
@@ -117,13 +102,25 @@ export async function GET(req: NextRequest) {
     return loginErrorRedirect(req, idpError === "access_denied" ? "oidc_access_denied" : "oidc_idp_error");
   }
 
-  const stateCookie = readStateCookie(req);
+  // Read ONLY under this deployment's name — the `__Host-` one on HTTPS, which
+  // a sibling subdomain can't plant (oidcStateCookie in oidc.ts).
+  const stateCookie = readOidcStateCookie(req.headers.get("cookie"));
   if (!stateCookie) {
     return loginErrorRedirect(req, "oidc_no_state");
   }
   const flowState = await verifyOidcStateCookie(stateCookie);
   if (!flowState) {
     return loginErrorRedirect(req, "oidc_state_invalid");
+  }
+
+  // The allowlist is read first: it decides whether the exchange also has to
+  // fetch a groups claim.
+  let policy;
+  try {
+    policy = await loadOidcAllowlist();
+  } catch (err) {
+    console.error("[oidc/callback] allowlist read failed:", err instanceof Error ? err.message : err);
+    return loginErrorRedirect(req, "oidc_user_rejected");
   }
 
   let claims;
@@ -134,35 +131,27 @@ export async function GET(req: NextRequest) {
     claims = await exchangeOidcCode(
       buildOidcExchangeUrl(flowState, req.nextUrl.searchParams),
       flowState,
+      oidcExchangeOptionsFor(policy),
     );
   } catch (err) {
     console.error("[oidc/callback] code exchange failed:", err instanceof Error ? err.message : err);
     return loginErrorRedirect(req, "oidc_exchange_failed");
   }
 
-  let dbUser;
+  // Allowlist, identity lookup and notification address — shared with the
+  // native route so the two can't disagree (oidc-signin.ts). Every refusal is
+  // audited there.
+  let outcome;
   try {
-    dbUser = await findOrCreateOidcUser(claims);
+    outcome = await resolveOidcSignIn(claims, policy, req.headers);
   } catch (err) {
     console.error("[oidc/callback] user lookup failed:", err instanceof Error ? err.message : err);
     return loginErrorRedirect(req, "oidc_user_rejected");
   }
-
-  if (dbUser === PROVIDER_REBIND_REQUIRED) {
-    return loginErrorRedirect(req, "oidc_rebind_required");
+  if (!outcome.ok) {
+    return loginErrorRedirect(req, oidcWebErrorCode(outcome.reason));
   }
-  if (dbUser === PROVIDER_SETUP_REQUIRED) {
-    return loginErrorRedirect(req, "oidc_setup_required");
-  }
-
-  // Keep notificationEmail in lock-step with the OIDC provider's email claim
-  // on every sign-in.
-  if (claims.email) {
-    const oidcEmail = normalizeEmail(claims.email);
-    await prisma.user
-      .update({ where: { id: dbUser.id }, data: { notificationEmail: oidcEmail } })
-      .catch((err) => console.error("[oidc/callback] notificationEmail sync failed:", err instanceof Error ? err.message : err));
-  }
+  const dbUser = outcome.user;
 
   const device = buildDeviceMeta(req.headers);
   let result: Awaited<ReturnType<typeof signInAndMintSession>>;
@@ -201,6 +190,6 @@ export async function GET(req: NextRequest) {
     "Set-Cookie",
     serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),
   );
-  res.headers.append("Set-Cookie", clearStateCookieHeader());
+  res.headers.append("Set-Cookie", clearOidcStateCookie());
   return res;
 }
