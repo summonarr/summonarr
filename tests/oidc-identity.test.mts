@@ -123,9 +123,13 @@ const { RequestCookies } = cjsRequire("next/dist/server/web/spec-extension/cooki
 const { RequestCookiesAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapters/request-cookies.js") as { RequestCookiesAdapter: { seal(c: unknown): unknown } };
 const { HeadersAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapters/headers.js") as { HeadersAdapter: { seal(h: Headers): unknown } };
 
-function inScope<T>(fn: () => Promise<T>, cookieHeader = ""): Promise<T> {
+// `requestHeaders`: the request's own headers, as Next puts them in the request
+// scope — the mint reads X-Summonarr-Client from there (next/headers) to bind a
+// native sign-in to the bearer transport (guardrail 6h).
+function inScope<T>(fn: () => Promise<T>, cookieHeader = "", requestHeaders?: Headers): Promise<T> {
   const workStore = { route: "/oidc-identity.test", forceStatic: false, dynamicShouldError: false, afterContext: { after: () => {} } };
-  const reqHeaders = new Headers(cookieHeader ? { cookie: cookieHeader } : {});
+  const reqHeaders = new Headers(requestHeaders ?? {});
+  if (cookieHeader) reqHeaders.set("cookie", cookieHeader);
   const requestStore = {
     type: "request",
     phase: "render",
@@ -355,7 +359,7 @@ async function nativeSignInWith(claims: Record<string, unknown>): Promise<Respon
     headers: { "content-type": "application/json", "x-summonarr-client": "ios; build=60", "x-forwarded-for": nextIp() },
     body: JSON.stringify({ code: `code-${seq}`, state, flowState }),
   });
-  return inScope(() => nativeSignIn.POST(req));
+  return inScope(() => nativeSignIn.POST(req), "", req.headers);
 }
 
 const VERIFIED = { email: "member@example.com", email_verified: true, name: "Member" };
