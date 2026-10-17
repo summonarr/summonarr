@@ -231,6 +231,9 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
                 ? t("adminQueue.fixMatch.accepted", { server: server === "jellyfin" ? "Jellyfin" : "Plex" })
                 : t("adminQueue.fixMatch.applyingOn", { server: server === "jellyfin" ? "Jellyfin" : "Plex" })}
               <span className="ml-2 font-mono text-zinc-500">{formatElapsed(progress?.elapsedMs ?? 0)}</span>
+              {(progress?.copies ?? 0) > 1 && (
+                <span className="ml-2 text-zinc-500">· {t("adminQueue.fixMatch.copyOf", { copy: progress?.copy ?? 1, copies: progress?.copies ?? 1 })}</span>
+              )}
             </p>
             <p className="text-zinc-500">
               {t("adminQueue.fixMatch.slowNote")}
@@ -534,7 +537,8 @@ export function FixMatchButton({
             ? t("adminQueue.fixMatch.loading")
             : phase === "applying"
               ? (progress?.remoteApplied
-                ? t("adminQueue.fixMatch.confirming", { elapsed: formatElapsed(progress.elapsedMs) })
+                ? t("adminQueue.fixMatch.confirming", { elapsed: formatElapsed(progress.elapsedMs) }) +
+                  ((progress.copies ?? 0) > 1 ? ` · ${t("adminQueue.fixMatch.copyOf", { copy: progress.copy ?? 1, copies: progress.copies ?? 1 })}` : "")
                 : t("adminQueue.fixMatch.applying"))
               : instanceLabel ? `${label} · ${instanceLabel}` : label}
         </button>

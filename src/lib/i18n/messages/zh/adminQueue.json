@@ -300,6 +300,7 @@
   "adminQueue.fixMatch.dbUpdatedPlex": "数据库已更新——Plex 显示未变",
   "adminQueue.fixMatch.dbUpdatedNote": "数据库已更新——见说明",
   "adminQueue.fixMatch.loading": "加载中…",
+  "adminQueue.fixMatch.copyOf": "第 {copy} 个副本，共 {copies} 个",
   "adminQueue.fixMatch.confirming": "正在确认… {elapsed}",
   "adminQueue.blacklist.searchFailed": "搜索失败——请重试",
   "adminQueue.blacklist.blockFailed": "屏蔽失败",

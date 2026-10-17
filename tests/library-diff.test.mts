@@ -33,3 +33,17 @@ test("bad matches: fixable first, then by path", () => {
   const out = [{ relativePath: "b", arrVerdict: null }, { relativePath: "z", arrVerdict: "plex" as const }, { relativePath: "a", arrVerdict: null }].sort(makeBadMatchComparator(c));
   assert.deepEqual(out.map((m) => m.relativePath), ["z", "a", "b"]);
 });
+
+// Structural pins for the bulk "Fix all" (no component harness in this repo):
+// it must ask before remapping N titles on live media servers, be stoppable,
+// and stop when the page goes away.
+import { readFileSync } from "node:fs";
+test("bulk Fix all asks first, can be stopped, and stops on unmount", () => {
+  const src = readFileSync(new URL("../src/components/admin/library-diff-client.tsx", import.meta.url), "utf8");
+  const fixAll = src.slice(src.indexOf("function FixAllArrButton"), src.indexOf("function ArrFilterButton"));
+  assert.match(fixAll, /onClick=\{\(\) => setRunState\("confirm"\)\}/, "the first click opens a confirm step");
+  assert.doesNotMatch(fixAll, /onClick=\{handleFixAll\}[^>]*\n[^>]*disabled=\{state === "running"\}/, "the start button must not run the loop directly");
+  assert.match(fixAll, /stopRef\.current = true/);
+  assert.match(fixAll, /if \(stopRef\.current\) break;/, "the loop checks the stop flag between titles");
+  assert.match(fixAll, /abortRef\.current\?\.abort\(\)/, "unmount aborts the status poll");
+});

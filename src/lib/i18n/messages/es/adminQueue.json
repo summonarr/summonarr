@@ -300,6 +300,7 @@
   "adminQueue.fixMatch.dbUpdatedPlex": "BD actualizada: Plex sigue mostrando lo mismo",
   "adminQueue.fixMatch.dbUpdatedNote": "BD actualizada: consulta la nota",
   "adminQueue.fixMatch.loading": "Cargando…",
+  "adminQueue.fixMatch.copyOf": "copia {copy} de {copies}",
   "adminQueue.fixMatch.confirming": "Confirmando… {elapsed}",
   "adminQueue.blacklist.searchFailed": "La búsqueda falló: inténtalo de nuevo",
   "adminQueue.blacklist.blockFailed": "No se pudo bloquear",

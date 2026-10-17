@@ -108,7 +108,13 @@ async function fixPlexMatch(
   mediaType: "MOVIE" | "TV",
   instance: MediaInstanceKey,
   preselectedGuid?: string,
+  report?: FixMatchReport,
 ): Promise<{ conflated: boolean; serverUrl: string; token: string }> {
+  // Progress the job exposes to the UI (no-op on the synchronous path). Plex used
+  // to report once, so a multi-minute search/confirm cascade looked frozen.
+  const progress: Parameters<FixMatchReport>[0] = { phase: "searching", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 };
+  const push = () => report?.({ ...progress });
+  push();
   // Plex rating keys are always integers; coerce to break taint from a DB-read
   // string before it's interpolated into any admin-token URL below.
   const safeKey = String(parseInt(ratingKey, 10) || 0);
@@ -228,6 +234,8 @@ async function fixPlexMatch(
   // Remember whether the unmatch actually landed: from here on a failure to
   // re-match leaves the item UNMATCHED in Plex, not merely unchanged, and the
   // final throw below has to say so.
+  progress.phase = "applying";
+  push();
   const unmatchRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/unmatch`, {
     method: "PUT",
     headers,
@@ -278,19 +286,31 @@ async function fixPlexMatch(
     timeoutMs: 30_000,
   }).catch((e: unknown) => { console.warn("[fix-match]", tag, "refresh call failed (non-fatal):", e); return null; });
 
+  // The match was APPLIED; from here Summonarr only waits for Plex to confirm it.
+  progress.remoteApplied = true;
+  progress.phase = "confirming";
+  push();
+
   const pollForConfirmation = async (
     maxAttempts: number,
     intervalMs: number,
   ): Promise<{ confirmed: boolean; conflatedMerge: boolean; plexTmdbId?: string; plexImdbId?: string }> => {
     let plexTmdbId: string | undefined;
     let plexImdbId: string | undefined;
+    progress.attempts = maxAttempts;
+    progress.attempt = 0;
+    push();
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await new Promise((r) => setTimeout(r, intervalMs));
+      progress.attempt = attempt + 1;
+      push();
       const checkRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}?includeGuids=1`, {
         headers,
         timeoutMs: 10_000,
       }).catch(() => null);
       if (!checkRes?.ok) {
+        progress.readFailures++;
+        push();
         continue;
       }
       const checkJson = await checkRes.json() as {
@@ -804,7 +824,7 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
       let conflatedWarning: string | null = null;
       if (server === "plex") {
         opts.report?.({ phase: "applying", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 });
-        const plexResult = await fixPlexMatch(itemKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
+        const plexResult = await fixPlexMatch(itemKey, correctTmdbId, mediaType, serverInstance, canonicalGuid, opts.report);
         if (plexResult.conflated) conflatedWarning = t("apiAdmin.fixMatch.plexConflated", { tmdbId: correctTmdbId });
       } else {
         newKey = (await fixJellyfinMatch(itemKey, correctTmdbId, mediaType, serverInstance, input.itemPath ?? null, tmdbId, opts.background, opts.report)).newItemId;
@@ -846,24 +866,27 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
       const plexRatingKey = item.plexRatingKey;
       // The canonical copy is the one the admin picked a candidate for; its
       // failure aborts the job exactly as before.
-      const plexResult = await fixPlexMatch(plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
+      const extraKeys = unionKeys(item.plexRatingKeys).filter((k) => k !== plexRatingKey);
+      const totalCopies = 1 + extraKeys.length;
+      // Tag every progress report with which copy is being worked on.
+      const copyReport = (copy: number): FixMatchReport => (p) => opts.report?.({ ...p, copy, copies: totalCopies });
+      const plexResult = await fixPlexMatch(plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid, copyReport(1));
       remoteRemapped = true;
 
       // Every OTHER copy of the title (guardrail 37c) — the Plex twin of the
       // Jellyfin loop. Left on the old match, the next sync could elect an
       // unfixed copy and revert the correction. Serial, like Jellyfin's, and a
       // copy is only touched if Plex says it still carries the old id.
-      const extraKeys = unionKeys(item.plexRatingKeys).filter((k) => k !== plexRatingKey);
       const movedKeys = new Set<string>([plexRatingKey]);
       const failedKeys: string[] = [];
-      for (const key of extraKeys) {
+      for (const [idx, key] of extraKeys.entries()) {
         try {
           const carries = await plexCopyCarriesTmdb(serverInstance, key, tmdbId);
           if (carries === null) { failedKeys.push(key); continue; }
           // Not the old id: it belongs to another title — nothing to fix, and it
           // keeps whatever row that title has.
           if (!carries) { movedKeys.add(key); continue; }
-          await fixPlexMatch(key, correctTmdbId, mediaType, serverInstance, canonicalGuid);
+          await fixPlexMatch(key, correctTmdbId, mediaType, serverInstance, canonicalGuid, copyReport(idx + 2));
           movedKeys.add(key);
         } catch (err) {
           console.error("[fix-match]", `plex copy ${key} failed:`, err instanceof Error ? err.message : err);
@@ -981,7 +1004,8 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
       const applied: Array<Awaited<ReturnType<typeof fixJellyfinMatch>>> = [];
       const failedCopies: string[] = [];
       const safeCopyIds = targetItemIds.map((id) => id.replace(/[^0-9a-f-]/gi, ""));
-      for (const targetId of targetItemIds) {
+      for (const [copyIdx, targetId] of targetItemIds.entries()) {
+        const copyReport: FixMatchReport = (p) => opts.report?.({ ...p, copy: copyIdx + 1, copies: targetItemIds.length });
         // The row's filePath belongs to the canonical copy (`jellyfinItemId`) —
         // it is written from the same winning item. Handing it to another copy
         // pointed that copy's fallback search at the canonical one, so only the
@@ -990,7 +1014,7 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         const safeTarget = targetId.replace(/[^0-9a-f-]/gi, "");
         const siblings = new Set(safeCopyIds.filter((id) => id !== safeTarget));
         try {
-          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, copyPath, tmdbId, opts.background, opts.report, siblings));
+          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, copyPath, tmdbId, opts.background, copyReport, siblings));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error("[fix-match]", `jellyfin copy ${targetId} failed:`, msg);

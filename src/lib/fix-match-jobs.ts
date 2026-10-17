@@ -27,6 +27,11 @@ export type FixMatchProgress = {
   // Confirmation reads that errored or timed out — the media server answers
   // slowly (or not at all) while it is busy refreshing.
   readFailures: number;
+  // Which copy of a multi-copy title is being worked on (1-based) — absent for a
+  // single item. Copies run one after another, so a title with several can take
+  // several confirmation windows end to end.
+  copy?: number;
+  copies?: number;
   updatedAt: number;
 };
 export type FixMatchReport = (progress: Omit<FixMatchProgress, "updatedAt">) => void;

@@ -630,6 +630,8 @@
   "adminManage.library.diff.resyncToFix": "Resynchronisez pour activer la correction",
   "adminManage.library.diff.correctMatch": "Correspondance correcte ✓",
   "adminManage.library.diff.fixAll": "Corriger les {count} où Arr est d'accord",
+  "adminManage.library.diff.stop": "Arrêter",
+  "adminManage.library.diff.fixStopped": "Arrêté — {fixed}/{total} corrigés",
   "adminManage.library.diff.fixing": "Correction {done}/{total}…",
   "adminManage.library.diff.fixDone": "Terminé — {fixed}/{total} corrigés",
   "adminManage.library.diff.plexHasAll": "Plex possède tout le contenu de Jellyfin.",

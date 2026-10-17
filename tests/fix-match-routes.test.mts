@@ -238,6 +238,8 @@ const fakePrisma = {
     update: async () => ({}), // lastSeenAt fire-and-forget touch
   },
   setting: {
+    findMany: async (args: { where: { key: { in: string[] } } }) =>
+      args.where.key.in.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) as string })),
     findUnique: async (args: { where: { key: string } }) => {
       settingReads.push(args.where.key);
       const value = settings.get(args.where.key);
@@ -1893,4 +1895,52 @@ test("POST (jellyfin): the corrected row keeps the removed row's title/year/adde
     assert.equal(branch.communityRating, 7.4);
     assert.equal("overview" in branch, false, "a null on the removed row is not carried");
   }
+});
+
+test("a Plex job reports confirming progress (attempt counts) tagged with the copy it is on", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001", plexRatingKeys: ["1001", "1002"] });
+  respond = plexCopiesResponder(PLEX_DEFAULT, ["1001", "1002"], 111, 222);
+
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz", async: true }, a.header), undefined);
+  const { jobId } = await res.json() as { jobId: string };
+  type Status = { status: string; progress?: { phase: string; remoteApplied: boolean; attempts: number; copy?: number; copies?: number } };
+  let final: Status = { status: "running" };
+  for (let i = 0; i < 400 && final.status === "running"; i++) {
+    await flush();
+    final = await (await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined)).json() as Status;
+  }
+  assert.equal(final.status, "done");
+  assert.equal(final.progress?.phase, "confirming");
+  assert.equal(final.progress?.remoteApplied, true);
+  assert.ok((final.progress?.attempts ?? 0) > 0, "Plex now reports its confirmation window");
+  assert.deepEqual([final.progress?.copy, final.progress?.copies], [2, 2], "the last progress report names the last of the two copies");
+});
+
+test("candidates: the arr cross-check reads EVERY enabled instance — a title only in a NAMED instance is still confirmed (guardrail 32)", async () => {
+  const a = await admin();
+  configureServers();
+  // No default Radarr at all; only the "anime" instance is configured.
+  settings.set("arrRadarrInstances", JSON.stringify([{ slug: "anime", name: "Anime" }]));
+  settings.set("radarrAnimeUrl", "http://10.88.0.20:7878");
+  settings.set("radarrAnimeApiKey", "anime-key");
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/anime/Right Film (2010)/right.mkv", jellyfinItemId: "aaaaaaaa" });
+  tmdbCacheRows.set("movie:222:details", JSON.stringify({ title: "Right Film", releaseYear: "2010", imdbId: "tt0000222" }));
+  const arrHits: string[] = [];
+  respond = (url) => {
+    if (url.origin !== "http://10.88.0.20:7878") throw new Error(`unexpected origin ${url.origin}`);
+    arrHits.push(url.pathname + url.search);
+    if (url.search === "?tmdbId=222") return okJson([{ tmdbId: 222, path: "/media/anime/Right Film (2010)" }]);
+    return okJson([]);
+  };
+
+  const res = await candidates(req(candidatesUrl({ server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222" }), { headers: a.header }), undefined);
+  assert.equal(res.status, 200);
+  const body = await res.json() as { arrConfirmedTmdbId: number | null; arrPathAgrees: boolean | null; arrConfirmedTitle: string | null };
+  assert.equal(body.arrConfirmedTmdbId, 222, "the named instance confirms the corrected id");
+  assert.equal(body.arrPathAgrees, true);
+  assert.equal(body.arrConfirmedTitle, "Right Film");
+  assert.ok(arrHits.includes("/api/v3/movie?tmdbId=222"));
+  assert.ok(settingReads.every((k) => k !== "radarrUrl" && k !== "radarrApiKey"), "the default-instance keys are no longer read raw");
 });

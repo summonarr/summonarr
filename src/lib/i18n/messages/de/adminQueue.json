@@ -300,6 +300,7 @@
   "adminQueue.fixMatch.dbUpdatedPlex": "DB aktualisiert – Plex-Anzeige unverändert",
   "adminQueue.fixMatch.dbUpdatedNote": "DB aktualisiert – siehe Hinweis",
   "adminQueue.fixMatch.loading": "Wird geladen…",
+  "adminQueue.fixMatch.copyOf": "Kopie {copy} von {copies}",
   "adminQueue.fixMatch.confirming": "Wird bestätigt… {elapsed}",
   "adminQueue.blacklist.searchFailed": "Suche fehlgeschlagen – versuchen Sie es erneut",
   "adminQueue.blacklist.blockFailed": "Sperren fehlgeschlagen",
