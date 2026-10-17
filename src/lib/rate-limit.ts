@@ -1,4 +1,5 @@
 import { processSingleton } from "./process-singleton";
+import { warnOnChange } from "./log-dedup";
 
 if (process.env.TRUST_PROXY !== "true") {
   console.warn(
@@ -17,25 +18,98 @@ interface RateLimitEntry {
 // module into every server bundle ("chunk") that imports it. A plain
 // module-level Map would give each chunk its own counters, so a key used by two
 // routes would get twice the intended limit.
-const windows = processSingleton("rate-limit:windows", () => {
-  const map = new Map<string, RateLimitEntry>();
-  // One cleanup timer per process, created with the map. .unref() lets Node
-  // exit (tests, shutdown) without waiting for this timer.
-  setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of map) {
-      if (entry.expiresAt < now) map.delete(key);
-    }
-  }, 60_000).unref();
-  return map;
-});
+function sweptMap(name: string): Map<string, RateLimitEntry> {
+  return processSingleton(name, () => {
+    const map = new Map<string, RateLimitEntry>();
+    // One cleanup timer per process, created with the map. .unref() lets Node
+    // exit (tests, shutdown) without waiting for this timer.
+    setInterval(() => sweepExpired(map, Date.now()), 60_000).unref();
+    return map;
+  });
+}
+
+function sweepExpired(map: Map<string, RateLimitEntry>, now: number): void {
+  for (const [key, entry] of map) {
+    if (entry.expiresAt < now) map.delete(key);
+  }
+}
+
+const windows = sweptMap("rate-limit:windows");
+
+// Buckets that bound guessing ONE account's secret: a password, a second-factor
+// code, a step-up password. They live in their OWN map that never evicts a
+// bucket with live hits.
+//
+// Why: the shared map is LRU-bounded, and a bucket that is already FULL is
+// never touched again (a refused attempt records nothing), so it drifts to the
+// front of the eviction order. An attacker who spent a victim's `login-email:`
+// budget only had to mint ~100k cheap new keys (any anonymous endpoint's per-IP
+// or per-secret bucket) to evict it and get a fresh 50 guesses — repeatably.
+// Flooding THIS map instead takes one real attempt per distinct account per
+// window, each behind its own per-IP limit and (for passwords) a full scrypt.
+//
+// When this map is full of live buckets, a NEW account's attempt is refused
+// (fail closed) rather than evicting a live one — an availability cost only
+// under a flood that already saturates the password hasher, against a security
+// one (unbounded guessing) the other way round.
+const PROTECTED_PREFIXES = [
+  "login-email:",
+  "mfa-user:",
+  "jellyfin-user:",
+  "profile-password:",
+  "profile-delete:",
+  "sessions-delete:",
+  "mfa-stepup:",
+  "mfa-totp-enable:",
+  "step-up-pw:",
+] as const;
+
+const protectedWindows = sweptMap("rate-limit:protected-windows");
 
 const MAX_KEYS = 100_000;
+const MAX_PROTECTED_KEYS = 100_000;
+// A full protected map is re-swept at most this often, so a flood of new keys
+// against a full map costs one O(n) sweep per interval, not one per request.
+const PROTECTED_SWEEP_INTERVAL_MS = 1_000;
+const lastProtectedSweep = processSingleton("rate-limit:protected-last-sweep", () => ({ at: 0 }));
+
+export function isProtectedRateLimitKey(key: string): boolean {
+  return PROTECTED_PREFIXES.some((p) => key.startsWith(p));
+}
+
+function mapFor(key: string): Map<string, RateLimitEntry> {
+  return isProtectedRateLimitKey(key) ? protectedWindows : windows;
+}
+
+// Makes room for one NEW key in `map`. Returns false when it can't — only the
+// protected map ever answers false.
+function makeRoom(map: Map<string, RateLimitEntry>, now: number): boolean {
+  if (map === protectedWindows) {
+    if (map.size < MAX_PROTECTED_KEYS) return true;
+    if (now - lastProtectedSweep.at >= PROTECTED_SWEEP_INTERVAL_MS) {
+      lastProtectedSweep.at = now;
+      sweepExpired(map, now);
+    }
+    if (map.size < MAX_PROTECTED_KEYS) return true;
+    warnOnChange(
+      "rate-limit:protected-full",
+      "full",
+      `[rate-limit] the per-account limiter is full (${MAX_PROTECTED_KEYS} live buckets) — new accounts' sign-in attempts are refused until buckets expire. This usually means a credential-stuffing flood.`,
+    );
+    return false;
+  }
+  if (map.size >= MAX_KEYS) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) map.delete(oldestKey);
+  }
+  return true;
+}
 
 // Sliding-window rate limiter: records a hit for `key` and returns true, or
 // returns false (recording nothing) once `limit` hits already fall within the
-// last `windowMs`. At most MAX_KEYS keys are kept; the least recently used key
-// is dropped first.
+// last `windowMs`. The shared map keeps at most MAX_KEYS keys, dropping the
+// least recently used first; per-account buckets (PROTECTED_PREFIXES) are never
+// dropped while live.
 export function checkRateLimit(key: string, limit: number, windowMs: number): boolean {
   return reserveRateLimit(key, limit, windowMs) !== null;
 }
@@ -46,22 +120,20 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
 // refundHit treats as "nothing to remove".
 export function reserveRateLimit(key: string, limit: number, windowMs: number): number | null {
   if (limit <= 0) return 0;
+  const map = mapFor(key);
   const now = Date.now();
   const cutoff = now - windowMs;
-  const entry = windows.get(key);
+  const entry = map.get(key);
   const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
-  if (hits.length === 0) windows.delete(key);
+  if (hits.length === 0) map.delete(key);
   if (hits.length >= limit) return null;
 
-  if (hits.length === 0 && windows.size >= MAX_KEYS) {
-    const oldestKey = windows.keys().next().value;
-    if (oldestKey !== undefined) windows.delete(oldestKey);
-  }
+  if (hits.length === 0 && !makeRoom(map, now)) return null;
   hits.push(now);
   // Delete then re-insert to move the key to the end of the Map's order; the
   // eviction above drops keys from the front, so this marks it recently used.
-  windows.delete(key);
-  windows.set(key, { hits, expiresAt: now + windowMs });
+  map.delete(key);
+  map.set(key, { hits, expiresAt: now + windowMs });
   return now;
 }
 
@@ -72,11 +144,19 @@ export function reserveRateLimit(key: string, limit: number, windowMs: number): 
 // verify — see authorizeWithCredentials). Pairs with recordFailure.
 export function peekRateLimit(key: string, limit: number, windowMs: number): boolean {
   if (limit <= 0) return true;
+  const map = mapFor(key);
   const now = Date.now();
   const cutoff = now - windowMs;
-  const entry = windows.get(key);
+  const entry = map.get(key);
   const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
-  if (hits.length === 0) windows.delete(key);
+  if (hits.length === 0) {
+    map.delete(key);
+    // A new per-account key that a full protected map could not take must not
+    // read as "room left" — the gate fails closed exactly as reserve does.
+    // (Only the protected map: makeRoom on the shared map would evict a key
+    // without inserting one.)
+    return map === protectedWindows ? makeRoom(map, now) : true;
+  }
   return hits.length < limit;
 }
 
@@ -94,7 +174,8 @@ export function peekRateLimit(key: string, limit: number, windowMs: number): boo
 // attacker's guess budget refills early. A hit that already aged out of the
 // window is simply not found, so nothing else is removed.
 export function refundHit(key: string, hitAt?: number): void {
-  const entry = windows.get(key);
+  const map = mapFor(key);
+  const entry = map.get(key);
   if (!entry || entry.hits.length === 0) return;
   if (hitAt !== undefined) {
     if (hitAt === 0) return;
@@ -104,26 +185,26 @@ export function refundHit(key: string, hitAt?: number): void {
   } else {
     entry.hits.pop();
   }
-  if (entry.hits.length === 0) windows.delete(key);
+  if (entry.hits.length === 0) map.delete(key);
 }
 
 // Records one hit for `key` (the "record" half of peek-then-record). Same
 // bookkeeping as checkRateLimit, but with no limit check: callers check with
 // peekRateLimit first.
 export function recordFailure(key: string, windowMs: number): void {
+  const map = mapFor(key);
   const now = Date.now();
   const cutoff = now - windowMs;
-  const entry = windows.get(key);
+  const entry = map.get(key);
   const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
 
-  if (hits.length === 0 && windows.size >= MAX_KEYS) {
-    const oldestKey = windows.keys().next().value;
-    if (oldestKey !== undefined) windows.delete(oldestKey);
-  }
+  // A full protected map can't take a new key; the failure has nowhere to go,
+  // and the next gate (peek/reserve) for that key refuses anyway (makeRoom).
+  if (hits.length === 0 && !makeRoom(map, now)) return;
   hits.push(now);
   // Move the key to the end of the Map's order (see checkRateLimit).
-  windows.delete(key);
-  windows.set(key, { hits, expiresAt: now + windowMs });
+  map.delete(key);
+  map.set(key, { hits, expiresAt: now + windowMs });
 }
 
 import { isIP } from "node:net";

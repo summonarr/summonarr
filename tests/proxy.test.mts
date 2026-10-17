@@ -58,7 +58,8 @@
 //
 // No DB or network: prisma delegates are shadowed in-memory (tests/
 // _helpers.mts), fetch throws, and the JWTs are REAL jose tokens whose claims
-// always mirror the stubbed DB row (the rotation path never fires here).
+// mirror the stubbed DB row — except in the bearer-rotation pin at the bottom,
+// which promotes the user on purpose.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -132,9 +133,8 @@ shadowPrismaModel(prisma, "user", {
   update: async () => ({}),
 });
 
-// Rotation never fires in this file (claims always mirror the stubbed DB row),
-// but a functional $transaction stub keeps an accidental trigger off a real
-// client. Mirrors api-auth.test.mts.
+// A functional $transaction stub for the privilege-change rotation (only the
+// bearer-rotation pin at the bottom triggers it). Mirrors api-auth.test.mts.
 const txStub = {
   authSession: {
     findUnique: async (args: { where: { sessionId: string } }) =>
@@ -1118,4 +1118,22 @@ test("with no configured origins, the request's own origin is the only CSRF-trus
   const envAuthoritative = await proxy(lanPost());
   assert.equal(envAuthoritative.status, 403, "configured AUTH_URL origins are the whole allowlist");
   assert.deepEqual(await bodyOf(envAuthoritative), { error: "Forbidden" });
+});
+
+// ── privilege change on a BEARER session: no rotation ───────────────────────
+//
+// The proxy can hand a COOKIE client its rotated replacement (Set-Cookie), but a
+// bearer client is never given a new token (guardrail 6b). Rotating its session
+// renamed the AuthSession row, so the iOS app's NEXT request was a 401 — every
+// device, after any role or permission edit.
+test("a bearer request after a role change passes WITHOUT rotating, and the app's token works on its next request", async () => {
+  const { userId, sessionId, token } = await mintSession({ role: "USER" });
+  const u = usersById.get(userId);
+  assert.ok(u);
+  u.role = "ISSUE_ADMIN";
+  const first = await proxy(req("/api/requests", { headers: asBearer(token) }));
+  assertPassedThrough(first);
+  assert.ok(sessionRows.has(sessionId), "the native session's row must not be renamed");
+  const second = await proxy(req("/api/requests", { headers: asBearer(token) }));
+  assertPassedThrough(second, "the app's original token must still pass the proxy");
 });

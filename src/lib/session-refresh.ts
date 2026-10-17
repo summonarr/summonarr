@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { signSessionJwt, verifySessionJwt, type SessionClaims } from "@/lib/session-jwt";
-import { shouldForceDbCheck } from "@/lib/session-revocation";
+import { markSessionForceRevoked, shouldForceDbCheck } from "@/lib/session-revocation";
 import { getCachedPlexAllowlist } from "@/lib/plex-membership";
 import { serializePermissions } from "@/lib/permissions";
 import { coalesce } from "@/lib/concurrency";
@@ -15,8 +15,9 @@ import { coalesce } from "@/lib/concurrency";
 //   2. Cross-replica revocation: AuthSession row deleted = logged out everywhere.
 //   3. Defense-in-depth cutoff: reject any token minted before sessionsRevokedAt
 //      or passwordChangedAt.
-//   4. Refresh role from DB. If role changed, rotate sessionId so the old token
-//      cannot be replayed after a privilege change.
+//   4. Refresh role + permissions from DB. If they changed and the caller can
+//      deliver a replacement cookie, rotate sessionId so the old token cannot be
+//      replayed after a privilege change.
 //   5. Refresh mediaServer for credentials/oidc tokens (plex/jellyfin/jellyfin-qc
 //      sessions have their mediaServer pinned at sign-in).
 //   6. Enforce the session deadline (`expiresAt` claim, captured at sign-in and
@@ -46,9 +47,19 @@ const FAST_CHECK_INTERVAL_SECONDS = 10;
 const SLOW_CHECK_INTERVAL_SECONDS = 60;
 
 export interface VerifyAndRefreshOptions {
-  // Set false by callers that CANNOT deliver a replacement token to the client — a
-  // server component can't set a cookie. Default true: every request-scoped caller
-  // (proxy, api-auth, /api/auth/me) hands the new token back and must keep rotating.
+  // Rotation renames the AuthSession row, so the token the client holds is dead
+  // the moment it commits. Pass true ONLY when this caller hands the replacement
+  // back as Set-Cookie: the proxy, withAuth and /api/auth/me on the COOKIE
+  // transport. Everyone else passes false — a server component and requireAuth()
+  // have no response to put it on, and a BEARER (native) client is never given a
+  // new token (guardrail 6b), so rotating it signed the iOS app out on its next
+  // request after any role/permission edit. Without rotation the claims still
+  // carry the fresh role + permissions, so the authz decision is unaffected; and
+  // a bearer token never carries dbCheckedAt from the client, so every bearer
+  // request re-reads privileges here anyway.
+  //
+  // Default true is kept for callers that predate the option; new callers should
+  // say which transport they are on.
   allowRotation?: boolean;
 }
 
@@ -201,43 +212,30 @@ export async function verifyAndRefreshSession(
     };
 
     // Privilege change (role OR permissions) → rotate sessionId so a leaked
-    // pre-change token cannot be replayed.
-    // ALSO bump sessionsRevokedAt past the old JWT's iat, so the cutoff check
-    // above rejects the old token on EVERY replica at its next DB check. Without
-    // the bump, only this replica would know about the rotation.
+    // pre-change token cannot be replayed. Renaming the AuthSession row is the
+    // whole revocation: every copy of the old token fails the row-presence check
+    // on the next slow-path verify, and markSessionForceRevoked (below) sends the
+    // next one on THIS process straight to the slow path.
     //
-    // rotationCutoffSec records the cutoff we stamped (null = no rotation). The
-    // signing path below uses it to force the new JWT's iat past that cutoff, so
-    // the freshly-minted token doesn't fail its own cutoff check when rotation
-    // happens in the same wall-clock second as the original sign-in.
-    let rotationCutoffSec: number | null = null;
+    // It deliberately does NOT stamp sessionsRevokedAt. That cutoff is per-USER
+    // (`iat <= cutoff`), so anchoring it to this token's iat also killed every
+    // OTHER session of the user minted earlier — every native device (a bearer
+    // token keeps its sign-in iat forever) and every browser not re-signed since
+    // — leaving their AuthSession rows listed as live. The cutoff is only read on
+    // the slow path, where the renamed row already rejects the old token, so the
+    // stamp bought nothing. revokeSessionById dropped the identical bump for the
+    // identical reason.
     const privilegeChanged =
       dbUser.role !== claims.role || dbPermsStr !== claimPermsStr;
     if (privilegeChanged && !allowRotation) {
-      // Rotation is DESTRUCTIVE: it renames the AuthSession row and bumps
-      // sessionsRevokedAt past this token's iat, so the token the browser still holds is
-      // dead the moment it commits. Callers that can deliver the replacement do so
-      // (proxy.ts rewrites the forwarded cookie AND sets Set-Cookie); a server component
-      // cannot, so running it there destroyed the session and bounced the user to /login
-      // on their next request — reachable on the prefetch path proxy.ts's matcher skips,
-      // which is the whole reason guardrail 29 puts a DB-checked read here.
-      //
-      // The authz decision is unaffected: the fresh role below is what this render
-      // gates on, so a demoted user gets nothing elevated. The rotation still happens —
-      // on the next request through proxy/api-auth, which can complete it.
+      // No rotation for a caller that can't deliver the replacement (see
+      // VerifyAndRefreshOptions). The authz decision is unaffected: the fresh role
+      // below (and the fresh permissions above) are what this request gates on,
+      // so a demoted user gets nothing elevated. A browser's cookie still rotates
+      // on its next request through the proxy / withAuth.
       workingClaims = { ...workingClaims, role: dbUser.role };
     } else if (privilegeChanged) {
       const newSessionId = randomUUID();
-      const oldIatSec = typeof claims.iat === "number" ? claims.iat : Math.floor(now);
-      // Stamp the cutoff AT the old token's own iat, not one past it. The check is
-      // `iat <= cutoff`, so the presented (pre-change) token is rejected either
-      // way; `+ 1` only added collateral: a sibling device's token minted in the
-      // very next second (a legitimate fresh token) failed `iat <= cutoff` and
-      // signed that device out. Whole-second comparison cannot wrongly KEEP a
-      // revoked token here: every token of the rotated session (any iat) also dies
-      // on the renamed AuthSession row, and the new token is signed past the cutoff.
-      const cutoffSec = oldIatSec;
-      const cutoffMs = cutoffSec * 1000;
       const rotated = await prisma.$transaction(async (tx) => {
         const existingRow = await tx.authSession.findUnique({
           where: { sessionId: claims.sessionId },
@@ -248,23 +246,13 @@ export async function verifyAndRefreshSession(
           where: { sessionId: claims.sessionId },
           data: { sessionId: newSessionId },
         });
-        const userRow = await tx.user.findUnique({
-          where: { id: claims.id },
-          select: { sessionsRevokedAt: true },
-        });
-        const existing = userRow?.sessionsRevokedAt;
-        // Never decrease — a prior full-user revoke may have set it higher.
-        if (!existing || existing.getTime() < cutoffMs) {
-          await tx.user.update({
-            where: { id: claims.id },
-            data: { sessionsRevokedAt: new Date(cutoffMs) },
-          });
-        }
         return true;
       }).catch(() => false);
       if (!rotated) return null;
+      // After the rename committed (guardrail 27). (sessionId was checked
+      // non-empty at the top; the narrowing doesn't survive into this closure.)
+      if (claims.sessionId) markSessionForceRevoked(claims.sessionId);
       workingClaims = { ...workingClaims, sessionId: newSessionId, role: dbUser.role };
-      rotationCutoffSec = cutoffSec;
     }
 
     // mediaServer refresh for credentials/oidc — plex/jellyfin/jellyfin-qc are pinned at sign-in
@@ -290,11 +278,7 @@ export async function verifyAndRefreshSession(
     // any hour-long gap no matter what sessionMaxDuration promised, and a 7-day
     // ADMIN ceiling ended every admin session weekly. A native session's deadline
     // is the never-reached sentinel (session-lifetime.ts), so it passes here
-    // forever and ends only through the revocation checks above. (The sole
-    // exception to "exactly the deadline" is the same-second privilege-change
-    // rotation below, where signedIat = cutoff+1 makes exp land ≤2s past it once;
-    // the DB AuthSession row / sessionsRevokedAt remain the real boundary, so
-    // this is immaterial.)
+    // forever and ends only through the revocation checks above.
     let resignExpiresIn: number;
     const sessionDeadline = workingClaims.expiresAt;
     if (typeof sessionDeadline === "number") {
@@ -310,13 +294,7 @@ export async function verifyAndRefreshSession(
 
     // Always re-sign on a DB check so dbCheckedAt advances even when nothing else
     // changed; the fast path at the top of the function still skips this entirely.
-    // On a same-second rotation, force iat STRICTLY past the cutoff: the cutoff
-    // check above rejects `iat <= cutoff` (deliberately inclusive for the
-    // revoke-all path), so `max(now, cutoff)` would mint a token that fails its
-    // own check on the next slow-path verify — bouncing the user to /login right
-    // after their role/permission change. `cutoff + 1` is the smallest iat the
-    // check accepts.
-    const signedIat = rotationCutoffSec !== null ? Math.max(now, rotationCutoffSec + 1) : undefined;
+    // (The presented token passed the cutoff check above, so iat = now does too.)
     const newToken = await signSessionJwt(
       {
         id: workingClaims.id,
@@ -340,7 +318,7 @@ export async function verifyAndRefreshSession(
         // Threading dbCheckedAt through the SessionClaims-as-JWTPayload escape hatch:
         dbCheckedAt: now,
       } as SessionClaims,
-      { expiresInSeconds: resignExpiresIn, iat: signedIat },
+      { expiresInSeconds: resignExpiresIn },
     );
 
     return {

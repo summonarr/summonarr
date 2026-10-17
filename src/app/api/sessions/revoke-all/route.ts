@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
-import { verifyPassword } from "@/lib/password-hash";
+import { requireStepUp } from "@/lib/step-up-auth";
+import { clearSessionFootholdsInTx } from "@/lib/session-footholds";
+import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
@@ -7,8 +9,6 @@ import { markUserForceRevalidate } from "@/lib/session-revocation";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-
-const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 
 // One-shot "sign out everywhere" endpoint. Two modes via the includeCurrent body flag:
 //
@@ -38,40 +38,18 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const confirmPassword = typeof body.confirmPassword === "string" ? body.confirmPassword : undefined;
   const includeCurrent = body.includeCurrent === true;
 
-  const user = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { passwordHash: true },
+  const denied = await requireStepUp({
+    req,
+    session,
+    confirmPassword,
+    context: includeCurrent ? "revoke-all" : "revoke-others",
+    messages: {
+      passwordRequired: t("apiAuth.sessions.confirmPasswordSignOut"),
+      recentSignInRequired: t("apiAuth.sessions.recentSignInSignOut"),
+    },
+    t,
   });
-  if (!user) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
-
-  if (user.passwordHash) {
-    if (!confirmPassword) {
-      return NextResponse.json(
-        { error: "password-required", message: t("apiAuth.sessions.confirmPasswordSignOut") },
-        { status: 401 },
-      );
-    }
-    const ok = await verifyPassword(confirmPassword, user.passwordHash);
-    if (!ok) return NextResponse.json({ error: "invalid-password" }, { status: 401 });
-  } else {
-    const callerSessionId = session.sessionId;
-    if (!callerSessionId) {
-      return NextResponse.json(
-        { error: "session-too-old", message: t("apiAuth.sessions.recentSignInSignOut") },
-        { status: 401 },
-      );
-    }
-    const caller = await prisma.authSession.findUnique({
-      where: { sessionId: callerSessionId },
-      select: { createdAt: true },
-    });
-    if (!caller || Date.now() - caller.createdAt.getTime() > STEP_UP_MAX_AGE_MS) {
-      return NextResponse.json(
-        { error: "session-too-old", message: t("apiAuth.sessions.recentSignInSignOut") },
-        { status: 401 },
-      );
-    }
-  }
+  if (denied) return denied;
 
   let deletedCount = 0;
   if (includeCurrent) {
@@ -81,10 +59,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
     await prisma.$transaction(async (tx) => {
       await tx.user.update({
         where: { id: session.user.id },
-        data: { sessionsRevokedAt: new Date() },
+        // The calendar feed URL is a bearer credential like a session (the
+        // password change clears it for the same reason).
+        data: { sessionsRevokedAt: new Date(), calendarTokenHash: null, calendarTokenCreatedAt: null },
       });
       const result = await tx.authSession.deleteMany({ where: { userId: session.user.id } });
       deletedCount = result.count;
+      await clearSessionFootholdsInTx(tx, session.user.id);
     });
   } else {
     // Delete every other session row AND bump sessionsRevokedAt to a value just
@@ -113,6 +94,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
         },
       });
       deletedCount = result.count;
+      // What a signed-out device could have planted goes with it (guardrail 6g):
+      // push registrations (this browser re-registers itself on its next page
+      // load), pending Discord links, and the calendar feed URL.
+      await clearSessionFootholdsInTx(tx, session.user.id);
+      await tx.user.update({
+        where: { id: session.user.id },
+        data: { calendarTokenHash: null, calendarTokenCreatedAt: null },
+      });
       if (callerRow) {
         const cutoff = new Date(callerRow.createdAt.getTime() - 1000);
         // Never DECREASE sessionsRevokedAt — a prior full revoke may have set it
@@ -136,6 +125,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // caller row still passes. Other replicas converge via the row deletion +
   // sessionsRevokedAt cutoff.
   markUserForceRevalidate(session.user.id);
+  void notifyAccountSecurityEvent(session.user.id, includeCurrent ? "signed-out-all" : "signed-out-others");
 
   void logAudit({
     userId: session.user.id,

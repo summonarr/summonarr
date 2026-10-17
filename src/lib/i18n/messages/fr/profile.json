@@ -129,6 +129,8 @@
   "profile.sessions.passwordLabel": "Confirmez votre mot de passe pour révoquer cet appareil",
   "profile.sessions.passwordPlaceholder": "Votre mot de passe",
   "profile.sessions.error.incorrectPassword": "Mot de passe incorrect.",
+  "profile.stepUp.prompt": "Confirmez votre mot de passe pour continuer",
+  "profile.stepUp.continue": "Continuer",
   "profile.sessions.error.revoke": "Échec de la révocation de la session.",
   "profile.close.title": "Fermer le compte",
   "profile.close.description": "Fermez votre compte et bloquez la connexion. Seul un administrateur peut le rétablir.",

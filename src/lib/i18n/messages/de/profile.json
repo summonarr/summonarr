@@ -129,6 +129,8 @@
   "profile.sessions.passwordLabel": "Bestätigen Sie Ihr Passwort, um die Sitzung dieses Geräts zu widerrufen",
   "profile.sessions.passwordPlaceholder": "Ihr Passwort",
   "profile.sessions.error.incorrectPassword": "Falsches Passwort.",
+  "profile.stepUp.prompt": "Bestätigen Sie Ihr Passwort, um fortzufahren",
+  "profile.stepUp.continue": "Weiter",
   "profile.sessions.error.revoke": "Sitzung konnte nicht widerrufen werden.",
   "profile.close.title": "Konto schließen",
   "profile.close.description": "Schließen Sie Ihr Konto und sperren Sie die Anmeldung. Nur ein Administrator kann es wiederherstellen.",

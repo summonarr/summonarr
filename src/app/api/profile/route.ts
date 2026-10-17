@@ -5,7 +5,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { readJsonCappedOr } from "@/lib/body-size";
-import { verifyPassword } from "@/lib/password-hash";
+import { verifyStepUpPassword } from "@/lib/step-up-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -52,8 +52,16 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     if (typeof password !== "string" || password.length === 0) {
       return NextResponse.json({ error: t("apiAuth.profile.passwordRequiredDelete") }, { status: 400 });
     }
-    const ok = await verifyPassword(password, target.passwordHash);
-    if (!ok) {
+    const verdict = await verifyStepUpPassword({
+      userId: id,
+      userName: target.name ?? target.email,
+      passwordHash: target.passwordHash,
+      password,
+      context: "account-delete",
+      req,
+    });
+    if (verdict === "rate-limited") return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
+    if (verdict === "invalid") {
       return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
     }
   }

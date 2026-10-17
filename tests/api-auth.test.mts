@@ -40,17 +40,24 @@
 //   - the UA-fingerprint and machine-IP checks are actually WIRED into
 //     authenticateRequest (mismatch ⇒ 401 before the handler; bearer skips
 //     the fingerprint check).
-// NOT covered: requireAuth() called directly — it reads next/headers
-// cookies()/headers(), which throw outside a request scope under the real
-// next/headers the loader wires up (same unreachability tests/
-// session-server.test.mts documents for readSummonarrSession).
+//   - privilege-change ROTATION per transport: a cookie session rotates and
+//     only its Set-Cookie replacement keeps working; a BEARER session is never
+//     rotated (the app is never handed a new token, so a rotation signed it
+//     out); requireAuth() never rotates (it has no response to put the
+//     replacement on — the SSE re-auth tick used to sign browsers out this way).
+//     requireAuth reads next/headers, so it runs inside a synthetic request
+//     scope (the tests/auth-signin-routes.test.mts technique).
 //
 // No DB or network: the prisma model delegates are shadowed in-memory
 // (tests/_helpers.mts), fetch throws, and the JWTs are REAL jose tokens.
-// Claim role/permissions always mirror the stubbed DB row so the privilege-
-// rotation path never fires here (session-refresh.test.mts owns rotation).
+// Claim role/permissions mirror the stubbed DB row (no rotation) except in the
+// per-transport rotation tests at the bottom, which edit the row on purpose.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+(globalThis as { AsyncLocalStorage?: unknown }).AsyncLocalStorage = AsyncLocalStorage;
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
 process.env.NEXTAUTH_SECRET = "api-auth-wrapper-test-secret-0123456789abcdef";
@@ -79,7 +86,7 @@ const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers
 const { signSessionJwt, verifySessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
-const { withAuth, withAdmin, withIssueAdmin, withPermission } = await import(
+const { withAuth, withAdmin, withIssueAdmin, withPermission, requireAuth } = await import(
   "../src/lib/api-auth.ts"
 );
 
@@ -121,9 +128,9 @@ shadowPrismaModel(prisma, "user", {
   update: async () => ({}),
 });
 
-// Rotation never fires in this file (claim always mirrors the DB row), but a
-// functional $transaction stub keeps an accidental trigger from reaching a
-// real client. Mirrors session-server.test.mts.
+// A functional $transaction stub for the privilege-change rotation (only the
+// per-transport rotation tests at the bottom trigger it). Mirrors
+// session-server.test.mts.
 const txStub = {
   authSession: {
     findUnique: async (args: { where: { sessionId: string } }) =>
@@ -554,4 +561,85 @@ test("a machine session's mint-time IP allowlist is enforced per request: wrong 
   );
   assert.equal(allowedIp.status, 200);
   assert.equal(calls.length, 1);
+});
+
+// ── privilege-change rotation, per transport ────────────────────────────────
+//
+// Rotation renames the AuthSession row, so the presented token dies the moment
+// it commits. That is only safe where the caller hands the client its
+// replacement: withAuth on the COOKIE transport (Set-Cookie). A bearer client is
+// never given a new token (guardrail 6b) and requireAuth has no response at all.
+
+function promote(userId: string): void {
+  const u = usersById.get(userId);
+  assert.ok(u);
+  u.role = "ISSUE_ADMIN";
+}
+
+test("rotation: a BEARER session whose role changed is NOT rotated — the app's original token keeps working", async () => {
+  const { userId, sessionId, token } = await mintSession({ role: "USER" });
+  promote(userId);
+  const { calls, handler } = probe();
+  const wrapped = withAuth(handler);
+  const first = await wrapped(makeReq(asBearer(token)), {});
+  assert.equal(first.status, 200);
+  assert.equal(calls[0].session.user.role, "ISSUE_ADMIN", "the request gates on the fresh DB role");
+  assert.equal(calls[0].session.sessionId, sessionId, "the native session keeps its id");
+  const again = await wrapped(makeReq(asBearer(token)), {});
+  assert.equal(again.status, 200, "the token the app holds must still work on its next request");
+});
+
+test("rotation: a COOKIE session whose role changed IS rotated — only the Set-Cookie replacement keeps working", async () => {
+  const { userId, sessionId, token } = await mintSession({ role: "USER" });
+  promote(userId);
+  const { calls, handler } = probe();
+  const wrapped = withAuth(handler);
+  const first = await wrapped(makeReq(asCookie(token)), {});
+  assert.equal(first.status, 200);
+  assert.notEqual(calls[0].session.sessionId, sessionId, "a leaked pre-change cookie must not replay");
+  const setCookie = first.headers.getSetCookie().find((c) => c.startsWith(`${COOKIE}=`));
+  assert.ok(setCookie, "the replacement is delivered");
+  const replacement = setCookie.split(";")[0].slice(COOKIE.length + 1);
+  assert.equal((await wrapped(makeReq(asCookie(token)), {})).status, 401, "the pre-change cookie is dead");
+  assert.equal((await wrapped(makeReq(asCookie(replacement)), {})).status, 200);
+});
+
+const cjsRequire = createRequire(import.meta.url);
+type RunStore = { run<T>(store: unknown, fn: () => T): T };
+const { workAsyncStorage } = cjsRequire("next/dist/server/app-render/work-async-storage.external.js") as { workAsyncStorage: RunStore };
+const { workUnitAsyncStorage } = cjsRequire("next/dist/server/app-render/work-unit-async-storage.external.js") as { workUnitAsyncStorage: RunStore };
+const { RequestCookies } = cjsRequire("next/dist/server/web/spec-extension/cookies.js") as { RequestCookies: new (h: Headers) => unknown };
+const { RequestCookiesAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapters/request-cookies.js") as { RequestCookiesAdapter: { seal(c: unknown): unknown } };
+const { HeadersAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapters/headers.js") as { HeadersAdapter: { seal(h: Headers): unknown } };
+
+function inRequestScope<T>(headers: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  const h = new Headers(headers);
+  return workAsyncStorage.run(
+    { route: "/api-auth.test", forceStatic: false, dynamicShouldError: false, afterContext: { after: () => {} } },
+    () => workUnitAsyncStorage.run(
+      {
+        type: "request", phase: "render",
+        headers: HeadersAdapter.seal(h),
+        cookies: RequestCookiesAdapter.seal(new RequestCookies(h)),
+        usedDynamic: false,
+      },
+      fn,
+    ),
+  );
+}
+
+test("rotation: requireAuth() NEVER rotates — after a role change the browser's cookie still works", async () => {
+  // requireAuth discards any refreshed token (no response to attach it to). The
+  // SSE stream's 60s re-auth tick calls it, and a rotation there renamed the
+  // row out from under the cookie the browser still held: signed out right
+  // after an admin edited the user's permissions.
+  const { userId, sessionId, token } = await mintSession({ role: "USER" });
+  promote(userId);
+  const fresh = await inRequestScope(asCookie(token), () => requireAuth());
+  assert.ok(!(fresh instanceof NextResponse), "the session resolves");
+  assert.equal(fresh.user.role, "ISSUE_ADMIN", "with the fresh DB role");
+  assert.equal(fresh.sessionId, sessionId, "and the SAME session");
+  const { handler } = probe();
+  assert.equal((await withAuth(handler)(makeReq(asCookie(token)), {})).status, 200,
+    "the browser's cookie must still work on its next request");
 });

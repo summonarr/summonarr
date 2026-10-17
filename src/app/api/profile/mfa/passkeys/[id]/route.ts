@@ -27,7 +27,7 @@ export const PATCH = withAuth(async (
   if (typeof parsed.name !== "string" || parsed.name.trim().length === 0) {
     return NextResponse.json({ error: t("apiAuth.mfa.nameRequired") }, { status: 400 });
   }
-  const user = await mfaReauthStepUp(session, parsed.password, t);
+  const user = await mfaReauthStepUp(session, parsed.password, t, req);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;
@@ -64,7 +64,7 @@ export const DELETE = withAuth(async (
   const { id } = await params;
   const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024, {});
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaReauthStepUp(session, parsed.password, t);
+  const user = await mfaReauthStepUp(session, parsed.password, t, req);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;

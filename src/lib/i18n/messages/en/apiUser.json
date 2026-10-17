@@ -146,6 +146,8 @@
   "apiUser.requests.bulk.onBehalfIdInvalid": "onBehalfOfUserId must be a string",
   "apiUser.requests.bulk.quotaMovie": "This would exceed the movie quota of {limit} per {window} ({remaining} remaining).",
   "apiUser.requests.bulk.quotaTv": "This would exceed the TV quota of {limit} per {window} ({remaining} remaining).",
+  "apiUser.requests.bulk.filerQuotaMovie": "This would exceed your own movie quota of {limit} per {window} ({remaining} remaining). Requests you file for others count toward it.",
+  "apiUser.requests.bulk.filerQuotaTv": "This would exceed your own TV quota of {limit} per {window} ({remaining} remaining). Requests you file for others count toward it.",
   "apiUser.requests.bulk.targetDeactivated": "Target user is deactivated",
   "apiUser.requests.bulk.targetMorePermissions": "You can't request on behalf of a user with more permissions than you",
   "apiUser.requests.bulk.targetNotFound": "Target user not found",

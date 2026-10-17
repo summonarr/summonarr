@@ -146,6 +146,8 @@
   "apiUser.requests.bulk.onBehalfIdInvalid": "onBehalfOfUserId 必须是字符串",
   "apiUser.requests.bulk.quotaMovie": "这将超出电影配额（{limit} 个/{window}，剩余 {remaining} 个）。",
   "apiUser.requests.bulk.quotaTv": "这将超出剧集配额（{limit} 个/{window}，剩余 {remaining} 个）。",
+  "apiUser.requests.bulk.filerQuotaMovie": "这将超出你自己的电影配额（{limit} 个/{window}，剩余 {remaining} 个）。你代他人提交的请求也计入其中。",
+  "apiUser.requests.bulk.filerQuotaTv": "这将超出你自己的剧集配额（{limit} 个/{window}，剩余 {remaining} 个）。你代他人提交的请求也计入其中。",
   "apiUser.requests.bulk.targetDeactivated": "目标用户已停用",
   "apiUser.requests.bulk.targetMorePermissions": "你不能代权限高于你的用户发起请求",
   "apiUser.requests.bulk.targetNotFound": "未找到目标用户",

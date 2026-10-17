@@ -2,7 +2,7 @@
 //   POST /api/auth/sign-in/credentials
 //   POST /api/auth/sign-in/plex
 //   POST /api/auth/plex/start
-//   GET/POST /api/auth/plex/pin
+//   POST/PATCH /api/auth/plex/pin
 //   GET  /api/auth/plex/client-id
 //   GET  /api/auth/oidc/start
 //   GET  /api/auth/oidc/callback
@@ -72,6 +72,7 @@ let plexPinCreate: { id?: number; code?: string } | null = { id: 4242, code: "AB
 let plexPinStatus = 200;
 let plexPinCreateThrows: Error | null = null;
 let plexPinToken: string | null = null;
+let plexUserOk = false;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
@@ -83,6 +84,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if (url.hostname === "plex.tv" && /^\/api\/v2\/pins\/\d+$/.test(url.pathname)) {
     return plexPinStatus === 200 ? json({ authToken: plexPinToken }) : json({ error: "nope" }, plexPinStatus);
+  }
+  if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user" && plexUserOk) {
+    return json({ id: 9001, email: "owner@example.com", username: "owner" });
   }
   // Everything else (plex.tv user lookup, OIDC discovery) fails — the routes'
   // error paths are what this file exercises.
@@ -103,7 +107,8 @@ const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
-const { signPlexFlowCookie, PLEX_FLOW_COOKIE } = await import("../src/lib/plex-flow-state.ts");
+const { signPlexFlowCookie, PLEX_FLOW_COOKIE, PLEX_CONNECT_COOKIE, signPlexConnectCookie } =
+  await import("../src/lib/plex-flow-state.ts");
 const { OIDC_STATE_COOKIE, OIDC_STATE_COOKIE_PATH, verifyOidcStateCookie, signOidcStateCookie } =
   await import("../src/lib/oidc.ts");
 const { NATIVE_CLIENT_HEADER } = await import("../src/lib/mobile-auth.ts");
@@ -257,6 +262,7 @@ beforeEach(() => {
   plexPinStatus = 200;
   plexPinCreateThrows = null;
   plexPinToken = null;
+  plexUserOk = false;
   delete process.env.OIDC_ISSUER;
   delete process.env.OIDC_CLIENT_ID;
   delete process.env.OIDC_CLIENT_SECRET;
@@ -624,47 +630,147 @@ test("plex start rejects malformed JSON", async () => {
   assert.equal(res.status, 400);
 });
 
-// ── /api/auth/plex/pin (admin-only) ──────────────────────────────────────────
+// ── /api/auth/plex/pin (admin-only "Connect Plex") ───────────────────────────
+//
+// plex.tv returns a PIN's authToken to anyone presenting (pinId, the client
+// identifier that created it). These used to be (any `?id=`, the constant
+// "summonarr-server" shared by every install), so anyone could poll recent pin
+// ids and collect an admin's Plex OWNER token. The PIN is now created under a
+// per-attempt random identifier, both live only in a signed HttpOnly cookie
+// bound to the admin, and the token is stored server-side.
+
+function patchPin(headers: Record<string, string> = {}, path = "/api/auth/plex/pin") {
+  return new NextRequest(`http://localhost:3000${path}`, { method: "PATCH", headers });
+}
+function connectCookieFrom(res: Response): string {
+  const raw = setCookies(res).find((c) => c.startsWith(`${PLEX_CONNECT_COOKIE}=`));
+  assert.ok(raw, "POST must set the connect cookie");
+  return raw.split(";")[0];
+}
+async function adminIdOf(sessionJwt: string): Promise<string> {
+  const { verifySessionJwt } = await import("../src/lib/session-jwt.ts");
+  const claims = await verifySessionJwt(sessionJwt);
+  assert.ok(claims);
+  return claims.id;
+}
 
 test("plex pin is admin-only on both verbs", async () => {
   const anonPost = await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined), undefined));
-  const anonGet = await inScope(() => plexPin.GET(get("/api/auth/plex/pin?id=1"), undefined));
+  const anonPatch = await inScope(() => plexPin.PATCH(patchPin(), undefined));
   assert.equal(anonPost.status, 401);
-  assert.equal(anonGet.status, 401);
+  assert.equal(anonPatch.status, 401);
   assert.deepEqual(fetchCalls, []);
 });
 
-test("plex pin GET validates its id", async () => {
+test("plex pin POST creates each PIN under a fresh random client identifier, never the shared constant", async () => {
   const t = await mintAdminSession();
-  for (const q of ["", "?id=", "?id=abc", "?id=0", "?id=-4"]) {
-    const res = await inScope(() => plexPin.GET(get(`/api/auth/plex/pin${q}`, { cookie: `${COOKIE}=${t}` }), undefined));
-    assert.equal(res.status, 400, `id ${q} should be rejected`);
+  const a = await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined));
+  const b = await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined));
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  const ids = fetchCalls.map((c) => c.headers.get("x-plex-client-identifier"));
+  assert.equal(ids.length, 2);
+  for (const id of ids) {
+    assert.ok(id && id !== "summonarr-server", `PIN created under ${id}`);
+    assert.ok(id.length >= 32, "the identifier must be unguessable");
   }
+  assert.notEqual(ids[0], ids[1], "every connect attempt needs its own identifier");
+  const body = await a.json();
+  assert.equal(body.clientId, ids[0], "the browser needs the identifier for the approval URL");
+  const raw = setCookies(a).find((c) => c.startsWith(`${PLEX_CONNECT_COOKIE}=`)) ?? "";
+  assert.match(raw, /HttpOnly/);
+  assert.match(raw, /Path=\/api\/auth\/plex\/pin/);
+});
+
+test("plex pin PATCH polls ONLY the cookie-bound pin with the cookie's identifier — a query id is ignored", async () => {
+  const t = await mintAdminSession();
+  const created = await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined));
+  const bound = connectCookieFrom(created);
+  const clientId = (await created.json()).clientId as string;
+  fetchCalls.length = 0;
+  const res = await inScope(() =>
+    plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}; ${bound}` }, "/api/auth/plex/pin?id=999"), undefined));
+  assert.equal(res.status, 200);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].url.pathname, "/api/v2/pins/4242", "must poll the bound pin, not ?id=");
+  assert.equal(fetchCalls[0].headers.get("x-plex-client-identifier"), clientId);
+});
+
+test("plex pin PATCH without a connect cookie never reaches plex.tv", async () => {
+  const t = await mintAdminSession();
+  const res = await inScope(() => plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}` }, "/api/auth/plex/pin?id=4242"), undefined));
+  assert.equal(res.status, 400);
   assert.deepEqual(fetchCalls, []);
 });
 
-test("plex pin GET marks the token response no-store", async () => {
-  // The poll returns a real Plex authToken once the user claims the PIN; it must
-  // not land in any cache.
+test("plex pin PATCH refuses a connect cookie another admin started", async () => {
+  const mine = await mintAdminSession();
+  const other = await mintAdminSession();
+  const foreign = await signPlexConnectCookie({ pinId: 4242, clientId: "summonarr-connect-x", uid: await adminIdOf(other) });
+  const res = await inScope(() =>
+    plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${mine}; ${PLEX_CONNECT_COOKIE}=${foreign}` }), undefined));
+  assert.equal(res.status, 400);
+  assert.deepEqual(fetchCalls, []);
+});
+
+test("plex pin PATCH refuses a token signed for another purpose (sign-in flow cookie)", async () => {
   const t = await mintAdminSession();
-  plexPinToken = "a-real-plex-token";
-  const res = await inScope(() => plexPin.GET(get("/api/auth/plex/pin?id=4242", { cookie: `${COOKIE}=${t}` }), undefined));
+  // The full connect claim shape (uid included), but signed with the RAW secret
+  // the sign-in flow cookie uses — only the purpose-bound key tells them apart.
+  const wrongKey = await signPlexFlowCookie(
+    { pinId: 4242, clientId: "summonarr-connect-x", uid: await adminIdOf(t) } as unknown as { pinId: number; clientId: string });
+  const res = await inScope(() =>
+    plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}; ${PLEX_CONNECT_COOKIE}=${wrongKey}` }), undefined));
+  assert.equal(res.status, 400);
+  assert.deepEqual(fetchCalls, []);
+});
+
+test("plex pin PATCH answers pending before the PIN is claimed", async () => {
+  const t = await mintAdminSession();
+  const bound = connectCookieFrom(
+    await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined)));
+  const res = await inScope(() => plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}; ${bound}` }), undefined));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { status: "pending" });
+  assert.equal(ops.filter((o) => o.op === "setting.upsert").length, 0);
+});
+
+test("plex pin PATCH stores the claimed owner token server-side and never returns it", async () => {
+  const t = await mintAdminSession();
+  const bound = connectCookieFrom(
+    await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined)));
+  plexPinToken = "a-real-plex-owner-token";
+  plexUserOk = true;
+  const res = await inScope(() => plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}; ${bound}` }), undefined));
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("cache-control"), "no-store");
-  assert.equal((await res.json()).authToken, "a-real-plex-token");
+  const text = await res.text();
+  assert.ok(!text.includes("a-real-plex-owner-token"), "the owner token must not reach the browser");
+  assert.equal(JSON.parse(text).status, "connected");
+  const saved = ops.filter((o) => o.op === "setting.upsert")
+    .map((o) => (o.args as { where: { key: string }; create: { value: string } }));
+  assert.ok(saved.some((a) => a.where.key === "plexAdminToken" && a.create.value === "a-real-plex-owner-token"));
+  assert.ok(setCookies(res).some((c) => c.startsWith(`${PLEX_CONNECT_COOKIE}=;`) && /Max-Age=0/.test(c)),
+    "a finished connect clears its cookie");
 });
 
-test("plex pin GET returns a null token before the PIN is claimed", async () => {
+test("plex pin PATCH refuses a token plex.tv will not vouch for, before any write", async () => {
   const t = await mintAdminSession();
-  const res = await inScope(() => plexPin.GET(get("/api/auth/plex/pin?id=4242", { cookie: `${COOKIE}=${t}` }), undefined));
-  assert.equal((await res.json()).authToken, null);
+  const bound = connectCookieFrom(
+    await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined)));
+  plexPinToken = "token-plex-rejects";
+  const res = await inScope(() => plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}; ${bound}` }), undefined));
+  assert.equal(res.status, 422);
+  assert.equal(ops.filter((o) => o.op === "setting.upsert").length, 0);
 });
 
 test("plex pin maps upstream failures to 502", async () => {
   const t = await mintAdminSession();
+  const bound = connectCookieFrom(
+    await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined)));
   plexPinStatus = 503;
   const p = await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined));
-  const g = await inScope(() => plexPin.GET(get("/api/auth/plex/pin?id=1", { cookie: `${COOKIE}=${t}` }), undefined));
+  const g = await inScope(() => plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}; ${bound}` }), undefined));
   assert.equal(p.status, 502);
   assert.equal(g.status, 502);
 });

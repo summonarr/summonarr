@@ -251,8 +251,11 @@ export async function proxy(request: NextRequest) {
   // forged cookie can never ride a CSRF-exempt bearer request.
   const sessionToken =
     bearerToken ?? parseSessionCookie(request.headers.get("cookie"));
+  // Rotation only on the cookie transport: this pass hands a cookie client its
+  // replacement via Set-Cookie, but a bearer client is never given a new token
+  // (guardrail 6b), so rotating its session would sign the app out.
   const refreshResult = sessionToken
-    ? await verifyAndRefreshSession(sessionToken)
+    ? await verifyAndRefreshSession(sessionToken, { allowRotation: !bearerToken })
     : null;
   const isLoggedIn = !!refreshResult;
   const role = refreshResult?.claims.role;

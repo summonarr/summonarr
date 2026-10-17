@@ -13,10 +13,11 @@ import { tooManyRequests } from "@/lib/http";
 // OIDC users authenticate at their provider, which owns MFA there, and a local
 // password-less account has nothing for a second factor to sit behind.
 
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
-import { verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { verifyStepUpPassword } from "@/lib/step-up-auth";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
@@ -52,6 +53,7 @@ export async function mfaReauthStepUp(
   session: SummonarrSession,
   password: unknown,
   t: Translator,
+  req: NextRequest,
 ): Promise<StepUpUser | NextResponse> {
   if (!checkRateLimit(`mfa-stepup:${session.user.id}`, 10, 15 * 60 * 1000)) {
     return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
@@ -70,7 +72,16 @@ export async function mfaReauthStepUp(
   if (password.length > MAX_PASSWORD_LENGTH) {
     return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
-  if (!(await verifyPassword(password, user.passwordHash))) {
+  const verdict = await verifyStepUpPassword({
+    userId: user.id,
+    userName: user.name ?? user.email,
+    passwordHash: user.passwordHash,
+    password,
+    context: "mfa-change",
+    req,
+  });
+  if (verdict === "rate-limited") return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
+  if (verdict === "invalid") {
     return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
   return { id: user.id, name: user.name, email: user.email };

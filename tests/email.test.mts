@@ -628,6 +628,21 @@ test("security notice: the heading is escaped exactly once (no &amp;amp;)", asyn
   assert.equal(html.includes("&amp;lt;"), false);
 });
 
+test("security notice: the ACCOUNT advice points at an administrator and the profile, the default keeps the two-factor advice", async () => {
+  // After a password change or a sign-out-everywhere the recipient may not be
+  // able to sign in at all, so "change your password and review two-factor" is
+  // the wrong advice there (guardrail 6g).
+  configureResend({ siteUrl: "https://media.example.com" });
+  await notifyUserSecurityEventEmail({ toEmail: "u@example.com", subject: "s", heading: "h", message: "m", advice: "account", ctaPath: "/profile" });
+  await notifyUserSecurityEventEmail({ toEmail: "u@example.com", subject: "s", heading: "h", message: "m" });
+  const [account, mfa] = sentEmails().map((e) => e.html);
+  assert.ok(account.includes("contact your Summonarr administrator"));
+  assert.ok(account.includes("https://media.example.com/profile\""), "the button goes to the profile");
+  assert.equal(account.includes("two-factor settings"), false);
+  assert.ok(mfa.includes("two-factor settings"));
+  assert.ok(mfa.includes("/profile#two-factor"));
+});
+
 // ── SMTP path: pre-socket gates ─────────────────────────────────────────────
 
 test("smtp backend: SSRF and port gates fire before any socket (and the resend path is never touched)", async () => {

@@ -170,6 +170,15 @@ function makeTx() {
       deleteMany: async () => {
         throw new Error("guardrail 28 violated: MediaServerUser must never be hard-deleted");
       },
+      // The manual link (server-users/[id] PATCH) re-reads the row and writes it
+      // inside a transaction.
+      findUnique: async (args: { where: { id: string } }) => serverUsersById.get(args.where.id) ?? null,
+      update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+        txOps.push({ op: "mediaServerUser.update", args });
+        const row = serverUsersById.get(args.where.id);
+        if (row) Object.assign(row, args.data);
+        return {};
+      },
     },
     authSession: {
       findUnique: async (args: { where: { sessionId: string } }) => {
@@ -200,6 +209,12 @@ function makeTx() {
         return u ? { sessionsRevokedAt: u.sessionsRevokedAt, deactivatedAt: u.deactivatedAt, purgedAt: u.purgedAt } : null;
       },
       update: rec("user.update"),
+      // The manual link's admin re-check reads the current and the new owner.
+      findMany: async (args: { where: { id: { in: string[] } } }) =>
+        args.where.id.in.flatMap((id) => {
+          const u = usersById.get(id);
+          return u ? [{ role: u.role, permissions: u.permissions }] : [];
+        }),
       // purgeUserDataInTx's final write — atomically re-checks deactivatedAt in
       // the SAME statement that scrubs the row, closing a race where a
       // concurrent reactivate could otherwise leave a purged-but-active zombie.
@@ -259,7 +274,12 @@ const fakePrisma = {
   issue: { count: async () => counts.issues },
   deletionVote: { count: async () => counts.votes },
   mediaServerUser: {
-    findUnique: async (args: { where: { id: string } }) => serverUsersById.get(args.where.id) ?? null,
+    // A SNAPSHOT, like real Prisma — a live reference would make a stale read
+    // look fresh and hide a missing in-transaction re-read.
+    findUnique: async (args: { where: { id: string } }) => {
+      const row = serverUsersById.get(args.where.id);
+      return row ? { ...row } : null;
+    },
     update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
       txOps.push({ op: "mediaServerUser.update(top)", args });
       const row = serverUsersById.get(args.where.id);
@@ -323,6 +343,7 @@ const fakePrisma = {
 const { NextRequest } = await import("next/server");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
+const { Permission } = await import("../src/lib/permissions.ts");
 
 const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
 const { DELETE: clearCache } = await import("../src/app/api/admin/clear-cache/route.ts");
@@ -1009,6 +1030,124 @@ test("a DEPARTED server user can still be linked — its history outlives the ac
   assert.equal(policy.status, 404);
 });
 
+// ── a MANAGE_USERS delegate (no ADMIN bit) ─────────────────────────────────
+//
+// Linking an identity is what makes its watch history readable by its new owner
+// (/api/play-history/mine*). A delegate could point the server owner's — or any
+// admin's — identity at their OWN account and read every title they watched,
+// while the victim's own history went blank.
+
+test("delegate link: may re-attach an ordinary member's identity to an ordinary account", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const targetId = seedUser("USER");
+  const msuId = seedServerUser({ userId: seedUser("USER") });
+  const res = await serverUserPatch(linkReq(msuId, { userId: targetId }, delegate.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  assert.equal(serverUsersById.get(msuId)?.userId, targetId);
+});
+
+test("delegate link: can NEVER take an identity for themselves", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const msuId = seedServerUser({ userId: seedUser("USER") });
+  const before = serverUsersById.get(msuId)?.userId;
+  const res = await serverUserPatch(linkReq(msuId, { userId: delegate.userId }, delegate.header), ctxFor(msuId));
+  assert.equal(res.status, 403);
+  assert.equal(serverUsersById.get(msuId)?.userId, before, "the binding must be untouched");
+});
+
+test("delegate link: can't move, unlink or un-pin an ADMIN's identity, nor the media server's own admin", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const accomplice = seedUser("USER");
+  const adminOwned = seedServerUser({ userId: seedUser("ADMIN"), manualUserLink: true });
+  for (const body of [{ userId: accomplice }, { userId: null }, { autoLink: true }]) {
+    const res = await serverUserPatch(linkReq(adminOwned, body, delegate.header), ctxFor(adminOwned));
+    assert.equal(res.status, 403, `${JSON.stringify(body)} on an admin's identity`);
+  }
+  assert.notEqual(serverUsersById.get(adminOwned)?.userId, accomplice);
+  assert.equal(serverUsersById.get(adminOwned)?.manualUserLink, true);
+
+  const owner = seedServerUser({ source: "plex", isServerAdmin: true });
+  const res = await serverUserPatch(linkReq(owner, { userId: accomplice }, delegate.header), ctxFor(owner));
+  assert.equal(res.status, 403, "the Plex/Jellyfin server owner's identity");
+  assert.equal(serverUsersById.get(owner)?.userId, null);
+  await flush();
+  assert.equal(auditRows.filter((r) => r.action === "SERVER_USER_LINK").length, 0);
+});
+
+test("delegate link: can't hand an identity TO an admin either (role or ADMIN bit)", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const msuId = seedServerUser();
+  const adminByRole = seedUser("ADMIN");
+  const adminByBit = seedUser("USER");
+  usersById.get(adminByBit)!.permissions = Permission.ADMIN;
+  for (const target of [adminByRole, adminByBit]) {
+    const res = await serverUserPatch(linkReq(msuId, { userId: target }, delegate.header), ctxFor(msuId));
+    assert.equal(res.status, 403);
+  }
+  assert.equal(serverUsersById.get(msuId)?.userId, null);
+});
+
+test("delegate link: the admin check runs on FRESH rows under advisory lock 42", async () => {
+  // The owner is promoted after the route's first read — the in-tx re-read must
+  // see it. Model the promotion as landing exactly when the lock is taken.
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const ownerId = seedUser("USER");
+  const msuId = seedServerUser({ userId: ownerId });
+  const savedTx = fakePrisma.$transaction;
+  fakePrisma.$transaction = async (arg: unknown, opts?: { timeout?: number }) => {
+    if (typeof arg !== "function") return savedTx(arg, opts);
+    const tx = makeTx();
+    const exec = tx.$executeRawUnsafe;
+    tx.$executeRawUnsafe = async (sql: string) => {
+      if (sql.includes("pg_advisory_xact_lock(42)")) usersById.get(ownerId)!.role = "ADMIN";
+      return exec(sql);
+    };
+    return (arg as (t: unknown) => Promise<unknown>)(tx);
+  };
+  try {
+    const res = await serverUserPatch(linkReq(msuId, { userId: seedUser("USER") }, delegate.header), ctxFor(msuId));
+    assert.equal(res.status, 403);
+    assert.equal(serverUsersById.get(msuId)?.userId, ownerId);
+    assert.ok(txOps.some((o) => o.op === "$executeRawUnsafe" && String(o.args).includes("pg_advisory_xact_lock(42)")));
+  } finally {
+    fakePrisma.$transaction = savedTx;
+  }
+});
+
+test("delegate link: the identity's CURRENT owner is re-read under the lock too", async () => {
+  // Between the route's first read and the transaction, the 5s poller re-binds
+  // the identity to an admin. Deciding on the first read would let it through.
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const adminId = seedUser("ADMIN");
+  const msuId = seedServerUser({ userId: seedUser("USER") });
+  const savedTx = fakePrisma.$transaction;
+  fakePrisma.$transaction = async (arg: unknown, opts?: { timeout?: number }) => {
+    if (typeof arg !== "function") return savedTx(arg, opts);
+    const tx = makeTx();
+    const exec = tx.$executeRawUnsafe;
+    tx.$executeRawUnsafe = async (sql: string) => {
+      if (sql.includes("pg_advisory_xact_lock(42)")) serverUsersById.get(msuId)!.userId = adminId;
+      return exec(sql);
+    };
+    return (arg as (t: unknown) => Promise<unknown>)(tx);
+  };
+  try {
+    const res = await serverUserPatch(linkReq(msuId, { userId: seedUser("USER") }, delegate.header), ctxFor(msuId));
+    assert.equal(res.status, 403);
+    assert.equal(serverUsersById.get(msuId)?.userId, adminId);
+  } finally {
+    fakePrisma.$transaction = savedTx;
+  }
+});
+
+test("an ADMIN may still link anything, including to themselves and the server owner's identity", async () => {
+  const admin = await mintSession("ADMIN");
+  const owner = seedServerUser({ source: "plex", isServerAdmin: true });
+  const res = await serverUserPatch(linkReq(owner, { userId: admin.userId }, admin.header), ctxFor(owner));
+  assert.equal(res.status, 200);
+  assert.equal(serverUsersById.get(owner)?.userId, admin.userId);
+});
+
 test("link: no session → 401, non-admin → 403, and the binding is untouched", async () => {
   const msuId = seedServerUser();
   const targetId = seedUser("USER");
@@ -1547,6 +1686,28 @@ test("delegate SUBSET rule: a MANAGE_USERS delegate cannot promote an account to
     ctxFor(targetId),
   );
   assert.equal((await patch(delegate)).status, 403);
-  const holder = await mintSession("USER", MANAGE_USERS | MANAGE_ISSUES);
+  // Holding the role's WHOLE preset (its request bits too) is what allows it.
+  const holder = await mintSession("USER", MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV | MANAGE_ISSUES);
   assert.equal((await patch(holder)).status, 200);
+});
+
+test("delegate SUBSET rule: (re-)setting a role can't hand out REQUEST bits the delegate doesn't hold", async () => {
+  // An admin restricted the target to movie requests. A delegate WITHOUT
+  // REQUEST_TV "re-set" them to USER — a same-role PATCH is accepted and
+  // re-seeds the whole preset — and handed them TV requests. Account creation
+  // already refused this (presetExceeds); the role branch only checked
+  // management bits.
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE);
+  const targetId = seedUser("USER");
+  usersById.get(targetId)!.permissions = Permission.REQUEST | Permission.REQUEST_MOVIE;
+  const res = await userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...delegate.header, "content-type": "application/json" },
+      body: JSON.stringify({ role: "USER" }),
+    }),
+    ctxFor(targetId),
+  );
+  assert.equal(res.status, 403);
+  assert.equal(txOps.filter((o) => o.op === "user.update").length, 0, "no re-seed was written");
 });

@@ -2022,7 +2022,17 @@ const spec = {
       post: {
         tags: ["Profile"],
         summary: "Start connecting Trakt (device-code flow)",
-        description: "Answers the short code the user enters at the verification URL. The device code itself stays on the server. Poll POST /profile/trakt/device/poll every `interval` seconds until it answers connected, expired, denied or conflict.",
+        description: "Answers the short code the user enters at the verification URL. The device code itself stays on the server. Poll POST /profile/trakt/device/poll every `interval` seconds until it answers connected, expired, denied or conflict. Requires a step-up: a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes.",
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { confirmPassword: { type: "string", description: "The current password (password accounts)" } },
+              },
+            },
+          },
+        },
         responses: {
           "200": {
             description: "The code to show",
@@ -2041,7 +2051,8 @@ const spec = {
             },
           },
           "400": { description: "Trakt is not available on this server (no client id/secret, or nothing to use it for)" },
-          "429": { description: "Too many starts, or Trakt is rate limiting" },
+          "401": { description: "Step-up authentication required or failed (guardrail 6g). `error` is a code: password-required (send `confirmPassword`), invalid-password, or session-too-old (an SSO caller whose session is older than 5 minutes)" },
+          "429": { description: "Too many starts, Trakt is rate limiting, or too many wrong step-up passwords" },
           "502": { description: "Trakt could not be reached" },
         },
       },
@@ -5472,13 +5483,16 @@ const spec = {
       post: {
         tags: ["Discord"],
         summary: "Issue a short-lived token to link a Discord account to the current user",
-        description: "The token lives 10 minutes and replaces any earlier one for the caller. With `discordId` only that Discord account can redeem it; without, any Discord account that sees it can. 5 per 10 minutes per user.",
+        description: "The token lives 10 minutes and replaces any earlier one for the caller. With `discordId` only that Discord account can redeem it; without, any Discord account that sees it can. 5 per 10 minutes per user. Requires a step-up: a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes. Audited.",
         requestBody: {
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits); present but malformed is a 400" } },
+                properties: {
+                  discordId: { type: "string", description: "Discord snowflake (17–20 digits); present but malformed is a 400" },
+                  confirmPassword: { type: "string", description: "The current password (password accounts)" },
+                },
               },
             },
           },
@@ -5499,6 +5513,7 @@ const spec = {
             },
           },
           "400": { description: "`discordId` is present but not a valid snowflake" },
+          "401": { description: "Step-up authentication required or failed (guardrail 6g). `error` is a code: password-required (send `confirmPassword`), invalid-password, or session-too-old (an SSO caller whose session is older than 5 minutes)" },
           "429": { description: "Rate limited" },
         },
       },
@@ -5507,14 +5522,15 @@ const spec = {
       post: {
         tags: ["Discord"],
         summary: "Start Discord account merge flow",
-        description: "DMs a 12-character code (valid 10 minutes) to the given Discord account through the bot. Deliberately does not say whether that Discord id is already linked; that surfaces at confirm-merge.",
+        description: "DMs a 12-character code (valid 10 minutes) to the given Discord account through the bot. Deliberately does not say whether that Discord id is already linked; that surfaces at confirm-merge. A WEB session needs a step-up (a password account sends `confirmPassword`; an SSO account must have signed in within the last 5 minutes); a native-app session is exempt.",
         requestBody: {
           required: true,
-          content: { "application/json": { schema: { type: "object", required: ["discordId"], properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits)" } } } } },
+          content: { "application/json": { schema: { type: "object", required: ["discordId"], properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits)" }, confirmPassword: { type: "string", description: "The current password (web sessions of password accounts)" } } } } },
         },
         responses: {
           "200": { description: "{ ok: true } — the code was DMed (it is never returned)" },
           "400": { description: "Invalid Discord user id" },
+          "401": { description: "Step-up authentication required or failed (guardrail 6g). `error` is a code: password-required (send `confirmPassword`), invalid-password, or session-too-old (an SSO caller whose session is older than 5 minutes)" },
           "429": { description: "More than 10 initiations an hour, or 3 per target Discord id per 15 minutes" },
           "502": { description: "The bot could not open or send the DM" },
           "503": { description: "No Discord bot token configured" },

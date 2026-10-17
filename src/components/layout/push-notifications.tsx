@@ -21,6 +21,26 @@ const SW_READY_TIMEOUT_MS = 10_000;
 // library would also work, but guardrail 9 rules that out.)
 const PUSH_CHANGED_EVENT = "summonarr:push-changed";
 
+// The server can drop this browser's registration without the browser knowing:
+// a password change or "sign out everywhere" deletes every push registration on
+// the account, since a session hijacker may have added their own (guardrail 6g).
+// The bell reads the BROWSER's subscription, so without this the owner's own
+// browser would keep showing "on" while nothing was delivered. Re-send it once
+// per page load; the server upserts by endpoint, so a still-registered browser
+// changes nothing. Failures are ignored: push may be switched off, the site may
+// be in maintenance, or the endpoint may belong to another account here.
+let resyncedThisPageLoad = false;
+function resyncSubscription(sub: PushSubscription): void {
+  if (resyncedThisPageLoad) return;
+  resyncedThisPageLoad = true;
+  const json = sub.toJSON();
+  void fetch(withBasePath("/api/push/subscribe"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys }),
+  }).catch(() => { });
+}
+
 /** The server's own (translated, safe) reason the VAPID key could not be served. */
 class ServerReasonError extends Error {}
 
@@ -62,7 +82,10 @@ export function PushNotifications() {
     navigator.serviceWorker
       .register(withBasePath("/sw.js"), { scope: withBasePath("/") })
       .then((reg) => reg.pushManager.getSubscription())
-      .then((sub) => setState(sub ? "subscribed" : "unsubscribed"))
+      .then((sub) => {
+        if (sub) resyncSubscription(sub);
+        setState(sub ? "subscribed" : "unsubscribed");
+      })
       .catch(() => setState("unsubscribed"));
 
     const onChanged = () => {

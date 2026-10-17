@@ -68,7 +68,15 @@ const stubs = {
       sessionRows.has(args.where.sessionId)
         ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId }
         : null,
-    update: async () => ({}), // lastSeenAt fire-and-forget touch
+    // lastSeenAt fire-and-forget touch, or the privilege-change rotation's
+    // sessionId rename (inside $transaction, which hands back these stubs).
+    update: async (args: { where: { sessionId: string }; data: { sessionId?: string } }) => {
+      if (args.data.sessionId) {
+        sessionRows.delete(args.where.sessionId);
+        sessionRows.add(args.data.sessionId);
+      }
+      return {};
+    },
   },
   user: {
     findUnique: async (args: { where: { id: string } }) => {
@@ -77,8 +85,8 @@ const stubs = {
     },
     update: async () => ({}),
   },
-  // Rotation never fires here (claims always mirror the DB row), but a
-  // functional stub keeps an accidental trigger loud instead of hanging.
+  // Only the bearer-rotation pin triggers the rotation; the rest of the file's
+  // claims mirror the DB row.
   $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(stubs),
 };
 
@@ -356,4 +364,19 @@ test("an ordinary session carries no allowlist and is unaffected by the check", 
   const res = await getMe(meReq({ ...asBearer(token), "x-forwarded-for": "203.0.113.9" }));
   assert.equal(res.status, 200);
   assert.equal((await res.json()).session.user.id, userId);
+});
+
+// A bearer (native) client is never handed a replacement token (guardrail 6b),
+// so /api/auth/me must not rotate its session after a role change — the row
+// rename made the app's very next request a 401.
+test("/api/auth/me: a role change does NOT rotate a bearer session — the app's token still works afterwards", async () => {
+  const { userId, sessionId, token } = await mintSession({ role: "USER" });
+  const u = usersById.get(userId);
+  assert.ok(u);
+  u.role = "ISSUE_ADMIN";
+  const first = await getMe(meReq(asBearer(token)));
+  assert.equal(first.status, 200);
+  assert.equal(((await bodyOf(first)).session as { user: { role: string } }).user.role, "ISSUE_ADMIN");
+  assert.ok(sessionRows.has(sessionId), "the native session's row must not be renamed");
+  assert.equal((await getMe(meReq(asBearer(token)))).status, 200);
 });

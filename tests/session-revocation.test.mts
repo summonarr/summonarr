@@ -124,3 +124,24 @@ test("user ledger is bounded independently; a session flood never evicts user ma
   assert.equal(shouldForceDbCheck("evict_c:u0", "sess_any"), true);
   assert.equal(shouldForceDbCheck(`evict_c:u${CAP - 1}`, "sess_any"), true);
 });
+
+// Turbopack copies this module into every server chunk that imports it. The
+// revoke routes mark in THEIR chunk; the proxy and every page render read
+// their own copy. With plain module-level Sets those copies were empty forever
+// (seen in a production build), so a revoked session kept rendering pages for
+// the whole dbCheckedAt window. A cache-busted second import is the unit-test
+// analogue of a second chunk: a mark made through one must be seen by the other.
+test("a mark made in one module instance (chunk) is seen by every other instance", async () => {
+  const markerSpecifier = "../src/lib/session-revocation.ts?chunk=route";
+  const readerSpecifier = "../src/lib/session-revocation.ts?chunk=proxy";
+  const routeChunk: typeof import("../src/lib/session-revocation.ts") = await import(markerSpecifier);
+  const proxyChunk: typeof import("../src/lib/session-revocation.ts") = await import(readerSpecifier);
+  assert.notEqual(routeChunk, proxyChunk, "the two imports must be distinct module instances");
+
+  routeChunk.markSessionForceRevoked("sess_cross_chunk");
+  routeChunk.markUserForceRevalidate("u_cross_chunk");
+  assert.equal(proxyChunk.shouldForceDbCheck("u_any", "sess_cross_chunk"), true);
+  assert.equal(proxyChunk.shouldForceDbCheck("u_cross_chunk", "sess_any"), true);
+  // …and the statically imported copy (a third "chunk") agrees.
+  assert.equal(shouldForceDbCheck("u_cross_chunk", "sess_other"), true);
+});

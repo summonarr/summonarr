@@ -259,6 +259,19 @@ shadowPrismaModel(prisma, "auditLog", {
 
 shadowPrismaModel(prisma, "setting", { findUnique: async () => null, findMany: async () => [] });
 
+// Media-server identities by email — user-create refuses a delegate an address
+// one of these carries (play-history attribution falls back to an email match).
+let serverUserEmails: string[] = [];
+shadowPrismaModel(prisma, "mediaServerUser", {
+  findFirst: async (args: { where: { email: { equals: string; mode?: string } } }) => {
+    rec("mediaServerUser.findFirst", args);
+    const want = args.where.email.equals;
+    const insensitive = args.where.email.mode === "insensitive";
+    const hit = serverUserEmails.find((e) => (insensitive ? e.toLowerCase() === want.toLowerCase() : e === want));
+    return hit ? { id: `msu-${hit}` } : null;
+  },
+});
+
 const users = await import("../src/app/api/admin/users/route.ts");
 const auditLog = await import("../src/app/api/admin/audit-log/route.ts");
 const auditExport = await import("../src/app/api/admin/audit-log/export/route.ts");
@@ -317,6 +330,7 @@ async function readAll(res: Response): Promise<string> {
 
 beforeEach(() => {
   ops = [];
+  serverUserEmails = [];
   appUsers = [];
   auditRows = [];
   auditSeq = 0;
@@ -349,6 +363,30 @@ test("users: a MANAGE_USERS holder who is NOT an admin can list and create", asy
   const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
   assert.equal((await listUsers(t)).status, 200);
   assert.equal((await createUser(t, { email: "new@example.com", password: "password12345" })).status, 201);
+});
+
+// ── a delegate can't plant an account on a media-server identity's email ─────
+//
+// Watch-history attribution falls back to an EMAIL match for an identity with no
+// provider-bound account (a Plex friend who never signed in here). A delegate
+// creating `friend@…` with a password of their choosing got the friend's
+// identity bound to it on the next 5s poll — then signed in and read the
+// friend's watch history.
+
+test("users: a MANAGE_USERS delegate can't create an account under a media-server user's email (any case)", async () => {
+  serverUserEmails = ["Friend@Example.com"];
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
+  const res = await createUser(t, { email: "friend@example.com", password: "password12345" });
+  assert.equal(res.status, 403);
+  assert.equal(opsOf("user.create").length, 0);
+  // An address no media server reports is still fine.
+  assert.equal((await createUser(t, { email: "someone-new@example.com", password: "password12345" })).status, 201);
+});
+
+test("users: an ADMIN may still create an account under a media-server user's email", async () => {
+  serverUserEmails = ["friend@example.com"];
+  const t = await mintSession({ role: "ADMIN" });
+  assert.equal((await createUser(t, { email: "friend@example.com", password: "password12345" })).status, 201);
 });
 
 // ── the self-escalation guard ────────────────────────────────────────────────

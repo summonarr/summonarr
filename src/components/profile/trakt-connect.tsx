@@ -8,6 +8,8 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
+import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
 
 // The user's own Trakt connection (src/lib/trakt-user.ts, guardrail 34c).
 // Connecting is a device-code flow: the server hands back a short code, the
@@ -49,6 +51,10 @@ export function TraktConnect(props: TraktConnectProps) {
   const [confirming, setConfirming] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Connecting Trakt needs a step-up (guardrail 6g): the server answers
+  // "password-required" and this asks for the password inline.
+  const [stepUp, setStepUp] = useState(false);
+  const [stepUpError, setStepUpError] = useState<string | null>(null);
   // The poll loop's timer, so a cancel or an unmount stops it.
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Bumped by every stop (cancel, unmount). A poll request already in flight
@@ -116,16 +122,28 @@ export function TraktConnect(props: TraktConnectProps) {
     }
   }
 
-  async function start() {
+  async function start(confirmPassword?: string) {
     setBusy("start");
     setError(null);
     try {
-      const res = await fetch(withBasePath("/api/profile/trakt/device"), { method: "POST" });
+      const res = await fetch(withBasePath("/api/profile/trakt/device"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(withStepUpPassword({}, confirmPassword)),
+      });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || typeof data?.userCode !== "string") {
-        setError(data?.error ?? t("profile.trakt.error.connect"));
+      const need = stepUpNeedOf(res.status, data);
+      if (need) {
+        setStepUp(true);
+        setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
         return;
       }
+      if (!res.ok || typeof data?.userCode !== "string") {
+        setError(data?.message ?? data?.error ?? t("profile.trakt.error.connect"));
+        return;
+      }
+      setStepUp(false);
+      setStepUpError(null);
       const interval = typeof data.interval === "number" && data.interval > 0 ? data.interval : 5;
       setDevice({ userCode: data.userCode, verificationUrl: data.verificationUrl, interval });
       schedulePoll(interval);
@@ -312,10 +330,19 @@ export function TraktConnect(props: TraktConnectProps) {
           {props.isJellyfin && props.uses.watchlist && (
             <p className="text-xs text-zinc-500">{t("profile.trakt.jellyfinHint")}</p>
           )}
-          <Button type="button" disabled={busy !== null} onClick={start} className="w-full sm:w-auto gap-1.5">
-            {busy === "start" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link className="w-4 h-4" />}
-            {t("profile.trakt.connect")}
-          </Button>
+          {stepUp ? (
+            <StepUpPasswordForm
+              busy={busy === "start"}
+              error={stepUpError}
+              onSubmit={(password) => void start(password)}
+              onCancel={() => { setStepUp(false); setStepUpError(null); }}
+            />
+          ) : (
+            <Button type="button" disabled={busy !== null} onClick={() => void start()} className="w-full sm:w-auto gap-1.5">
+              {busy === "start" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link className="w-4 h-4" />}
+              {t("profile.trakt.connect")}
+            </Button>
+          )}
         </>
       )}
 

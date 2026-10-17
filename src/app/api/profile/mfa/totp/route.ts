@@ -22,7 +22,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (maint) return maint;
   const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024, {});
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaReauthStepUp(session, parsed.password, t);
+  const user = await mfaReauthStepUp(session, parsed.password, t, req);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;

@@ -146,6 +146,8 @@
   "apiUser.requests.bulk.onBehalfIdInvalid": "onBehalfOfUserId doit être une chaîne",
   "apiUser.requests.bulk.quotaMovie": "Cela dépasserait le quota de films de {limit} par {window} ({remaining} restantes).",
   "apiUser.requests.bulk.quotaTv": "Cela dépasserait le quota de séries de {limit} par {window} ({remaining} restantes).",
+  "apiUser.requests.bulk.filerQuotaMovie": "Cela dépasserait votre propre quota de films de {limit} par {window} ({remaining} restantes). Les demandes que vous faites pour d’autres y comptent.",
+  "apiUser.requests.bulk.filerQuotaTv": "Cela dépasserait votre propre quota de séries de {limit} par {window} ({remaining} restantes). Les demandes que vous faites pour d’autres y comptent.",
   "apiUser.requests.bulk.targetDeactivated": "L'utilisateur cible est désactivé",
   "apiUser.requests.bulk.targetMorePermissions": "Vous ne pouvez pas faire de demande au nom d'un utilisateur ayant plus d'autorisations que vous",
   "apiUser.requests.bulk.targetNotFound": "Utilisateur cible introuvable",

@@ -129,6 +129,8 @@
   "profile.sessions.passwordLabel": "Confirm your password to revoke this device",
   "profile.sessions.passwordPlaceholder": "Your password",
   "profile.sessions.error.incorrectPassword": "Incorrect password.",
+  "profile.stepUp.prompt": "Confirm your password to continue",
+  "profile.stepUp.continue": "Continue",
   "profile.sessions.error.revoke": "Failed to revoke session.",
   "profile.close.title": "Close Account",
   "profile.close.description": "Close your account and block sign-in. Only an administrator can restore it.",

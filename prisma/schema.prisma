@@ -441,8 +441,17 @@ model MediaRequest {
   requestedBy String
   user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
 
+  // The account that FILED this request when it was made on someone else's
+  // behalf (POST /api/requests/bulk with onBehalfOfUserId); null for a user's
+  // own request. A non-admin filer's own quota counts these as well as their
+  // own requests, so naming other users can't multiply what they may file
+  // (guardrail 6g). A plain id, not a relation: the row belongs to requestedBy,
+  // and this is only a quota key. Null on rows filed before the column existed.
+  filedBy String?
+
   @@unique([tmdbId, mediaType, requestedBy, arrInstance])
   @@index([requestedBy])
+  @@index([filedBy])
   // Serves the admin request list: `where {status?}` + `ORDER BY createdAt DESC`
   // (requests/route.ts). The composite's `status` prefix also covers the plain
   // `where {status}` filter, so a standalone @@index([status]) is unneeded.

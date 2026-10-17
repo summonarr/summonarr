@@ -1,8 +1,8 @@
 // Unit tests for verifyAndRefreshSession (src/lib/session-refresh.ts) — the
 // surfaces its sibling files do NOT cover. Division of labour:
-//   - tests/session-refresh-rotation.test.mts owns the ROLE-change rotation's
-//     same-second cutoff regression (rotated token survives its own cutoff,
-//     the pre-rotation token dies) and the deliberate `iat <= cutoff`
+//   - tests/session-refresh-rotation.test.mts owns the ROLE-change rotation
+//     (the rotated token verifies, the pre-rotation token dies, no other
+//     device of the user is signed out) and the deliberate `iat <= cutoff`
 //     inclusivity for sessionsRevokedAt alone;
 //   - tests/session-server.test.mts owns the plain rejection paths as seen
 //     through the request-aware reader (expired/tampered JWT, deleted
@@ -37,8 +37,8 @@
 //     sentinel forever and ends only through revocation (row deleted);
 //   - the passwordChangedAt cutoff (before/same-second/after boundaries) and
 //     cutoff = max(sessionsRevokedAt, passwordChangedAt);
-//   - PERMISSIONS-only privilege change (same role) rotating the sessionId,
-//     stamping sessionsRevokedAt, and propagating the new mask into both the
+//   - PERMISSIONS-only privilege change (same role) rotating the sessionId
+//     (without a per-user cutoff), and propagating the new mask into both the
 //     returned claims and the re-signed token; a rotation whose transaction
 //     loses the row or throws failing CLOSED (null, never a stale session);
 //   - mediaServer refresh for credentials tokens vs the sign-in-pinned
@@ -643,9 +643,10 @@ test("the cutoff is max(sessionsRevokedAt, passwordChangedAt) — a newer passwo
 
 test("a permissions-only change (same role) rotates the sessionId and propagates the new mask", async () => {
   // The DB mask moved 0 → 8 (MANAGE_ISSUES) after sign-in; the role did not
-  // change. Rotation must fire exactly as for a role change: new sessionId,
-  // sessionsRevokedAt stamped, and BOTH the returned claims and the re-signed
-  // token carrying the DB mask (a leaked pre-grant token must not replay).
+  // change. Rotation must fire exactly as for a role change: new sessionId and
+  // BOTH the returned claims and the re-signed token carrying the DB mask (a
+  // leaked pre-grant token must not replay) — and NO per-user cutoff, which
+  // would sign out the user's other devices.
   const { userId, sessionId, token } = await mint({
     role: "USER",
     permissions: "0",
@@ -660,12 +661,32 @@ test("a permissions-only change (same role) rotates the sessionId and propagates
   const payload = decodePayload(result.refreshed.token);
   assert.equal(payload.sessionId, result.claims.sessionId);
   assert.equal(payload.permissions, "8");
-  assert.ok(
-    usersById.get(userId)?.sessionsRevokedAt instanceof Date,
-    "rotation must stamp sessionsRevokedAt so other replicas reject the old token",
+  assert.equal(
+    usersById.get(userId)?.sessionsRevokedAt,
+    null,
+    "rotation must not stamp the per-user cutoff — the renamed row already kills the old token",
   );
   assert.ok(sessionRows.has(result.claims.sessionId as string), "the AuthSession row follows the new id");
   assert.ok(!sessionRows.has(sessionId), "the old sessionId row must be gone");
+});
+
+test("after a rotation, a copy of the OLD token riding a fresh dbCheckedAt is sent to the DB and dies — no fast-path grace", async () => {
+  // A stolen copy of the pre-change cookie, re-signed moments ago, carries a
+  // fresh dbCheckedAt and would ride the fast path with its stale privileges for
+  // the rest of the window. The rotation marks the old sessionId, so the next
+  // presentation goes to the DB, finds the renamed row gone, and is refused.
+  const { userId, sessionId, token, iat, expiresAt } = await mint({ role: "USER", permissions: "0", dbPermissions: 8n });
+  const rotated = await verifyAndRefreshSession(token);
+  assert.ok(rotated);
+  assert.notEqual(rotated.claims.sessionId, sessionId);
+  const staleCopy = await signSessionJwt(
+    {
+      id: userId, role: "USER", permissions: "0", provider: "credentials", sessionId, expiresAt,
+      dbCheckedAt: nowSec(),
+    } as Omit<SessionClaims, "iat" | "exp">,
+    { expiresInSeconds: 7_200, iat },
+  );
+  assert.equal(await verifyAndRefreshSession(staleCopy), null);
 });
 
 test("a rotation that cannot complete fails CLOSED: missing row mid-transaction and a throwing transaction both yield null", async () => {

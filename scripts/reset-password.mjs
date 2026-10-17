@@ -145,11 +145,33 @@ function connectionParams() {
   throw new Error("Set POSTGRES_PASSWORD (bundled Postgres), DATABASE_URL, or PGHOST/PGUSER/PGPASSWORD/PGDATABASE");
 }
 
+// The same floor the app enforces at registration, password change and admin
+// create — a break-glass reset must not be the one way to set a weaker password.
+const MIN_PASSWORD_LENGTH = 12;
+
+// The ADMIN superbit (Permission.ADMIN in src/lib/permissions.ts), as the
+// decimal the BIGINT column takes. --admin sets it WITH the role, as the app's
+// role change does — a role without its bitmask is a half-promoted account.
+const ADMIN_PERMISSIONS = "1";
+
+async function hasColumn(client, table, column) {
+  const { rows } = await client.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
+    [table, column],
+  );
+  return rows.length > 0;
+}
+
+async function hasTable(client, table) {
+  const { rows } = await client.query(`SELECT to_regclass($1) AS t`, [`public."${table}"`]);
+  return rows[0]?.t != null;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const password = opts.fromStdin ? await readStdin() : opts.password;
-  if (!password || password.length < 8) {
-    console.error("Password must be at least 8 characters.");
+  if (!password || password.length < MIN_PASSWORD_LENGTH) {
+    console.error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
     process.exit(1);
   }
 
@@ -158,25 +180,50 @@ async function main() {
   await client.connect();
   try {
     await client.query("BEGIN");
+    // The same invalidation the in-app password change performs (guardrail
+    // 6g): both cutoffs move to now, so every session token minted before
+    // dies on its next request — native (never-expiring) ones included.
     const sql = opts.promote
       ? `UPDATE "User"
             SET "passwordHash" = $1,
                 "passwordChangedAt" = NOW(),
-                role = 'ADMIN'
+                "sessionsRevokedAt" = NOW(),
+                role = 'ADMIN',
+                permissions = $3::bigint
           WHERE LOWER(email) = LOWER($2)
         RETURNING id, email, role`
       : `UPDATE "User"
             SET "passwordHash" = $1,
-                "passwordChangedAt" = NOW()
+                "passwordChangedAt" = NOW(),
+                "sessionsRevokedAt" = NOW()
           WHERE LOWER(email) = LOWER($2)
         RETURNING id, email, role`;
-    const { rows } = await client.query(sql, [hash, opts.email]);
+    const { rows } = await client.query(sql, opts.promote ? [hash, opts.email, ADMIN_PERMISSIONS] : [hash, opts.email]);
     if (rows.length === 0) {
       await client.query("ROLLBACK");
       console.error(`No user found with email ${opts.email}.`);
       process.exit(2);
     }
     const u = rows[0];
+    // ...and what the in-app change removes alongside the sessions: the device
+    // rows, the calendar feed URL (a bearer credential), push registrations and
+    // pending Discord link/merge codes a session holder could have planted.
+    // Each is probed first so the break-glass still works on a database whose
+    // schema predates it.
+    if (await hasTable(client, "AuthSession")) {
+      await client.query(`DELETE FROM "AuthSession" WHERE "userId" = $1`, [u.id]);
+    }
+    if (await hasColumn(client, "User", "calendarTokenHash")) {
+      await client.query(
+        `UPDATE "User" SET "calendarTokenHash" = NULL, "calendarTokenCreatedAt" = NULL WHERE id = $1`,
+        [u.id],
+      );
+    }
+    for (const table of ["PushSubscription", "DiscordLinkToken", "DiscordMergeCode"]) {
+      if (await hasTable(client, table)) {
+        await client.query(`DELETE FROM "${table}" WHERE "userId" = $1`, [u.id]);
+      }
+    }
     if (opts.resetMfa) {
       // Same write set as the in-app admin reset (deleteAllMfaInTx in
       // src/lib/mfa/mfa-store.ts): authenticator secret, passkeys, recovery codes.
@@ -185,10 +232,7 @@ async function main() {
       }
       // ...and the persistent code lockout (clearMfaLockoutInTx). Probed first so
       // the break-glass still works on a database whose schema predates it.
-      const { rows: lockCols } = await client.query(
-        `SELECT 1 FROM information_schema.columns WHERE table_name = 'User' AND column_name = 'mfaLockedUntil'`,
-      );
-      if (lockCols.length > 0) {
+      if (await hasColumn(client, "User", "mfaLockedUntil")) {
         await client.query(
           `UPDATE "User" SET "mfaFailedAttempts" = 0, "mfaLockoutCount" = 0, "mfaLockedUntil" = NULL WHERE id = $1`,
           [u.id],

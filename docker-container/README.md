@@ -471,7 +471,7 @@ If no row matches the email, the script exits with code `2` and **no changes are
 - The `summonarr` container is **running and healthy** (check with `docker ps`).
 - You're on a Summonarr image **≥ `0.11.1`** (the script was added in that release). Pin with `SUMMONARR_VERSION=0.11.1` in `.env`, or run `:latest`.
 - You can run `docker exec` against the container — usually means root or membership in the `docker` group.
-- The new password is **at least 8 characters**. The script refuses anything shorter with exit code `1`.
+- The new password is **at least 12 characters** (the same minimum the app enforces). The script refuses anything shorter with exit code `1`.
 
 ### Step 1 — Confirm the email you'll reset
 
@@ -563,7 +563,7 @@ If you've changed `POSTGRES_USER` or `POSTGRES_DB` in your `.env` away from the 
 
 **`No user found with email ...`** — The email isn't in the `User` table, or it has a different case than you typed (the script normalises both sides to lowercase, so case shouldn't matter — double-check spelling). Re-run Step 1 to list every account.
 
-**`Password must be at least 8 characters.`** — Exactly that. Use ≥ 8.
+**`Password must be at least 12 characters.`** — Exactly that. Use ≥ 12.
 
 **`Cannot parse DATABASE_URL`** (only seen when overriding) — If you bypassed the `PG*` flags and passed your own `DATABASE_URL`, it doesn't match `postgres://user:pass@host:port/db`. Either fix the URL or switch back to the four `PG*` flags.
 

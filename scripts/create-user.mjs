@@ -183,8 +183,9 @@ async function main() {
   }
 
   const password = opts.fromStdin ? await readStdin() : opts.password;
-  if (!password || password.length < 8) {
-    console.error("Password must be at least 8 characters.");
+  // The app's floor (registration, password change, admin create).
+  if (!password || password.length < 12) {
+    console.error("Password must be at least 12 characters.");
     process.exit(1);
   }
 

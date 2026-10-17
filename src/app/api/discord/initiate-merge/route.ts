@@ -6,6 +6,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isNativeSession, requireStepUp } from "@/lib/step-up-auth";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
@@ -13,7 +14,7 @@ const SNOWFLAKE_RE = /^\d{17,20}$/;
 
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<{ discordId?: unknown }>(req, 16384);
+  const parsed = await readJsonCapped<{ discordId?: unknown; confirmPassword?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const discordId = String(parsed.discordId ?? "").trim();
 
@@ -51,6 +52,29 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // account by reading the code. The owner of a taken id receives a DM they did
   // not ask for; the text says to ignore it, and the per-target limit above
   // bounds how often. A @discord.local shadow proceeds as before.
+
+  // Step-up (guardrail 6g), as generate-link: a hijacked WEB session must not be
+  // able to link the hijacker's own Discord account. A native (iOS) session is
+  // exempt — the shipped app has no step-up prompt here (guardrail 25: additive
+  // only) and its token lives in the Keychain, not an ambient cookie. "Native"
+  // is the session's own kind, fixed at sign-in (the never-expiring deadline
+  // only a caller presenting X-Summonarr-Client is minted, guardrail 6c) — NOT
+  // the transport: a stolen browser cookie replayed as a bearer token is still a
+  // web session and still gets the step-up.
+  if (!isNativeSession(session)) {
+    const denied = await requireStepUp({
+      req,
+      session,
+      confirmPassword: parsed.confirmPassword,
+      context: "discord-merge",
+      messages: {
+        passwordRequired: t("apiAuth.stepUp.passwordRequired"),
+        recentSignInRequired: t("apiAuth.stepUp.recentSignIn"),
+      },
+      t,
+    });
+    if (denied) return denied;
+  }
 
   const botTokenRow = await prisma.setting.findUnique({ where: { key: "discordBotToken" } });
   if (!botTokenRow?.value) {

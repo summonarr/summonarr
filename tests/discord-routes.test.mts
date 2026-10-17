@@ -99,6 +99,8 @@ const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
+const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
+const { hashPassword } = await import("../src/lib/password-hash.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
@@ -113,11 +115,19 @@ const opsOf = (name: string) => ops.filter((o) => o.op === name);
 type AppUser = Record<string, unknown> & { id: string; email: string; discordId: string | null; role: string };
 let appUsers: AppUser[] = [];
 const sessionRows = new Set<string>();
+// AuthSession.createdAt per session — the SSO step-up (guardrail 6g) reads it.
+const sessionCreatedAt = new Map<string, Date>();
 let userUpdateThrows = false;
 
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) =>
-    sessionRows.has(args.where.sessionId) ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId } : null,
+    sessionRows.has(args.where.sessionId)
+      ? {
+          id: `row-${args.where.sessionId}`,
+          sessionId: args.where.sessionId,
+          createdAt: sessionCreatedAt.get(args.where.sessionId) ?? new Date(),
+        }
+      : null,
   update: async () => ({}),
 });
 
@@ -285,7 +295,16 @@ function inScope<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 let seq = 0;
-async function mintSession(opts: { role?: string; permissions?: bigint; discordId?: string | null } = {}): Promise<{ userId: string; token: string }> {
+// Default: an SSO-shaped account (no passwordHash) signed in just now, so the
+// step-up (guardrail 6g) passes on recency and the older tests are unchanged.
+async function mintSession(opts: {
+  role?: string;
+  permissions?: bigint;
+  discordId?: string | null;
+  passwordHash?: string | null;
+  sessionAgeMs?: number;
+  native?: boolean;
+} = {}): Promise<{ userId: string; token: string }> {
   seq++;
   const userId = `member-${seq}`;
   const sessionId = `sess-${seq}`;
@@ -295,12 +314,17 @@ async function mintSession(opts: { role?: string; permissions?: bigint; discordI
     id: userId, name: `Member ${seq}`, email: `member-${seq}@example.com`, role,
     permissions: BigInt(permissions), mediaServer: null, sessionsRevokedAt: null,
     passwordChangedAt: null, deactivatedAt: null, notificationEmail: null,
-    discordId: opts.discordId ?? null,
+    discordId: opts.discordId ?? null, passwordHash: opts.passwordHash ?? null,
   });
   sessionRows.add(sessionId);
+  sessionCreatedAt.set(sessionId, new Date(Date.now() - (opts.sessionAgeMs ?? 0)));
   const iat = Math.floor(Date.now() / 1000);
   const token = await signSessionJwt(
-    { id: userId, role, permissions, provider: "credentials", sessionId, expiresAt: iat + 86_400 },
+    {
+      id: userId, role, permissions, provider: "credentials", sessionId,
+      // A native (iOS) session carries the never-reached deadline (guardrail 6c).
+      expiresAt: opts.native ? NEVER_EXPIRES_AT_SEC : iat + 86_400,
+    },
     { expiresInSeconds: 7_200, iat },
   );
   return { userId, token };
@@ -396,6 +420,71 @@ test("the user-facing routes admit a plain USER", async () => {
   assert.equal((await doStatus(token)).status, 200);
   assert.equal((await doGenerate(token)).status, 200);
   assert.equal((await doUnlink(token)).status, 200);
+});
+
+// ── step-up before linking (guardrail 6g) ───────────────────────────────────
+//
+// A redeemed link lets that Discord account act as this user and survives a
+// password change. So a hijacked session must not be able to mint a code (or
+// send a merge code) for the hijacker's own Discord account without proving
+// it's the owner: the password, or for an SSO account a fresh sign-in.
+
+test("step-up: generate-link asks a PASSWORD account for its password, refuses a wrong one, mints on the right one", async () => {
+  const { token } = await mintSession({ passwordHash: await hashPassword("correct-horse-battery") });
+  const ask = await doGenerate(token);
+  assert.equal(ask.status, 401);
+  assert.equal((await ask.json()).error, "password-required");
+  const wrong = await doGenerate(token, { confirmPassword: "nope-nope-nope" });
+  assert.equal(wrong.status, 401);
+  assert.equal((await wrong.json()).error, "invalid-password");
+  assert.equal(opsOf("discordLinkToken.upsert").length, 0, "nothing minted without the step-up");
+  const failed = opsOf("auditLog.create").map((o) => (o.args as { data: { action: string; details: string } }).data)
+    .filter((d) => d.action === "AUTH_LOGIN_FAILED");
+  assert.equal(failed.length, 1, "a wrong step-up password is audited");
+  assert.match(failed[0].details, /step_up_password/);
+  const ok = await doGenerate(token, { confirmPassword: "correct-horse-battery" });
+  assert.equal(ok.status, 200);
+  assert.equal(opsOf("discordLinkToken.upsert").length, 1);
+});
+
+test("step-up: generate-link refuses an SSO account whose sign-in is older than 5 minutes", async () => {
+  const { token } = await mintSession({ sessionAgeMs: 6 * 60_000 });
+  const res = await doGenerate(token);
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, "session-too-old");
+  assert.equal(opsOf("discordLinkToken.upsert").length, 0);
+});
+
+test("step-up: a minted link code is audited", async () => {
+  const { token } = await mintSession();
+  assert.equal((await doGenerate(token)).status, 200);
+  const rows = opsOf("auditLog.create").map((o) => (o.args as { data: { target: string; details: string } }).data);
+  assert.ok(rows.some((d) => d.target.startsWith("discord-link:") && d.details.includes("discord-link-code")));
+});
+
+test("step-up: initiate-merge needs it from a WEB session — even one replayed as a bearer token — but not from a NATIVE one", async () => {
+  const web = await mintSession({ sessionAgeMs: 6 * 60_000 });
+  const viaCookie = await doInitiate(web.token, { discordId: VALID_SNOWFLAKE });
+  assert.equal(viaCookie.status, 401);
+  assert.equal((await viaCookie.json()).error, "session-too-old");
+  // The SAME browser token presented as `Authorization: Bearer` (a stolen cookie
+  // swapped to the native transport) is still a web session.
+  const viaBearer = await inScope(() => initiateMerge.POST(new NextRequest("http://localhost:3000/api/discord/initiate-merge", {
+    method: "POST",
+    headers: { authorization: `Bearer ${web.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ discordId: VALID_SNOWFLAKE }),
+  }), undefined));
+  assert.equal(viaBearer.status, 401);
+  assert.equal(opsOf("discordMergeCode.upsert").length, 0);
+  // A native (iOS) session — the never-expiring deadline only an app sign-in is
+  // minted — skips it: the shipped app has no prompt here (guardrail 25).
+  const app = await mintSession({ sessionAgeMs: 6 * 60_000, native: true });
+  await inScope(() => initiateMerge.POST(new NextRequest("http://localhost:3000/api/discord/initiate-merge", {
+    method: "POST",
+    headers: { authorization: `Bearer ${app.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ discordId: VALID_SNOWFLAKE }),
+  }), undefined));
+  assert.equal(opsOf("discordMergeCode.upsert").length, 1, "the native session reaches the merge code");
 });
 
 // ── 1: generate-link fails CLOSED on a malformed snowflake ───────────────────

@@ -4,9 +4,12 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { logAudit } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
+import { footholdDeletes } from "@/lib/session-footholds";
+import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 import { invalidateUserSession } from "@/lib/auth";
-import { hashPassword, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { verifyStepUpPassword } from "@/lib/step-up-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { tooManyRequests } from "@/lib/http";
 
@@ -64,8 +67,18 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     // TypeError; reject it explicitly (mirrors the newPassword guard above).
     return NextResponse.json({ error: t("apiAuth.profile.invalidRequest") }, { status: 400 });
   }
-  const currentOk = await verifyPassword(currentPassword ?? "", user.passwordHash);
-  if (!currentOk) {
+  // The current password is a step-up proof like any other: it draws on the
+  // shared per-account guess budget and a miss is audited (step-up-auth.ts).
+  const verdict = await verifyStepUpPassword({
+    userId: session.user.id,
+    userName: user.name ?? user.email,
+    passwordHash: user.passwordHash,
+    password: currentPassword ?? "",
+    context: "password-change",
+    req,
+  });
+  if (verdict === "rate-limited") return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
+  if (verdict === "invalid") {
     return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
 
@@ -95,9 +108,15 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     prisma.authSession.deleteMany({
       where: { userId: session.user.id },
     }),
+    // Anything a session holder could have planted that would outlive the
+    // sessions (guardrail 6g): push registrations and pending Discord links.
+    ...footholdDeletes(prisma, session.user.id),
   ]);
 
   invalidateUserSession(session.user.id);
+  // Best-effort owner email, listing what is still connected (a Discord link, a
+  // Trakt connection) — the password change is the usual compromise response.
+  void notifyAccountSecurityEvent(session.user.id, "password-changed");
 
   void logAudit({
     userId: session.user.id,
@@ -105,6 +124,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     action: "SETTINGS_CHANGE",
     target: `user:${session.user.id}`,
     details: { kind: "password-change" },
+    ...auditContext(req, session),
   });
 
   return NextResponse.json({ ok: true, requiresRelogin: true });

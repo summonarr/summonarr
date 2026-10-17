@@ -144,3 +144,38 @@ test("parseQuotaLimit numeric edge forms follow parseInt semantics", () => {
   assert.equal(parseQuotaLimit("1e3"), 1); // parseInt stops at 'e' — NOT 1000
   assert.equal(parseQuotaLimit("Infinity"), 0); // non-digit prefix → NaN → 0
 });
+
+// Guardrail 6g: one definition of "what counts against a user's quota" —
+// requests made FOR them plus requests they FILED for others (filedBy). A
+// counter written inline (`requestedBy: …, createdAt: { gte: … }, status:
+// { notIn: ["DECLINED"] } }`) silently drops the filedBy half, and a
+// REQUEST_ON_BEHALF holder's own quota stops being charged again.
+test("quotaUsageWhere counts what a user requested AND what they filed for others, never declined rows", async () => {
+  const { quotaUsageWhere } = await import("../src/lib/quota.ts");
+  const since = new Date("2026-10-01T00:00:00Z");
+  assert.deepEqual(quotaUsageWhere("u1", "MOVIE", since), {
+    OR: [{ requestedBy: "u1" }, { filedBy: "u1" }],
+    mediaType: "MOVIE",
+    createdAt: { gte: since },
+    status: { notIn: ["DECLINED"] },
+  });
+});
+
+test("no quota counter in src/ builds its own where clause", async () => {
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const offenders: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (p.startsWith(join("src", "generated"))) continue;
+      if (statSync(p).isDirectory()) walk(p);
+      else if (/\.tsx?$/.test(p) && p !== join("src", "lib", "quota.ts")) {
+        const src = readFileSync(p, "utf-8");
+        if (/createdAt: \{ gte: [^}]*\}, status: \{ notIn: \["DECLINED"\] \}/.test(src)) offenders.push(p);
+      }
+    }
+  };
+  walk("src");
+  assert.deepEqual(offenders, []);
+});

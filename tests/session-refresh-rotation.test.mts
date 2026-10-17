@@ -1,13 +1,13 @@
 // Regression tests for the privilege-change session rotation in
 // verifyAndRefreshSession (src/lib/session-refresh.ts).
 //
-// The bug being pinned: rotation stamps sessionsRevokedAt = oldIat+1 and used to
-// re-sign the new token with iat = max(now, cutoff). The cutoff check rejects
-// `iat <= cutoff` (deliberately inclusive for the revoke-all path), so when the
-// rotation ran within ~1s of the presented token's iat, the freshly-minted
-// token carried iat == cutoff and failed its own check on the next slow-path
-// verify — bouncing the user to /login immediately after their role/permission
-// change. The fix signs iat = max(now, cutoff + 1).
+// Rotation renames the AuthSession row, and that rename is the whole revocation
+// of the pre-change token. It used to ALSO stamp the per-user sessionsRevokedAt
+// cutoff at the presented token's iat — which (`iat <= cutoff`) signed out every
+// OTHER device of the user minted earlier: every native app (a bearer token
+// keeps its sign-in iat forever) and every browser not re-signed since. Those
+// devices' AuthSession rows stayed listed as live. The stamp is gone; the pins
+// below hold both halves: the old token dies, no other device does.
 //
 // The DB surface (authSession/user lookups, the rotation $transaction) is
 // stubbed in-memory; the JWTs are REAL jose tokens (NEXTAUTH_SECRET set below).
@@ -125,23 +125,21 @@ test("rotated token survives its own revocation cutoff (same-second rotation)", 
   // the slow path and hit the cutoff check.
   markUserForceRevalidate(userId);
 
-  // First verify: rotation fires (role mismatch) — sessionId rotates, cutoff is
-  // stamped, and a re-signed token comes back.
+  // First verify: rotation fires (role mismatch) — sessionId rotates and a
+  // re-signed token comes back. No per-user cutoff is stamped.
   const first = await verifyAndRefreshSession(token);
   assert.ok(first, "rotation verify must succeed");
   assert.ok(first.refreshed, "rotation must re-sign a token");
   assert.equal(first.claims.role, "ISSUE_ADMIN");
   assert.notEqual(first.claims.sessionId, "sess-old-1");
-  assert.ok(dbUser.sessionsRevokedAt, "rotation must stamp sessionsRevokedAt");
+  assert.equal(dbUser.sessionsRevokedAt, null, "rotation must not stamp the per-user cutoff");
 
   // Second verify with the freshly-minted token, again on the forced slow path.
-  // Pre-fix this returned null (iat == cutoff fails the inclusive check) and the
-  // user was bounced to /login right after the promotion.
   const second = await verifyAndRefreshSession(first.refreshed.token);
-  assert.ok(second, "the rotated token must pass the cutoff it just stamped");
+  assert.ok(second, "the rotated token must verify straight away");
   assert.equal(second.claims.role, "ISSUE_ADMIN");
 
-  // The OLD token is now genuinely dead: same-second iat falls at/below the cutoff.
+  // The OLD token is genuinely dead: its AuthSession row was renamed.
   const replayed = await verifyAndRefreshSession(token);
   assert.equal(replayed, null, "the pre-rotation token must be rejected");
 });
@@ -173,9 +171,8 @@ test("revoke-all in the same second as sign-in still rejects (the deliberate <= 
 // ── the non-persisting caller opt-out ──────────────────────────────────────
 
 test("allowRotation:false surfaces the fresh role WITHOUT killing the presented token", async () => {
-  // Rotation is destructive — it renames the AuthSession row and stamps
-  // sessionsRevokedAt past the token's own iat, so the token the browser still holds
-  // dies the moment it commits. Callers that can hand back the replacement do so
+  // Rotation is destructive — it renames the AuthSession row, so the token the
+  // client still holds dies the moment it commits. Callers that can hand back the replacement do so
   // (proxy.ts rewrites the forwarded cookie AND sets Set-Cookie). A SERVER COMPONENT
   // cannot set a cookie, so running it on the page-render path destroyed the session
   // and bounced the user to /login on their next request — on the prefetch path
@@ -232,30 +229,35 @@ test("rotation is still the DEFAULT — every request-scoped caller keeps it", a
   const result = await verifyAndRefreshSession(token);
   assert.ok(result);
   assert.notEqual(result.claims.sessionId, "sess-rotate-2", "the default must still rotate");
-  assert.ok(dbUser.sessionsRevokedAt, "the default must still stamp the cutoff");
+  assert.equal(dbUser.sessionsRevokedAt, null, "…by renaming the row, never by a per-user cutoff");
 });
 
-test("rotation's cutoff is the old token's own second: a sibling token minted one second later survives, the old token dies", async () => {
+test("a rotation signs out NO other device — an OLDER sibling token (every native app) survives; only the old token dies", async () => {
+  // Device A (a browser, re-signed recently) is first to hit the server after an
+  // admin edits the user's permissions, so A's session rotates. Device B's token
+  // was minted EARLIER — the shape of every iOS session, whose bearer token keeps
+  // its sign-in iat forever. The old cutoff stamp (at A's iat) killed B too.
   const userId = "user-rotation-sibling";
   dbSessionId = "sess-old-sib";
   dbUser = makeDbUser({ role: "ISSUE_ADMIN" });
-  const iat = Math.floor(Date.now() / 1000) - 5;
+  const now = Math.floor(Date.now() / 1000);
   const mk = (sessionId: string, role: string, at: number) =>
     signSessionJwt(
       { id: userId, role, permissions: "0", provider: "credentials", sessionId, expiresAt: at + 86_400 },
       { expiresInSeconds: 7_200, iat: at },
     );
-  const token = await mk(dbSessionId, "USER", iat);
+  // Minted an hour before the rotating token (still well inside its life).
+  const olderSibling = await mk("sess-sibling", "ISSUE_ADMIN", now - 3_600);
+  const token = await mk(dbSessionId, "USER", now - 5);
   markUserForceRevalidate(userId);
   const first = await verifyAndRefreshSession(token);
   assert.ok(first?.refreshed);
-  assert.equal(dbUser.sessionsRevokedAt?.getTime(), iat * 1000, "cutoff = the old token's iat, not iat + 1");
-  // A sibling device's token (already carrying the new role, other session) minted at iat + 1.
-  const sibling = await mk("sess-sibling", "ISSUE_ADMIN", iat + 1);
+  assert.equal(dbUser.sessionsRevokedAt, null, "no per-user cutoff");
   const savedId = dbSessionId;
   dbSessionId = "sess-sibling";
-  const sib = await verifyAndRefreshSession(sibling);
+  const sib = await verifyAndRefreshSession(olderSibling);
   dbSessionId = savedId;
-  assert.ok(sib, "a sibling token minted the second after the old iat must not be signed out");
+  assert.ok(sib, "another device's older token must not be signed out by this device's rotation");
   assert.equal(await verifyAndRefreshSession(token), null, "the pre-rotation token still dies");
 });
+

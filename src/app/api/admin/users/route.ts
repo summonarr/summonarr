@@ -182,6 +182,24 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     return NextResponse.json({ error: t("apiAdmin.users.invalidEmail") }, { status: 400 });
   }
 
+  // A delegate must not create an account under a media-server user's email.
+  // Play-history attribution falls back to an EMAIL match for any identity with
+  // no provider-bound account (resolveMediaServerUser, play-history.ts) — the
+  // typical Plex friend who never signed in here. So a delegate could create
+  // `friend@…` with a password of their choosing, let the next 5s poll bind the
+  // friend's identity to it, then sign in as that account and read the friend's
+  // watch history (and the friend's own later Plex/OIDC sign-in would be refused
+  // as an email collision). An admin may still do this deliberately.
+  if (!hasPermission(session.user.permissions, Permission.ADMIN)) {
+    const serverUser = await prisma.mediaServerUser.findFirst({
+      where: { email: { equals: normalized, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (serverUser) {
+      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminCreateServerEmail") }, { status: 403 });
+    }
+  }
+
   const password = body.password;
   if (!password || typeof password !== "string") {
     return NextResponse.json({ error: t("apiAdmin.users.passwordRequired") }, { status: 400 });

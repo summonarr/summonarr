@@ -21,7 +21,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (maint) return maint;
   const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaReauthStepUp(session, parsed.password, t);
+  const user = await mfaReauthStepUp(session, parsed.password, t, req);
   if (user instanceof NextResponse) return user;
 
   // Checked before the second factor so a 409 never spends a recovery code.

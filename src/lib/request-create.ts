@@ -15,7 +15,7 @@ import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPer
 import { getArrInstancesWithConfigured } from "@/lib/arr-instance-registry";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
-import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, type ResolvedQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { isBlacklisted } from "@/lib/blacklist";
 import { exceedsCap } from "@/lib/content-rating";
@@ -293,7 +293,7 @@ export async function createMediaRequest(
     enforceQuota = resolvedQuota.limit > 0;
     if (enforceQuota) {
       const preCount = await prisma.mediaRequest.count({
-        where: { requestedBy: session.user.id, mediaType, createdAt: { gte: resolvedQuota.since }, status: { notIn: ["DECLINED"] } },
+        where: quotaUsageWhere(session.user.id, mediaType, resolvedQuota.since),
       });
       if (preCount >= resolvedQuota.limit) {
         return fail(429, t("apiUser.create.quota", { limit: resolvedQuota.limit, window: translateQuotaWindow(t, resolvedQuota.windowLabel) }), "quota");
@@ -413,7 +413,7 @@ export async function createMediaRequest(
       // Re-check quota inside the transaction to prevent races on concurrent requests
       if (enforceQuota && resolvedQuota) {
         const count = await tx.mediaRequest.count({
-          where: { requestedBy: session.user.id, mediaType, createdAt: { gte: resolvedQuota.since }, status: { notIn: ["DECLINED"] } },
+          where: quotaUsageWhere(session.user.id, mediaType, resolvedQuota.since),
         });
         if (count >= resolvedQuota.limit) {
           throw new Error("QUOTA_EXCEEDED");

@@ -146,6 +146,8 @@
   "apiUser.requests.bulk.onBehalfIdInvalid": "onBehalfOfUserId deve essere una stringa",
   "apiUser.requests.bulk.quotaMovie": "Verrebbe superata la quota film di {limit} ogni {window} ({remaining} rimanenti).",
   "apiUser.requests.bulk.quotaTv": "Verrebbe superata la quota serie TV di {limit} ogni {window} ({remaining} rimanenti).",
+  "apiUser.requests.bulk.filerQuotaMovie": "Verrebbe superata la tua quota film di {limit} ogni {window} ({remaining} rimanenti). Le richieste che fai per altri contano nella quota.",
+  "apiUser.requests.bulk.filerQuotaTv": "Verrebbe superata la tua quota serie di {limit} ogni {window} ({remaining} rimanenti). Le richieste che fai per altri contano nella quota.",
   "apiUser.requests.bulk.targetDeactivated": "L'utente di destinazione è disattivato",
   "apiUser.requests.bulk.targetMorePermissions": "Non puoi fare richieste per conto di un utente con più permessi dei tuoi",
   "apiUser.requests.bulk.targetNotFound": "Utente di destinazione non trovato",

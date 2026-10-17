@@ -197,12 +197,18 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
 
     let pinId: number;
     let pinCode: string;
+    let pinClientId: string;
     try {
       const res = await fetch(withBasePath("/api/auth/plex/pin"), { method: "POST" });
       if (!res.ok) throw new Error("create failed");
-      const data: { id: number; code: string } = await res.json();
+      const data: { id: number; code: string; clientId: string } = await res.json();
+      if (typeof data.clientId !== "string" || !data.clientId) throw new Error("create failed");
       pinId = data.id;
       pinCode = data.code;
+      // The server mints a fresh client identifier per connect attempt (and keeps
+      // it, bound to this admin, in an HttpOnly cookie). The approval URL must
+      // name the same identifier the PIN was created under.
+      pinClientId = data.clientId;
     } catch {
       setError(t("settings.form.plex.startFailed"));
       setStatus("error");
@@ -214,7 +220,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
     const forwardUrl = encodeURIComponent(`${base}/auth/plex/done?state=${state}`);
     const plexUrl =
       `https://app.plex.tv/auth#?` +
-      `clientID=summonarr-server` +
+      `clientID=${encodeURIComponent(pinClientId)}` +
       `&code=${pinCode}` +
       `&context[device][product]=Summonarr` +
       `&forwardUrl=${forwardUrl}`;

@@ -158,14 +158,21 @@ const txObj = {
       const u = usersById.get(args.where.id);
       return u ? { ...u } : null;
     },
-    update: async (args: { where: { id: string }; data: { sessionsRevokedAt: Date } }) => {
+    update: async (args: { where: { id: string }; data: { sessionsRevokedAt?: Date } }) => {
       rec("tx.user.update", args);
       const u = usersById.get(args.where.id);
-      if (u) u.sessionsRevokedAt = args.data.sessionsRevokedAt;
+      if (u && args.data.sessionsRevokedAt) u.sessionsRevokedAt = args.data.sessionsRevokedAt;
       return {};
     },
   },
+  // What a signed-out device could have planted (guardrail 6g) goes in the same tx.
+  pushSubscription: { deleteMany: async (args: unknown) => { rec("tx.pushSubscription.deleteMany", args); return { count: 0 }; } },
+  discordLinkToken: { deleteMany: async (args: unknown) => { rec("tx.discordLinkToken.deleteMany", args); return { count: 0 }; } },
+  discordMergeCode: { deleteMany: async (args: unknown) => { rec("tx.discordMergeCode.deleteMany", args); return { count: 0 }; } },
 };
+
+// Notification email is off (no settings) — the security notice is a silent no-op.
+shadowPrismaModel(prisma, "setting", { findUnique: async () => null, findMany: async () => [] });
 shadowPrismaClientMethod(prisma, "$transaction", async (fn: unknown) => {
   if (Array.isArray(fn)) return Promise.all(fn);
   return (fn as (tx: typeof txObj) => Promise<unknown>)(txObj);
@@ -447,8 +454,26 @@ test("revoke-all (includeCurrent=false) deletes every OTHER device, keeps the ca
   assert.equal(shouldForceDbCheck(caller.userId, "anything"), true, "the user is force-revalidated after the delete");
   // One sessionsRevokedAt write happened (its exact value — just before the
   // caller's createdAt — is computed in src/lib/auth.ts and not checked here).
-  assert.equal(opsOf("tx.user.update").length, 1, "the cross-replica cutoff is bumped");
+  const userWrites = opsOf("tx.user.update").map((o) => (o.args as { data: Record<string, unknown> }).data);
+  assert.equal(userWrites.filter((d) => d.sessionsRevokedAt instanceof Date).length, 1, "the cross-replica cutoff is bumped");
+  assertFootholdsCleared(caller.userId);
 });
+
+// Guardrail 6g: the compromise response takes what a signed-out device could
+// have planted with it — push registrations, pending Discord link and merge
+// codes, and the calendar feed URL — in the same transaction as the sign-out.
+function assertFootholdsCleared(userId: string): void {
+  for (const op of ["tx.pushSubscription.deleteMany", "tx.discordLinkToken.deleteMany", "tx.discordMergeCode.deleteMany"]) {
+    const calls = opsOf(op);
+    assert.equal(calls.length, 1, `${op} runs once`);
+    assert.deepEqual(calls[0].args, { where: { userId } }, `${op} is scoped to the caller`);
+  }
+  const userWrites = opsOf("tx.user.update").map((o) => (o.args as { data: Record<string, unknown> }).data);
+  assert.ok(
+    userWrites.some((d) => d.calendarTokenHash === null && d.calendarTokenCreatedAt === null),
+    "the calendar feed URL is revoked too",
+  );
+}
 
 test("revoke-all (includeCurrent=true) bumps sessionsRevokedAt to now and deletes ALL rows including the caller's", async () => {
   const caller = await mintSession({ passwordHash: PASSWORD_HASH });
@@ -463,6 +488,7 @@ test("revoke-all (includeCurrent=true) bumps sessionsRevokedAt to now and delete
   const upd = opsOf("tx.user.update")[0].args as { data: { sessionsRevokedAt: Date } };
   assert.ok(Date.now() - upd.data.sessionsRevokedAt.getTime() < 5_000, "the full-revoke cutoff is ~now");
   assert.equal(shouldForceDbCheck(caller.userId, "anything"), true);
+  assertFootholdsCleared(caller.userId);
 });
 
 test("revoke-all SSO path: a recent caller session with an empty body succeeds; an old one → 401 session-too-old", async () => {

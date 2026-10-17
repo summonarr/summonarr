@@ -15,6 +15,7 @@ import {
   getClientIp,
   getClientIpKey,
   ipBucketKey,
+  isProtectedRateLimitKey,
 } from "../src/lib/rate-limit.ts";
 
 // Run `fn` with the given env vars set (undefined = deleted), restoring the
@@ -265,8 +266,8 @@ test("distinct User-Agents land in distinct untrusted buckets", () => {
 });
 
 // ---------------------------------------------------------------------------
-// LRU eviction — the MAX_KEYS=100_000 memory-DoS bound. Kept last: it churns
-// the shared Map with 100k filler keys.
+// LRU eviction — the MAX_KEYS=100_000 memory-DoS bound. Kept near the end: it
+// churns the shared Map with 100k filler keys.
 // ---------------------------------------------------------------------------
 
 test("LRU eviction at MAX_KEYS gives the evicted (oldest) key a fresh bucket", () => {
@@ -282,6 +283,65 @@ test("LRU eviction at MAX_KEYS gives the evicted (oldest) key a fresh bucket", (
   }
   // Evicted => fresh bucket; without eviction this would still be false.
   assert.equal(checkRateLimit(victim, 1, windowMs), true);
+});
+
+// ── per-account buckets are never evicted while live ───────────────────────
+//
+// A refused attempt records nothing, so a bucket an attacker has FILLED is never
+// touched again and drifts to the front of the shared LRU. Minting ~100k cheap
+// keys on any anonymous endpoint then evicted it — a fresh 50 password guesses
+// against the same account, repeatably. Per-account guessing buckets now live
+// in their own map that a flood of OTHER keys cannot reach.
+
+test("a FULL per-account login bucket survives a 100k-key flood of the shared limiter", () => {
+  const windowMs = 3_600_000;
+  const victim = `login-email:${Math.random()}`;
+  for (let i = 0; i < 50; i++) assert.equal(checkRateLimit(victim, 50, windowMs), true);
+  assert.equal(checkRateLimit(victim, 50, windowMs), false, "the attacker has spent the budget");
+  for (let i = 0; i < 100_050; i++) checkRateLimit(`qc-poll-secret:flood-${i}`, 30, windowMs);
+  assert.equal(checkRateLimit(victim, 50, windowMs), false, "the flood must not hand back a fresh budget");
+  assert.equal(peekRateLimit(victim, 50, windowMs), false);
+});
+
+test("every per-account guessing bucket is a protected key, at the call site that builds it", () => {
+  // The protection is keyed on prefix, so a renamed key would silently fall back
+  // to the evictable map. Pin each call site's literal prefix to the list.
+  const sites: Array<[string, string]> = [
+    ["src/lib/auth.ts", "login-email:"],
+    ["src/lib/auth.ts", "jellyfin-user:"],
+    ["src/app/api/auth/sign-in/mfa/route.ts", "mfa-user:"],
+    ["src/lib/mfa/step-up.ts", "mfa-stepup:"],
+    ["src/app/api/profile/password/route.ts", "profile-password:"],
+    ["src/app/api/profile/route.ts", "profile-delete:"],
+    ["src/app/api/sessions/route.ts", "sessions-delete:"],
+    ["src/app/api/profile/mfa/totp/enable/route.ts", "mfa-totp-enable:"],
+    ["src/lib/step-up-auth.ts", "step-up-pw:"],
+  ];
+  for (const [file, prefix] of sites) {
+    const src = readFileSync(join(process.cwd(), file), "utf-8");
+    assert.ok(src.includes("`" + prefix + "${"), `${file} no longer builds a \`${prefix}\` key`);
+    assert.equal(isProtectedRateLimitKey(`${prefix}x`), true, `${prefix} must be protected`);
+  }
+  // Cheap, attacker-mintable keys stay in the evictable map.
+  for (const k of ["qc-poll-secret:x", "register:1.2.3.4", "login-ip:1.2.3.4", "plex-start:x"]) {
+    assert.equal(isProtectedRateLimitKey(k), false, `${k} must not be protected`);
+  }
+});
+
+// Kept LAST: leaves the protected map full for the rest of the process.
+test("a full protected limiter refuses a NEW account rather than evicting a live bucket", () => {
+  const windowMs = 3_600_000;
+  const victim = `mfa-user:${Math.random()}`;
+  for (let i = 0; i < 10; i++) assert.equal(checkRateLimit(victim, 10, windowMs), true);
+  assert.equal(checkRateLimit(victim, 10, windowMs), false);
+  for (let i = 0; i < 100_000; i++) checkRateLimit(`login-email:fill-${i}`, 50, windowMs);
+  // The victim's spent bucket is still there…
+  assert.equal(checkRateLimit(victim, 10, windowMs), false, "a live bucket must never be evicted");
+  // …and a brand-new account is refused (fail closed) instead of displacing it.
+  assert.equal(reserveRateLimit(`login-email:newcomer-${Math.random()}`, 50, windowMs), null);
+  assert.equal(peekRateLimit(`jellyfin-user:newcomer-${Math.random()}`, 10, windowMs), false);
+  // The shared map is unaffected: an ordinary key still gets a bucket.
+  assert.equal(checkRateLimit(`register:${Math.random()}`, 5, windowMs), true);
 });
 
 // ── reserve-then-refund (the login gate) ───────────────────────────────────

@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { revokeDiscordRolesOnUnlink } from "@/lib/discord-notify";
+import { logAudit } from "@/lib/audit";
+import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 
 export interface MergeResult {
   migrated: number;
@@ -125,5 +127,33 @@ export async function mergeDiscordIntoWebAccount(
     void revokeDiscordRolesOnUnlink(previousDiscordId);
   }
 
+  // Every completed link — the bot's /link command and the confirm-merge code
+  // both land here — is audited and mailed to the owner (guardrail 6g). A link
+  // lets that Discord account act as this user and survives a password change,
+  // so a link the owner didn't make must be visible to them. Both are
+  // best-effort and post-commit (guardrail 26).
+  if (previousDiscordId !== discordUserId) {
+    void auditDiscordLink(webUserId, discordUserId, previousDiscordId, migrated);
+    void notifyAccountSecurityEvent(webUserId, "discord-linked");
+  }
+
   return { migrated };
+}
+
+async function auditDiscordLink(
+  webUserId: string,
+  discordUserId: string,
+  previousDiscordId: string | null,
+  migrated: number,
+): Promise<void> {
+  const owner = await prisma.user
+    .findUnique({ where: { id: webUserId }, select: { name: true, email: true } })
+    .catch(() => null);
+  await logAudit({
+    userId: webUserId,
+    userName: owner?.name ?? owner?.email ?? "unknown",
+    action: "SETTINGS_CHANGE",
+    target: `discord-link:${webUserId}`,
+    details: { type: "discord-link", discordId: discordUserId, previousDiscordId, migrated },
+  });
 }

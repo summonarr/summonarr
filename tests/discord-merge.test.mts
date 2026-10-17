@@ -54,7 +54,10 @@ const DISCORD_ID = "123456789012345678";
 
 type Op = { op: string; args?: unknown };
 const ops: Op[] = [];
-const opNames = () => ops.map((o) => o.op);
+// The transaction's own ops (plus the role-revoke fetches). The post-commit
+// audit + owner email (guardrail 6g) run on the top-level client and are
+// asserted separately, so they don't disturb the sequence pins.
+const opNames = () => ops.filter((o) => !o.op.startsWith("top.") && o.op !== "auditLog.create").map((o) => o.op);
 
 type ReqRow = { id: string; tmdbId: number; mediaType: string; arrInstance: string };
 type VoteRow = { id: string; tmdbId: number; mediaType: string };
@@ -132,6 +135,20 @@ shadowPrismaModel(prisma, "setting", {
     const keys = args.where?.key?.in;
     const all = [...settings.entries()].map(([key, value]) => ({ key, value }));
     return keys ? all.filter((r) => keys.includes(r.key)) : all;
+  },
+});
+// The post-commit link audit + owner security email (guardrail 6g) read the
+// owner off the TOP-LEVEL client. With no email settings the email is a no-op.
+shadowPrismaModel(prisma, "user", {
+  findUnique: async (args: { where: { id: string } }) => {
+    ops.push({ op: "top.user.findUnique", args });
+    return args.where.id === WEB ? { name: "Web", email: "web@example.com", notificationEmail: null, locale: null, discordId: DISCORD_ID, traktConnection: null } : null;
+  },
+});
+shadowPrismaModel(prisma, "auditLog", {
+  create: async (args: { data: { action: string; target: string; details: string } }) => {
+    ops.push({ op: "auditLog.create", args: args.data });
+    return args.data;
   },
 });
 // Role DELETEs land in the SAME op log as the tx writes, so their position
@@ -379,4 +396,27 @@ test("merge finale: the shadow row is deleted BEFORE the web row takes the disco
   assert.ok(deleteIdx < linkIdx, "shadow delete must precede the discordId claim");
   assert.deepEqual(opArgs("user.delete"), { where: { id: SHADOW } });
   assert.deepEqual(opArgs("user.update"), { where: { id: WEB }, data: { discordId: DISCORD_ID } });
+});
+
+// Guardrail 6g: a completed link lets that Discord account act as the user and
+// survives a password change, so every NEW link is audited (and mailed to the
+// owner, best-effort). Re-linking the id the user already has is not news.
+test("a NEW link is audited after the commit; re-linking the same id is not", async () => {
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID);
+  await settle();
+  const audits = ops.filter((o) => o.op === "auditLog.create").map((o) => o.args as { action: string; target: string; details: string });
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].action, "SETTINGS_CHANGE");
+  assert.equal(audits[0].target, `discord-link:${WEB}`);
+  assert.deepEqual(JSON.parse(audits[0].details), { type: "discord-link", discordId: DISCORD_ID, previousDiscordId: null, migrated: 0 });
+  const names = ops.map((o) => o.op);
+  assert.ok(names.indexOf("user.update") < names.indexOf("auditLog.create"), "audited after the link committed");
+  assert.deepEqual(errors, []);
+
+  ops.length = 0;
+  webRow = { id: WEB, discordId: DISCORD_ID };
+  existingUser = { id: WEB, email: "web@example.com" };
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID);
+  await settle();
+  assert.equal(ops.filter((o) => o.op === "auditLog.create").length, 0, "the same link again is not a new link");
 });

@@ -663,6 +663,15 @@ export async function processBackupImport(
           conflictSkippedTotal++;
         }
       }
+      // A restore must not bring back sessions (guardrail 6g). The dump carries
+      // the AuthSession rows AND each user's sessionsRevokedAt/passwordChangedAt
+      // as of when it was taken, so restoring an older backup resurrected every
+      // device the owner had signed out since — a stolen phone revoked last
+      // week, or every session a password change ended. Native tokens never
+      // expire (guardrail 6c), so that resurrection was permanent. Inside the
+      // same transaction, so a rolled-back restore leaves sessions untouched.
+      await tx.authSession.deleteMany({});
+      await tx.user.updateMany({ data: { sessionsRevokedAt: new Date() } });
     }, { timeout: RESTORE_TX_TIMEOUT_MS, maxWait: 10_000 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -681,6 +690,10 @@ export async function processBackupImport(
   if (rejection) {
     return { ok: false, status: rejection.status, error: rejection.error };
   }
+
+  warnings.push(
+    "Every account was signed out by the restore (sessions in the backup are never brought back). Sign in again.",
+  );
 
   if (conflictSkippedTotal > 0) {
     warnings.push(

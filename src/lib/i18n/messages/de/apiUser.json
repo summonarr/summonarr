@@ -146,6 +146,8 @@
   "apiUser.requests.bulk.onBehalfIdInvalid": "onBehalfOfUserId muss eine Zeichenkette sein",
   "apiUser.requests.bulk.quotaMovie": "Damit würde das Filmkontingent von {limit} pro {window} überschritten ({remaining} verbleibend).",
   "apiUser.requests.bulk.quotaTv": "Damit würde das Serienkontingent von {limit} pro {window} überschritten ({remaining} verbleibend).",
+  "apiUser.requests.bulk.filerQuotaMovie": "Damit würde Ihr eigenes Filmkontingent von {limit} pro {window} überschritten ({remaining} verbleibend). Anfragen, die Sie für andere stellen, zählen dazu.",
+  "apiUser.requests.bulk.filerQuotaTv": "Damit würde Ihr eigenes Serienkontingent von {limit} pro {window} überschritten ({remaining} verbleibend). Anfragen, die Sie für andere stellen, zählen dazu.",
   "apiUser.requests.bulk.targetDeactivated": "Der Zielbenutzer ist deaktiviert",
   "apiUser.requests.bulk.targetMorePermissions": "Sie können nicht im Namen eines Benutzers mit mehr Berechtigungen als Ihren anfragen",
   "apiUser.requests.bulk.targetNotFound": "Zielbenutzer nicht gefunden",

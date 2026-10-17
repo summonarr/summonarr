@@ -65,7 +65,9 @@ export async function GET(req: NextRequest) {
   if (!token) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
-  const result = await verifyAndRefreshSession(token);
+  // Rotate only for a cookie client (this route returns its replacement as
+  // Set-Cookie); a bearer client is never given a new token (guardrail 6b).
+  const result = await verifyAndRefreshSession(token, { allowRotation: !bearer });
   if (!result) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }

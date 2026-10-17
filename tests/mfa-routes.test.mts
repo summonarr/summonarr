@@ -1087,6 +1087,51 @@ test("M2: passkeys are exempt — a failed assertion never counts, a passkey sti
   assert.equal(u.mfaLockoutCount, 1);
 });
 
+// The per-account in-memory bucket used to be charged for EVERY method before
+// the method was even read. Junk `webauthn` bodies (which never touch the
+// persistent code counter, so no lockout email) filled it, and the owner's real
+// passkey then got 429 — from any IP, renewable every 15 minutes. And the 10th
+// wrong code imposes the DB lockout AND fills the bucket at the same moment, so
+// the "passkey still works during a lockout" escape hatch was dead exactly when
+// it was needed. The bucket now bounds CODE methods only.
+test("M2: a password-holder's junk passkey attempts can never block the owner's real passkey", async () => {
+  const u = await seedUser();
+  const auth = seedPasskey(u.id);
+  for (let c = 0; c < 3; c++) {
+    const ch = await challengeFor(u);
+    for (let i = 0; i < 4; i++) {
+      IP = `198.51.100.${(++ipSeq % 250) + 1}`;
+      const junk = await mfa({ mfaToken: ch.mfaToken, method: "webauthn", credential: { id: "AA", rawId: "AA", type: "public-key", response: {} } });
+      assert.equal(junk.status, 401);
+    }
+  }
+  assert.equal(u.mfaFailedAttempts, 0);
+  IP = "203.0.113.77";
+  const ch = await challengeFor(u);
+  const good = assertionResponse({
+    auth, rpId: "localhost", origin: "http://localhost:3000", challenge: ch.webauthn!.challenge, signCount: 1,
+    userHandle: webAuthnUserHandle(u.id as string),
+  });
+  assert.equal((await mfa({ mfaToken: ch.mfaToken, method: "webauthn", credential: good })).status, 200);
+  assert.equal(sessionWrites, 1);
+});
+
+test("M2: right after someone hammers codes into a lockout, the owner's passkey still signs in", async () => {
+  const u = await seedUser();
+  const key = seedTotp(u.id as string);
+  const auth = seedPasskey(u.id);
+  await wrongCodes(u, MFA_LOCKOUT_THRESHOLD, currentCode(key) === "000000" ? "111111" : "000000");
+  assert.ok(u.mfaLockedUntil instanceof Date, "the code lockout is in force");
+  // No simulated restart: the in-memory bucket is exactly as the attacker left it.
+  IP = "203.0.113.78";
+  const ch = await challengeFor(u);
+  const good = assertionResponse({
+    auth, rpId: "localhost", origin: "http://localhost:3000", challenge: ch.webauthn!.challenge, signCount: 1,
+    userHandle: webAuthnUserHandle(u.id as string),
+  });
+  assert.equal((await mfa({ mfaToken: ch.mfaToken, method: "webauthn", credential: good })).status, 200);
+});
+
 test("M2: a wrong code at the ENROLLMENT step-up spends the same persistent budget, and a lockout refuses it there too", async () => {
   const u = await seedUser();
   const jwt = await sessionFor(u);

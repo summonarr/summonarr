@@ -86,9 +86,9 @@ export function machineIpAllowed(claims: SessionClaims, headers: Headers): boole
 //
 // IMPORTANT: when called outside the withAuth wrapper, any refreshed JWT
 // produced by the refresh logic is silently DISCARDED — the caller has no
-// response object to attach the Set-Cookie to. This is fine for the rare
-// direct callers (dual-auth routes, the play-history export) because the
-// next withAuth-wrapped request re-signs the token again.
+// response object to attach the Set-Cookie to. That is fine for a dbCheckedAt
+// bump (the next withAuth-wrapped request re-signs again), and it is why this
+// path never ROTATES: a discarded rotation is a sign-out.
 export async function requireAuth(
   opts: RequireAuthOptions = {},
 ): Promise<SummonarrSession | NextResponse> {
@@ -101,7 +101,12 @@ export async function requireAuth(
   if (!token) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const result = await verifyAndRefreshSession(token);
+  // Never rotate here: requireAuth has no response to put the replacement cookie
+  // on, so a rotation would rename the AuthSession row out from under the token
+  // the browser still holds and sign it out on its next request. That is exactly
+  // what the SSE stream's 60s re-auth tick did after any role/permission edit.
+  // The fresh role + permissions are in the claims either way.
+  const result = await verifyAndRefreshSession(token, { allowRotation: false });
   if (!result) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -149,7 +154,9 @@ async function authenticateRequest(
   if (!token) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const result: VerifyAndRefreshResult | null = await verifyAndRefreshSession(token);
+  // Rotate only for a cookie client — withAuth hands it the replacement as
+  // Set-Cookie. A bearer client is never given a new token (guardrail 6b).
+  const result: VerifyAndRefreshResult | null = await verifyAndRefreshSession(token, { allowRotation: !bearer });
   if (!result) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

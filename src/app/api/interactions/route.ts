@@ -24,7 +24,7 @@ import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import { isBlacklisted } from "@/lib/blacklist";
 import { exceedsCap } from "@/lib/content-rating";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
-import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isFeatureEnabled } from "@/lib/features";
@@ -1208,7 +1208,7 @@ async function handleComponent(interaction: any): Promise<void> {
         );
         if (rq && rq.limit > 0) {
           const count = await prisma.mediaRequest.count({
-            where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+            where: quotaUsageWhere(dbUser.id, mediaType, rq.since),
           });
           if (count >= rq.limit) {
             confirmEmbed.color = 0xed4245;
@@ -1352,7 +1352,7 @@ async function handleComponent(interaction: any): Promise<void> {
             prisma.$transaction(async (tx) => {
               if (quotaApplies && rq && rq.limit > 0) {
                 const count = await tx.mediaRequest.count({
-                  where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+                  where: quotaUsageWhere(dbUser.id, mediaType, rq.since),
                 });
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
               }
@@ -1440,7 +1440,7 @@ async function handleComponent(interaction: any): Promise<void> {
               mirrored = false; // reset — the callback re-runs on a P2034 retry
               if (quotaApplies && rq && rq.limit > 0) {
                 const count = await tx.mediaRequest.count({
-                  where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+                  where: quotaUsageWhere(dbUser.id, mediaType, rq.since),
                 });
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
               }

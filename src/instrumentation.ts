@@ -2,6 +2,7 @@
 // the Node.js runtime, so it is safe to use Node APIs and server-only modules.
 import { evaluateLocalOnlyStartup } from "@/lib/local-only";
 import { parseAuthUrl } from "@/lib/auth-url";
+import { secretReuseError } from "@/lib/boot-secrets";
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
@@ -113,6 +114,19 @@ export async function register() {
       if (process.env.NODE_ENV === "production") {
         process.exit(1);
       }
+    }
+
+    // The three secrets must be independent values (guardrail 6g) — a reused
+    // value lets the most exposed one (the cron bearer) forge sessions or
+    // decrypt stored credentials. Same production-only exit as the length checks.
+    const reuse = secretReuseError({
+      nextAuthSecret: process.env.NEXTAUTH_SECRET,
+      cronSecret: process.env.CRON_SECRET,
+      tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
+    });
+    if (reuse) {
+      console.error(reuse);
+      if (process.env.NODE_ENV === "production") process.exit(1);
     }
 
     if (!process.env.TMDB_READ_TOKEN) {

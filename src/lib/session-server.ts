@@ -68,17 +68,14 @@ export async function readActiveSummonarrSessionFromRequest(
   const token = bearer ?? parseSessionCookie(req.headers.get("cookie"));
   if (!token) return null;
   try {
-    // Rotation is allowed ONLY for a bearer token. Guardrail 6b lists sessionId
-    // rotation among the defenses that still apply to bearer sessions — a native
-    // client re-authenticates rather than being handed a mid-life token.
-    //
-    // The cookie FALLBACK must not rotate, for the same reason the cookie-only
-    // sibling above passes false: rotation renames the AuthSession row and bumps
-    // the cutoff past this token's iat, killing the cookie the browser still
-    // holds — and this reader has no response to hand the replacement back on.
-    // Passing the default here rotated on the cookie path too, logging the user
-    // out on their next request right after a role or permission edit.
-    const result = await verifyAndRefreshSession(token, { allowRotation: !!bearer });
+    // Never rotate: this reader has no response to hand a replacement back on,
+    // and rotation renames the AuthSession row, killing the token the client
+    // still holds. That holds for BOTH transports — a cookie client would be
+    // signed out on its next request, and a bearer (native) client is never
+    // given a new token at all (guardrail 6b), so rotating it signed the iOS
+    // app out after any role or permission edit. The claims carry the fresh
+    // role + permissions either way.
+    const result = await verifyAndRefreshSession(token, { allowRotation: false });
     return result?.claims ?? null;
   } catch {
     return null;

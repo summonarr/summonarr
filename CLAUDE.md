@@ -279,6 +279,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - OIDC has a SECOND, native-only path, and the two must not be crossed.
     - No refresh for bearer clients
     - That forbids handing the CLIENT a new token; it does NOT forbid the server-internal forwarded-header rewrite, which is REQUIRED for both transports.
+    - A privilege change ROTATES the session only where the replacement is delivered: the cookie transport through the proxy, `withAuth` and `/api/auth/me` (`allowRotation: !bearer`). Bearer requests, `requireAuth()` and the server-component readers pass `allowRotation: false`, and rotation never stamps the per-user `sessionsRevokedAt` cutoff.
 6c. **A session lives until its sign-in deadline — nothing shortens it, nothing caps it, and a native session has no deadline at all.** `verifyAndRefreshSession` rejects a token past the `expiresAt` claim and otherwise re-signs with `exp` AT that claim; `initializeTokenOnSignIn` sets the claim to the admin-configured desktop/mobile/remember-me duration for browsers and to `NEVER_EXPIRES_AT_SEC` ([session-lifetime.ts](src/lib/session-lifetime.ts)) for a caller presenting `X-Summonarr-Client`.
 
     Detail and rationale: [docs/guardrails/6c.md](docs/guardrails/6c.md).
@@ -305,6 +306,42 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Recovery-code writes serialize per user
     - "Prompt administrators to set up two-factor"
     - Native/iOS
+6e. **A rate-limit bucket that bounds guessing ONE account's secret (a password, a second-factor code, a step-up password) MUST use a key prefix in `PROTECTED_PREFIXES` ([rate-limit.ts](src/lib/rate-limit.ts)). Those buckets are never evicted while they hold live hits.**
+
+    Why:
+    - The shared limiter is LRU-bounded at 100k keys, and a FULL bucket is never touched again (a refused attempt records nothing), so it drifts to the front of the eviction order. Minting ~100k cheap keys on any anonymous endpoint evicted a victim's `login-email:` bucket and handed back a fresh 50 password guesses, repeatably.
+    - The per-account `mfa-user:` bucket used to be charged for passkey attempts too. Junk assertions filled it and blocked the owner's real passkey, which breaks 6d's "a passkey still works during a lockout".
+
+    Rules:
+    - Protected buckets live in their own process-wide map. When it is full of live buckets, a NEW account's attempt is refused (fail closed); a live bucket is never evicted to make room.
+    - Never add a cheap, attacker-mintable key (per-IP, per-secret, per-pin) to the list, or a flood fills the protected map instead.
+    - `mfa-user:` is charged for CODE methods only (TOTP, recovery). Passkey attempts are bounded by the per-IP limit and the per-token failure cap.
+    - `tests/rate-limit.test.mts` pins each call site's literal prefix to the list, so a renamed key fails it.
+6f. **The admin "Connect Plex" PIN is created AND polled under a per-attempt random client identifier that lives only in the signed HttpOnly connect cookie, bound to the admin who started it. NEVER the shared `PLEX_CLIENT_ID`, and never a pin id taken from the request.** [plex-flow-state.ts](src/lib/plex-flow-state.ts) (`signPlexConnectCookie`), [/api/auth/plex/pin](src/app/api/auth/plex/pin/route.ts).
+
+    Why:
+    - plex.tv hands a PIN's authToken to whoever presents the pin id and the client identifier that created it, with no code and no secret. `summonarr-server` is identical in every install and public in the source, and the old poll took any `?id=`, so anyone could poll recent pin ids and collect an admin's Plex OWNER token.
+
+    Rules:
+    - `POST` creates the PIN and sets the cookie. `PATCH` polls the cookie's pin and stores the token server-side through `savePlexAdminToken` ([plex-admin-connect.ts](src/lib/plex-admin-connect.ts)). The owner token never reaches the browser.
+    - The cookie is signed with an HKDF subkey of `NEXTAUTH_SECRET` with its own `typ` and audience, never the raw session key.
+    - `tests/auth-signin-routes.test.mts` pins each leg from the attacker's side.
+6g. **A password change or "sign out everywhere" must leave a session hijacker NOTHING that outlives the sessions. Anything a session can plant that would survive (a linked Discord account, a Trakt connection) needs a step-up to plant, and every step-up password draws on ONE audited per-account budget.** [step-up-auth.ts](src/lib/step-up-auth.ts), [session-footholds.ts](src/lib/session-footholds.ts), [account-security-notify.ts](src/lib/account-security-notify.ts).
+
+    Why:
+    - A password change and sign-out-everywhere ended the sessions but left push registrations, pending Discord link and merge codes and (sign-out-everywhere) the calendar feed URL. Linking Discord and connecting Trakt needed only a session, so a hijacker could link THEIR accounts and keep approving, requesting and receiving pushes as the owner after the owner's compromise response.
+    - Every step-up route had its own password bucket and never audited a miss, so a stolen session could test passwords at ~11 a minute across them.
+    - Restoring a backup brought back every session revoked since it was taken, and native tokens never expire (6c).
+
+    Rules:
+    - Password change and revoke-all (both modes) delete PushSubscription, DiscordLinkToken and DiscordMergeCode rows in the SAME transaction (`footholdDeletes` / `clearSessionFootholdsInTx`) and clear the calendar token. Then they email the owner, listing what is still connected. A redeemed Discord link and a Trakt connection are NOT removed; listing them is the defence. The web bell re-sends its browser subscription once per page load and the iOS app re-registers after sign-in, so the owner's own devices come back.
+    - Every step-up password goes through `verifyStepUpPassword`: the protected `step-up-pw:` bucket (6e), a refund on success, `AUTH_LOGIN_FAILED` `reason: "step_up_password"` on a miss. `tests/step-up-auth.test.mts` scans `src` for any other `verifyPassword(` caller (sign-in in auth.ts excepted).
+    - `requireStepUp` (password, or an SSO sign-in younger than 5 minutes) guards `generate-link`, the Trakt device start, and `initiate-merge` for WEB sessions. A native session is exempt there because the shipped app has no prompt (guardrail 25). "Native" is `isNativeSession`, the session's never-expiring deadline fixed at sign-in, NEVER the transport: a stolen browser cookie replayed as a bearer token is still a web session.
+    - Every completed Discord link (`mergeDiscordIntoWebAccount`, the one chokepoint for `/link` and confirm-merge) is audited and mailed to the owner after the commit.
+    - A DB restore deletes every AuthSession row and stamps every user's `sessionsRevokedAt` inside the restore transaction (backup-import.ts).
+    - Boot refuses NEXTAUTH_SECRET, CRON_SECRET and TOKEN_ENCRYPTION_KEY sharing a value (`secretReuseError`, [boot-secrets.ts](src/lib/boot-secrets.ts)).
+    - A user's quota counts what they requested AND what they filed on others' behalf (`MediaRequest.filedBy`, `quotaUsageWhere` in [quota.ts](src/lib/quota.ts)). Every quota counter uses it; `tests/quota.test.mts` fails on an inline one.
+    - The CLI reset (`scripts/reset-password.mjs`) mirrors the in-app change: 12-character minimum, both cutoffs, AuthSession rows, calendar token, footholds, and `--admin` sets permissions with the role.
 7. **No success logs.** `console.error` and `console.warn` only, namespaced with a `[scope]` prefix. Silent success is the convention. Do not add `console.log` for happy-path events.
 7a. **NEVER call `encryptToken` at the call site for `Setting.value`, `Account.{access_token,refresh_token,id_token}` or `UserTotp.secret`.** The Prisma extension in [src/lib/prisma.ts](src/lib/prisma.ts) handles encryption on every write to those fields and decryption on every read. Pre-encrypting at the route, sign-in/OIDC, or library layer produces double-encrypted rows of the form `enc:v1:<enc:v1:…>` — on read the extension decrypts once and hands callers the inner ciphertext, which then gets sent as an API key/token to upstream services and fails auth. This bug shipped in `bc81802` (a route-level pre-encryption in `/api/settings` and an `encryptingAdapter` wrapper in `auth.ts`); both were removed afterward. The remaining legitimate `encryptToken` callers are: `PushSubscription` writes ([push/subscribe](src/app/api/push/subscribe/route.ts) and [push/apns](src/app/api/push/apns/route.ts) — the latter encrypts the APNs `deviceToken`; the extension does not cover that table) and the one-shot migration scripts under [scripts/](scripts/). Do not add a third. `UserTotp.secret` (guardrail 6d) is covered by the extension — and unlike `Setting.value` every write of that column is sensitive, so its `updateMany`/`createMany` are ENCRYPTED rather than refused; never read it through a nested `include: { totp: … }` from a user query (that bypasses the `userTotp` hooks — `tests/mfa-prisma-extension.test.mts` scans for it).
 7b. **A warning that restates an UNCHANGED condition on every pass goes through `warnOnChange` ([log-dedup.ts](src/lib/log-dedup.ts)). Rate questions are answered by the cron run history — NEVER by counting log lines.**
@@ -513,6 +550,14 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - `revokeAllUserSessions` already does it right (mark after the tx); `revokeSessionById` was fixed to match.
 
     Rule: write the DB row first; only on success update the in-memory ledger. If the write throws, let it propagate so the caller learns the operation failed instead of trusting a phantom mark.
+27a. **Every in-memory auth ledger is process-wide (`processSingleton`), NEVER a module-level `Set`/`Map`.**
+
+    Why:
+    - Turbopack copies a lib module into every server chunk that imports it ([process-singleton.ts](src/lib/process-singleton.ts)). `session-revocation.ts`'s force-revalidate Sets were plain module state: the revoke routes marked in THEIR chunk, while the proxy and every page render read their own copies, which nothing ever wrote. So "revocation takes effect on the next request" held for `withAuth` API routes only, and a revoked session kept rendering pages for the whole dbCheckedAt window (10s admin / 60s user).
+
+    Rules:
+    - Any state that means "remember across the whole server" goes through `processSingleton`: revocation marks, rate-limit buckets, the MFA token ledger.
+    - A single-module unit test can't see the bug. Pin it with a cache-busted second import (`?chunk=…`), the unit-test analogue of a second chunk, as `tests/session-revocation.test.mts` does.
 28. **NEVER hard-delete a `MediaServerUser`. Soft-delete (`active = false`) instead.**
 
     Detail and rationale: [docs/guardrails/28.md](docs/guardrails/28.md).
@@ -629,6 +674,16 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Watchlist auto-request is 34b, unchanged:
     - The history is imported, never read live
     - In For You the Trakt history IS watch history, under the SAME cap.
+34d. **A MANAGE_USERS delegate (no ADMIN bit) may re-link ordinary members' media-server identities, but NEVER to themselves, and NEVER an identity owned by an admin, going to an admin (role or bit), or belonging to the media server's own admin. A delegate also may not create a local account under a media-server user's email.** [server-users/[id]](src/app/api/admin/server-users/[id]/route.ts), [admin/users POST](src/app/api/admin/users/route.ts).
+
+    Why:
+    - Linking an identity is what makes its watch history readable by its new owner (`/api/play-history/mine*`). A delegate could point the server owner's identity at their own account and read everything they watched, while the owner's own history went blank.
+    - `resolveMediaServerUser` falls back to an EMAIL match for an identity with no provider-bound account (34). A delegate creating `friend@…` with a password of their choosing got that friend's identity bound to it on the next poll.
+
+    Rules:
+    - The admin check re-reads the identity AND both owners inside the write's transaction, under advisory lock 42 (the role-change lock).
+    - An ADMIN keeps the unrestricted escape hatch, which is why the route exists.
+    - `tests/admin-routes.test.mts` and `tests/admin-users-audit-routes.test.mts` pin it.
 35. **A Plex/Jellyfin server is identified by a `serverInstance` slug string, and availability is a UNION across every configured server — NOTHING routes to a specific one.** Mirrors guardrail 32's arr model with that one deliberate divergence: an arr *request* must land on exactly one instance, whereas the only question multi-server answers here is "is this watchable somewhere, and what's playing right now."
 
     Detail and rationale: [docs/guardrails/35.md](docs/guardrails/35.md).

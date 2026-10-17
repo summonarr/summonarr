@@ -11,7 +11,9 @@ const read = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "u
 
 test("sign-in/mfa reserves with reserveRateLimit and refunds its own hit", () => {
   const src = read("src/app/api/auth/sign-in/mfa/route.ts");
-  assert.match(src, /const userHitAt = reserveRateLimit\(userKey,/);
+  // Reserved for CODE methods only (guardrail 6e) — a passkey attempt reserves
+  // nothing (0, which refundHit treats as "nothing to remove").
+  assert.match(src, /const userHitAt = isCode \? reserveRateLimit\(userKey,[^;]*\) : 0;/);
   assert.match(src, /refundHit\(userKey, userHitAt\)/);
   assert.doesNotMatch(src, /refundHit\(userKey\)/, "a bare refundHit pops the newest hit");
 });

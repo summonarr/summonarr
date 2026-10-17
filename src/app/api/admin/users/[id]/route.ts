@@ -6,7 +6,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, rolePresetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, rolePresetExceeds, presetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
 import type { InstanceGrants, MediaServerGrants } from "@/lib/permissions";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -433,10 +433,14 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: t("apiAdmin.users.roleInvalid") }, { status: 400 });
   }
 
-  // Subset rule (same as the permissions branch): re-seeding from the new role's
-  // preset hands out its management bits, so a delegate may only pick a role
-  // whose management bits it holds (ISSUE_ADMIN needs MANAGE_ISSUES).
-  if (rolePresetExceeds(body.role, session.user.permissions)) {
+  // Subset rule (same as the permissions branch and account creation): setting a
+  // role re-seeds the target's WHOLE bitmask from the role's preset, baseline
+  // REQUEST* bits included. So a delegate may only pick a role whose preset it
+  // holds in full — management bits (ISSUE_ADMIN needs MANAGE_ISSUES) AND the
+  // request bits. Checking management bits alone let a delegate without, say,
+  // REQUEST_TV "re-set" a user an admin had restricted to movies back to USER and
+  // hand them TV requests (a same-role PATCH is accepted and re-seeds too).
+  if (rolePresetExceeds(body.role, session.user.permissions) || presetExceeds(body.role, session.user.permissions)) {
     return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
   }
 

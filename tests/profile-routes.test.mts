@@ -487,6 +487,14 @@ test("password change with the CORRECT current password re-hashes, stamps the in
   const del = opsOf("authSession.deleteMany")[0].args as { where: { userId: string } };
   assert.equal(del.where.userId, userId, "all of the user's AuthSession rows are deleted");
   assert.equal(shouldForceDbCheck(userId, "any-session"), true, "invalidateUserSession must mark the user force-revalidate");
+
+  // Guardrail 6g: what a session holder could have planted goes with the
+  // sessions — push registrations and pending Discord link/merge codes.
+  for (const op of ["pushSubscription.deleteMany", "discordLinkToken.deleteMany", "discordMergeCode.deleteMany"]) {
+    const calls = opsOf(op);
+    assert.equal(calls.length, 1, `${op} runs with the password change`);
+    assert.deepEqual(calls[0].args, { where: { userId } });
+  }
 });
 
 test("new-password validation rejects a missing, too-short, or too-long password before any DB read", async () => {

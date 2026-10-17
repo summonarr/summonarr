@@ -28,7 +28,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!session.sessionId) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
   const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaReauthStepUp(session, parsed.password, t);
+  const user = await mfaReauthStepUp(session, parsed.password, t, req);
   if (user instanceof NextResponse) return user;
 
   const state = await getMfaState(user.id);

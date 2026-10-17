@@ -24,7 +24,7 @@ import {
   Permission,
 } from "@/lib/permissions";
 import { getMediaInstanceAccessLists, visibleInstancesFor } from "@/lib/media-visibility";
-import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, quotaUsageWhere } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
 import { mapLimit } from "@/lib/concurrency";
 import { readJsonCapped } from "@/lib/body-size";
@@ -77,13 +77,16 @@ class QuotaExceeded extends Error {
   readonly limit: number;
   readonly windowLabel: string;
   readonly used: number;
+  // Whose quota ran out: the target's, or (on behalf) the FILER's own.
+  readonly whose: "target" | "filer";
 
-  constructor(mt: MediaType, limit: number, windowLabel: string, used: number) {
+  constructor(mt: MediaType, limit: number, windowLabel: string, used: number, whose: "target" | "filer" = "target") {
     super("QUOTA_EXCEEDED");
     this.mt = mt;
     this.limit = limit;
     this.windowLabel = windowLabel;
     this.used = used;
+    this.whose = whose;
   }
 }
 
@@ -239,7 +242,15 @@ export const POST = withPermission([
   const filerRow = filerChecked
     ? await prisma.user.findUnique({
         where: { id: session.user.id },
-        select: { instanceGrants: true, mediaServerGrants: true },
+        select: {
+          instanceGrants: true,
+          mediaServerGrants: true,
+          maxContentRating: true,
+          movieQuotaLimit: true,
+          movieQuotaDays: true,
+          tvQuotaLimit: true,
+          tvQuotaDays: true,
+        },
       })
     : null;
   const filerGrants = parseInstanceGrants(filerRow?.instanceGrants);
@@ -469,9 +480,17 @@ export const POST = withPermission([
   // DECLINED history row and then create nothing, silently erasing it. Only capped,
   // non-admin targets pay the per-item certification fetch; unknown/unrated titles
   // are allowed (see content-rating.ts).
+  //
+  // A non-ADMIN on-behalf filer's OWN cap applies too (the stricter wins): the
+  // permission-bit subset rule above can't see a cap, so a capped delegate could
+  // otherwise file titles above their own rating by naming an uncapped user —
+  // and with AUTO_APPROVE on both, straight into Radarr/Sonarr.
   let ratingBlocked: CreateOutcome[] = [];
-  if (target.maxContentRating && !hasPermission(targetPerms, Permission.ADMIN)) {
-    const cap = target.maxContentRating;
+  const caps = [
+    target.maxContentRating && !hasPermission(targetPerms, Permission.ADMIN) ? target.maxContentRating : null,
+    filerChecked ? filerRow?.maxContentRating ?? null : null,
+  ].filter((c): c is string => typeof c === "string" && c.length > 0);
+  if (caps.length > 0) {
     const checked = await mapLimit(toCreate, ARR_CONCURRENCY, async (it) => {
       let cert: string | undefined;
       try {
@@ -480,7 +499,7 @@ export const POST = withPermission([
       } catch {
         cert = undefined;
       }
-      return { it, blocked: exceedsCap(cert, cap) };
+      return { it, blocked: caps.some((cap) => exceedsCap(cert, cap)) };
     });
     toCreate = checked.filter((c) => !c.blocked).map((c) => c.it);
     ratingBlocked = checked
@@ -544,9 +563,15 @@ export const POST = withPermission([
   const mirroredKeys = new Set<string>();
   if (prepared.length > 0) {
     const enforceQuota = !hasPermission(targetPerms, Permission.QUOTA_UNLIMITED);
+    // A non-ADMIN on-behalf filer's OWN quota is charged too (guardrail 6g): the
+    // rows carry filedBy, and quotaUsageWhere counts what a user filed for others
+    // beside what was filed for them — so naming other users can't multiply what
+    // a delegate may file.
+    const enforceFilerQuota =
+      filerChecked && filerRow !== null && !hasPermission(session.user.permissions, Permission.QUOTA_UNLIMITED);
     let gLimit = 0;
     let gPeriod = "week";
-    if (enforceQuota) {
+    if (enforceQuota || enforceFilerQuota) {
       const qrows = await prisma.setting.findMany({ where: { key: { in: ["quotaLimit", "quotaPeriod"] } } });
       const qmap = Object.fromEntries(qrows.map((s) => [s.key, s.value]));
       gLimit = parseQuotaLimit(qmap.quotaLimit);
@@ -570,16 +595,22 @@ export const POST = withPermission([
                 where: { id: { in: staleDeclinedIds }, status: "DECLINED", permanentlyDeclined: false },
               });
             }
-            if (enforceQuota) {
-              for (const mt of ["MOVIE", "TV"] as MediaType[]) {
-                const n = prepared.filter((p) => p.mediaType === mt).length;
-                if (n === 0) continue;
+            for (const mt of ["MOVIE", "TV"] as MediaType[]) {
+              const n = prepared.filter((p) => p.mediaType === mt).length;
+              if (n === 0) continue;
+              if (enforceQuota) {
                 const rq = resolveUserQuota(mt, target, gLimit, gPeriod);
-                if (rq.limit <= 0) continue;
-                const used = await tx.mediaRequest.count({
-                  where: { requestedBy: targetUserId, mediaType: mt, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
-                });
-                if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used);
+                if (rq.limit > 0) {
+                  const used = await tx.mediaRequest.count({ where: quotaUsageWhere(targetUserId, mt, rq.since) });
+                  if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used);
+                }
+              }
+              if (enforceFilerQuota && filerRow) {
+                const rq = resolveUserQuota(mt, filerRow, gLimit, gPeriod);
+                if (rq.limit > 0) {
+                  const used = await tx.mediaRequest.count({ where: quotaUsageWhere(session.user.id, mt, rq.since) });
+                  if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used, "filer");
+                }
               }
             }
             // Capture rows that existed BEFORE this insert so the side effects below
@@ -637,6 +668,8 @@ export const POST = withPermission([
                   releaseYear: p.releaseYear,
                   note: null,
                   requestedBy: targetUserId,
+                  // Who filed it, when on behalf — the filer's quota key (guardrail 6g).
+                  ...(isOnBehalf ? { filedBy: session.user.id } : {}),
                   status,
                   // No availableAt: a mirrored row is never created AVAILABLE (above).
                   // Auto-approve is an approval (MediaRequest.approvedAt). A mirrored
@@ -661,11 +694,16 @@ export const POST = withPermission([
         const remaining = Math.max(0, err.limit - err.used);
         return NextResponse.json(
           {
-            error: t(err.mt === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv", {
-              limit: err.limit,
-              window: translateQuotaWindow(t, err.windowLabel),
-              remaining,
-            }),
+            error: t(
+              err.whose === "filer"
+                ? err.mt === "MOVIE" ? "apiUser.requests.bulk.filerQuotaMovie" : "apiUser.requests.bulk.filerQuotaTv"
+                : err.mt === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv",
+              {
+                limit: err.limit,
+                window: translateQuotaWindow(t, err.windowLabel),
+                remaining,
+              },
+            ),
           },
           { status: 429 },
         );

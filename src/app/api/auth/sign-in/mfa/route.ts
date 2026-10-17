@@ -26,8 +26,8 @@ import type { Translator } from "@/lib/i18n/translate";
 // session lifetime (6c, rememberMe carried in the challenge token) and the
 // disabled-account refusal (33) are the shared ones, not a parallel copy.
 //
-// Throttles: per IP (every attempt), per account (reserved, refunded on
-// success — the credentials-route pattern), per challenge token (burns after
+// Throttles: per IP (every attempt), per account for CODE methods (reserved,
+// refunded on success — the credentials-route pattern), per challenge token (burns after
 // MAX_TOKEN_FAILURES wrong answers, consumed on success, and RESERVED for the
 // duration of one verification so parallel requests can't both spend a
 // factor), and the PERSISTENT per-account code lockout in src/lib/mfa/lockout.ts
@@ -101,8 +101,17 @@ export async function POST(req: NextRequest) {
   const input = parseInput(body);
   if (!input) return NextResponse.json({ error: t("apiAuth.mfa.inputRequired") }, { status: 400 });
 
+  // The per-account bucket bounds CODE guessing only. A passkey can't be
+  // guessed (it is a signature over this challenge), and guardrail 6d promises
+  // it still works while someone holding the password hammers codes — so it
+  // must neither be refused by this bucket nor charge it. Charging it let ten
+  // junk `webauthn` bodies (which never touch the persistent code counter, so no
+  // lockout email either) block the owner's real passkey for 15 minutes,
+  // renewable forever. Passkey attempts stay bounded by the per-IP limit above
+  // and the per-token failure cap.
   const userKey = `mfa-user:${claims.userId}`;
-  const userHitAt = reserveRateLimit(userKey, USER_LIMIT, USER_WINDOW_MS);
+  const isCode = input.method === "totp" || input.method === "recovery";
+  const userHitAt = isCode ? reserveRateLimit(userKey, USER_LIMIT, USER_WINDOW_MS) : 0;
   if (userHitAt === null) {
     fail("mfa_rate_limited", claims.userId);
     return NextResponse.json({ error: t("apiAuth.common.tooManyAttempts15") }, { status: 429 });

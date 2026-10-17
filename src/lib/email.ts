@@ -832,6 +832,15 @@ export async function notifyUserSecurityEventEmail(data: {
   message: string;
   /** The recipient's stored User.locale (null → the instance default). */
   locale?: string | null;
+  /** Where the button goes. Default: the two-factor section of the profile. */
+  ctaPath?: string;
+  /**
+   * The "if this wasn't you" advice. "mfa" (default) says to change the password
+   * and review two-factor; "account" says to contact an administrator — after a
+   * password change or a sign-out-everywhere the recipient may no longer be able
+   * to sign in at all.
+   */
+  advice?: "mfa" | "account";
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
@@ -843,9 +852,12 @@ export async function notifyUserSecurityEventEmail(data: {
       preheader: data.message,
       accent: "amber",
       heading: data.heading,
-      subheading: t("notify.email.security.subheading", { message: esc(data.message) }),
+      subheading: t(
+        data.advice === "account" ? "notify.email.account.subheading" : "notify.email.security.subheading",
+        { message: esc(data.message) },
+      ),
       ctaLabel: cfg.siteUrl ? t("notify.email.security.cta") : undefined,
-      ctaHref: cfg.siteUrl ? buildSiteUrl(cfg.siteUrl, "/profile#two-factor") : undefined,
+      ctaHref: cfg.siteUrl ? buildSiteUrl(cfg.siteUrl, data.ctaPath ?? "/profile#two-factor") : undefined,
       siteUrl: cfg.siteUrl,
     });
     await sendOne(cfg, data.toEmail, data.subject, html);

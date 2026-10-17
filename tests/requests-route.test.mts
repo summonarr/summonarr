@@ -826,7 +826,9 @@ test("the quota pre-check 429s an over-quota user with the per-user override's w
     error: "You have reached your request quota of 1 per 3 days",
   });
   const countArgs = opsOf("mediaRequest.count")[0].args as { where: Record<string, unknown> };
-  assert.equal(countArgs.where.requestedBy, userId);
+  // quotaUsageWhere (guardrail 6g): what the user requested AND what they filed
+  // for others on their behalf both count against their quota.
+  assert.deepEqual(countArgs.where.OR, [{ requestedBy: userId }, { filedBy: userId }]);
   assert.equal(countArgs.where.mediaType, "MOVIE");
   assert.deepEqual(countArgs.where.status, { notIn: ["DECLINED"] }, "declined rows never consume quota");
   assert.equal(txCalls, 0);
