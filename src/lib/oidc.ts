@@ -1,6 +1,7 @@
 import * as client from "openid-client";
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
+import { readGroupsClaim } from "@/lib/oidc-allowlist";
 
 // Summonarr's OIDC (OpenID Connect) sign-in client. Configured by the OIDC_*
 // env vars and talks to a single identity provider (IdP).
@@ -17,15 +18,67 @@ import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 // Authelia/Keycloak on the operator's LAN are a common deployment.
 
 export const OIDC_STATE_COOKIE = "summonarr-oidc-flow";
+// The name in a secure context (HTTPS AUTH_URL). The `__Host-` prefix makes the
+// browser refuse the cookie unless it is Secure, has Path=/ and NO Domain — so
+// a sibling subdomain (evil.example.com beside summonarr.example.com) can't set
+// or shadow it. Without it, that sibling could plant ITS OWN signed flow cookie
+// (from a flow it started) on Path=/api/auth/oidc, then send the victim to the
+// callback with its code: the victim's browser is signed in as the attacker
+// (login CSRF), and whatever they then request or rate is the attacker's.
+export const OIDC_STATE_COOKIE_SECURE = "__Host-summonarr-oidc-flow";
 
-// Cookie Path for the OIDC state cookie. MUST include BASE_PATH: on a subpath
-// deployment the callback lives at `${BASE_PATH}/api/auth/oidc/callback`, and a
-// cookie scoped to the bare "/api/auth/oidc" is never sent back to it — the
-// callback then reads no state and every OIDC sign-in fails. Shared by the
-// set (oidc/start) and clear (oidc/callback) sites so the two can never drift;
-// a mismatched Path silently fails to expire the cookie. No-op when unset.
+// Cookie Path for the OIDC state cookie in an INSECURE (http dev) context. MUST
+// include BASE_PATH: on a subpath deployment the callback lives at
+// `${BASE_PATH}/api/auth/oidc/callback`, and a cookie scoped to the bare
+// "/api/auth/oidc" is never sent back to it — the callback then reads no state
+// and every OIDC sign-in fails. No-op when unset. A secure context uses "/" —
+// `__Host-` requires it.
 export const OIDC_STATE_COOKIE_PATH = `${process.env.BASE_PATH ?? ""}/api/auth/oidc`;
 const OIDC_STATE_TTL_SECONDS = 5 * 60;
+
+// Same rule as session-cookie.ts: an https AUTH_URL is secure, an http one is
+// not, and an unset/odd one is secure in production.
+function isSecureOidcCookieContext(): boolean {
+  const url = process.env.AUTH_URL ?? "";
+  if (url.startsWith("https://")) return true;
+  if (url.startsWith("http://")) return false;
+  return process.env.NODE_ENV === "production";
+}
+
+// The flow cookie's name and attributes for this deployment. Shared by the set
+// (oidc/start), read and clear (oidc/callback) sites so they can never drift —
+// a mismatched name or Path silently fails to read or expire the cookie.
+export function oidcStateCookie(): { name: string; path: string; secure: boolean } {
+  return isSecureOidcCookieContext()
+    ? { name: OIDC_STATE_COOKIE_SECURE, path: "/", secure: true }
+    : { name: OIDC_STATE_COOKIE, path: OIDC_STATE_COOKIE_PATH, secure: false };
+}
+
+export function serializeOidcStateCookie(value: string): string {
+  const { name, path, secure } = oidcStateCookie();
+  const attrs = [`${name}=${value}`, `Path=${path}`, "HttpOnly", "SameSite=Lax", `Max-Age=${OIDC_STATE_TTL_SECONDS}`];
+  if (secure) attrs.push("Secure");
+  return attrs.join("; ");
+}
+
+export function clearOidcStateCookie(): string {
+  const { name, path, secure } = oidcStateCookie();
+  return `${name}=; Path=${path}; Max-Age=0; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
+}
+
+// The flow cookie's value from a Cookie header — ONLY under this deployment's
+// name. In a secure context an unprefixed `summonarr-oidc-flow` is exactly what
+// a sibling subdomain can plant, so it is never read as a fallback.
+export function readOidcStateCookie(cookieHeader: string | null): string | null {
+  if (!cookieHeader) return null;
+  const { name } = oidcStateCookie();
+  for (const piece of cookieHeader.split(/;\s*/)) {
+    const eq = piece.indexOf("=");
+    if (eq === -1) continue;
+    if (piece.slice(0, eq) === name) return piece.slice(eq + 1);
+  }
+  return null;
+}
 
 // openid-client refuses every non-https request unless `allowInsecureRequests`
 // is passed, and it is deliberately NOT passed here: TLS to the IdP is the right
@@ -176,7 +229,8 @@ export interface OidcAuthorizationStart {
 export async function buildOidcAuthorization(
   redirectUri: string,
   returnTo?: string,
-  opts?: { native?: boolean },
+  // requestGroupsScope: the allowlist's opt-in extra "groups" scope.
+  opts?: { native?: boolean; requestGroupsScope?: boolean },
 ): Promise<OidcAuthorizationStart> {
   const config = await getOidcConfig();
   const codeVerifier = client.randomPKCECodeVerifier();
@@ -189,7 +243,7 @@ export async function buildOidcAuthorization(
   const nonce = client.randomNonce();
   const url = client.buildAuthorizationUrl(config, {
     redirect_uri: redirectUri,
-    scope: "openid profile email",
+    scope: opts?.requestGroupsScope ? "openid profile email groups" : "openid profile email",
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
     state,
@@ -203,6 +257,9 @@ export async function buildOidcAuthorization(
 }
 
 export interface OidcClaims {
+  // The ID token's `iss` (openid-client has already checked it against the
+  // discovered issuer). A `sub` is unique only within it.
+  issuer: string;
   sub: string;
   email: string | null;
   emailVerified: boolean;
@@ -213,6 +270,14 @@ export interface OidcClaims {
   accessToken: string | null;
   refreshToken: string | null;
   expiresAt: number | null;
+  // The allowlist's group claim, when one was asked for (null: the IdP sent
+  // none, or none was asked for).
+  groups: string[] | null;
+}
+
+export interface OidcExchangeOptions {
+  // Read this claim as the user's groups — from the ID token, else userinfo.
+  groupsClaim?: string;
 }
 
 // Native-flow variant. The app posts back the bare (code, state) it caught on
@@ -225,10 +290,12 @@ export async function exchangeNativeOidcCode(
   code: string,
   state: string,
   flowState: OidcFlowState,
+  options: OidcExchangeOptions = {},
 ): Promise<OidcClaims> {
   return exchangeOidcCode(
     buildOidcExchangeUrl(flowState, new URLSearchParams({ code, state })),
     flowState,
+    options,
   );
 }
 
@@ -252,6 +319,7 @@ export function buildOidcExchangeUrl(
 export async function exchangeOidcCode(
   requestUrl: URL,
   flowState: OidcFlowState,
+  options: OidcExchangeOptions = {},
 ): Promise<OidcClaims> {
   const config = await getOidcConfig();
   const tokens = await client.authorizationCodeGrant(config, requestUrl, {
@@ -267,11 +335,31 @@ export async function exchangeOidcCode(
   if (!sub) {
     throw new Error("[oidc] ID token missing required `sub` claim");
   }
+  const issuer = typeof claims.iss === "string" ? claims.iss : "";
+  if (!issuer) {
+    throw new Error("[oidc] ID token missing required `iss` claim");
+  }
+  // Groups: the ID token first, then userinfo (several IdPs release group
+  // claims only there). Asked for only when the allowlist has groups.
+  let groups: string[] | null = null;
+  if (options.groupsClaim) {
+    groups = readGroupsClaim(claims as Record<string, unknown>, options.groupsClaim);
+    if (groups === null && tokens.access_token) {
+      try {
+        const info = await client.fetchUserInfo(config, tokens.access_token, sub);
+        groups = readGroupsClaim(info as Record<string, unknown>, options.groupsClaim);
+      } catch (err) {
+        // No groups ⇒ the allowlist refuses: a userinfo failure fails closed.
+        console.warn("[oidc] userinfo request for the groups claim failed:", err instanceof Error ? err.message : err);
+      }
+    }
+  }
   // Pull email/profile from claims directly. If the IdP only releases them via
   // userinfo, we could fetchUserInfo here — but most providers (Authelia,
   // Keycloak, Google, Authentik) include them in id_token when the openid+email+profile
   // scope is requested.
   return {
+    issuer,
     sub,
     email: typeof claims.email === "string" ? claims.email : null,
     emailVerified: claims.email_verified === true,
@@ -286,5 +374,6 @@ export async function exchangeOidcCode(
       typeof tokens.expires_in === "number"
         ? Math.floor(Date.now() / 1000) + tokens.expires_in
         : null,
+    groups,
   };
 }

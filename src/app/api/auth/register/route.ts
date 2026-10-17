@@ -5,6 +5,7 @@ import { checkRateLimit, getClientIpKey, parseRateLimit } from "@/lib/rate-limit
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { normalizeEmail } from "@/lib/auth";
+import { isReservedEmailDomain } from "@/lib/reserved-email";
 import { defaultPermissionsForRole } from "@/lib/permissions";
 import { readJsonCapped } from "@/lib/body-size";
 import { parseBearerToken, hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
@@ -93,6 +94,11 @@ export async function POST(req: NextRequest) {
   const domainDot = emailParts[1].lastIndexOf(".");
   if (domainDot < 1 || domainDot === emailParts[1].length - 1) {
     return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
+  }
+  // Summonarr mints addresses in these domains for itself (reserved-email.ts,
+  // guardrail 34e); a human account must never hold one.
+  if (isReservedEmailDomain(normalizedEmail)) {
+    return NextResponse.json({ error: t("apiAuth.common.reservedEmail") }, { status: 400 });
   }
 
   if (name !== undefined && name !== null && (typeof name !== "string" || name.trim().length > 100)) {

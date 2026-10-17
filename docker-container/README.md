@@ -388,7 +388,7 @@ Optional **4K instances** use a parallel set of fields (`radarr4kUrl`, `sonarr4k
 Summonarr ships a native OIDC client (`openid-client`) — Authorization Code flow with mandatory PKCE (`S256`), `client_secret_post` token auth, and scopes `openid profile email`. The IdP **must** support discovery (`.well-known/openid-configuration`).
 
 1. Register a new confidential application with your IdP. **Callback / redirect URI:** `${AUTH_URL}/api/auth/oidc/callback` (e.g. `https://requests.example.com/api/auth/oidc/callback`; for a sub-path deploy include the prefix, `https://example.com/request/api/auth/oidc/callback`).
-2. Ensure the IdP releases `email` and `name`/`preferred_username` **in the ID token** and asserts `email_verified=true` — Summonarr reads claims from the ID token (no userinfo call) and **refuses sign-in if the email is unverified or missing**.
+2. Ensure the IdP releases `email` and `name`/`preferred_username` **in the ID token** and asserts `email_verified=true` — Summonarr reads these claims from the ID token and **refuses to create or link an account if the email is unverified or missing**. An unverified address is never copied into a user's notification email.
 3. Copy the issuer, client ID, and client secret into your `.env`:
 
    ```dotenv
@@ -398,6 +398,12 @@ Summonarr ships a native OIDC client (`openid-client`) — Authorization Code fl
    OIDC_DISPLAY_NAME=Authentik    # optional; login-button label, defaults to "SSO"
    ```
 4. `docker compose up -d --force-recreate summonarr`. OIDC discovery is cached at boot, so env or IdP-metadata changes require this restart. The "Sign in with …" button then appears automatically.
+
+**Who may sign in** — Admin → Settings → Authentication → *Single sign-on (OIDC) allowlist*. Off by default (anyone the IdP authenticates gets in). You can require membership in one of a list of groups (the claim name is configurable, default `groups`; it is read from the ID token, else from userinfo — tick *Request the groups scope* for IdPs such as Authelia that only release it when asked), require an IdP-verified email in one of a list of domains, and/or allow **existing users only** (no account is ever created on an OIDC sign-in). The groups and domain rules apply to every OIDC sign-in, existing accounts included, on the web and in the iOS app; each refusal is written to the audit log as `AUTH_LOGIN_FAILED` with its reason.
+
+> **Disabling someone at the IdP does not sign them out of Summonarr.** Summonarr checks the IdP only at sign-in: a session it already issued stays valid (iOS app sessions never expire), and the allowlist only refuses their *next* sign-in. To cut someone off, also deactivate them in **Admin → Users** — that ends every session they have.
+
+> **Changing `OIDC_ISSUER`.** An OIDC account is bound to the issuer it signed in under (an IdP's user id is only unique within that IdP), so after pointing `OIDC_ISSUER` somewhere else, existing OIDC users are refused until an admin deals with it. If the new issuer is the *same* identity provider under a new URL (same user ids), clear the stored issuer so each account adopts the new one on its next sign-in: `UPDATE "Account" SET issuer = NULL WHERE provider = 'oidc';` — never do this when moving to a different IdP.
 
 > **First admin & OIDC.** The first OIDC sign-in is **not** auto-promoted to ADMIN — bootstrap your admin via local registration first, and keep that local account as a break-glass login (the recovery script can't reset OIDC users). To let an OAuth/OIDC user become the first admin instead, set `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN=true`. A self-hosted IdP on a private LAN IP is supported; link-local (`169.254.x`) issuers are blocked by the SSRF policy.
 
@@ -587,6 +593,8 @@ docker compose logs -f summonarr   # watch prisma db push apply any schema chang
 ```
 
 > **Upgrading a LAN/localhost deployment (`TRUST_PROXY` unset or `false`)?** Add `SUMMONARR_ALLOW_LOCAL_ONLY=true` to `.env` *before* `docker compose up -d`. Production now refuses to start in local-only mode without that explicit opt-in — see [`TRUST_PROXY` / `SUMMONARR_ALLOW_LOCAL_ONLY`](#environment-variables). The boot log names the exact variable if you hit it. Deployments already running `TRUST_PROXY=true` behind a reverse proxy are unaffected.
+
+> **Sign-in identity binding (since the 2026-10-17 auth hardening).** A Jellyfin account is now bound to the Jellyfin server it was first seen on, and signing in to it through a *different* configured Jellyfin server is refused; an OIDC account is bound to its issuer. Existing accounts are migrated automatically (at boot, or on their next sign-in) — nothing to do. If the boot log reports accounts that "carry a jellyfin-<id>@jellyfin.local address but were not bound", those rows also have a password, a Plex id or an OIDC login, and that Jellyfin user's sign-in is refused until you sort out which account is theirs.
 
 Schema changes are applied on every container start via `prisma db push` (no migrations directory, no manual step). Destructive schema changes (dropped columns, narrowed types) will **fail fast at boot** instead of silently clobbering data — apply those by hand with explicit intent when they come up.
 

@@ -272,6 +272,7 @@ export async function purgeUserDataInTx(
       plexClientId: null,
       plexUserId: null,
       jellyfinUserId: null,
+      jellyfinInstance: null,
       purgedAt: now,
       sessionsRevokedAt: now, // pushes every existing JWT's iat below the cutoff
     },

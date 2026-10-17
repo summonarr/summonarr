@@ -24,10 +24,11 @@ import { mediaInstanceLabel, plexSettingKey } from "./media-instances";
 //
 // Candidate filter: only "Plex-only" users — no passwordHash, no jellyfinUserId,
 // no OIDC Account row, AND no @jellyfin.local synthetic email (legacy Jellyfin
-// users created before the jellyfinUserId column landed sit with
-// jellyfinUserId=null until their next Jellyfin sign-in self-heals them via
-// findOrCreateJellyfinUser; treating them as Plex candidates produced spurious
-// "REFUSED on next Plex sign-in" warnings every boot). These rows are the
+// users created before the jellyfinUserId column landed sat with
+// jellyfinUserId=null until the one-time backfill in jellyfin-identity.ts bound
+// them — guardrail 34e; the rows it deliberately leaves unbound still carry the
+// address. Treating them as Plex candidates produced spurious "REFUSED on next
+// Plex sign-in" warnings every boot). These rows are the
 // ones that will ACTUALLY be locked out without a backfill; local/Jellyfin/
 // OIDC users whose plexUserId happens to be null have another way in and
 // shouldn't generate noise on every boot.

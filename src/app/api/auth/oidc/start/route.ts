@@ -3,10 +3,10 @@ import {
   buildOidcAuthorization,
   isOidcConfigured,
   NATIVE_OIDC_CALLBACK_SCHEME,
-  OIDC_STATE_COOKIE,
-  OIDC_STATE_COOKIE_PATH,
+  serializeOidcStateCookie,
   signOidcStateCookie,
 } from "@/lib/oidc";
+import { loadOidcAllowlist } from "@/lib/oidc-signin";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { safeInternalPath } from "@/lib/safe-url";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
@@ -36,13 +36,6 @@ function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
 
 function getRedirectUri(base: string): string {
   return `${base.replace(/\/$/, "")}/api/auth/oidc/callback`;
-}
-
-function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? "";
-  if (url.startsWith("https://")) return true;
-  if (url.startsWith("http://")) return false;
-  return process.env.NODE_ENV === "production";
 }
 
 export async function GET(req: NextRequest) {
@@ -78,9 +71,16 @@ export async function GET(req: NextRequest) {
   // the login form) returns undefined for missing or unsafe input, and the
   // callback then falls back to "/".
   const returnTo = safeInternalPath(req.nextUrl.searchParams.get("callbackUrl"));
+  // The allowlist's opt-in "groups" scope. An unreadable (or unreachable)
+  // policy asks for nothing extra — the callback reads it again and refuses
+  // an unreadable one there.
+  const policy = await loadOidcAllowlist().catch(() => null);
   let auth;
   try {
-    auth = await buildOidcAuthorization(redirectUri, returnTo, { native: isNative });
+    auth = await buildOidcAuthorization(redirectUri, returnTo, {
+      native: isNative,
+      requestGroupsScope: policy?.requestGroupsScope === true,
+    });
   } catch (err) {
     console.error("[oidc/start] discovery or URL build failed:", err);
     return isNative
@@ -102,19 +102,10 @@ export async function GET(req: NextRequest) {
   }
 
   const res = NextResponse.redirect(auth.url.toString());
-  const secure = isSecureCookieContext();
-  const attrs = [
-    `${OIDC_STATE_COOKIE}=${cookieValue}`,
-    // Must include BASE_PATH — a cookie scoped to "/api/auth/oidc" is never sent
-    // back to `${BASE_PATH}/api/auth/oidc/callback`, so the callback reads no state
-    // and every OIDC sign-in fails. Kept in lockstep with clearStateCookieHeader()
-    // in ../callback/route.ts. No-op when BASE_PATH is unset.
-    `Path=${OIDC_STATE_COOKIE_PATH}`,
-    "HttpOnly",
-    "SameSite=Lax",
-    "Max-Age=300",
-  ];
-  if (secure) attrs.push("Secure");
-  res.headers.append("Set-Cookie", attrs.join("; "));
+  // `__Host-` + Path=/ + Secure on HTTPS, so a sibling subdomain can't plant a
+  // flow cookie of its own (login CSRF); the BASE_PATH-scoped plain name on
+  // http dev. Name and attributes come from oidcStateCookie (oidc.ts), the same
+  // source the callback reads and clears with.
+  res.headers.append("Set-Cookie", serializeOidcStateCookie(cookieValue));
   return res;
 }

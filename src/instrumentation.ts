@@ -288,6 +288,16 @@ export async function register() {
       .then(({ markLegacyPurgedAccounts }) => markLegacyPurgedAccounts())
       .catch((err) => console.error("[account-lifecycle] startup error:", err));
 
+    // Jellyfin identity binding (guardrail 34e): bind rows that still identify
+    // as Jellyfin only by their jellyfin-<id>@jellyfin.local address (once
+    // ever — sign-in no longer falls back to the address), then give every
+    // bound row with no server binding the instance its id was first seen on.
+    // Awaited so the first sign-ins after an upgrade already see the bindings;
+    // a few indexed queries, and a no-op once both steps have run.
+    await import("@/lib/jellyfin-identity")
+      .then(({ backfillJellyfinIdentities }) => backfillJellyfinIdentities())
+      .catch((err) => console.error("[jellyfin-identity] startup error:", err));
+
     // Plex SSO identity-binding self-heal: backfill User.plexUserId from plex.tv
     // so existing Plex users (created before sign-in switched from email-based to
     // immutable-id-based (provider, plexUserId) matching) aren't locked out on

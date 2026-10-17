@@ -458,6 +458,15 @@ test("register: a missing or malformed email is rejected (400) with no user crea
   assert.equal(users.length, 0);
 });
 
+test("register (guardrail 34e): an address in a domain Summonarr mints for itself is refused (400), whatever its case", async () => {
+  for (const email of ["jellyfin-abc@jellyfin.local", "Discord_1@DISCORD.local", "deleted-u1@deleted.invalid"]) {
+    const res = await registerPost(registerReq({ email, password: STRONG_PASSWORD }));
+    assert.equal(res.status, 400, `${email} must be rejected`);
+    assert.deepEqual(await bodyOf(res), { error: "That email address is reserved and can't be used for an account." }, email);
+  }
+  assert.equal(users.length, 0);
+});
+
 test("register (guardrail 30): the anonymous body is capped — oversized → 413, malformed → 400 — before any user exists", async () => {
   // Content-Length fast path: 413 on the header alone, no body parse.
   const viaHeader = await registerPost(registerReq("{}", { extraHeaders: { "content-length": "20000" } }));

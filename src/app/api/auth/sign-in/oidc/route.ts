@@ -2,15 +2,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import {
   AccountDeactivatedError,
   buildDeviceMeta,
-  findOrCreateOidcUser,
-  normalizeEmail,
-  PROVIDER_REBIND_REQUIRED,
-  PROVIDER_SETUP_REQUIRED,
   signInAndMintSession,
 } from "@/lib/auth";
 import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
-import { prisma } from "@/lib/prisma";
+import { loadOidcAllowlist, oidcExchangeOptionsFor, oidcNativeRefusal, resolveOidcSignIn } from "@/lib/oidc-signin";
 import {
   exchangeNativeOidcCode,
   isNativeOidcState,
@@ -82,9 +78,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.oidc.flowMismatch") }, { status: 400 });
   }
 
+  // Read before the exchange: it decides whether the exchange also fetches a
+  // groups claim. A DB fault here is a 500, like the lookup below.
+  const policy = await loadOidcAllowlist();
+
   let claims;
   try {
-    claims = await exchangeNativeOidcCode(body.code, body.state, flowState);
+    claims = await exchangeNativeOidcCode(body.code, body.state, flowState, oidcExchangeOptionsFor(policy));
   } catch (err) {
     console.error(
       "[auth/sign-in/oidc] code exchange failed:",
@@ -93,43 +93,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.oidc.failed") }, { status: 401 });
   }
 
+  // Allowlist, identity lookup and notification address — the SAME function the
+  // web callback runs (oidc-signin.ts), which audits every refusal.
+  //
   // Deliberately NOT caught: the IdP step above already succeeded, so a throw
   // here is a server-side fault (DB unreachable), not a refusal of the
   // credential. Every sibling provider route lets it propagate as a 500; the
   // old 401 made the iOS app treat it as "rejected" and send the user back to
   // the IdP to re-authenticate, which cannot help. The 401 stays ONLY on the
   // exchange, where a bad or stale code is a genuine credential failure.
-  const dbUser = await findOrCreateOidcUser(claims);
+  const outcome = await resolveOidcSignIn(claims, policy, req.headers);
 
-  // Same refusals the web callback renders as ?error= codes on /login. Kept as
-  // distinct messages so the app can tell the user what to do rather than
-  // showing a generic failure.
-  if (dbUser === PROVIDER_REBIND_REQUIRED) {
-    return NextResponse.json(
-      { error: t("apiAuth.oidc.rebindRequired") },
-      { status: 409 },
-    );
+  // The refusals the web callback renders as ?error= codes on /login, as
+  // distinct messages so the app can tell the user what to do (the app shows
+  // the `error` of any non-2xx answer).
+  if (!outcome.ok) {
+    const refusal = oidcNativeRefusal(outcome.reason);
+    return NextResponse.json({ error: t(refusal.messageKey) }, { status: refusal.status });
   }
-  if (dbUser === PROVIDER_SETUP_REQUIRED) {
-    return NextResponse.json(
-      { error: t("apiAuth.oidc.setupRequired") },
-      { status: 409 },
-    );
-  }
-
-  // Keep notificationEmail in lock-step with the provider's email claim on every
-  // sign-in, exactly as the web callback does.
-  if (claims.email) {
-    const oidcEmail = normalizeEmail(claims.email);
-    await prisma.user
-      .update({ where: { id: dbUser.id }, data: { notificationEmail: oidcEmail } })
-      .catch((err) =>
-        console.error(
-          "[auth/sign-in/oidc] notificationEmail sync failed:",
-          err instanceof Error ? err.message : err,
-        ),
-      );
-  }
+  const dbUser = outcome.user;
 
   const device = buildDeviceMeta(req.headers);
   let result;

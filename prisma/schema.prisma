@@ -118,6 +118,14 @@ model User {
   // email but not its plexUserId/jellyfinUserId, sign-in is REFUSED.
   plexUserId     String? @unique
   jellyfinUserId String? @unique
+  // The Jellyfin server instance (MediaServerUser.serverInstance slug, "" =
+  // default) jellyfinUserId was bound through. Sign-in through any OTHER
+  // configured Jellyfin server is refused, so a second server can't vouch for
+  // an identity it doesn't own (guardrail 34e). Null only on rows bound before
+  // this column existed: the boot backfill fills it from the earliest
+  // MediaServerUser row for the id, and a row with no such evidence adopts the
+  // instance of its next sign-in. Unrelated to play-history attribution (34).
+  jellyfinInstance String? @db.VarChar(32)
 
   // Discord notification preferences (opt-in by default)
   notifyOnApproved  Boolean @default(true)
@@ -253,6 +261,12 @@ model Account {
   scope             String?
   id_token          String?
   session_state     String?
+  // OIDC only: the ID token's `iss`. A `sub` is unique only within its issuer,
+  // so an `oidc` row matches a sign-in on (issuer, sub), never sub alone — a
+  // changed OIDC_ISSUER must not sign a new IdP's user into an old account
+  // with the same subject (guardrail 34e). Null on rows created before the
+  // column existed; such a row adopts the issuer of its next sign-in.
+  issuer            String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
