@@ -33,15 +33,26 @@ import { isReservedEmailDomain } from "@/lib/reserved-email";
 // deliberately revokes nothing.
 
 import { normalizeEmail } from "@/lib/email-normalize";
+import { passwordVersion } from "@/lib/mfa/mfa-store";
 // Re-exported so existing imports of `normalizeEmail` from "@/lib/auth"
 // continue to work.
 export { normalizeEmail };
 
-// Hashes the lowercased email for audit storage. Truncated to 16 hex chars so a
-// password accidentally typed in the email field can't be recovered from logs while
+// Keyed fingerprint of the lowercased email for audit storage (and the
+// per-account login bucket key). Truncated to 16 hex chars so a password
+// accidentally typed in the email field can't be recovered from logs, while
 // still letting an operator correlate failed-login attempts on the same input.
+//
+// An HMAC under its own HKDF subkey of NEXTAUTH_SECRET (the "audit-email"
+// purpose in signing-keys.ts, guardrail 6h), not a bare SHA-256: an unkeyed hash
+// of an email is reversed by hashing a list of candidate addresses, so anyone
+// holding an audit export (or a backup) could confirm which addresses had tried
+// to sign in. Rows written before this used the unkeyed form; they no longer
+// correlate with new ones, which the retention scrub makes moot (auth-event
+// details are cleared once aged). The same value keys the per-account sign-in
+// limiter and lockout notice, so it always uses the CURRENT secret.
 export function hashAuditEmail(email: string): string {
-  return createHash("sha256").update(email).digest("hex").slice(0, 16);
+  return purposeHmacHex(signingKey("audit-email"), email).slice(0, 16);
 }
 
 // Sentinel returned when a provider-bound lookup refuses sign-in due to an email
@@ -800,12 +811,18 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
 // hash still being the one just verified, so a password change landing in between
 // is never overwritten with the old password. Best-effort: on failure the old hash
 // stays (it still verifies) and the sign-in carries on.
-async function rehashPassword(userId: string, verifiedHash: string, password: string): Promise<void> {
+// Returns the hash the row holds afterwards as far as this call knows: the new
+// one when the compare-and-swap landed, else the verified one (a concurrent
+// password change won, or the write failed). The two-factor challenge
+// fingerprints THIS value, so it must match what the MFA step will re-read.
+async function rehashPassword(userId: string, verifiedHash: string, password: string): Promise<string> {
   try {
     const passwordHash = await hashPassword(password);
-    await prisma.user.updateMany({ where: { id: userId, passwordHash: verifiedHash }, data: { passwordHash } });
+    const { count } = await prisma.user.updateMany({ where: { id: userId, passwordHash: verifiedHash }, data: { passwordHash } });
+    return count === 1 ? passwordHash : verifiedHash;
   } catch (err) {
     console.error("[auth] password rehash failed:", err instanceof Error ? err.message : err);
+    return verifiedHash;
   }
 }
 
@@ -873,13 +890,18 @@ export async function authorizeWithCredentials(
   const user = await prisma.user.findUnique({ where: { email } });
 
   let valid = false;
+  // The exact hash the password was checked against — the two-factor challenge
+  // fingerprints THIS one (guardrail 6d), never a later re-read that a password
+  // change landing in between could have replaced.
+  let verifiedHash: string | null = null;
   if (user?.passwordHash) {
     valid = await verifyPassword(credentials.password as string, user.passwordHash);
+    if (valid) verifiedHash = user.passwordHash;
   } else {
     await dummyVerify();
   }
 
-  if (!valid || !user) {
+  if (!valid || !user || !verifiedHash) {
     // The hit was already reserved at the gate above — a genuine wrong password (or an
     // unknown account, which also reached the dummyVerify branch) simply keeps it.
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
@@ -908,12 +930,21 @@ export async function authorizeWithCredentials(
   // parameters (guardrail 6i). AWAITED on purpose: the two-factor challenge minted
   // next fingerprints the stored hash (passwordVersion), so a rehash landing after
   // it would kill the challenge and fail the owner's sign-in once.
-  if (user.passwordHash && needsRehash(user.passwordHash)) {
-    await rehashPassword(user.id, user.passwordHash, credentials.password as string);
+  //
+  // The challenge's fingerprint must follow the hash the row holds NOW: the MFA
+  // step re-reads the stored hash and compares fingerprints, so fingerprinting
+  // the pre-rehash hash expired every legacy-hash owner's first 2FA sign-in.
+  let currentHash = verifiedHash;
+  if (needsRehash(verifiedHash)) {
+    currentHash = await rehashPassword(user.id, verifiedHash, credentials.password as string);
   }
 
   const device = buildDeviceMeta(headers);
-  return { id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device };
+  return {
+    id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device,
+    // A keyed fingerprint, never the hash itself (it rides along to the mint).
+    _passwordVersion: passwordVersion(currentHash),
+  };
 }
 
 export async function authorizeWithPlex(

@@ -311,6 +311,16 @@ export async function register() {
       .then(({ backfillJellyfinIdentities }) => backfillJellyfinIdentities())
       .catch((err) => console.error("[jellyfin-identity] startup error:", err));
 
+    // iOS push rows registered before the endpoint handle became a hash still
+    // carry the raw APNs device token in plaintext (`apns:<token>`) beside the
+    // encrypted copy (apns-endpoint.ts). Rewrite them once per boot — a no-op
+    // once none are left. Awaited so it finishes before the first register;
+    // the route handles a leftover legacy row anyway, so a failure here only
+    // delays the cleanup to the next boot or the device's next launch.
+    await import("@/lib/apns-endpoint")
+      .then(({ migrateLegacyApnsEndpoints }) => migrateLegacyApnsEndpoints())
+      .catch((err) => console.error("[push] APNs endpoint migration error:", err));
+
     // Plex SSO identity-binding self-heal: backfill User.plexUserId from plex.tv
     // so existing Plex users (created before sign-in switched from email-based to
     // immutable-id-based (provider, plexUserId) matching) aren't locked out on

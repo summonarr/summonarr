@@ -28,6 +28,7 @@ import { resolveUserQuota, parseQuotaLimit, quotaUsageWhere, type ResolvedQuota 
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isFeatureEnabled } from "@/lib/features";
+import { discordGuildVerdict } from "@/lib/discord-guild";
 import { isLocale, type Locale } from "@/lib/i18n/locales";
 import { getRecentlyAdded } from "@/lib/recently-added";
 import { addToWatchlist, takeWatchlistAddToken } from "@/lib/watchlist-add";
@@ -1950,6 +1951,22 @@ export async function POST(req: NextRequest) {
   // the feature is off; real interactions get an ephemeral explanation (type 4 + flags 64).
   if (!(await isFeatureEnabled("feature.integration.discord"))) {
     return NextResponse.json({ type: 4, data: { content: interactionTranslatorSync(interaction)("notify.bot.disabled"), flags: 64 } });
+  }
+
+  // Server gate (discord-guild.ts): the signature proves the interaction came
+  // from Discord, not from OUR server. Anything outside the configured guild —
+  // another server the bot was added to, or a DM — is answered with an
+  // ephemeral refusal and touches nothing else. Before the replay guard, so a
+  // refused interaction doesn't even write a nonce row. Only the two types this
+  // route acts on (2 command, 3 component) are gated; every other type is the
+  // 400 at the bottom anyway.
+  if (interaction.type === 2 || interaction.type === 3) {
+    const guildRow = await prisma.setting.findUnique({ where: { key: "discordGuildId" } });
+    const guildVerdict = discordGuildVerdict(interaction, guildRow?.value);
+    if (guildVerdict !== "ok") {
+      const key = guildVerdict === "not-configured" ? "notify.bot.serverNotConfigured" : "notify.bot.wrongServer";
+      return NextResponse.json({ type: 4, data: { content: interactionTranslatorSync(interaction)(key), flags: 64 } });
+    }
   }
 
   // Replay guard (defense-in-depth beyond the 5s timestamp window above): a captured,

@@ -29,7 +29,9 @@ import { prisma } from "@/lib/prisma";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { disabledAccountResponse } from "@/lib/sign-in-response";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { getMfaState, passwordVersion } from "./mfa-store";
+import { logAudit } from "@/lib/audit";
+import { getClientIp } from "@/lib/rate-limit";
+import { getMfaState } from "./mfa-store";
 import { MFA_TOKEN_TTL_SECONDS, signMfaSigninToken } from "./mfa-token";
 import { webAuthnConfigFromEnv } from "./webauthn";
 
@@ -39,9 +41,14 @@ export const WEBAUTHN_TIMEOUT_MS = MFA_TOKEN_TTL_SECONDS * 1000;
 
 export type MfaMethod = "totp" | "webauthn" | "recovery";
 
+// `passwordVersion` is the fingerprint of the hash the password step VERIFIED
+// (authorizeWithCredentials' `_passwordVersion`), not of a re-read: a password
+// change landing between the verify and this read would otherwise hand the old
+// password a challenge fingerprinted with the NEW hash — one the change was
+// supposed to kill. The MFA step compares it with the hash current then.
 export async function mfaChallengeFor(
   req: NextRequest,
-  user: { id: string; rememberMe?: string },
+  user: { id: string; rememberMe?: string; passwordVersion: string },
 ): Promise<NextResponse | null> {
   // Errors propagate: a failed factor lookup must 500 (no session), never fall
   // through to the no-2FA branch and mint one.
@@ -85,8 +92,24 @@ export async function mfaChallengeFor(
     userId: user.id,
     rememberMe: user.rememberMe,
     native: hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER)),
-    pwv: passwordVersion(row.passwordHash),
+    pwv: user.passwordVersion,
     webauthnChallenge: webauthn?.challenge,
+  });
+
+  // The password was RIGHT. For a 2FA account that is a meaningful event on its
+  // own — it is what a stolen password looks like before the second factor
+  // stops it — so it is audited, not just the later second-factor outcome.
+  // AUTH_LOGIN_FAILED because no session exists yet (the login is not complete),
+  // with its own reason; the details carry no secret.
+  void logAudit({
+    userId: user.id,
+    userName: "anonymous",
+    action: "AUTH_LOGIN_FAILED",
+    target: "auth:login",
+    ipAddress: getClientIp(req.headers),
+    userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
+    provider: "credentials",
+    details: { reason: "mfa_challenge_issued", methods },
   });
 
   return NextResponse.json(

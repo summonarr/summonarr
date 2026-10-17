@@ -57,9 +57,26 @@ export type DiscordSlashCommand = {
   readonly name: string;
   readonly description: string;
   readonly options?: readonly DiscordCommandOption[];
+  // Where the command may be used. Every command is GUILD-only (see
+  // DISCORD_GUILD_ONLY below), stamped on by the map at the end of the list.
+  readonly contexts?: readonly number[];
+  readonly integration_types?: readonly number[];
 };
 
-export const DISCORD_SLASH_COMMANDS: readonly DiscordSlashCommand[] = [
+/**
+ * Every command is usable ONLY inside a server the bot was added to:
+ * `contexts: [0]` (GUILD — not 1 BOT_DM, not 2 PRIVATE_CHANNEL) and
+ * `integration_types: [0]` (GUILD_INSTALL — not 1 USER_INSTALL, which would
+ * let anyone install the app on their own account and run it anywhere).
+ * Discord documents both as globally-scoped fields; on the guild-scoped
+ * registration they change nothing, and the interactions route refuses any
+ * interaction from outside the configured server either way
+ * (src/lib/discord-guild.ts). This is the picker half: the commands don't
+ * show up where they would only be refused.
+ */
+export const DISCORD_GUILD_ONLY = { contexts: [0], integration_types: [0] } as const;
+
+const COMMANDS: readonly DiscordSlashCommand[] = [
   {
     name: "request",
     description: "Request a movie or TV show to be added to the library",
@@ -155,3 +172,5 @@ export const DISCORD_SLASH_COMMANDS: readonly DiscordSlashCommand[] = [
     ],
   },
 ];
+
+export const DISCORD_SLASH_COMMANDS: readonly DiscordSlashCommand[] = COMMANDS.map((cmd) => ({ ...cmd, ...DISCORD_GUILD_ONLY }));

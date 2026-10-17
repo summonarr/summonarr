@@ -98,7 +98,7 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash } from "node:crypto";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 import dns from "node:dns/promises";
 
 // Next's async-local-storage shim captures globalThis.AsyncLocalStorage at
@@ -710,12 +710,27 @@ beforeEach(() => {
 
 // ── pure helpers ────────────────────────────────────────────────────────────
 
-test("hashAuditEmail is a 16-hex-char sha256 truncation — deterministic, input-sensitive", () => {
+test("hashAuditEmail is a 16-hex-char HMAC under an HKDF subkey of NEXTAUTH_SECRET — deterministic, input-sensitive, never an unkeyed hash", () => {
   const h = hashAuditEmail("alice@example.com");
   assert.match(h, /^[0-9a-f]{16}$/);
-  assert.equal(h, createHash("sha256").update("alice@example.com").digest("hex").slice(0, 16));
+  // An unkeyed hash of an email is reversed by hashing candidate addresses.
+  assert.notEqual(h, createHash("sha256").update("alice@example.com").digest("hex").slice(0, 16), "not a bare sha256");
+  // Keyed by a SUBKEY, never the raw session secret.
+  assert.notEqual(h, createHmac("sha256", process.env.NEXTAUTH_SECRET!).update("alice@example.com").digest("hex").slice(0, 16), "not the raw secret");
+  // The "audit-email" purpose subkey from signing-keys.ts (guardrail 6h).
+  const subkey = Buffer.from(hkdfSync("sha256", process.env.NEXTAUTH_SECRET!, "summonarr-signing-key", "summonarr:audit-email:v1", 32));
+  assert.equal(h, createHmac("sha256", subkey).update("alice@example.com").digest("hex").slice(0, 16));
   assert.equal(hashAuditEmail("alice@example.com"), h); // stable for correlation
   assert.notEqual(hashAuditEmail("bob@example.com"), h);
+  // A different instance secret gives a different value (no cross-instance correlation).
+  const saved = process.env.NEXTAUTH_SECRET;
+  try {
+    process.env.NEXTAUTH_SECRET = `${saved}-other-instance`;
+    assert.notEqual(hashAuditEmail("alice@example.com"), h);
+  } finally {
+    process.env.NEXTAUTH_SECRET = saved;
+  }
+  assert.equal(hashAuditEmail("alice@example.com"), h);
 });
 
 test("isTokenExpired: null session reads expired; a missing deadline reads NOT expired (current behavior)", () => {

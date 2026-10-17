@@ -36,15 +36,18 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 type PutCall = { url: string; method: string; auth: string | null; body: string | null };
 const puts: PutCall[] = [];
 let putStatus = 200;
+// Per-URL override (the global-clear failure test).
+let putStatusFor: ((url: string) => number) | null = null;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
+  const status = putStatusFor ? putStatusFor(url) : putStatus;
   puts.push({
     url,
     method: init?.method ?? "GET",
     auth: new Headers(init?.headers).get("authorization"),
     body: typeof init?.body === "string" ? init.body : null,
   });
-  return new Response(putStatus === 200 ? "[]" : "boom", { status: putStatus, headers: { "content-type": "application/json" } });
+  return new Response(status === 200 ? "[]" : "boom", { status, headers: { "content-type": "application/json" } });
 }) as unknown as typeof fetch;
 
 const { prisma } = await import("../src/lib/prisma.ts");
@@ -75,6 +78,7 @@ beforeEach(() => {
   warns.length = 0;
   errors.length = 0;
   putStatus = 200;
+  putStatusFor = null;
 });
 
 test("unconfigured (no bot token / client id): no Discord call, no hash write", async () => {
@@ -126,8 +130,13 @@ test("a guild id targets the GUILD endpoint and the hash is scope-specific (a gu
   settings.set(DISCORD_SCHEMA_HASH_KEY, discordSchemaHash(null));
 
   await syncDiscordCommandsIfChanged();
-  assert.equal(puts.length, 1, "a scope flip (global->guild) must re-register");
+  assert.equal(puts.length, 2, "a scope flip (global->guild) must re-register, then clear the global set");
   assert.equal(puts[0].url, "https://discord.com/api/v10/applications/12345/guilds/67890/commands");
+  // The leftover GLOBAL set would keep the commands usable in every other server
+  // the bot is in — it is replaced with an empty one.
+  assert.equal(puts[1].url, "https://discord.com/api/v10/applications/12345/commands");
+  assert.equal(puts[1].method, "PUT");
+  assert.equal(puts[1].body, "[]");
   assert.deepEqual(upserts, [{ key: DISCORD_SCHEMA_HASH_KEY, value: discordSchemaHash("67890") }]);
   assert.notEqual(discordSchemaHash("67890"), discordSchemaHash(null), "guild and global hashes must differ");
 });
@@ -141,4 +150,24 @@ test("a failed registration warns and does NOT record the hash (so the next boot
   assert.equal(puts.length, 1);
   assert.equal(upserts.length, 0, "a failed PUT must leave the hash unset so the next boot retries");
   assert.ok(warns.some((w) => w.includes("[discord] boot command sync failed (401)")));
+});
+
+test("a failed GLOBAL clear after a guild registration is a failure: the hash stays unset so the next boot retries", async () => {
+  settings.set("discordBotToken", "bot-tok");
+  settings.set("discordClientId", "12345");
+  settings.set("discordGuildId", "67890");
+  putStatusFor = (url) => (url.endsWith("/applications/12345/commands") ? 500 : 200);
+
+  await syncDiscordCommandsIfChanged();
+  assert.equal(puts.length, 2, "guild PUT, then the clear");
+  assert.equal(upserts.length, 0, "the clear failed — not current yet");
+  assert.ok(warns.some((w) => w.includes("[discord] boot command sync failed (500)")));
+});
+
+test("a global-scope registration (no Guild ID) makes no clear call", async () => {
+  settings.set("discordBotToken", "bot-tok");
+  settings.set("discordClientId", "12345");
+  await syncDiscordCommandsIfChanged();
+  assert.equal(puts.length, 1);
+  assert.notEqual(puts[0].body, "[]");
 });

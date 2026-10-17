@@ -410,6 +410,31 @@ test("register: the first sign-up bootstraps the initial ADMIN and returns the u
   assert.equal(settings.get("discordRequireLinkedAccount"), "true");
 });
 
+test("register: the first-admin bootstrap is audited — USER_CREATE kind first-admin, named by id, with the request's address", async () => {
+  auditRows.length = 0;
+  const res = await registerPost(registerReq({ name: "Owner", email: "owner@example.com", password: STRONG_PASSWORD }));
+  assert.equal(res.status, 201);
+  const body = await bodyOf(res);
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = auditRows.filter((r) => r.action === "USER_CREATE");
+  assert.equal(rows.length, 1, "exactly one row for the bootstrap");
+  const row = rows[0];
+  assert.equal(row.userId, body.id, "the new admin is the actor");
+  assert.equal(row.target, `user:${body.id}`);
+  const details = JSON.parse(row.details as string);
+  assert.deepEqual(details, { kind: "first-admin", targetUserId: body.id, role: "ADMIN" });
+  assert.ok(!(row.details as string).includes("owner@example.com"), "the details never carry the email");
+  assert.equal(row.provider, "credentials");
+  assert.ok(row.ipAddress, "the request's address is recorded");
+
+  // A refused registration writes nothing.
+  auditRows.length = 0;
+  const closed = await registerPost(registerReq({ email: "late@example.com", password: STRONG_PASSWORD }));
+  assert.equal(closed.status, 403);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(auditRows.filter((r) => r.action === "USER_CREATE").length, 0);
+});
+
 test("register: onboarding is one-shot — a completed setup OR any existing user closes it (403)", async () => {
   // (a) setup_completed_at already present.
   settings.set("setup_completed_at", "2026-01-01T00:00:00.000Z");

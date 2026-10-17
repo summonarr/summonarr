@@ -8,6 +8,7 @@ import { revokeOtherUserSessions } from "@/lib/auth";
 import {
   ensureRecoveryCodesInTx,
   getMfaState,
+  lockUserMfaInTx,
   MAX_PASSKEYS_PER_USER,
   sanitizePasskeyName,
 } from "@/lib/mfa/mfa-store";
@@ -29,7 +30,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // issued is single-use, expires in 5 minutes and is bound to this user AND this
 // session, so it can't be replayed or completed from somewhere else. A token
 // minted on the password alone (the account had no factor then) is refused if
-// the account has gained a factor since.
+// the account has gained a factor since — judged INSIDE the write transaction,
+// under the per-user MFA lock, so two password-only registrations racing each
+// other (or a TOTP enable) can't both land as "the first factor".
 //
 // When this is the account's FIRST second factor the response carries ten
 // one-time recovery codes and every OTHER session is signed out.
@@ -59,6 +62,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!parsed.credential || typeof parsed.credential !== "object") {
     return NextResponse.json({ error: t("apiAuth.mfa.passkeyResponseMissing") }, { status: 400 });
   }
+  // Early answer only (it spends nothing); the authoritative check is the
+  // re-read under the lock below.
   const before = await getMfaState(user.id);
   if (before.enabled && !claims.factorVerified) {
     return NextResponse.json({ error: t("apiAuth.mfa.passkeySetupExpired") }, { status: 400 });
@@ -80,14 +85,22 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAuth.mfa.passkeySetupExpired") }, { status: 400 });
   }
 
-  if (before.passkeys.length >= MAX_PASSKEYS_PER_USER) {
-    return NextResponse.json({ error: t("apiAuth.mfa.maxPasskeys", { max: MAX_PASSKEYS_PER_USER }) }, { status: 400 });
-  }
   const name = sanitizePasskeyName(parsed.name);
 
-  let recoveryCodes: string[] | null;
+  let outcome:
+    | { kind: "added"; recoveryCodes: string[] | null; firstFactor: boolean }
+    | { kind: "gained-factor" }
+    | { kind: "max" };
   try {
-    recoveryCodes = await prisma.$transaction(async (tx) => {
+    outcome = await prisma.$transaction(async (tx) => {
+      // Lock FIRST, then read the factor state inside it: every enrollment
+      // write for this user (another passkey, TOTP setup/enable, recovery
+      // codes) takes the same lock, so this read can't be stale by the time
+      // the credential lands. The `before` read above is a request old.
+      await lockUserMfaInTx(tx, user.id);
+      const state = await getMfaState(user.id, tx);
+      if (state.enabled && !claims.factorVerified) return { kind: "gained-factor" as const };
+      if (state.passkeys.length >= MAX_PASSKEYS_PER_USER) return { kind: "max" as const };
       // The unique credentialId violation, if any, is this tx's FIRST write and
       // propagates (guardrail 23) — nothing earlier to roll back silently.
       await tx.webAuthnCredential.create({
@@ -106,8 +119,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
       // First factor: a pending authenticator secret issued on the password
       // alone must not be confirmable once the account has 2FA (totp/enable
       // takes no password), so it goes.
-      if (!before.enabled) await tx.userTotp.deleteMany({ where: { userId: user.id, enabledAt: null } });
-      return ensureRecoveryCodesInTx(tx, user.id);
+      if (!state.enabled) await tx.userTotp.deleteMany({ where: { userId: user.id, enabledAt: null } });
+      return { kind: "added" as const, recoveryCodes: await ensureRecoveryCodesInTx(tx, user.id), firstFactor: !state.enabled };
     });
   } catch (err) {
     if ((err as { code?: string })?.code === "P2002") {
@@ -115,15 +128,22 @@ export const POST = withAuth(async (req, _ctx, session) => {
     }
     throw err;
   }
+  if (outcome.kind === "gained-factor") {
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeySetupExpired") }, { status: 400 });
+  }
+  if (outcome.kind === "max") {
+    return NextResponse.json({ error: t("apiAuth.mfa.maxPasskeys", { max: MAX_PASSKEYS_PER_USER }) }, { status: 400 });
+  }
+  const { recoveryCodes, firstFactor } = outcome;
 
-  const revoked = before.enabled ? 0 : await revokeOtherUserSessions(user.id, session.sessionId);
+  const revoked = firstFactor ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
   void notifyMfaSecurityEvent(user.id, "passkey-added");
   void logAudit({
     userId: user.id,
     userName: user.name ?? user.email,
     action: "MFA_CHANGE",
     target: `user:${user.id}`,
-    details: { kind: "passkey-added", name, firstFactor: !before.enabled, otherSessionsRevoked: revoked },
+    details: { kind: "passkey-added", name, firstFactor, otherSessionsRevoked: revoked },
     ...auditContext(req, session),
   });
   return NextResponse.json(

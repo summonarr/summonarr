@@ -401,8 +401,19 @@ type PostOpts = {
   contentLength?: string;    // override the Content-Length header
 };
 
+// The configured server (discordGuildId). Every command/component payload is
+// sent FROM it unless the test names a guild_id itself — an explicit
+// `guild_id: undefined` models a DM (JSON drops the key).
+const GUILD_ID = "555555555555555555";
+function fromGuild(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const p = payload as Record<string, unknown>;
+  if ((p.type === 2 || p.type === 3) && !("guild_id" in p)) return { ...p, guild_id: GUILD_ID };
+  return payload;
+}
+
 async function post(payload: unknown, opts: PostOpts = {}): Promise<Response> {
-  const body = opts.rawBody ?? JSON.stringify(payload);
+  const body = opts.rawBody ?? JSON.stringify(fromGuild(payload));
   const timestamp = opts.timestamp ?? String(Math.floor(Date.now() / 1000));
   const signature = opts.signature ?? (opts.signed === false ? "00".repeat(64) : signBody(timestamp, body));
   const headers: Record<string, string> = {
@@ -449,6 +460,7 @@ beforeEach(async () => {
   settings.clear();
   settings.set("discordPublicKey", PUBLIC_KEY_HEX);
   settings.set("discordBotToken", "a-bot-token");
+  settings.set("discordGuildId", GUILD_ID);
   interactions.invalidatePublicKeyCache();
   invalidateFeatureFlagCache();
   requestRows = [];
@@ -638,6 +650,83 @@ test("a real interaction while DISABLED gets an ephemeral explanation, not an er
   assert.equal(body.type, 4, "type 4 = immediate reply");
   assert.equal(body.data.flags, 64, "flags 64 = ephemeral");
   assert.match(body.data.content, /disabled/i);
+});
+
+// ── the server gate (discord-guild.ts) ───────────────────────────────────────
+// The signature proves an interaction came from Discord, not from OUR server.
+// Commands registered globally (or a leftover global set) work in every server
+// the bot is in, so a stranger who adds the bot to their own server could run
+// /request here. Everything but PING must come from the configured guild.
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+test("server gate: a /request from ANOTHER server is refused ephemerally and nothing runs", async () => {
+  const res = await post({ ...command("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]), guild_id: "666666666666666666" });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.type, 4, "an immediate reply, not a deferral (type 5) that would run the handler");
+  assert.equal(body.data.flags, 64, "ephemeral");
+  assert.equal(body.data.content, "This bot only answers in its own Discord server.");
+  await settle();
+  assert.equal(opsOf("discordSearchCache.create").length, 0, "refused before the replay guard writes a nonce");
+  assert.equal(opsOf("user.findUnique").length, 0, "no account is looked up");
+  assert.equal(opsOf("user.create").length, 0, "no @discord.local shadow account is created");
+  assert.equal(fetchCalls.length, 0, "no TMDB search and no Discord edit");
+});
+
+test("server gate: a DM (no guild_id) is refused — /link from a DM doesn't redeem the token", async () => {
+  appUsers.push({ id: "web-1", email: "web@example.com", name: "Web", discordId: null, role: "USER", deactivatedAt: null });
+  linkTokens.push({ token: "a".repeat(32), userId: "web-1", expiresAt: new Date(Date.now() + 60_000), discordId: null, user: appUsers[0] });
+  const dm = { ...command("link", [{ name: "token", value: "a".repeat(32) }]), member: undefined, user: { id: "123456789012345678", username: "someone" }, guild_id: undefined };
+  const body = await (await post(dm)).json();
+  assert.equal(body.type, 4);
+  assert.equal(body.data.content, "This bot only answers in its own Discord server.");
+  await settle();
+  assert.equal(opsOf("discordLinkToken.findUnique").length, 0, "the link token is never read");
+  assert.equal(linkTokens.length, 1, "nor consumed");
+  assert.equal(appUsers[0].discordId, null, "and no Discord id is bound");
+});
+
+test("server gate: a button click from another server is refused — an approve never lands", async () => {
+  requestRows = [{ id: "req-x", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, posterPath: null, status: "PENDING", requestedBy: "u-req", qualityProfileId: null, arrInstance: "" }];
+  const click = {
+    id: nextInteractionId(), type: 3, application_id: "app-1", token: "t", guild_id: "666666666666666666",
+    member: { user: { id: "222222222222222222", username: "admin" } },
+    data: { custom_id: "admin_approve:req-x" },
+  };
+  const body = await (await post(click)).json();
+  assert.equal(body.type, 4, "not the type-6 acknowledgement that runs the component handler");
+  assert.equal(body.data.flags, 64);
+  await settle();
+  assert.equal(opsOf("mediaRequest.updateMany").length, 0);
+  assert.equal(requestRows[0].status, "PENDING");
+});
+
+test("server gate: with NO Guild ID configured every interaction is refused (fail closed); PING still answers", async () => {
+  settings.delete("discordGuildId");
+  assert.deepEqual(await (await post(ping())).json(), { type: 1 }, "Discord's endpoint verification keeps passing");
+  for (const payload of [command("status"), { ...command("status"), guild_id: "666666666666666666" }]) {
+    const body = await (await post(payload)).json();
+    assert.equal(body.type, 4);
+    assert.equal(body.data.flags, 64);
+    assert.match(body.data.content, /Guild \(Server\) ID/, "tells the admin what to set");
+  }
+  await settle();
+  assert.equal(opsOf("discordSearchCache.create").length, 0);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("server gate: the refusal follows the invoker's Discord locale", async () => {
+  const body = await (await post({ ...command("status"), guild_id: "666666666666666666", locale: "es-ES" })).json();
+  assert.equal(body.data.content, "Este bot solo responde en su propio servidor de Discord.");
+});
+
+test("server gate: the configured guild passes (with surrounding whitespace in the setting)", async () => {
+  settings.set("discordGuildId", ` ${GUILD_ID} `);
+  const body = await (await post(command("status"))).json();
+  assert.equal(body.type, 5, "deferred — the handler runs");
 });
 
 // ── reply language ───────────────────────────────────────────────────────────

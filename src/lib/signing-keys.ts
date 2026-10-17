@@ -29,7 +29,10 @@ export type SigningPurpose =
   | "qc-flow"
   | "oidc-flow"
   | "request-token"
-  | "plex-token-cache";
+  | "plex-token-cache"
+  // hashAuditEmail (auth.ts): the audit-log email hash, which also keys the
+  // per-account sign-in limiter. An HMAC key, never a JWT signer.
+  | "audit-email";
 
 export interface SigningKey {
   kid: string;

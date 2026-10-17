@@ -199,10 +199,15 @@ function auditMatch(r: AuditRow, where: Record<string, unknown> | undefined): bo
       continue;
     }
     if (k === "ipAddress" || k === "userAgent" || k === "details") {
-      const f = v as { not?: unknown };
       const val = (r as unknown as Record<string, unknown>)[k];
+      if (v === null || typeof v !== "object") { if (val !== v) return false; continue; }
+      const f = v as { not?: unknown; contains?: string };
       if ("not" in f) { if (val === f.not) return false; continue; }
-      if (val !== v) return false;
+      if (f.contains !== undefined) { if (typeof val !== "string" || !val.includes(f.contains)) return false; continue; }
+      return false;
+    }
+    if (k === "id") {
+      if (r.id !== v) return false;
       continue;
     }
     throw new Error(`unhandled AuditLog where key: ${k}`);
@@ -638,6 +643,11 @@ test("users: a successful create is audited", async () => {
   await drainAfter();
   const created = opsOf("auditLog.create").find((o) => (o.args as { data: { action: string } }).data.action === "USER_CREATE");
   assert.ok(created, "USER_CREATE audit row missing");
+  const raw = (created.args as { data: { details: string; target: string } }).data;
+  const details = JSON.parse(raw.details);
+  assert.equal(`user:${details.targetUserId}`, raw.target, "the new account is named by its id");
+  assert.ok(!("targetEmail" in details), "never by its email");
+  assert.ok(!raw.details.includes("audited@example.com"));
 });
 
 test("users: a create audit never records the password", async () => {
@@ -824,6 +834,21 @@ test("scrub: clears details on auth events but PRESERVES a USER_DELETE record", 
   await scrubAudit(t);
   assert.equal(auditRows.find((r) => r.id === "login")!.details, null);
   assert.equal(auditRows.find((r) => r.id === "del")!.details, '{"target":"bob"}');
+});
+
+test("scrub: aged admin-action rows lose the TARGET user's name/email from their details — the rest of the record stays", async () => {
+  const t = await mintSession();
+  const old = new Date(Date.now() - 200 * 86_400_000);
+  auditRows = [
+    audit({ id: "role", createdAt: old, action: "USER_ROLE_CHANGE", details: JSON.stringify({ targetUser: "Bob", targetEmail: "bob@example.com", before: { role: "USER" }, after: { role: "ADMIN" } }) }),
+    audit({ id: "fresh", createdAt: new Date(), action: "USER_CREATE", details: JSON.stringify({ targetUser: "Eve", targetEmail: "eve@example.com" }) }),
+    audit({ id: "odd", createdAt: old, action: "SETTINGS_CHANGE", details: 'not json but mentions "targetUser"' }),
+  ];
+  const body = await (await scrubAudit(t)).json();
+  assert.equal(body.adminDetailsScrubbed, 1);
+  assert.deepEqual(JSON.parse(auditRows.find((r) => r.id === "role")!.details!), { before: { role: "USER" }, after: { role: "ADMIN" } });
+  assert.match(auditRows.find((r) => r.id === "fresh")!.details!, /eve@example\.com/, "inside the retention window: untouched");
+  assert.equal(auditRows.find((r) => r.id === "odd")!.details, 'not json but mentions "targetUser"', "unparseable details are left alone, never guessed at");
 });
 
 test("scrub: reports the counts and the cutoff it used", async () => {

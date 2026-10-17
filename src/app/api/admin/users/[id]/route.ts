@@ -506,7 +506,8 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
 
   // Role change already committed; a failed audit write must not 500 it (a retry
   // would re-apply and double-audit). logAudit swallows write failures by design.
-  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_ROLE_CHANGE", target: `user:${id}`, details: { targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, after: { role: body.role } }, ...auditContext(req, session) });
+  // The target is named by id (+ display name), never by email.
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_ROLE_CHANGE", target: `user:${id}`, details: { targetUserId: id, ...(target.name ? { targetUser: target.name } : {}), before: { role: target.role }, after: { role: body.role } }, ...auditContext(req, session) });
   return NextResponse.json({ id, role: body.role });
 });
 
@@ -582,6 +583,6 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   // Account already disabled; a failed audit write must not 500 it (guardrail 26
   // — logAudit swallows write failures). Everything (requests/issues/votes, the
   // identity itself) is preserved — the account is off, not erased.
-  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DEACTIVATE", target: `user:${id}`, details: { kind: "admin-disable", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(req, session) });
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DEACTIVATE", target: `user:${id}`, details: { kind: "admin-disable", targetUserId: id, ...(target.name ? { targetUser: target.name } : {}), before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(req, session) });
   return NextResponse.json({ ok: true });
 });

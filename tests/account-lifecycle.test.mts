@@ -60,6 +60,8 @@ let userUpdateManyRows = 1; // rows affected by purge's final guarded update (ra
 let lastCas: { sql: string; values: unknown[] } | null = null;
 // What user.findUnique returns to purgeUserDataInTx's precondition check.
 let userState: { deactivatedAt: Date | null; purgedAt: Date | null } | null = null;
+type AuditStoreRow = { id: string; target: string; userId: string | null; userName: string; details: string | null };
+let auditStore: AuditStoreRow[] = [];
 
 function record(model: string, method: string) {
   return async (args: unknown) => {
@@ -101,6 +103,25 @@ const baseTx = {
   userTotp: { deleteMany: record("userTotp", "deleteMany") },
   webAuthnCredential: { deleteMany: record("webAuthnCredential", "deleteMany") },
   mfaRecoveryCode: { deleteMany: record("mfaRecoveryCode", "deleteMany") },
+  // Audit rows the purge's scrub finds (audit-scrub.ts): an in-memory list the
+  // updateMany CAS rewrites, so a test can read the result back.
+  auditLog: {
+    findMany: async (args: { where: { target?: string } }) => {
+      ops.push({ op: "auditLog.findMany", args });
+      return auditStore.filter((r) => r.target === args.where.target && r.details?.match(/"target(User|Email)"/));
+    },
+    updateMany: async (args: { where: { id?: string; details?: string; userId?: string }; data: Record<string, unknown> }) => {
+      ops.push({ op: "auditLog.updateMany", args });
+      let count = 0;
+      for (const r of auditStore) {
+        if (args.where.id !== undefined && (r.id !== args.where.id || r.details !== args.where.details)) continue;
+        if (args.where.userId !== undefined && r.userId !== args.where.userId) continue;
+        Object.assign(r, args.data);
+        count++;
+      }
+      return { count };
+    },
+  },
   user: {
     findUnique: async (args: unknown) => {
       ops.push({ op: "user.findUnique", args });
@@ -132,6 +153,11 @@ const deactivateTx = {
   userTotp: { deleteMany: trap("deactivation must NOT remove two-factor — it is reversible") },
   webAuthnCredential: { deleteMany: trap("deactivation must NOT remove passkeys — it is reversible") },
   mfaRecoveryCode: { deleteMany: trap("deactivation must NOT remove recovery codes — it is reversible") },
+  // Nor the audit trail: a disabled account is not an erased one.
+  auditLog: {
+    findMany: trap("deactivation must NOT scrub the audit trail — it is reversible"),
+    updateMany: trap("deactivation must NOT scrub the audit trail — it is reversible"),
+  },
 } as unknown as AnyTx;
 
 const purgeTx = {
@@ -167,6 +193,10 @@ const PURGE_OPS = [
   "traktWatchedItem.deleteMany",
   "traktConnection.deleteMany",
   "verificationToken.deleteMany",
+  // The audit trail's copies of who this was (audit-scrub.ts): rows ABOUT the
+  // account lose the target name/email, rows BY it lose the actor name.
+  "auditLog.findMany",
+  "auditLog.updateMany",
   "user.updateMany",
 ];
 
@@ -182,6 +212,7 @@ beforeEach(() => {
   userUpdateManyRows = 1;
   lastCas = null;
   userState = { deactivatedAt: DISABLED_AT, purgedAt: null };
+  auditStore = [];
 });
 
 // ── deactivate ──────────────────────────────────────────────────────────────
@@ -306,6 +337,25 @@ test("purge of a disabled account issues the full scrub set, in order", async ()
   for (const op of PURGE_OPS.slice(1, 9)) {
     assert.deepEqual(opArgs(op), { where: { userId: ID } }, op);
   }
+});
+
+test("purge scrubs the audit trail's copies of who this was — target name/email on rows ABOUT the account, the actor name on rows BY it", async () => {
+  auditStore = [
+    { id: "a1", target: `user:${ID}`, userId: "admin-1", userName: "Admin", details: JSON.stringify({ targetUser: "Alice", targetEmail: "alice@example.com", before: { role: "USER" }, after: { role: "ADMIN" } }) },
+    { id: "a2", target: "user:someone-else", userId: "admin-1", userName: "Admin", details: JSON.stringify({ targetUser: "Bob", targetEmail: "bob@example.com" }) },
+    { id: "a3", target: "auth:login", userId: ID, userName: "alice@example.com", details: JSON.stringify({ provider: "credentials" }) },
+  ];
+  await purgeUserDataInTx(purgeTx, ID, NOW);
+  const about = auditStore.find((r) => r.id === "a1")!;
+  assert.deepEqual(JSON.parse(about.details!), { before: { role: "USER" }, after: { role: "ADMIN" } }, "what happened stays, who it was goes");
+  assert.equal(about.userName, "Admin", "the acting admin is not the purged person");
+  const other = auditStore.find((r) => r.id === "a2")!;
+  assert.match(other.details!, /bob@example\.com/, "another account's rows are untouched");
+  const by = auditStore.find((r) => r.id === "a3")!;
+  assert.equal(by.userName, "[redacted]", "the purged person's own rows lose their name/email");
+  assert.equal(by.userId, ID, "still keyed by the id");
+  const scrubFind = opArgs("auditLog.findMany") as { where: { target: string } };
+  assert.equal(scrubFind.where.target, `user:${ID}`, "the details scrub is scoped to THIS account");
 });
 
 test("the purge payload is EXACTLY the personal-data field set — nothing more, nothing less", async () => {

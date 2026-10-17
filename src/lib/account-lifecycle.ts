@@ -3,6 +3,8 @@ import "server-only";
 import { prisma } from "./prisma";
 import { verifyIdentifierPrefixFor } from "./notification-email-verify";
 import { deleteAllMfaInTx } from "./mfa/mfa-store";
+import { scrubTargetPiiFromAudit } from "./audit-scrub";
+import { REDACTED_USER_NAME } from "./audit";
 
 // The encryption extension in ./prisma changes the client's type, so the
 // generated Prisma.TransactionClient is NOT assignable to the interactive-tx
@@ -248,6 +250,14 @@ export async function purgeUserDataInTx(
   await tx.verificationToken.deleteMany({
     where: { identifier: { startsWith: verifyIdentifierPrefixFor(id) } },
   });
+  // The audit trail keeps WHAT happened to this account, not who it was
+  // (audit-scrub.ts): admin-action rows ABOUT it lose the target name/email in
+  // their details, and rows BY it lose the actor name (often the email) — both
+  // keyed by the user id, which survives. IP and user agent stay until the
+  // ordinary retention scrub. The USER_PURGE row the route writes after this
+  // commits is the one record that still names the account, until retention.
+  await scrubTargetPiiFromAudit(tx, { target: `user:${id}` });
+  await tx.auditLog.updateMany({ where: { userId: id }, data: { userName: REDACTED_USER_NAME } });
   // Re-check deactivation atomically in the same statement that scrubs the row.
   // The precondition read at the top of this function is several awaited
   // deletes ago — a concurrent reactivate can clear deactivatedAt in that

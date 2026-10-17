@@ -10,6 +10,7 @@ import { defaultPermissionsForRole } from "@/lib/permissions";
 import { readJsonCapped } from "@/lib/body-size";
 import { parseBearerToken, hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { logAudit, auditContext } from "@/lib/audit";
 
 // In-process flag: the DB advisory lock below is the real guard; this just turns away an obvious double-submit early.
 let registrationInFlight = false;
@@ -182,6 +183,20 @@ export async function POST(req: NextRequest) {
   } finally {
     registrationInFlight = false;
   }
+
+  // The instance's first ADMIN was just created by an unauthenticated request —
+  // the one moment anyone who reaches the setup page can take the server. The
+  // row records who did it and from where. Post-commit and swallowing
+  // (guardrail 26): the account exists either way. Named by id, not email.
+  void logAudit({
+    userId: user.id,
+    userName: user.name ?? user.email,
+    action: "USER_CREATE",
+    target: `user:${user.id}`,
+    details: { kind: "first-admin", targetUserId: user.id, role: user.role },
+    ...auditContext(req),
+    provider: "credentials",
+  });
 
   return NextResponse.json(user, { status: 201 });
 }

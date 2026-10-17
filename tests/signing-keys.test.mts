@@ -62,6 +62,7 @@ const PURPOSES: SigningPurpose[] = [
   "oidc-flow",
   "request-token",
   "plex-token-cache",
+  "audit-email",
 ];
 
 function header(token: string): Record<string, unknown> {

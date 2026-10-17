@@ -185,6 +185,8 @@
   "notify.discord.issueResolved.description": "Das von Ihnen gemeldete Problem mit **{media}** wurde gelöst.",
   "notify.discord.issueResolved.resolution": "**Lösung:** {resolution}",
   "notify.bot.disabled": "Die Discord-Integration ist derzeit deaktiviert.",
+  "notify.bot.wrongServer": "Dieser Bot antwortet nur auf seinem eigenen Discord-Server.",
+  "notify.bot.serverNotConfigured": "Dieser Bot ist noch für keinen Discord-Server eingerichtet. Ein Administrator muss die Guild-(Server-)ID in den Discord-Einstellungen von Summonarr eintragen.",
   "notify.bot.slow": "Das dauert länger als erwartet. Bitte versuchen Sie es erneut.",
   "notify.bot.unexpected": "Ein unerwarteter Fehler ist aufgetreten. Bitte versuchen Sie es erneut.",
   "notify.bot.unexpectedShort": "Ein unerwarteter Fehler ist aufgetreten.",
