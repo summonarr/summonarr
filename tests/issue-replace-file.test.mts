@@ -702,8 +702,13 @@ function parkSonarrDelete(): { open: () => void } {
   return { open };
 }
 // Bounded: answers whether `cond` came true — a mutant must fail, never hang on the gate.
-async function until(cond: () => boolean): Promise<boolean> {
-  for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setImmediate(r));
+// Bounded by TIME, not ticks: the request under test verifies its session on
+// libuv's thread pool, and on a saturated CI runner 500 setImmediate turns can
+// pass before that thread is scheduled. The gate only opens on open(), so a
+// time bound still proves "answered while parked".
+async function until(cond: () => boolean, ms = 5_000): Promise<boolean> {
+  const deadline = performance.now() + ms;
+  while (!cond() && performance.now() < deadline) await new Promise((r) => setImmediate(r));
   return cond();
 }
 function tracked<T>(p: Promise<T>): { p: Promise<T>; settled: () => boolean } {

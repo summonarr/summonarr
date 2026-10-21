@@ -197,6 +197,17 @@ function deferred<T = void>() {
   return { promise, resolve };
 }
 const tick = () => new Promise((r) => setImmediate(r));
+// Bounded by TIME, not ticks: each PATCH verifies its session on libuv's thread
+// pool, so on a saturated CI runner neither the tick count nor the order two
+// PATCHes reach the lock is fixed. The tests below start the second save only
+// once the first one's PUT is out, so the lock order is the one they assert.
+async function until(cond: () => boolean, ms = 5_000): Promise<boolean> {
+  const deadline = performance.now() + ms;
+  while (!cond() && performance.now() < deadline) await tick();
+  return cond();
+}
+// Long enough for a queued save to clear auth and reach the lock it waits on.
+const settle = () => new Promise((r) => setTimeout(r, 100));
 const saveLocks = () =>
   ((globalThis as unknown as Record<symbol, Map<string, unknown>>)[Symbol.for("summonarr.processSingletons")]
     .get("arr-system-data:provider-save-locks")) as Map<string, unknown>;
@@ -230,8 +241,9 @@ test("two overlapping saves to one provider run in turn: the second reads after 
     return undefined;
   };
   const a = patch(token, { kind: "indexer", id: 3, enableRss: false });
+  assert.ok(await until(() => puts === 1), "the first save's PUT is out");
   const b = patch(token, { kind: "indexer", id: 3, enableInteractiveSearch: false });
-  for (let i = 0; i < 20; i++) await tick();
+  await settle();
   assert.deepEqual(arrCalls().map((c) => c.method), ["GET", "PUT"], "the second save has not read the resource while the first PUT is out");
   firstPut.resolve();
   const [ra, rb] = await Promise.all([a, b]);
@@ -265,8 +277,9 @@ test("a save that fails releases the lock: the next save to that provider still 
     return undefined;
   };
   const a = patch(token, { kind: "indexer", id: 3, enableRss: false });
+  assert.ok(await until(() => puts === 1), "the first save's PUT is out");
   const b = patch(token, { kind: "indexer", id: 3, enableInteractiveSearch: false });
-  for (let i = 0; i < 20; i++) await tick();
+  await settle();
   firstPut.resolve();
   const [ra, rb] = await Promise.all([a, b]);
   assert.notEqual(ra.status, 200, "the first save failed");
