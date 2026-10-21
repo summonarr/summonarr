@@ -46,7 +46,6 @@ let deleteStatus: (origin: string, path: string) => number = () => 200;
 let deleteThrows: (origin: string, path: string) => Error | null = () => null;
 let listingStatus: (origin: string) => number = () => 200;
 // Runs before a listing answers — lets a test park one listing mid-flight.
-let listingHook: ((origin: string, path: string) => Promise<void>) | null = null;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
@@ -63,11 +62,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const ls = listingStatus(url.origin);
   if (ls !== 200) return new Response("down", { status: ls });
   if (url.pathname === "/api/v3/movie") {
-    // The body is read BEFORE the hook parks: a parked listing answers with the
-    // library as it was when the request reached Radarr.
-    const body = radarrMovies[url.origin] ?? [];
-    if (listingHook) await listingHook(url.origin, url.pathname);
-    return Response.json(body);
+    return Response.json(radarrMovies[url.origin] ?? []);
   }
   if (url.pathname === "/api/v3/series") return Response.json(sonarrSeries);
   throw new Error(`unexpected fetch ${method} ${url}`);
@@ -200,16 +195,11 @@ shadowPrismaModel(prisma, "watchlistItem", { groupBy: async () => [] });
 shadowPrismaModel(prisma, "activeSession", { findMany: async () => [] });
 shadowPrismaModel(prisma, "upstreamWatchEvidence", { findMany: async () => [] });
 let protections: Array<{ tmdbId: number; mediaType: string; title: string | null; reason: string | null; createdAt: Date }> = [];
-// When set, a protection read answers with what it saw on arrival, but only
-// once the gate opens — a computation parked mid-flight.
-let protectionsGate: Promise<void> | null = null;
 let _protectionReads = 0;
 shadowPrismaModel(prisma, "cleanupProtection", {
   findMany: async (args: { where?: { tmdbId?: { in?: number[] } } }) => {
     _protectionReads++;
-    const seen = protections.filter((p) => inIds(args.where, p.tmdbId));
-    if (protectionsGate) await protectionsGate;
-    return seen;
+    return protections.filter((p) => inIds(args.where, p.tmdbId));
   },
   upsert: async (args: { where: { tmdbId_mediaType: { tmdbId: number; mediaType: string } }; create: { title: string | null; reason: string | null } }) => {
     seq.push("cleanupProtection.upsert");
@@ -244,12 +234,10 @@ shadowPrismaModel(prisma, "blacklistItem", {
     return {};
   },
 });
-let auditFails = false;
 let audits: Array<{ action: string; target: string; details: Record<string, unknown> }> = [];
 shadowPrismaModel(prisma, "auditLog", {
   create: async (args: { data: { action: string; target: string; details: string | null } }) => {
     seq.push(`audit ${args.data.action} ${args.data.target}`);
-    if (auditFails) throw new Error("simulated audit failure");
     audits.push({ action: args.data.action, target: args.data.target, details: args.data.details ? JSON.parse(args.data.details) : {} });
     return { id: "audit" };
   },
@@ -307,12 +295,9 @@ beforeEach(() => {
   requestWrites.length = 0;
   blacklistUpserts = [];
   audits = [];
-  auditFails = false;
   deleteStatus = () => 200;
   deleteThrows = () => null;
   listingStatus = () => 200;
-  listingHook = null;
-  protectionsGate = null;
   _protectionReads = 0;
   tmdbPlays = [];
   tmdbToTvdb = new Map();
