@@ -211,10 +211,10 @@ async function main() {
     }
     const u = rows[0];
     // ...and what the in-app change removes alongside the sessions: the device
-    // rows, the calendar feed URL (a bearer credential), push registrations and
-    // pending Discord link/merge codes a session holder could have planted.
-    // Each is probed first so the break-glass still works on a database whose
-    // schema predates it.
+    // rows, the calendar feed URL (a bearer credential), push registrations,
+    // pending Discord link/merge codes and a pending notification-email
+    // verification a session holder could have planted. Each is probed first so
+    // the break-glass still works on a database whose schema predates it.
     if (await hasTable(client, "AuthSession")) {
       await client.query(`DELETE FROM "AuthSession" WHERE "userId" = $1`, [u.id]);
     }
@@ -228,6 +228,16 @@ async function main() {
       if (await hasTable(client, table)) {
         await client.query(`DELETE FROM "${table}" WHERE "userId" = $1`, [u.id]);
       }
+    }
+    // The verification link's row is keyed by identifier, not userId
+    // ("notif-email:<userId>:<email>", src/lib/notification-email-verify.ts), and
+    // its confirm route is public: left unexpired, it binds the holder's address
+    // and the owner's security mail goes there. A prefix compare, not LIKE, so a
+    // `_` or `%` in the id can't act as a wildcard.
+    if (await hasTable(client, "VerificationToken")) {
+      await client.query(`DELETE FROM "VerificationToken" WHERE left(identifier, length($1)) = $1`, [
+        `notif-email:${u.id}:`,
+      ]);
     }
     if (opts.resetMfa) {
       // Same write set as the in-app admin reset (deleteAllMfaInTx in

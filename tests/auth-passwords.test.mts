@@ -202,7 +202,7 @@ shadowPrismaModel(prisma, "authSession", {
     return { count: before - sessions.length };
   },
 });
-for (const model of ["pushSubscription", "discordLinkToken", "discordMergeCode"]) {
+for (const model of ["pushSubscription", "discordLinkToken", "discordMergeCode", "verificationToken"]) {
   shadowPrismaModel(prisma, model, { deleteMany: async () => ({ count: 0 }) });
 }
 shadowPrismaModel(prisma, "setting", {

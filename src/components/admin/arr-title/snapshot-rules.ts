@@ -71,3 +71,42 @@ export function episodeSnapshotMayPaint(p: {
 }): boolean {
   return p.seq === p.newest && (p.answered !== p.seq || p.failed) && snapshotMayPaint(p.shown > 0, p.writing);
 }
+
+/**
+ * The Settings form's tag edit: the tags the admin turned ON and OFF, never a
+ * whole list. The list it would save is derived from the title as the arr last
+ * reported it, so a live read that rebases the form under the edit (a tag added
+ * on the arr since the snapshot painted) keeps that tag instead of saving the
+ * snapshot's list back over it.
+ */
+export type TagDelta = { add: number[]; remove: number[] };
+
+export const NO_TAG_DELTA: TagDelta = { add: [], remove: [] };
+
+/** The tags the form shows: (base ∪ add) \ remove, ascending. */
+export function applyTagDelta(base: readonly number[], delta: TagDelta): number[] {
+  const tags = new Set(base);
+  for (const id of delta.add) tags.add(id);
+  for (const id of delta.remove) tags.delete(id);
+  return [...tags].sort((a, b) => a - b);
+}
+
+/**
+ * The delta after the admin flips one tag. A flip back to what the arr
+ * reported leaves no edit behind, so it can't outlive a later rebase.
+ */
+export function toggleTagDelta(delta: TagDelta, base: readonly number[], id: number): TagDelta {
+  const on = applyTagDelta(base, delta).includes(id);
+  const add = delta.add.filter((x) => x !== id);
+  const remove = delta.remove.filter((x) => x !== id);
+  if (on && base.includes(id)) remove.push(id);
+  if (!on && !base.includes(id)) add.push(id);
+  return { add, remove };
+}
+
+/** The PATCH's `tags`: the derived list, or undefined when it is the arr's own (nothing to send). */
+export function tagDeltaChange(base: readonly number[], delta: TagDelta): number[] | undefined {
+  const next = applyTagDelta(base, delta);
+  const current = [...new Set(base)].sort((a, b) => a - b);
+  return next.length === current.length && next.every((x, i) => x === current[i]) ? undefined : next;
+}

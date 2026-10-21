@@ -75,12 +75,13 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   invalidateUserSession(id);
 
   // Already committed; a failed audit write must not 500 it (guardrail 26).
+  // The target is named by id (+ display name), never by email (audit-scrub.ts).
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,
     action: "USER_REACTIVATE",
     target: `user:${id}`,
-    details: { targetUser: target.name ?? target.email, targetEmail: target.email, role: target.role },
+    details: { targetUserId: id, ...(target.name ? { targetUser: target.name } : {}), role: target.role },
     ...auditContext(req, session),
   });
 

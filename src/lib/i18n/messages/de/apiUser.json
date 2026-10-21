@@ -191,5 +191,8 @@
   "apiUser.requests.searchNothingMissing": "Nichts zu suchen – von dieser Serie fehlt keine ausgestrahlte, überwachte Folge",
   "apiUser.requests.searchInstanceUnavailable": "Die Sonarr-Instanz dieser Anfrage ist nicht mehr konfiguriert",
   "apiUser.requests.searchPartial": "Nur ein Teil der Suche wurde gestartet – Sonarr hat den Rest abgelehnt. Suchen Sie später erneut nach dem, was noch fehlt.",
-  "apiUser.requests.searchSeriesNotInSonarr": "Diese Serie ist nicht in der Sonarr-Instanz dieser Anfrage – senden Sie die Anfrage erneut, um sie wieder hinzuzufügen"
+  "apiUser.requests.searchSeriesNotInSonarr": "Diese Serie ist nicht in der Sonarr-Instanz dieser Anfrage – senden Sie die Anfrage erneut, um sie wieder hinzuzufügen",
+  "apiUser.common.arrTimeout": "Radarr/Sonarr hat nicht rechtzeitig geantwortet – versuchen Sie es später erneut",
+  "apiUser.common.arrUnreachable": "Radarr/Sonarr ist nicht erreichbar – versuchen Sie es später erneut",
+  "apiUser.common.arrFailed": "Die Radarr/Sonarr-Anfrage ist fehlgeschlagen – Details stehen im Serverprotokoll"
 }

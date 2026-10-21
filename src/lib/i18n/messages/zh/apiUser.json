@@ -191,5 +191,8 @@
   "apiUser.requests.searchNothingMissing": "无需搜索——此剧集没有缺失的已播出且受监控的集",
   "apiUser.requests.searchInstanceUnavailable": "此请求的 Sonarr 实例已不再配置",
   "apiUser.requests.searchPartial": "搜索只启动了一部分——Sonarr 拒绝了其余部分。请稍后再次搜索仍缺失的内容。",
-  "apiUser.requests.searchSeriesNotInSonarr": "此剧集不在此请求的 Sonarr 实例中——请重新推送该请求以再次添加"
+  "apiUser.requests.searchSeriesNotInSonarr": "此剧集不在此请求的 Sonarr 实例中——请重新推送该请求以再次添加",
+  "apiUser.common.arrTimeout": "Radarr/Sonarr 未能及时响应——请稍后重试",
+  "apiUser.common.arrUnreachable": "无法连接 Radarr/Sonarr——请稍后重试",
+  "apiUser.common.arrFailed": "Radarr/Sonarr 请求失败——详细信息见服务器日志"
 }

@@ -5,7 +5,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { isNativeSession, requireStepUp } from "@/lib/step-up-auth";
+import { isNativeSessionForStepUp, requireStepUp } from "@/lib/step-up-auth";
 import { generateDiscordMergeCode } from "@/lib/discord-merge-code";
 
 const DISCORD_API = "https://discord.com/api/v10";
@@ -57,11 +57,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // able to link the hijacker's own Discord account. A native (iOS) session is
   // exempt — the shipped app has no step-up prompt here (guardrail 25: additive
   // only) and its token lives in the Keychain, not an ambient cookie. "Native"
-  // is the session's own kind, fixed at sign-in (the never-expiring deadline
-  // only a caller presenting X-Summonarr-Client is minted, guardrail 6c) — NOT
-  // the transport: a stolen browser cookie replayed as a bearer token is still a
-  // web session and still gets the step-up.
-  if (!isNativeSession(session)) {
+  // is isNativeSessionForStepUp (step-up-auth.ts): the never-expiring deadline
+  // (guardrail 6c), or a pre-6c 1-year session told by its AuthSession row and
+  // presented as a bearer — NOT the transport alone: a stolen browser cookie
+  // replayed as a bearer token is still a web session and still gets the step-up.
+  if (!(await isNativeSessionForStepUp(session, req))) {
     const denied = await requireStepUp({
       req,
       session,

@@ -100,7 +100,7 @@ export async function offboardJellyfinIdentities(input: {
 async function offboardOne(jellyfinUserId: string): Promise<OffboardOutcome> {
   const user = await prisma.user.findUnique({
     where: { jellyfinUserId },
-    select: { id: true, name: true, email: true },
+    select: { id: true, name: true },
   });
   if (!user) return "no-account";
 
@@ -138,7 +138,10 @@ async function offboardOne(jellyfinUserId: string): Promise<OffboardOutcome> {
     action: "SESSION_REVOKE",
     target: `user:${user.id}`,
     details: {
-      targetUser: user.name ?? user.email,
+      // By id, plus the display name when there is one — never the email
+      // (guardrail 33: the purge's scrub finds this row by its user: target).
+      targetUserId: user.id,
+      ...(user.name ? { targetUser: user.name } : {}),
       revokedAll: true,
       reason: "jellyfin_offboarded",
       jellyfinUserId,

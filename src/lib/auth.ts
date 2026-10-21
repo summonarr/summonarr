@@ -218,7 +218,7 @@ export async function findOrCreateJellyfinUser(
   name: string,
   // The configured Jellyfin server the credential was verified against. The
   // identity is bound to it (guardrail 34e): a returning id signing in through
-  // any other server is refused.
+  // any other server is refused, and so is a new one first seen elsewhere.
   instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
 ): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   // Provider-supplied display name is untrusted — strip HTML/control chars so it
@@ -289,7 +289,16 @@ export async function findOrCreateJellyfinUser(
     return PROVIDER_SETUP_REQUIRED;
   }
 
-  // 3) New user, bound to the server it signed in through.
+  // 3) New user, bound to the server it signed in through — unless the id was
+  //    first seen on another one. Same rule as the null adoption above: a twin
+  //    planted on a later server must not claim an identity whose owner just
+  //    hasn't signed in yet (the subject-matched attribution, guardrail 34,
+  //    would hand it their watch history and lock the owner out).
+  const firstSeen = await jellyfinFirstSeenInstance(jellyfinId);
+  if (firstSeen !== null && firstSeen !== instance) {
+    console.warn(`[auth] Refused jellyfin sign-in through ${mediaInstanceLabel("jellyfin", instance)}: this Jellyfin id was first seen on a different server (registered now or since removed).`);
+    return new ProviderRefusal("instance_mismatch");
+  }
   const created = await prisma.user.create({
     data: {
       email: syntheticEmail,

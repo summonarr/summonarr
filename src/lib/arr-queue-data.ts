@@ -49,10 +49,11 @@ export interface QueueReport {
 }
 
 // Same page shape and ceiling as the queue-membership reads in arr.ts: 250 per
-// page, at most 40 pages (10k records) per instance.
-const PAGE_SIZE = 250;
+// page, at most 40 pages (10k records) per instance. Exported for the paged
+// reader's bounds pin (tests/arr-projection-bounds.test.mts).
+export const PAGE_SIZE = 250;
 const QUEUE_READ_TIMEOUT_MS = 20_000;
-const MAX_PAGES = 40;
+export const MAX_PAGES = 40;
 const LISTING_CONCURRENCY = 4;
 const REQUESTER_CHUNK = 1_000;
 const MAX_REQUESTERS_PER_ROW = 5;
@@ -88,7 +89,10 @@ export async function readQueuePages(service: QueueService, instance: string, si
       throw err;
     }
     const batch = Array.isArray(res?.records) ? res.records : [];
-    records.push(...batch);
+    // At most a page's worth per page (an honest arr never sends more), appended
+    // one by one: a spread push of a hostile page past ~125k records throws
+    // RangeError, and an uncapped page would let one answer outgrow the page cap.
+    for (const r of batch.slice(0, PAGE_SIZE)) records.push(r);
     const total = typeof res?.totalRecords === "number" ? res.totalRecords : 0;
     if (batch.length === 0 || page * PAGE_SIZE >= total) break;
   }

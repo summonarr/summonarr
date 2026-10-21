@@ -155,6 +155,11 @@ function makeTx() {
     userTotp: { deleteMany: rec("userTotp.deleteMany") },
     webAuthnCredential: { deleteMany: rec("webAuthnCredential.deleteMany") },
     mfaRecoveryCode: { deleteMany: rec("mfaRecoveryCode.deleteMany") },
+    // The purge reads the account's own request ids for its exact moderation-row
+    // scrub (audit-scrub.ts scrubOwnedRequestPii): none here.
+    mediaRequest: {
+      findMany: async (args?: unknown) => { txOps.push({ op: "mediaRequest.findMany", args }); return []; },
+    },
     // The purge's audit-trail scrub (audit-scrub.ts): no aged rows here.
     auditLog: {
       findMany: async (args?: unknown) => { txOps.push({ op: "auditLog.findMany", args }); return []; },
@@ -276,6 +281,10 @@ const fakePrisma = {
     },
   },
   mediaRequest: { count: async () => counts.requests },
+  // The admin 2FA reset's before-state read (getMfaState): no factors enrolled.
+  userTotp: { findUnique: async () => null },
+  webAuthnCredential: { findMany: async () => [] },
+  mfaRecoveryCode: { count: async () => 0 },
   issue: { count: async () => counts.issues },
   deletionVote: { count: async () => counts.votes },
   mediaServerUser: {
@@ -357,6 +366,7 @@ const { PATCH: userPatch, DELETE: userDelete } = await import("../src/app/api/ad
 const { GET: sessionsList, DELETE: sessionsRevoke } = await import("../src/app/api/admin/users/[id]/sessions/route.ts");
 const { POST: userReactivate } = await import("../src/app/api/admin/users/[id]/reactivate/route.ts");
 const { POST: userPurge } = await import("../src/app/api/admin/users/[id]/purge/route.ts");
+const { DELETE: userMfaReset } = await import("../src/app/api/admin/users/[id]/mfa/route.ts");
 const { PATCH: serverUserPatch } = await import("../src/app/api/admin/server-users/[id]/route.ts");
 const { DELETE: trashDelete } = await import("../src/app/api/admin/trash-guides/applications/[id]/route.ts");
 const { POST: plexTerminate } = await import("../src/app/api/admin/play-history/terminate-session/route.ts");
@@ -1445,9 +1455,11 @@ test("mediaServerGrants: the map is normalized, written, echoed and audited — 
   assert.equal(auditRows.length, 1, "a grants change is audited like a permission change");
   assert.equal(auditRows[0].action, "USER_PERMISSIONS_CHANGE");
   assert.equal(auditRows[0].target, `user:${targetId}`);
-  // logAudit serializes `details` to a JSON string before the insert.
+  // logAudit serializes `details` to a JSON string before the insert. The
+  // target is named by id (+ display name), never by email (audit-scrub.ts).
   assert.deepEqual(JSON.parse(auditRows[0].details as string), {
     field: "mediaServerGrants",
+    targetUserId: targetId,
     targetUser: usersById.get(targetId)!.name,
     after: expected,
   });
@@ -1675,4 +1687,69 @@ test("delegate SUBSET rule: (re-)setting a role can't hand out REQUEST bits the 
   );
   assert.equal(res.status, 403);
   assert.equal(txOps.filter((o) => o.op === "user.update").length, 0, "no re-seed was written");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// USER-TARGET AUDIT ROWS NAME THE ACCOUNT BY ID. Every `user:<id>` row these
+// routes write carries `targetUserId` (+ `targetUser` only when the account has
+// a display name), never the email — not as a `targetUser` fallback for an
+// unnamed account (a typical OIDC or Jellyfin user), and not as `targetEmail`.
+// Audit details outlive everything but the retention scrub (audit-scrub.ts).
+// USER_PURGE is the documented exception and is pinned above.
+// ════════════════════════════════════════════════════════════════════════════
+
+test("user-target audit rows (permissions, both grant maps, reactivate, 2FA reset) name the account by targetUserId, never by email", async () => {
+  for (const name of ["Named Person", null]) {
+    const named = name ? { targetUser: name } : {};
+    const admin = await mintSession("ADMIN", Permission.ADMIN);
+    const onlyRow = (action: string): Record<string, unknown> => {
+      assert.equal(auditRows.length, 1, `${action}: one audit row`);
+      assert.equal(auditRows[0].action, action);
+      const raw = auditRows[0].details as string;
+      assert.ok(!raw.includes("@example.com"), `${action} (${name ?? "no name"}): no email anywhere in the details`);
+      auditRows.length = 0;
+      return JSON.parse(raw) as Record<string, unknown>;
+    };
+    const patch = async (targetId: string, body: unknown) => {
+      const res = await userPatch(
+        req(`http://localhost:3000/api/admin/users/${targetId}`, {
+          method: "PATCH",
+          headers: { ...admin.header, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        ctxFor(targetId),
+      );
+      assert.equal(res.status, 200);
+      await flush();
+      return res.json() as Promise<Record<string, unknown>>;
+    };
+
+    const targetId = seedUser("USER");
+    usersById.get(targetId)!.name = name;
+
+    await patch(targetId, { permissions: "16" });
+    assert.deepEqual(onlyRow("USER_PERMISSIONS_CHANGE"), { targetUserId: targetId, ...named, before: "0", after: "16" });
+
+    const inst = await patch(targetId, { instanceGrants: { anime: { request: true } } });
+    assert.deepEqual(onlyRow("USER_PERMISSIONS_CHANGE"), { field: "instanceGrants", targetUserId: targetId, ...named, after: inst.instanceGrants });
+
+    const media = await patch(targetId, { mediaServerGrants: { plex: { remote: { view: true } } } });
+    assert.deepEqual(onlyRow("USER_PERMISSIONS_CHANGE"), { field: "mediaServerGrants", targetUserId: targetId, ...named, after: media.mediaServerGrants });
+
+    const resetRes = await userMfaReset(req(`http://localhost:3000/api/admin/users/${targetId}/mfa`, { method: "DELETE", headers: admin.header }), ctxFor(targetId));
+    assert.equal(resetRes.status, 200);
+    assert.deepEqual(await resetRes.json(), { ok: true }, "wire contract unchanged");
+    await flush();
+    assert.deepEqual(onlyRow("MFA_RESET"), {
+      targetUserId: targetId, ...named, role: "USER", before: { totp: false, passkeys: 0, recoveryCodes: 0 },
+    });
+
+    const disabledId = seedDisabledUser("USER");
+    usersById.get(disabledId)!.name = name;
+    const reRes = await userReactivate(req(`http://localhost:3000/api/admin/users/${disabledId}/reactivate`, { method: "POST", headers: admin.header }), ctxFor(disabledId));
+    assert.equal(reRes.status, 200);
+    assert.deepEqual(await reRes.json(), { ok: true }, "wire contract unchanged");
+    await flush();
+    assert.deepEqual(onlyRow("USER_REACTIVATE"), { targetUserId: disabledId, ...named, role: "USER" }, "no targetEmail either");
+  }
 });

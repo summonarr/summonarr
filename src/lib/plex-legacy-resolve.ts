@@ -4,7 +4,7 @@ import { safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit } from "./concurrency";
 import { resolveTvdbToTmdb } from "./arr";
-import { withDuplicateRatingKeys, getPlexTmdbIds, type PlexLegacyGuidRef, type PlexLibraryItemData, type PlexSection } from "./plex";
+import { foldDuplicateRatingKeys, plexLibraryRatingKeys, getPlexTmdbIds, type PlexLegacyGuidRef, type PlexLibraryItemData, type PlexSection } from "./plex";
 
 // Resolves the legacy-agent secondary channel (see PlexLegacyGuidRef in
 // plex.ts) to tmdb ids via TMDB /find — com.plexapp.agents.thetvdb:// shows
@@ -122,14 +122,27 @@ export function mergeResolvedLegacyItems(
   const ordered = [...resolved].sort((a, b) =>
     a.ratingKey.localeCompare(b.ratingKey, "en", { numeric: true }) || a.tmdbId - b.tmdbId,
   );
+  const otherCopyKeys = new Map<number, string[]>();
   for (const r of ordered) {
-    const existing = items.get(r.tmdbId);
-    // The modern-agent row keeps the title; the legacy copy's ratingKey stays
-    // addressable so its plays still resolve (guardrail 37c).
-    items.set(r.tmdbId, existing ? withDuplicateRatingKeys(existing, r.data) : r.data);
+    if (items.has(r.tmdbId)) {
+      // The modern-agent row keeps the title; the legacy copy's ratingKey stays
+      // addressable so its plays still resolve (guardrail 37c). Folded once
+      // below, not per copy (see foldDuplicateRatingKeys in plex.ts).
+      let keys = otherCopyKeys.get(r.tmdbId);
+      if (!keys) {
+        keys = [];
+        otherCopyKeys.set(r.tmdbId, keys);
+      }
+      for (const k of plexLibraryRatingKeys(r.data)) keys.push(k);
+    } else {
+      items.set(r.tmdbId, r.data);
+    }
     if (ratingKeyToTmdb && !ratingKeyToTmdb.has(r.ratingKey)) {
       ratingKeyToTmdb.set(r.ratingKey, [r.tmdbId]);
     }
+  }
+  for (const [tmdbId, keys] of otherCopyKeys) {
+    items.set(tmdbId, foldDuplicateRatingKeys(items.get(tmdbId)!, keys));
   }
 }
 

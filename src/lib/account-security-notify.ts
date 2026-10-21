@@ -3,7 +3,8 @@ import "server-only";
 // Owner-facing email for account security events outside two-factor (those are
 // src/lib/mfa/notify.ts): a password change, signing out everywhere, a Discord
 // account being linked, password sign-in being paused after too many wrong
-// passwords (guardrail 6i), and a native app signing in. Best-effort by
+// passwords (guardrail 6i), step-up password confirmations being paused the same
+// way (guardrail 6g), and a native app signing in. Best-effort by
 // contract, like the MFA notice — always called with `void`, swallows every
 // error, never blocks or fails the change it reports, and is a no-op while
 // notification email is off.
@@ -29,13 +30,14 @@ export type AccountSecurityEvent =
   | "signed-out-others"
   | "discord-linked"
   | "sign-in-locked"
+  | "step-up-locked"
   | "app-signed-in";
 
 // Per-event extras for the sentence. Only the events that use them read them.
 export interface AccountSecurityDetail {
   /** app-signed-in: the new session's device label (UA-derived — untrusted text). */
   device?: string | null;
-  /** sign-in-locked: how long password sign-in stays paused, in minutes. */
+  /** sign-in-locked / step-up-locked: how long the pause lasts, in minutes. */
   minutes?: number;
 }
 
@@ -51,8 +53,8 @@ export function accountSecurityMessage(
     const device = detail.device?.trim();
     return t("notify.account.event.app-signed-in", { device: device || t("notify.account.unknownDevice") });
   }
-  if (event === "sign-in-locked") {
-    return t("notify.account.event.sign-in-locked", detail.minutes !== undefined ? { minutes: detail.minutes } : undefined);
+  if (event === "sign-in-locked" || event === "step-up-locked") {
+    return t(`notify.account.event.${event}`, detail.minutes !== undefined ? { minutes: detail.minutes } : undefined);
   }
   const sentence = t(`notify.account.event.${event}`);
   if (event === "discord-linked") return sentence;
@@ -86,15 +88,21 @@ export async function notifyAccountSecurityEvent(
     // A lockout changed nothing on the account and the owner can still sign in
     // once it lifts, so its advice is the password + two-factor one, not "contact
     // your administrator". A new app sign-in is ended from the Sessions list; the
-    // owner can still sign in, so the advice is to sign that device out.
+    // owner can still sign in, so the advice is to sign that device out. A paused
+    // step-up means someone holding a signed-in session is guessing, and the owner
+    // can't sign it out themselves until the pause lifts, so it says to contact
+    // an administrator.
     const locked = event === "sign-in-locked";
+    const stepUpLocked = event === "step-up-locked";
     const signIn = event === "app-signed-in";
     await notifyUserSecurityEventEmail({
       toEmail: to,
       subject: signIn ? t("notify.account.subject.app-signed-in") : t("notify.account.subject"),
       heading: signIn
         ? t("notify.account.heading.app-signed-in")
-        : t(locked ? "notify.account.lockedHeading" : "notify.account.heading"),
+        : stepUpLocked
+          ? t("notify.account.stepUpLockedHeading")
+          : t(locked ? "notify.account.lockedHeading" : "notify.account.heading"),
       message: accountSecurityMessage(
         t,
         event,
@@ -105,7 +113,7 @@ export async function notifyAccountSecurityEvent(
         detail,
       ),
       locale: user.locale ?? null,
-      ctaPath: signIn ? "/profile#sessions" : "/profile",
+      ctaPath: signIn || stepUpLocked ? "/profile#sessions" : "/profile",
       advice: signIn ? "sign-in" : locked ? "mfa" : "account",
     });
   } catch (err) {
@@ -128,10 +136,12 @@ export const MAX_LOCKOUT_NOTICES = 10_000;
 // Process-wide (guardrail 27a): a per-chunk copy would mail once per chunk.
 const lockoutNotices = processSingleton("account-security:lockout-notices", () => new Map<string, number>());
 
-// Claims the one notice for `key` (the account bucket's email hash) in the
-// current window. Synchronous on purpose: concurrent attempts can never both
-// claim it. Returns false when it was already claimed, or when the ledger is
-// full of live claims (the notice is best-effort; the lockout itself still holds).
+// Claims the one notice for `key` in the current window: the sign-in bucket's
+// email hash, or the step-up bucket's own `step-up-pw:<userId>` key (a distinct
+// namespace — a hex hash never starts with it). Synchronous on purpose:
+// concurrent attempts can never both claim it. Returns false when it was already
+// claimed, or when the ledger is full of live claims (the notice is best-effort;
+// the lockout itself still holds).
 export function claimSignInLockoutNotice(key: string, windowMs: number, now = Date.now()): boolean {
   const until = lockoutNotices.get(key);
   if (until !== undefined && until > now) return false;
@@ -153,6 +163,17 @@ export function resetSignInLockoutNoticesForTests(): void {
 // already holds. Never throws (notifyAccountSecurityEvent swallows everything).
 export async function notifySignInLockout(userId: string, windowMs: number): Promise<void> {
   await notifyAccountSecurityEvent(userId, "sign-in-locked", {
+    minutes: Math.max(1, Math.round(windowMs / 60_000)),
+  });
+}
+
+// Mails the owner that step-up password confirmations (signing out a device,
+// sign out everywhere, changing the password, …) are paused for up to the window:
+// the shared `step-up-pw:` budget (guardrail 6g) is full, and only a signed-in
+// session can spend it. Claimed with claimSignInLockoutNotice under the bucket's
+// own key by verifyStepUpPassword. Never throws.
+export async function notifyStepUpLockout(userId: string, windowMs: number): Promise<void> {
+  await notifyAccountSecurityEvent(userId, "step-up-locked", {
     minutes: Math.max(1, Math.round(windowMs / 60_000)),
   });
 }

@@ -191,5 +191,8 @@
   "apiUser.requests.searchNothingMissing": "Rien à rechercher — aucun épisode diffusé et surveillé de cette série ne manque",
   "apiUser.requests.searchInstanceUnavailable": "L'instance Sonarr de cette demande n'est plus configurée",
   "apiUser.requests.searchPartial": "Seule une partie de la recherche a démarré — Sonarr a refusé le reste. Relancez plus tard une recherche pour ce qui manque encore.",
-  "apiUser.requests.searchSeriesNotInSonarr": "Cette série n'est pas dans l'instance Sonarr de cette demande — renvoyez la demande pour l'ajouter à nouveau"
+  "apiUser.requests.searchSeriesNotInSonarr": "Cette série n'est pas dans l'instance Sonarr de cette demande — renvoyez la demande pour l'ajouter à nouveau",
+  "apiUser.common.arrTimeout": "Radarr/Sonarr n'a pas répondu à temps — réessayez plus tard",
+  "apiUser.common.arrUnreachable": "Impossible de joindre Radarr/Sonarr — réessayez plus tard",
+  "apiUser.common.arrFailed": "La requête à Radarr/Sonarr a échoué — le journal du serveur contient les détails"
 }

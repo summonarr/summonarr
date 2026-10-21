@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import type { OidcAllowlist } from "@/lib/oidc-allowlist";
+import { formatAllowlistLines, parseDomainLines, parseGroupLines, type OidcAllowlist } from "@/lib/oidc-allowlist";
 import type { SaveStatus } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 import { rich } from "./rich";
@@ -15,15 +15,8 @@ import { rich } from "./rich";
 // Admin → Settings → Authentication: who may sign in through OIDC (guardrail
 // 34e, src/lib/oidc-allowlist.ts). Saved whole through PATCH
 // /api/admin/oidc-allowlist; the server validates and answers with what it
-// stored, which becomes the new baseline.
-
-function toLines(list: readonly string[]): string {
-  return list.join("\n");
-}
-
-function fromLines(text: string): string[] {
-  return text.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
-}
+// stored, which becomes the new baseline. The text boxes parse through the
+// shared helpers: groups split on newlines only (a comma can be part of a name).
 
 export function OidcAllowlistForm({
   initial,
@@ -37,10 +30,10 @@ export function OidcAllowlistForm({
   const t = useT();
   const [saved, setSaved] = useState(initial);
   const [unreadable, setUnreadable] = useState(initialUnreadable);
-  const [groups, setGroups] = useState(toLines(initial.groups));
+  const [groups, setGroups] = useState(formatAllowlistLines(initial.groups));
   const [groupsClaim, setGroupsClaim] = useState(initial.groupsClaim);
   const [requestGroupsScope, setRequestGroupsScope] = useState(initial.requestGroupsScope);
-  const [emailDomains, setEmailDomains] = useState(toLines(initial.emailDomains));
+  const [emailDomains, setEmailDomains] = useState(formatAllowlistLines(initial.emailDomains));
   const [existingUsersOnly, setExistingUsersOnly] = useState(initial.existingUsersOnly);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -58,10 +51,10 @@ export function OidcAllowlistForm({
   }, []);
 
   const draft: OidcAllowlist = {
-    groups: fromLines(groups),
+    groups: parseGroupLines(groups),
     groupsClaim: groupsClaim.trim() || "groups",
     requestGroupsScope,
-    emailDomains: fromLines(emailDomains),
+    emailDomains: parseDomainLines(emailDomains),
     existingUsersOnly,
   };
   // An unreadable stored value is always worth re-saving, edited or not.
@@ -91,10 +84,10 @@ export function OidcAllowlistForm({
       const stored = data.allowlist;
       setSaved(stored);
       setUnreadable(false);
-      setGroups(toLines(stored.groups));
+      setGroups(formatAllowlistLines(stored.groups));
       setGroupsClaim(stored.groupsClaim);
       setRequestGroupsScope(stored.requestGroupsScope);
-      setEmailDomains(toLines(stored.emailDomains));
+      setEmailDomains(formatAllowlistLines(stored.emailDomains));
       setExistingUsersOnly(stored.existingUsersOnly);
       setStatus("ok");
       resetTimer.current = setTimeout(() => setStatus("idle"), 3000);

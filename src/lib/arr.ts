@@ -3,6 +3,7 @@ import { arrRequesterTagLabel } from "./arr-tags";
 import { arrSettingKey, isRadarrMinimumAvailability, type ArrInstanceKey, type RadarrMinimumAvailability } from "./arr-instances";
 import { SafeFetchError, safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import type { ArrErrorKind } from "./arr-error-kind";
+import type { Translator } from "./i18n/translate";
 import { int, namesOf } from "./arr-parse";
 import { sanitizeForLog } from "./sanitize";
 import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
@@ -293,11 +294,14 @@ export class ArrResponseError extends Error {
   // Explicit fields (not constructor parameter properties) so the module loads
   // under Node's strip-only TS mode — the unit suite imports it.
   public readonly status: number;
-  public readonly body: string;
+  public readonly body!: string;
   constructor(status: number, body: string) {
     super(`Arr service returned a non-200 response (${status})`);
     this.status = status;
-    this.body = body;
+    // NOT enumerable: console.error(err) prints an error's own enumerable
+    // properties, and the arr's body can quote an indexer URL with its apikey
+    // (guardrail 5e). Every reader names `err.body`, which still reads it.
+    Object.defineProperty(this, "body", { value: body, enumerable: false, writable: false, configurable: false });
   }
 }
 
@@ -489,6 +493,26 @@ export function arrErrorMessage(err: unknown): string {
   }
   if (err instanceof Error) return err.message;
   return "Arr request failed";
+}
+
+/**
+ * arrErrorMessage for a caller who may be a non-ADMIN delegate (MANAGE_REQUESTS,
+ * MANAGE_ISSUES). An ArrResponseError's text is already a generic status phrase;
+ * any other error is named by its KIND only. A SafeFetchError's message carries
+ * the arr's internal URL, host, IP and port ("fetch failed for
+ * http://10.0.0.5:7878/api/v3/command: … ECONNREFUSED 10.0.0.5:7878"), which no
+ * delegate-facing arr surface shows (guardrail 5g). Log arrErrorMessage beside it.
+ */
+export function arrErrorMessageForClient(err: unknown, t: Translator): string {
+  if (err instanceof ArrResponseError) return arrErrorMessage(err);
+  switch (arrErrorKind(err)) {
+    case "timeout":
+      return t("apiUser.common.arrTimeout");
+    case "unreachable":
+      return t("apiUser.common.arrUnreachable");
+    default:
+      return t("apiUser.common.arrFailed");
+  }
 }
 
 async function getAllowedQualityIds(cfg: ArrCfg, profileId?: number): Promise<Set<number> | null> {

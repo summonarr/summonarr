@@ -197,14 +197,27 @@ export function projectTitle(service: ArrService, instance: string, raw: unknown
 export interface Choice { id: number; name: string }
 export interface RootFolderChoice { path: string; freeSpace: number | null; accessible: boolean }
 
+// The catalog lists come from the arr, capped by arrFetch only by size (50 MB),
+// and are projected synchronously on every title-manager read and edit (and its
+// background snapshot refresh). So each dedupes through a Set, keeps at most its
+// cap — far past any real instance's profiles, tags and root folders — and reads
+// at most PROJECTION_SCAN_FACTOR times that, so junk or duplicates are bounded too.
+export const MAX_CHOICES = 2_000;
+export const MAX_ROOT_FOLDER_CHOICES = 500;
+export const PROJECTION_SCAN_FACTOR = 10;
+
 export function projectChoices(raw: unknown, nameField: "name" | "label" = "name"): Choice[] {
   if (!Array.isArray(raw)) return [];
   const out: Choice[] = [];
-  for (const x of raw) {
+  const seen = new Set<number>();
+  for (const x of raw.slice(0, MAX_CHOICES * PROJECTION_SCAN_FACTOR)) {
     const r = obj(x);
     const id = posInt(r?.id);
     const name = textOrNull(r?.[nameField], 200);
-    if (id !== null && name !== null && !out.some((c) => c.id === id)) out.push({ id, name });
+    if (id === null || name === null || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name });
+    if (out.length >= MAX_CHOICES) break;
   }
   return out;
 }
@@ -212,11 +225,14 @@ export function projectChoices(raw: unknown, nameField: "name" | "label" = "name
 export function projectRootFolderChoices(raw: unknown): RootFolderChoice[] {
   if (!Array.isArray(raw)) return [];
   const out: RootFolderChoice[] = [];
-  for (const x of raw) {
+  const seen = new Set<string>();
+  for (const x of raw.slice(0, MAX_ROOT_FOLDER_CHOICES * PROJECTION_SCAN_FACTOR)) {
     const r = obj(x);
     const path = textOrNull(r?.path, 1_000);
-    if (!r || path === null || out.some((f) => f.path === path)) continue;
+    if (!r || path === null || seen.has(path)) continue;
+    seen.add(path);
     out.push({ path, freeSpace: bytesOrNull(r.freeSpace), accessible: r.accessible !== false });
+    if (out.length >= MAX_ROOT_FOLDER_CHOICES) break;
   }
   return out;
 }

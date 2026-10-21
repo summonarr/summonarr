@@ -233,7 +233,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
         { status: 400 },
       );
     }
-    const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true, email: true } });
+    const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true } });
     if (!targetUser) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
     // A non-admin MANAGE_USERS holder must not edit an admin's permissions or grant
@@ -279,7 +279,9 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
       throw err;
     }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { targetUser: targetUser.name ?? targetUser.email, before: targetUser.permissions.toString(), after: parsed.toString() }, ...auditContext(req, session) });
+    // The target is named by id (+ display name), never by email — here and on
+    // the two grant rows below (audit-scrub.ts).
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { targetUserId: id, ...(targetUser.name ? { targetUser: targetUser.name } : {}), before: targetUser.permissions.toString(), after: parsed.toString() }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, permissions: parsed.toString() });
   }
@@ -302,7 +304,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
     }
     const grants = serializeInstanceGrants(parsedGrants);
-    const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true, email: true } });
+    const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true } });
     if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { instanceGrants: grants } });
@@ -312,7 +314,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
       throw err;
     }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "instanceGrants", targetUser: prev.name ?? prev.email, after: grants }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "instanceGrants", targetUserId: id, ...(prev.name ? { targetUser: prev.name } : {}), after: grants }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, instanceGrants: grants });
   }
@@ -346,7 +348,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
     }
     const grants = serializeMediaServerGrants(parsedGrants);
-    const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true, email: true } });
+    const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true } });
     if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } });
@@ -356,7 +358,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
       throw err;
     }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "mediaServerGrants", targetUser: prev.name ?? prev.email, after: grants }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "mediaServerGrants", targetUserId: id, ...(prev.name ? { targetUser: prev.name } : {}), after: grants }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, mediaServerGrants: grants });
   }

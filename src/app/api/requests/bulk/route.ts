@@ -805,15 +805,16 @@ export const POST = withPermission([
 
   const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
   const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;
-  const requesterName = target.name ?? target.email;
 
   if (isOnBehalf) {
+    // The account by id (+ display name), never the email — the convention for
+    // a row ABOUT a user (audit-scrub.ts).
     void logAudit({
       userId: session.user.id,
       userName: session.user.name ?? session.user.email,
       action: "REQUEST_ON_BEHALF",
       target: `user:${targetUserId}`,
-      details: { targetUser: requesterName, created: createdCount, results },
+      details: { targetUserId, ...(target.name ? { targetUser: target.name } : {}), created: createdCount, results },
       ...auditContext(req, session),
     });
   }

@@ -21,7 +21,8 @@
 //      server (structural).
 //   8. NARROWED-READ PARITY: re-judging one title (what the delete route does)
 //      reaches the same verdict as the full report. A tmdb-id-only narrowed read
-//      used to miss 1–4 entirely.
+//      used to miss 1–4 entirely. That holds for a title with a backslash too —
+//      the stub's `contains` applies real ILIKE semantics (F019).
 //   9. A fulfilled request's availableAt is an ARRIVAL date (the earliest of
 //      every arrival source opens the window) — AVAILABLE requests only, and the
 //      EARLIEST of them.
@@ -50,12 +51,25 @@ function matchField(v: unknown, cond: unknown): boolean {
       : v === c.equals;
   }
   if ("startsWith" in c) return String(v).startsWith(String(c.startsWith));
-  if ("contains" in c) {
-    return c.mode === "insensitive"
-      ? String(v ?? "").toLowerCase().includes(String(c.contains).toLowerCase())
-      : String(v ?? "").includes(String(c.contains));
-  }
+  if ("contains" in c) return likeContains(String(v ?? ""), String(c.contains), c.mode === "insensitive");
   throw new Error(`unsupported condition ${JSON.stringify(cond)}`);
+}
+
+// What Prisma's `contains` really runs: `ILIKE ('%' || $1 || '%')` with the term
+// bound unescaped and no ESCAPE clause, so `%`/`_` are wildcards and a backslash
+// is Postgres's default LIKE escape. A plain `includes` would hide F019.
+function likeContains(value: string, term: string, insensitive: boolean): boolean {
+  const pattern = `%${insensitive ? term.toLowerCase() : term}%`;
+  const lit = (ch: string) => ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") re += lit(pattern[++i]);
+    else if (ch === "%") re += "[\\s\\S]*";
+    else if (ch === "_") re += "[\\s\\S]";
+    else re += lit(ch);
+  }
+  return new RegExp(`^${re}$`).test(insensitive ? value.toLowerCase() : value);
 }
 
 function matchWhere(row: Row, where: Where | undefined): boolean {
@@ -102,6 +116,7 @@ let upstream: Row[] = [];
 let requests: Row[] = [];
 let episodes: Array<{ tmdbId: number; seasonNumber: number; episodeNumber: number; addedAt: Date | null }> = [];
 const groupByWheres: Where[] = [];
+const playGroupBys: Array<{ by: string[]; where?: Where }> = [];
 
 const settings = new Map<string, string>([
   ["playHistoryEnabled", "true"],
@@ -117,6 +132,7 @@ shadowPrismaModel(prisma, "plexLibraryItem", { findMany: async (args: { where?: 
 shadowPrismaModel(prisma, "playHistory", {
   groupBy: async (args: Parameters<typeof groupBy>[1]) => {
     if (args.where) groupByWheres.push(args.where);
+    playGroupBys.push({ by: args.by, where: args.where });
     return groupBy(plays, args);
   },
 });
@@ -164,6 +180,7 @@ const play = (over: Row): Row => ({
 
 beforeEach(() => {
   groupByWheres.length = 0;
+  playGroupBys.length = 0;
   plexLib = [
     plex(100, "MOVIE", "Alpha", { key: "rk100", keys: ["rk100", "rk100-4k"] }), // two sections (37c)
     plex(200, "MOVIE", "Bravo", { key: "rk200" }),
@@ -326,6 +343,40 @@ test("8. narrowed-read parity: re-judging one title reaches the full report's ve
       `seasons for ${t.title}`,
     );
   }
+});
+
+// The narrowed read's tmdb-less-play query (the only PlayHistory groupBy by title).
+const unattributedRead = () => {
+  const reads = playGroupBys.filter((c) => c.by.includes("title"));
+  assert.equal(reads.length, 1, "one unattributed-play read");
+  return reads[0].where ?? {};
+};
+
+test("F019 8b. a BACKSLASH holder title: the narrowed read drops the title filter and keeps the full read's soft verdict", async () => {
+  // The stub is a real ILIKE: the backslash escapes the B, so the filter would miss.
+  assert.equal(matchField("Foo\\Bar", { contains: "Foo\\Bar", mode: "insensitive" }), false, "stub applies LIKE escaping");
+  assert.equal(matchField("FooBar", { contains: "Foo\\Bar", mode: "insensitive" }), true, "stub applies LIKE escaping");
+  plexLib.push(plex(650, "MOVIE", "Foo\\Bar", { key: "rk650" }));
+  plays.push(play({ sourceItemId: "unknown-650", title: "Foo\\Bar" }));
+  const full = byId(await loadLibraryWatchFacts(null, { now: NOW })).get(650)!;
+  assert.equal(full.verdict.state, "possiblyWatched", "the full read soft-matches the tmdb-less play");
+  playGroupBys.length = 0;
+  const one = await loadLibraryWatchFacts(null, { now: NOW, only: [{ tmdbId: 650, mediaType: "MOVIE" }] });
+  assert.ok(!("OR" in unattributedRead()), `no title filter for a backslash title: ${JSON.stringify(unattributedRead())}`);
+  assert.equal(one.titles[0].verdict.state, full.verdict.state, "narrowed verdict matches the full read");
+  assert.equal(one.titles[0].evidence.softPlays, full.evidence.softPlays, "narrowed soft plays match the full read");
+});
+
+test("F019 8c. a PADDED holder title still narrows, by its trimmed title, and reaches the full read's verdict", async () => {
+  plexLib.push(plex(660, "MOVIE", "  Papa  ", { key: "rk660" }));
+  plays.push(play({ sourceItemId: "unknown-660", title: "Papa" }));
+  const full = byId(await loadLibraryWatchFacts(null, { now: NOW })).get(660)!;
+  assert.equal(full.verdict.state, "possiblyWatched");
+  playGroupBys.length = 0;
+  const one = await loadLibraryWatchFacts(null, { now: NOW, only: [{ tmdbId: 660, mediaType: "MOVIE" }] });
+  assert.deepEqual(unattributedRead().OR, [{ title: { contains: "Papa", mode: "insensitive" } }], "the filter is kept, trimmed");
+  assert.equal(one.titles[0].verdict.state, full.verdict.state, "narrowed verdict matches the full read");
+  assert.equal(one.titles[0].evidence.softPlays, full.evidence.softPlays);
 });
 
 test("9. a fulfilled request's availableAt opens the window — the EARLIEST AVAILABLE one, never a declined request's date", async () => {

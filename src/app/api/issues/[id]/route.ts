@@ -10,6 +10,7 @@ import {
   searchSeasonInSonarr,
   searchEpisodeInSonarr,
   resolveTvdbIdFromTmdbId,
+  arrErrorMessage,
 } from "@/lib/arr";
 import { notifyUserIssueResolved } from "@/lib/discord-notify";
 import { notifyUserIssueResolvedPush } from "@/lib/push";
@@ -20,9 +21,15 @@ import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { recordIssueGrab } from "@/lib/issue-grab";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 
 const VALID_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
+// Every Refetch queues an automatic search across every indexer and records an
+// IssueGrab row (kept, never pruned), and a MANAGE_ISSUES delegate can reach it —
+// bounded per caller like the sibling Replace release / Replace file routes.
+const REFETCH_LIMIT_PER_MIN = 10;
 
 export const PATCH = withIssueAdmin(async (
   req,
@@ -65,10 +72,13 @@ export const PATCH = withIssueAdmin(async (
     if (!isValidInstanceSlug(instance)) {
       return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
     }
+    if (!checkRateLimit(`issue-refetch:${session.user.id}`, REFETCH_LIMIT_PER_MIN, 60_000)) {
+      return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    }
     // A failed search — and, as before, a failed status write after it — answers
     // with the issue and an `arrError` (the wire shape the iOS app decodes).
     const refetchFailed = (err: unknown) => {
-      console.error("[arr] Issue refetch failed:", err);
+      console.error("[arr] Issue refetch failed:", arrErrorMessage(err));
       return NextResponse.json({ ...issue, arrError: t("apiUser.issues.arrFailed") });
     };
     let tvdbId: number | null = issue.tvdbId;

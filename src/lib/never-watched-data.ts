@@ -363,9 +363,18 @@ export async function loadLibraryWatchFacts(
   // detail-page chip's movie read scans the whole table.
   const movieKeySources = only ? [...new Set([...movieKeys.keys()].map((k) => k.split("|")[0]))] : null;
   // Every holder row's own title, not one per title: a Plex "The Office (US)"
-  // never ILIKE-contains a Jellyfin play titled "The Office".
+  // never ILIKE-contains a Jellyfin play titled "The Office". Trimmed (in
+  // absorb), as normalizeTitleKey trims, so a padded holder title still narrows.
   const narrowTitles = only ? [...new Set([...byKey.values()].flatMap((w) => [...w.titles]))] : null;
-  const onlyTitles = narrowTitles && narrowTitles.length <= NARROW_TITLE_FILTER_MAX ? narrowTitles : null;
+  // A backslash title gets the full read's unfiltered query instead: Prisma's
+  // `contains` binds the term unescaped into an ILIKE with no ESCAPE clause
+  // (sanitize.ts), and Postgres reads the backslash as its default LIKE escape,
+  // so `%Foo\Bar%` misses "Foo\Bar" itself — the filter would no longer be a
+  // superset of the in-memory match. `%` and `_` only widen it, so they stay.
+  const onlyTitles =
+    narrowTitles && narrowTitles.length <= NARROW_TITLE_FILTER_MAX && !narrowTitles.some((t) => t.includes("\\"))
+      ? narrowTitles
+      : null;
   const tmdbScope = onlyIds ? { in: onlyIds } : { not: null };
 
   // The five PlayHistory aggregates are whole-table GROUP BYs on the full read.

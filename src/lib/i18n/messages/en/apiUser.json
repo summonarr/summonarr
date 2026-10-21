@@ -191,5 +191,8 @@
   "apiUser.requests.searchNothingMissing": "Nothing to search — no aired, monitored episode of this series is missing",
   "apiUser.requests.searchInstanceUnavailable": "This request's Sonarr instance isn't configured any more",
   "apiUser.requests.searchPartial": "Only part of the search started — Sonarr refused the rest. Search again later for what is still missing.",
-  "apiUser.requests.searchSeriesNotInSonarr": "This series isn't in this request's Sonarr instance — re-push the request to add it again"
+  "apiUser.requests.searchSeriesNotInSonarr": "This series isn't in this request's Sonarr instance — re-push the request to add it again",
+  "apiUser.common.arrTimeout": "Radarr/Sonarr didn't answer in time — try again later",
+  "apiUser.common.arrUnreachable": "Couldn't reach Radarr/Sonarr — try again later",
+  "apiUser.common.arrFailed": "The Radarr/Sonarr request failed — the server log has the details"
 }

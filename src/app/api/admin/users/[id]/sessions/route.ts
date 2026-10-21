@@ -67,7 +67,7 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { id: true, role: true, name: true, email: true },
+    select: { id: true, role: true, name: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
   if (targetRequiresAdmin(target.role, session.user.permissions)) {
@@ -97,11 +97,13 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       userName:  session.user.name ?? session.user.email ?? "unknown",
       action:    "SESSION_REVOKE",
       target:    `user:${id}`,
+      // The account by id (+ display name when it has one), never by email
+      // (audit-scrub.ts).
       details:   {
-        targetUser:  target.name ?? target.email,
-        targetEmail: target.email,
-        revokedAll:  true,
-        adminAction: true,
+        targetUserId: id,
+        ...(target.name ? { targetUser: target.name } : {}),
+        revokedAll:   true,
+        adminAction:  true,
       },
       ...auditContext(req, session),
     });
@@ -133,10 +135,14 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       userId:    session.user.id,
       userName:  session.user.name ?? session.user.email ?? "unknown",
       action:    "SESSION_REVOKE",
-      target:    `session:${body.sessionId}`,
+      // Under the ACCOUNT's target with the session in details, like revoke-all:
+      // a `session:<sid>` target named the person only inside its details, which
+      // the purge's `user:<id>` scrub never reached.
+      target:    `user:${id}`,
       details:   {
-        targetUser:   target.name ?? target.email,
-        targetEmail:  target.email,
+        targetUserId: id,
+        ...(target.name ? { targetUser: target.name } : {}),
+        sessionId:    body.sessionId,
         deviceLabel:  record.deviceLabel,
         adminAction:  true,
       },

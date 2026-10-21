@@ -133,6 +133,24 @@ export function serializeOidcAllowlist(policy: OidcAllowlist): string {
   return JSON.stringify(policy);
 }
 
+// The settings form's text boxes ↔ the lists. Groups split on NEWLINES ONLY: a
+// comma is legal inside a group name (an LDAP DN such as
+// "cn=media,ou=groups,dc=corp", a display name such as "Plex, Friends"), and
+// splitting there would store fragments that either match nothing or match an
+// unrelated group. Domains also accept commas, which DOMAIN_RE never allows
+// inside one.
+export function parseGroupLines(text: string): string[] {
+  return text.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
+export function parseDomainLines(text: string): string[] {
+  return text.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+}
+
+export function formatAllowlistLines(list: readonly string[]): string {
+  return list.join("\n");
+}
+
 // The group names a claim carries: an array of strings (every common IdP), or a
 // single string. Anything else, or an absent claim, is null. Own properties
 // only, so a claim named "constructor" can't read the prototype.

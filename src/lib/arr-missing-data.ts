@@ -15,7 +15,8 @@ import {
   cutoffSeriesFromEpisodes,
   missingEpisodes,
   missingMovie,
-  missingSeries,
+  missingMovieList,
+  missingSeriesList,
   planCutoffSearch,
   planSeriesSearch,
   qualityProfileInfo,
@@ -29,7 +30,6 @@ import {
   type SonarrCutoffRecord,
   type SonarrEpisodeFileRow,
   type SonarrEpisodeRow,
-  type SonarrSeriesRow,
 } from "./arr-missing";
 
 export type MissingService = "radarr" | "sonarr";
@@ -114,7 +114,10 @@ async function loadReport<T extends { tmdbId: number | null; posterPath: string 
     // changes (guardrail 7b).
     const logKey = `missing:${service}:${instances[i].slug}`;
     if (s.status === "fulfilled") {
-      report.items.push(...s.value);
+      // One by one, never a spread push: each list is capped (MAX_MISSING_ITEMS,
+      // the cutoff page ceiling), and a spread of an upstream-sized one throws
+      // RangeError (guardrail 5i).
+      for (const it of s.value) report.items.push(it);
       forgetWarnOnChange(logKey);
       return;
     }
@@ -137,27 +140,13 @@ async function loadReport<T extends { tmdbId: number | null; posterPath: string 
 // the likeliest to still be in flight, the oldest are the stuck ones at the end.
 export async function loadMissingMovies(now: Date): Promise<MissingReport<MissingMovie>> {
   const nowMs = now.getTime();
-  const report = await loadReport<MissingMovie>("radarr", (rows, instance) => {
-    const out: MissingMovie[] = [];
-    for (const row of rows as RadarrMovieRow[]) {
-      const m = row && typeof row === "object" ? missingMovie(row, instance, nowMs) : null;
-      if (m) out.push(m);
-    }
-    return out;
-  });
+  const report = await loadReport<MissingMovie>("radarr", (rows, instance) => missingMovieList(rows, instance, nowMs));
   report.items.sort((a, b) => b.releasedAt.localeCompare(a.releasedAt) || a.title.localeCompare(b.title));
   return report;
 }
 
 export async function loadMissingSeries(): Promise<MissingReport<MissingSeries>> {
-  const report = await loadReport<MissingSeries>("sonarr", (rows, instance) => {
-    const out: MissingSeries[] = [];
-    for (const row of rows as SonarrSeriesRow[]) {
-      const s = row && typeof row === "object" ? missingSeries(row, instance) : null;
-      if (s) out.push(s);
-    }
-    return out;
-  });
+  const report = await loadReport<MissingSeries>("sonarr", (rows, instance) => missingSeriesList(rows, instance));
   report.items.sort((a, b) => (b.lastAired ?? "").localeCompare(a.lastAired ?? "") || a.title.localeCompare(b.title));
   return report;
 }
@@ -172,7 +161,8 @@ export const CUTOFF_MAX_PAGES = 40;
 // the arr reported more records than were read. Sonarr's listing is per
 // EPISODE, so a raised cutoff on a large library can reach it; the series
 // past it would otherwise vanish from the page with nothing saying so.
-async function readCutoffPages(cfg: ArrCfg, service: MissingService): Promise<{ records: unknown[]; total: number; truncated: boolean }> {
+// Exported for its bounds pin (tests/arr-projection-bounds.test.mts).
+export async function readCutoffPages(cfg: ArrCfg, service: MissingService): Promise<{ records: unknown[]; total: number; truncated: boolean }> {
   const include = service === "sonarr" ? "&includeSeries=true&includeEpisodeFile=true" : "";
   const records: unknown[] = [];
   let total = 0;
@@ -182,7 +172,10 @@ async function readCutoffPages(cfg: ArrCfg, service: MissingService): Promise<{ 
       cfg, `/api/v3/wanted/cutoff?page=${page}&pageSize=${CUTOFF_PAGE_SIZE}&monitored=true${include}`,
     );
     const batch = Array.isArray(res?.records) ? res.records : [];
-    records.push(...batch);
+    // At most a page's worth per page (an honest arr never sends more), appended
+    // one by one: a spread push of a hostile page past ~125k records throws
+    // RangeError, and an uncapped page would let one answer outgrow the page cap.
+    for (const r of batch.slice(0, CUTOFF_PAGE_SIZE)) records.push(r);
     total = typeof res?.totalRecords === "number" ? res.totalRecords : 0;
     if (batch.length === 0 || page * CUTOFF_PAGE_SIZE >= total) {
       reachedEnd = true;

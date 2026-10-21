@@ -13,7 +13,9 @@
 // vanished) can never be saved back over the arr as if the admin had chosen it.
 // While the title shown is the last-known SNAPSHOT (src/lib/arr-snapshot.ts),
 // edits are kept but Save waits: the live read rebases them first, so no save
-// is ever diffed against data that may be a day old.
+// is ever diffed against data that may be a day old. Tags are edited as the
+// ones turned on and off (TagDelta), never a whole list, so a tag added on the
+// arr since the snapshot survives that rebase.
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -24,6 +26,7 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { queueFormatters } from "@/components/admin/queue-format";
 import type { ArrTitle, Choice, RootFolderChoice } from "@/lib/arr-title";
 import { arrApi, type TitleRef } from "./shared";
+import { applyTagDelta, NO_TAG_DELTA, tagDeltaChange, toggleTagDelta, type TagDelta } from "./snapshot-rules";
 
 type Draft = {
   monitored: boolean;
@@ -35,6 +38,7 @@ type Draft = {
   seasonFolder: boolean | null;
   monitorNewItems: string | null;
 };
+type Edits = Partial<Omit<Draft, "tags">> & { tags?: TagDelta };
 
 const AVAILABILITY = ["announced", "inCinemas", "released"] as const;
 const SERIES_TYPES = ["standard", "daily", "anime"] as const;
@@ -66,8 +70,6 @@ function draftOf(title: ArrTitle): Draft {
     monitorNewItems: title.monitorNewItems,
   };
 }
-
-const sameTags = (a: readonly number[], b: readonly number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -116,8 +118,9 @@ export function SettingsTab({
   // A release date is a calendar date (Radarr stores midnight UTC) — shown as that date, in UTC.
   const releaseDay = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" }), [locale]);
   const base = useMemo(() => draftOf(title), [title]);
-  const [edits, setEdits] = useState<Partial<Draft>>({});
-  const draft: Draft = { ...base, ...edits };
+  const [edits, setEdits] = useState<Edits>({});
+  const { tags: tagDelta = NO_TAG_DELTA, ...fieldEdits } = edits;
+  const draft: Draft = { ...base, ...fieldEdits, tags: applyTagDelta(base.tags, tagDelta) };
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState<"plain" | "moving" | null>(null);
@@ -132,7 +135,8 @@ export function SettingsTab({
     if (draft.monitored !== base.monitored) c.monitored = draft.monitored;
     if (draft.qualityProfileId !== base.qualityProfileId && draft.qualityProfileId !== null) c.qualityProfileId = draft.qualityProfileId;
     if (draft.rootFolderPath !== base.rootFolderPath && draft.rootFolderPath !== null) c.rootFolderPath = draft.rootFolderPath;
-    if (!sameTags(draft.tags, base.tags)) c.tags = draft.tags;
+    const tagsChange = tagDeltaChange(base.tags, tagDelta);
+    if (tagsChange) c.tags = tagsChange;
     if (isMovie) {
       if (draft.minimumAvailability !== base.minimumAvailability && draft.minimumAvailability !== null) c.minimumAvailability = draft.minimumAvailability;
     } else {
@@ -154,7 +158,7 @@ export function SettingsTab({
     return () => onSavingChange?.(false);
   }, [saving, onSavingChange]);
 
-  function update(patch: Partial<Draft>) {
+  function update(patch: Edits) {
     setEdits((e) => ({ ...e, ...patch }));
     setSaved(null);
     setError("");
@@ -307,7 +311,7 @@ export function SettingsTab({
                   key={tag.id}
                   type="button"
                   aria-pressed={on}
-                  onClick={() => update({ tags: on ? draft.tags.filter((x) => x !== tag.id) : [...draft.tags, tag.id].sort((a, b) => a - b) })}
+                  onClick={() => update({ tags: toggleTagDelta(tagDelta, base.tags, tag.id) })}
                   className="ds-hover-tint rounded-full px-2.5 py-1 text-xs transition-colors"
                   style={{
                     border: `1px solid ${on ? "var(--ds-accent)" : "var(--ds-border)"}`,

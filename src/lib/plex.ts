@@ -322,17 +322,38 @@ export interface PlexLibraryItemData {
 // rewritten the row. Twin of jellyfin.ts libraryItemIds (guardrail 37c).
 export function plexLibraryRatingKeys(data: Pick<PlexLibraryItemData, "ratingKey" | "duplicateRatingKeys">): string[] {
   const keys = data.ratingKey ? [data.ratingKey] : [];
-  for (const k of data.duplicateRatingKeys ?? []) if (!keys.includes(k)) keys.push(k);
+  const seen = new Set(keys);
+  for (const k of data.duplicateRatingKeys ?? []) {
+    if (seen.has(k)) continue;
+    seen.add(k);
+    keys.push(k);
+  }
   return keys;
+}
+
+// A copy of `existing` that also answers to every key in `keys` — the bulk form
+// of withDuplicateRatingKeys. Callers folding many copies of one title collect
+// the losers' keys and call this ONCE: folding pair by pair rebuilt the
+// winner's growing list per copy, cubic in copies of one tmdb id, so a Plex
+// server listing a few thousand items with one tmdb guid froze the event loop
+// for minutes in an unattended sync. Never mutates, for the reason below.
+export function foldDuplicateRatingKeys(existing: PlexLibraryItemData, keys: Iterable<string>): PlexLibraryItemData {
+  const have = new Set(existing.duplicateRatingKeys ?? []);
+  const extra: string[] = [];
+  for (const k of keys) {
+    if (k === existing.ratingKey || have.has(k)) continue;
+    have.add(k);
+    extra.push(k);
+  }
+  if (extra.length === 0) return existing;
+  return { ...existing, duplicateRatingKeys: [...(existing.duplicateRatingKeys ?? []), ...extra].sort() };
 }
 
 // A copy of `existing` that also answers to `other`'s ratingKeys. Never mutates:
 // one entry object is shared by every tmdb id a conflated Plex item claims, so
 // an in-place push would hand the duplicate key to titles it isn't a copy of.
 export function withDuplicateRatingKeys(existing: PlexLibraryItemData, other: PlexLibraryItemData): PlexLibraryItemData {
-  const extra = plexLibraryRatingKeys(other).filter((k) => k !== existing.ratingKey && !existing.duplicateRatingKeys?.includes(k));
-  if (extra.length === 0) return existing;
-  return { ...existing, duplicateRatingKeys: [...(existing.duplicateRatingKeys ?? []), ...extra].sort() };
+  return foldDuplicateRatingKeys(existing, plexLibraryRatingKeys(other));
 }
 
 export async function getPlexSectionTmdbIds(
@@ -371,6 +392,10 @@ export async function getPlexSectionTmdbIds(
     : `/library/sections/${sectionKey}/all`;
   const baseUrl = `${serverUrl}${path}?type=${plexType}&includeGuids=1`;
   const items = new Map<number, PlexLibraryItemData>();
+  // Every ratingKey seen for a tmdb id that collided in this section, folded
+  // into the surviving entry once after the walk (foldDuplicateRatingKeys) —
+  // the Jellyfin twin's extraItemIds.
+  const collidedKeys = new Map<number, Set<string>>();
   await plexFetchAllPages<PlexMetadataItem>(baseUrl, token, (batch) => {
     for (const item of batch) {
       if (item.type === "collection") continue;
@@ -398,7 +423,15 @@ export async function getPlexSectionTmdbIds(
         // Last write still wins inside a section (page order, as before), but
         // the copy it replaces stays addressable through its ratingKey.
         const prev = items.get(id);
-        items.set(id, prev && prev.ratingKey !== entry.ratingKey ? withDuplicateRatingKeys(entry, prev) : entry);
+        items.set(id, entry);
+        if (!prev) continue;
+        let keys = collidedKeys.get(id);
+        if (!keys) {
+          keys = new Set<string>();
+          collidedKeys.set(id, keys);
+          if (prev.ratingKey) keys.add(prev.ratingKey);
+        }
+        if (entry.ratingKey) keys.add(entry.ratingKey);
       }
     }
     // recentOnly early stop: every item on this page is KNOWN older than the
@@ -411,6 +444,10 @@ export async function getPlexSectionTmdbIds(
       return true;
     }
   });
+  for (const [id, keys] of collidedKeys) {
+    const winner = items.get(id);
+    if (winner) items.set(id, foldDuplicateRatingKeys(winner, keys));
+  }
 
   if (sectionType === "show" && !skipShowFilePaths) {
     // TV show items from /all don't include episode file paths; fetch one episode leaf per show to get a real path
@@ -468,18 +505,27 @@ export async function getPlexTmdbIds(
     matching.map((s) => getPlexSectionTmdbIds(serverUrl, token, s.key, sectionType, recentOnly, ratingKeyToTmdbOut, legacyOut, skipShowFilePaths, recentSinceEpochSec))
   );
   const combined = new Map<number, PlexLibraryItemData>();
+  const otherCopyKeys = new Map<number, string[]>();
   for (const map of results) {
     for (const [id, data] of map) {
-      const existing = combined.get(id);
-      if (existing) {
+      if (combined.has(id)) {
         // A TMDB ID appearing in multiple sections (e.g. duplicated libraries)
         // keeps the first-seen entry, and records the other copy's ratingKey so
         // plays and server history filed under it still resolve (guardrail 37c).
-        combined.set(id, withDuplicateRatingKeys(existing, data));
+        // Folded once below, not per section (see foldDuplicateRatingKeys).
+        let keys = otherCopyKeys.get(id);
+        if (!keys) {
+          keys = [];
+          otherCopyKeys.set(id, keys);
+        }
+        for (const k of plexLibraryRatingKeys(data)) keys.push(k);
       } else {
         combined.set(id, data);
       }
     }
+  }
+  for (const [id, keys] of otherCopyKeys) {
+    combined.set(id, foldDuplicateRatingKeys(combined.get(id)!, keys));
   }
   return combined;
 }

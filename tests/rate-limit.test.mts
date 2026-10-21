@@ -291,7 +291,7 @@ test("LRU eviction at MAX_KEYS gives the evicted (oldest) key a fresh bucket", (
 // touched again and drifts to the front of the shared LRU. Minting ~100k cheap
 // keys on any anonymous endpoint then evicted it — a fresh 50 password guesses
 // against the same account, repeatably. Per-account guessing buckets now live
-// in their own map that a flood of OTHER keys cannot reach.
+// in their own maps (one per key class) that a flood of OTHER keys cannot reach.
 
 test("a FULL per-account login bucket survives a 100k-key flood of the shared limiter", () => {
   const windowMs = 3_600_000;
@@ -328,20 +328,45 @@ test("every per-account guessing bucket is a protected key, at the call site tha
   }
 });
 
-// Kept LAST: leaves the protected map full for the rest of the process.
-test("a full protected limiter refuses a NEW account rather than evicting a live bucket", () => {
+// Leaves the `login-email:` class full for the rest of the process; every later
+// test uses keys outside it. The jellyfin-user and user-id fills are in
+// tests/rate-limit-classes.test.mts (a full class can't be emptied in-process).
+test("a full login-email class refuses a NEW account rather than evicting a live bucket", () => {
   const windowMs = 3_600_000;
-  const victim = `mfa-user:${Math.random()}`;
-  for (let i = 0; i < 10; i++) assert.equal(checkRateLimit(victim, 10, windowMs), true);
-  assert.equal(checkRateLimit(victim, 10, windowMs), false);
+  const victim = `login-email:victim-${Math.random()}`;
+  for (let i = 0; i < 50; i++) assert.equal(checkRateLimit(victim, 50, windowMs), true);
+  assert.equal(checkRateLimit(victim, 50, windowMs), false);
   for (let i = 0; i < 100_000; i++) checkRateLimit(`login-email:fill-${i}`, 50, windowMs);
   // The victim's spent bucket is still there…
-  assert.equal(checkRateLimit(victim, 10, windowMs), false, "a live bucket must never be evicted");
+  assert.equal(checkRateLimit(victim, 50, windowMs), false, "a live bucket must never be evicted");
   // …and a brand-new account is refused (fail closed) instead of displacing it.
   assert.equal(reserveRateLimit(`login-email:newcomer-${Math.random()}`, 50, windowMs), null);
-  assert.equal(peekRateLimit(`jellyfin-user:newcomer-${Math.random()}`, 10, windowMs), false);
+  assert.equal(peekRateLimit(`login-email:newcomer-${Math.random()}`, 50, windowMs), false);
   // The shared map is unaffected: an ordinary key still gets a bucket.
   assert.equal(checkRateLimit(`register:${Math.random()}`, 5, windowMs), true);
+});
+
+test("a typed-email flood that fills login-email: refuses no other class", () => {
+  // Runs after the fill above. `login-email:` is minted from whatever email was
+  // typed, so an anonymous flood fills it; it must not spill into Jellyfin
+  // sign-in or the signed-in compromise-response actions (F020).
+  const windowMs = 3_600_000;
+  assert.equal(reserveRateLimit(`login-email:still-full-${Math.random()}`, 50, windowMs), null, "the class is full");
+  const others = [
+    "jellyfin-user:",
+    "sessions-delete:",
+    "step-up-pw:",
+    "mfa-totp-enable:",
+    "mfa-user:",
+    "mfa-stepup:",
+    "profile-password:",
+    "profile-delete:",
+  ];
+  for (const prefix of others) {
+    const id = Math.random();
+    assert.equal(peekRateLimit(`${prefix}peek-${id}`, 10, windowMs), true, `${prefix} peek must see room`);
+    assert.notEqual(reserveRateLimit(`${prefix}new-${id}`, 10, windowMs), null, `${prefix} must accept a new key`);
+  }
 });
 
 // ── reserve-then-refund (the login gate) ───────────────────────────────────

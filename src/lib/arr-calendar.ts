@@ -12,7 +12,7 @@
 // nothing on a future local day reads missing.
 import { bool, bytes, isoOrNull, nonNegInt, posInt, text, textOrNull } from "./arr-parse";
 import { tmdbPosterPathFromImages } from "./arr-missing";
-import { needsAttention, queuePhase } from "./arr-queue";
+import { needsAttention, PROJECTION_SCAN_FACTOR, queuePhase } from "./arr-queue";
 import type { ArrService } from "./arr-instances";
 
 export type CalendarKind = "episode" | "cinema" | "physical" | "digital";
@@ -124,6 +124,14 @@ export const DEFAULT_RUNTIME_MINUTES = 60;
 // A runtime is minutes; anything past a day is a bad value, not a broadcast.
 const MAX_RUNTIME_MINUTES = 24 * 60;
 
+// The calendar is the arr's own answer, which arrFetch caps only by size (50 MB
+// — hundreds of thousands of minimal entries), projected synchronously on every
+// page load and its snapshot refresh. So each instance keeps at most this many
+// entries per window — the page reads two weeks, and even the API's longest
+// window of a very large library stays far below it — and its raw list is read
+// at most PROJECTION_SCAN_FACTOR times that deep (guardrail 5i).
+export const MAX_CALENDAR_ENTRIES = 10_000;
+
 function statusOf(
   kind: CalendarKind,
   dateMs: number,
@@ -151,14 +159,15 @@ function statusOf(
 export function radarrCalendarEntries(instance: string, raw: unknown, startMs: number, endMs: number, nowMs: number): CalendarEntry[] {
   if (!Array.isArray(raw)) return [];
   const out: CalendarEntry[] = [];
-  for (const x of raw) {
-    const m = obj(x);
+  for (let i = 0, n = Math.min(raw.length, MAX_CALENDAR_ENTRIES * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_CALENDAR_ENTRIES; i++) {
+    const m = obj(raw[i]);
     const arrId = posInt(m?.id);
     if (!m || arrId === null) continue;
     const hasFile = bool(m.hasFile);
     const monitored = bool(m.monitored);
     const dates: Array<[CalendarKind, unknown]> = [["cinema", m.inCinemas], ["physical", m.physicalRelease], ["digital", m.digitalRelease]];
     for (const [kind, rawDate] of dates) {
+      if (out.length >= MAX_CALENDAR_ENTRIES) break;
       const iso = isoOrNull(rawDate);
       if (!iso) continue;
       const ms = Date.parse(iso);
@@ -196,8 +205,8 @@ export function radarrCalendarEntries(instance: string, raw: unknown, startMs: n
 export function sonarrCalendarEntries(instance: string, raw: unknown, nowMs: number): CalendarEntry[] {
   if (!Array.isArray(raw)) return [];
   const out: CalendarEntry[] = [];
-  for (const x of raw) {
-    const e = obj(x);
+  for (let i = 0, n = Math.min(raw.length, MAX_CALENDAR_ENTRIES * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_CALENDAR_ENTRIES; i++) {
+    const e = obj(raw[i]);
     const episodeId = posInt(e?.id);
     const seriesId = posInt(e?.seriesId);
     const iso = isoOrNull(e?.airDateUtc);

@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { withAuth, withPermission } from "@/lib/api-auth";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage } from "@/lib/arr";
+import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage, arrErrorMessageForClient } from "@/lib/arr";
 import { addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
 import { MissingInstanceError, NothingMissingError, SeriesNotOnInstanceError, findSeriesIdOnInstance, searchMissing } from "@/lib/arr-missing-data";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
+import { requesterAuditDetails } from "@/lib/audit-scrub";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
@@ -126,8 +127,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         // adds it back — an answer, translated, not a logged failure.
         arrError = t("apiUser.requests.searchSeriesNotInSonarr");
       } else {
-        console.error("[arr] Search failed:", err);
-        arrError = arrErrorMessage(err);
+        // The detail to the log; the caller (a MANAGE_REQUESTS delegate, maybe)
+        // gets the failure's kind, never the arr's internal URL (guardrail 5g).
+        console.error("[arr] Search failed:", arrErrorMessage(err));
+        arrError = arrErrorMessageForClient(err, t);
       }
     }
     return NextResponse.json({ ...existing, adminNote: searchedNote, arrError });
@@ -168,8 +171,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         pushedTvdbId = await addSeriesToSonarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
       }
     } catch (err) {
-      console.error("[arr] Retry push failed:", err);
-      arrError = arrErrorMessage(err);
+      console.error("[arr] Retry push failed:", arrErrorMessage(err));
+      arrError = arrErrorMessageForClient(err, t);
     }
     // Bookkeeping write kept OUT of the try above (mirrors the approve branch
     // below and requests/route.ts): Sonarr has already accepted the series by
@@ -328,14 +331,16 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
   emitSSE({ type: "request:updated", requestId: id, status: updated.status, userId: existing.requestedBy });
 
-  const requestedByName = existing.user?.name ?? existing.user?.email ?? existing.requestedBy;
+  // The requester by id (+ display name), never the email: an account purge
+  // finds these rows by the id (audit-scrub.ts scrubRequesterPii).
+  const requester = requesterAuditDetails(existing.requestedBy, existing.user?.name);
   // An admin acting on their OWN request shouldn't get a self-notification ("your
   // request was approved/declined/available") — they just performed the action.
   const selfAction = existing.requestedBy === session.user.id;
   if (status === "APPROVED" && existing.status !== "APPROVED") {
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, before: { status: existing.status }, after: { status }, ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}) }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, ...requester, before: { status: existing.status }, after: { status }, ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}) }, ...auditContext(req, session) });
   } else if (status === "DECLINED" && existing.status !== "DECLINED") {
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DECLINE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, adminNote: updated.adminNote, before: { status: existing.status }, after: { status } }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DECLINE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, ...requester, adminNote: updated.adminNote, before: { status: existing.status }, after: { status } }, ...auditContext(req, session) });
   }
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
@@ -356,8 +361,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       }
       arrPushSucceeded = true;
     } catch (err) {
-      console.error("[arr] Failed to push request:", err);
-      arrError = arrErrorMessage(err);
+      console.error("[arr] Failed to push request:", arrErrorMessage(err));
+      arrError = arrErrorMessageForClient(err, t);
       // Roll status back to PENDING so the request isn't stuck APPROVED with no
       // ARR backing — admin sees the failure in the response (`arrError`) and
       // can retry. Matches the Discord interactions auto-approve rollback shape.
@@ -499,7 +504,7 @@ export const DELETE = withAuth(async (
   // Only an admin-initiated delete is an audit-worthy moderation action; a user
   // cancelling their own pending request is routine and stays out of the log.
   if (isAdmin) {
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DELETE", target: `request:${id}`, details: { title: existing.title, mediaType: existing.mediaType, year: existing.releaseYear, requestedBy: existing.user?.name ?? existing.user?.email ?? existing.requestedBy, before: { status: existing.status } }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DELETE", target: `request:${id}`, details: { title: existing.title, mediaType: existing.mediaType, year: existing.releaseYear, ...requesterAuditDetails(existing.requestedBy, existing.user?.name), before: { status: existing.status } }, ...auditContext(req, session) });
   }
   return NextResponse.json({ ok: true });
 });

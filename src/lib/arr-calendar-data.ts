@@ -36,10 +36,11 @@ const CONCURRENCY = 4;
 // The queue is read only to mark what is downloading, so it is bounded well
 // below the Download Queue page's 40 pages: past 1,000 records a title further
 // down simply keeps its own status.
-const QUEUE_PAGE_SIZE = 250;
-const MAX_QUEUE_PAGES = 4;
+export const QUEUE_PAGE_SIZE = 250;
+export const MAX_QUEUE_PAGES = 4;
 
-async function readQueue(cfg: ArrCfg): Promise<unknown[]> {
+// Exported for its bounds pin (tests/arr-projection-bounds.test.mts).
+export async function readQueue(cfg: ArrCfg): Promise<unknown[]> {
   const records: unknown[] = [];
   for (let page = 1; page <= MAX_QUEUE_PAGES; page++) {
     // Unknown items (no title matched) are left out by default — nothing on a
@@ -48,7 +49,10 @@ async function readQueue(cfg: ArrCfg): Promise<unknown[]> {
       cfg, `/api/v3/queue?page=${page}&pageSize=${QUEUE_PAGE_SIZE}`, { quietErrors: true },
     );
     const batch = Array.isArray(res?.records) ? res.records : [];
-    records.push(...batch);
+    // At most a page's worth per page (an honest arr never sends more), appended
+    // one by one: a spread push of a hostile page past ~125k records throws
+    // RangeError, and an uncapped page would let one answer outgrow the page cap.
+    for (const r of batch.slice(0, QUEUE_PAGE_SIZE)) records.push(r);
     const total = typeof res?.totalRecords === "number" ? res.totalRecords : 0;
     if (batch.length === 0 || page * QUEUE_PAGE_SIZE >= total) break;
   }
@@ -118,7 +122,9 @@ export async function loadCalendar(start: Date, end: Date, unmonitored: boolean,
     // one condition, logged once until it changes (guardrail 7b).
     const logKey = `arr-calendar:${inst.service}:${inst.slug}`;
     if (s.status === "fulfilled") {
-      report.entries.push(...s.value);
+      // One by one, never a spread push: each list is capped (MAX_CALENDAR_ENTRIES),
+      // and a spread of an upstream-sized one throws RangeError (guardrail 5i).
+      for (const e of s.value) report.entries.push(e);
       forgetWarnOnChange(logKey);
       return;
     }

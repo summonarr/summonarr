@@ -3,7 +3,7 @@ import { emitNotificationEvents } from "@/lib/notify-agents";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrErrorMessageForClient } from "@/lib/arr";
 import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/discord-notify";
 import { notifyUsersRequestsApprovedPush, notifyUsersRequestsDeclinedPush } from "@/lib/push";
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail } from "@/lib/email";
@@ -258,9 +258,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
           pushedTvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy);
         }
       } catch (err) {
-        console.error("[arr] Batch approve push failed for", r.id, err);
+        console.error("[arr] Batch approve push failed for", r.id, arrErrorMessage(err));
         failedIds.add(r.id);
-        failureReasons.set(r.id, arrErrorMessage(err));
+        // The kind, never the arr's internal URL: the caller may be a delegate (guardrail 5g).
+        failureReasons.set(r.id, arrErrorMessageForClient(err, t));
       }
       // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
       // series by this point, so a P2025 (row deleted mid-push) or transient DB error

@@ -106,7 +106,8 @@ import { emitSSE } from "@/lib/sse-emitter";
 //       202 { job } at once. The marks run in sequence, each re-reading the
 //       title's history, and a long series outlasts a reverse proxy's hold —
 //       the admin saw a 502 on a replace that had succeeded. The same admin
-//       posting for the same issue while it runs JOINS it. The synchronous
+//       posting the same replace (issue, instance, files, follow-up) while it
+//       runs JOINS it; a different one is the 409 above. The synchronous
 //       default stays for API callers.
 //   GET ?job=<id> → that replace's poll: 202 { job, running } while it runs,
 //       then the POST's own status and body; 404 once it is gone (expired,
@@ -123,7 +124,12 @@ const LIMIT_PER_MIN = 10;
 // The issues with a replace running now (this process — guardrail 17's single
 // long-lived server). Claimed before the CAS, released when the replace ends.
 const inFlight = processSingleton("issue-replace-inflight", () => new Set<string>());
-const jobKey = (issueId: string) => `issue-replace\u0000${issueId}`;
+// The JOIN key is the whole request, not the issue: a second POST naming another
+// instance, other files or another follow-up joined the first job and reported its
+// result as its own, its files never touched. It now falls through to
+// the per-issue `inFlight` 409. An identical retry (a reload, a double submit) joins.
+const jobKey = (issueId: string, instance: string, then: string, fileIds: readonly number[]) =>
+  `issue-replace\u0000${issueId}\u0000${instance}\u0000${then}\u0000${[...fileIds].sort((a, b) => a - b).join(",")}`;
 
 const serviceOf = (issue: Issue): ArrService => (issue.mediaType === "MOVIE" ? "radarr" : "sonarr");
 const instanceName = (service: ArrService, instance: string) =>
@@ -463,9 +469,11 @@ export const POST = withAdmin(async (req, { params }: RouteContext, session) => 
   if (!then || !fileIds || (background !== undefined && typeof background !== "boolean")) {
     return NextResponse.json({ error: t("apiUser.issues.replaceFile.bodyInvalid") }, { status: 400 });
   }
-  // This admin's replace of this issue is already running: join it — nothing
-  // is read, deleted or searched again, and no rate token is spent.
-  const running = background === true ? runningArrJob(session.user.id, jobKey(id)) : null;
+  // This admin's identical replace of this issue is already running: join it —
+  // nothing is read, deleted or searched again, and no rate token is spent. The
+  // instance is normalized as loadIssueFiles does; a malformed one joins nothing.
+  const joinInstance = body.instance === undefined || body.instance === null ? "" : typeof body.instance === "string" ? body.instance.trim() : null;
+  const running = background === true && joinInstance !== null ? runningArrJob(session.user.id, jobKey(id, joinInstance, then, fileIds)) : null;
   if (running) return NextResponse.json({ job: running }, { status: 202 });
   if (!checkRateLimit(`issue-replace-file:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
     return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
@@ -686,7 +694,7 @@ export const POST = withAdmin(async (req, { params }: RouteContext, session) => 
     };
 
     if (background !== true) return await replaceFiles();
-    const { jobId } = startArrJob(session.user.id, jobKey(id), async () => {
+    const { jobId } = startArrJob(session.user.id, jobKey(id, instance, then, fileIds), async () => {
       try {
         return await answerOf(await replaceFiles());
       } finally {

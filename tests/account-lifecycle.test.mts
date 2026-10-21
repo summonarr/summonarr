@@ -62,6 +62,7 @@ let lastCas: { sql: string; values: unknown[] } | null = null;
 let userState: { deactivatedAt: Date | null; purgedAt: Date | null } | null = null;
 type AuditStoreRow = { id: string; target: string; userId: string | null; userName: string; details: string | null };
 let auditStore: AuditStoreRow[] = [];
+let ownedRequestIds: string[] = [];
 
 function record(model: string, method: string) {
   return async (args: unknown) => {
@@ -103,6 +104,17 @@ const baseTx = {
   userTotp: { deleteMany: record("userTotp", "deleteMany") },
   webAuthnCredential: { deleteMany: record("webAuthnCredential", "deleteMany") },
   mfaRecoveryCode: { deleteMany: record("mfaRecoveryCode", "deleteMany") },
+  // The purge reads the account's own request ids for the exact scrub of their
+  // moderation rows (scrubOwnedRequestPii). The requests themselves are kept.
+  mediaRequest: {
+    findMany: async (args: unknown) => {
+      ops.push({ op: "mediaRequest.findMany", args });
+      return ownedRequestIds.map((id) => ({ id }));
+    },
+    delete: trap("account removal must never delete the user's requests — history stays attached"),
+    deleteMany: trap("account removal must never delete the user's requests — history stays attached"),
+    updateMany: trap("account removal must never reassign the user's requests"),
+  },
   // Audit rows the purge's scrub finds (audit-scrub.ts): an in-memory list the
   // updateMany CAS rewrites, so a test can read the result back.
   auditLog: {
@@ -196,6 +208,13 @@ const PURGE_OPS = [
   // The audit trail's copies of who this was (audit-scrub.ts): rows ABOUT the
   // account lose the target name/email, rows BY it lose the actor name.
   "auditLog.findMany",
+  // Legacy session:<sid> revoke rows naming the account (scrubLegacySessionRevokePii).
+  "auditLog.findMany",
+  // The requests it still owns, for the exact scrub of their moderation rows
+  // (scrubOwnedRequestPii) — none here, so no audit read follows it.
+  "mediaRequest.findMany",
+  // Its requests' moderation rows naming it as the requester (scrubRequesterPii).
+  "auditLog.findMany",
   "auditLog.updateMany",
   "user.updateMany",
 ];
@@ -213,6 +232,7 @@ beforeEach(() => {
   lastCas = null;
   userState = { deactivatedAt: DISABLED_AT, purgedAt: null };
   auditStore = [];
+  ownedRequestIds = [];
 });
 
 // ── deactivate ──────────────────────────────────────────────────────────────
@@ -356,6 +376,20 @@ test("purge scrubs the audit trail's copies of who this was — target name/emai
   assert.equal(by.userId, ID, "still keyed by the id");
   const scrubFind = opArgs("auditLog.findMany") as { where: { target: string } };
   assert.equal(scrubFind.where.target, `user:${ID}`, "the details scrub is scoped to THIS account");
+});
+
+test("purge reads THIS account's request ids and scrubs their moderation rows by exact request target", async () => {
+  ownedRequestIds = ["req-1", "req-2"];
+  await purgeUserDataInTx(purgeTx, ID, NOW);
+  assert.deepEqual(opArgs("mediaRequest.findMany"), { where: { requestedBy: ID }, select: { id: true } });
+  const exact = ops.filter((o) => o.op === "auditLog.findMany")
+    .map((o) => (o.args as { where: { action?: unknown; target?: unknown } }).where)
+    .filter((w) => typeof w.target === "object" && w.target !== null && "in" in w.target);
+  assert.equal(exact.length, 1, "one exact-target read for one chunk of ids");
+  assert.deepEqual(exact[0].target, { in: ["request:req-1", "request:req-2"] });
+  assert.deepEqual(exact[0].action, { in: ["REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE"] });
+  // Inside the purge transaction, before the row's own scrub.
+  assert.ok(opNames().indexOf("mediaRequest.findMany") < opNames().indexOf("user.updateMany"));
 });
 
 test("the purge payload is EXACTLY the personal-data field set — nothing more, nothing less", async () => {

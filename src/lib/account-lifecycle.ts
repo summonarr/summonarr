@@ -3,7 +3,7 @@ import "server-only";
 import { prisma } from "./prisma";
 import { verifyIdentifierPrefixFor } from "./notification-email-verify";
 import { deleteAllMfaInTx } from "./mfa/mfa-store";
-import { scrubTargetPiiFromAudit } from "./audit-scrub";
+import { scrubTargetPiiFromAudit, scrubLegacySessionRevokePii, scrubOwnedRequestPii, scrubRequesterPii } from "./audit-scrub";
 import { REDACTED_USER_NAME } from "./audit";
 
 // The encryption extension in ./prisma changes the client's type, so the
@@ -193,9 +193,12 @@ export async function purgeUserDataInTx(
   id: string,
   now: Date,
 ): Promise<void> {
+  // The email is read here, before the scrub below rewrites it: the legacy
+  // session-revoke rows, and the older moderation rows of since-deleted
+  // requests, can only be found by it.
   const row = await tx.user.findUnique({
     where: { id },
-    select: { deactivatedAt: true, purgedAt: true },
+    select: { deactivatedAt: true, purgedAt: true, email: true },
   });
   if (!row) throw new NotDeactivatedError();
   if (row.purgedAt) return; // idempotent — already scrubbed
@@ -256,7 +259,17 @@ export async function purgeUserDataInTx(
   // keyed by the user id, which survives. IP and user agent stay until the
   // ordinary retention scrub. The USER_PURGE row the route writes after this
   // commits is the one record that still names the account, until retention.
+  // Admin single-session revokes written before 2026-10-20 sit under a
+  // `session:<sid>` target instead, so they are matched by this account's email;
+  // the moderation rows of its requests (`request:<rid>`) name it as the
+  // requester. The requests it still owns are matched exactly by their ids (the
+  // purge keeps every request, so this read sees all of them); the ones since
+  // deleted, by requester id or, on older rows, by the email.
   await scrubTargetPiiFromAudit(tx, { target: `user:${id}` });
+  await scrubLegacySessionRevokePii(tx, id, row.email);
+  const owned = await tx.mediaRequest.findMany({ where: { requestedBy: id }, select: { id: true } });
+  await scrubOwnedRequestPii(tx, owned.map((r) => r.id));
+  await scrubRequesterPii(tx, id, row.email);
   await tx.auditLog.updateMany({ where: { userId: id }, data: { userName: REDACTED_USER_NAME } });
   // Re-check deactivation atomically in the same statement that scrubs the row.
   // The precondition read at the top of this function is several awaited

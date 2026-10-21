@@ -169,6 +169,7 @@ const txObj = {
   pushSubscription: { deleteMany: async (args: unknown) => { rec("tx.pushSubscription.deleteMany", args); return { count: 0 }; } },
   discordLinkToken: { deleteMany: async (args: unknown) => { rec("tx.discordLinkToken.deleteMany", args); return { count: 0 }; } },
   discordMergeCode: { deleteMany: async (args: unknown) => { rec("tx.discordMergeCode.deleteMany", args); return { count: 0 }; } },
+  verificationToken: { deleteMany: async (args: unknown) => { rec("tx.verificationToken.deleteMany", args); return { count: 0 }; } },
 };
 
 // Notification email is off (no settings) — the security notice is a silent no-op.
@@ -468,6 +469,11 @@ function assertFootholdsCleared(userId: string): void {
     assert.equal(calls.length, 1, `${op} runs once`);
     assert.deepEqual(calls[0].args, { where: { userId } }, `${op} is scoped to the caller`);
   }
+  // A pending notification-email link: its confirm page is public, so it could
+  // otherwise be confirmed after the sign-out.
+  const pendingEmail = opsOf("tx.verificationToken.deleteMany");
+  assert.equal(pendingEmail.length, 1, "tx.verificationToken.deleteMany runs once");
+  assert.deepEqual(pendingEmail[0].args, { where: { identifier: { startsWith: `notif-email:${userId}:` } } });
   const userWrites = opsOf("tx.user.update").map((o) => (o.args as { data: Record<string, unknown> }).data);
   assert.ok(
     userWrites.some((d) => d.calendarTokenHash === null && d.calendarTokenCreatedAt === null),

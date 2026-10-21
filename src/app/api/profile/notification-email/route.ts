@@ -4,10 +4,11 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { normalizeEmail } from "@/lib/auth";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, peekRateLimit } from "@/lib/rate-limit";
 import { isNotificationEmailEnabled, sendNotificationEmailVerification } from "@/lib/email";
 import { localeForRequest } from "@/lib/i18n/server-locale";
 import { tooManyRequests } from "@/lib/http";
+import { isNativeSessionForStepUp, requireStepUp } from "@/lib/step-up-auth";
 import {
   generateVerifyToken,
   buildVerifyIdentifier,
@@ -19,8 +20,8 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // RFC-5322-lite (matches the profile route). SMTP rejects the rest.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// POST { email } — begin verifying a self-service notification email for a
-// Jellyfin user. A one-time link is mailed to the CANDIDATE address; the address
+// POST { email, confirmPassword? } — begin verifying a self-service notification
+// email for a Jellyfin user. A one-time link is mailed to the CANDIDATE address; the address
 // is bound to the account only once that link is confirmed (proof of possession),
 // which is what stops this from being a "redirect Summonarr's mail at a victim"
 // vector. Jellyfin-only (Plex/OIDC emails are provider-owned + synced on sign-in).
@@ -35,14 +36,45 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAuth.profile.notificationEmailReadOnly") }, { status: 403 });
   }
 
+  const parsed = await readJsonCapped<{ email?: string; confirmPassword?: unknown }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+
   // 3 sends / 15 min per user — an authenticated user can't weaponize this into
-  // an email-bombing tool against an arbitrary mailbox.
-  if (!checkRateLimit(`notif-email-verify:${session.user.id}`, 3, 15 * 60_000)) {
+  // an email-bombing tool against an arbitrary mailbox. PEEKED before the
+  // step-up, so a spent budget refuses without a password verify: a correct
+  // step-up password refunds its own hit, so nothing else stops a loop of them,
+  // each a full scrypt in the 2-slot hash queue (guardrail 6i). Spent only once
+  // the step-up passes, below.
+  const sendKey = `notif-email-verify:${session.user.id}`;
+  if (!peekRateLimit(sendKey, 3, 15 * 60_000)) {
     return tooManyRequests(900, t("apiAuth.profile.tooManyVerificationEmails"));
   }
 
-  const parsed = await readJsonCapped<{ email?: string }>(req, 16384);
-  if (parsed instanceof NextResponse) return parsed;
+  // Step-up (guardrail 6g): a confirmed address receives every notification and
+  // security email from then on, and outlives a password change or sign out
+  // everywhere, so a hijacked session must not be able to point it at the
+  // hijacker's own mailbox. Ahead of spending a send, so the password prompt's
+  // first round trip doesn't use one up. A native session is exempt, as on the
+  // other 6g routes: the shipped iOS app calls this route and has no prompt.
+  if (!(await isNativeSessionForStepUp(session, req))) {
+    const denied = await requireStepUp({
+      req,
+      session,
+      confirmPassword: parsed.confirmPassword,
+      context: "notification-email",
+      messages: {
+        passwordRequired: t("apiAuth.stepUp.passwordRequired"),
+        recentSignInRequired: t("apiAuth.stepUp.recentSignIn"),
+      },
+      t,
+    });
+    if (denied) return denied;
+  }
+
+  if (!checkRateLimit(sendKey, 3, 15 * 60_000)) {
+    return tooManyRequests(900, t("apiAuth.profile.tooManyVerificationEmails"));
+  }
+
   const rawEmail = typeof parsed.email === "string" ? parsed.email.trim() : "";
   if (!rawEmail || rawEmail.length > 320 || !EMAIL_RE.test(rawEmail)) {
     return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });

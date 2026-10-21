@@ -29,6 +29,15 @@ import type { ArrService } from "./arr-instances";
 type Raw = Record<string, unknown>;
 const obj = (v: unknown): Raw | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Raw) : null);
 
+// Every list below comes from the arr, whose answer arrFetch caps only by size
+// (50 MB — hundreds of thousands of entries), and these run synchronously on
+// the one event loop, from the arr-watch cron with nobody signed in. So each
+// projection dedupes through a Set, keeps at most its cap, and READS at most
+// this many times its cap: a hostile or MITM'd arr padding a list with junk
+// or duplicates costs a bounded scan too, not only a bounded output.
+export const PROJECTION_SCAN_FACTOR = 10;
+const scanOf = (raw: readonly unknown[], cap: number): readonly unknown[] => raw.slice(0, cap * PROJECTION_SCAN_FACTOR);
+
 // ── scheduled tasks ──────────────────────────────────────────────────────────
 
 export interface ArrTask {
@@ -45,14 +54,19 @@ export interface ArrTask {
 
 const TASK_NAME = /^[A-Za-z][A-Za-z0-9]{1,79}$/;
 
+/** The most scheduled tasks listed — each arr has about twenty. */
+export const MAX_TASKS = 500;
+
 /** /api/v3/system/task → the instance's scheduled tasks, by name. */
 export function projectTasks(raw: unknown): ArrTask[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrTask[] = [];
-  for (const x of raw) {
+  const seen = new Set<string>();
+  for (const x of scanOf(raw, MAX_TASKS)) {
     const r = obj(x);
     const taskName = typeof r?.taskName === "string" ? r.taskName : "";
-    if (!r || !TASK_NAME.test(taskName) || out.some((t) => t.taskName === taskName)) continue;
+    if (!r || !TASK_NAME.test(taskName) || seen.has(taskName)) continue;
+    seen.add(taskName);
     out.push({
       taskName,
       name: text(r.name, 100) || taskName,
@@ -62,6 +76,7 @@ export function projectTasks(raw: unknown): ArrTask[] {
       lastDurationSeconds: parseTimeSpan(r.lastDuration),
       nextExecution: isoOrNull(r.nextExecution),
     });
+    if (out.length >= MAX_TASKS) break;
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -502,17 +517,21 @@ export function isTransientJobPollFailure(status: number, body: unknown): boolea
 
 export interface ArrTag { id: number; label: string }
 
+export const MAX_TAG_ENTRIES = 1_000;
+
 /** /api/v3/tag → id and label, to name the tags indexers and clients carry. */
 export function projectTags(raw: unknown): ArrTag[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrTag[] = [];
-  for (const x of raw) {
+  const seen = new Set<number>();
+  for (const x of scanOf(raw, MAX_TAG_ENTRIES)) {
     const r = obj(x);
     const id = posInt(r?.id);
     const label = textOrNull(r?.label, 100);
-    if (id === null || label === null || out.some((t) => t.id === id)) continue;
+    if (id === null || label === null || seen.has(id)) continue;
+    seen.add(id);
     out.push({ id, label });
-    if (out.length >= 1_000) break;
+    if (out.length >= MAX_TAG_ENTRIES) break;
   }
   return out;
 }
@@ -536,13 +555,60 @@ export interface ArrRootFolder {
 export interface ArrDisk { path: string; label: string | null; freeSpace: number | null; totalSpace: number | null }
 
 export const MAX_UNMAPPED = 500;
+/**
+ * The most root folders and disks projected — far past any real instance. They
+ * also bound rootDisk's roots × disks matching (projectRootFolders, and the
+ * monitor's readDisks over the same two lists) to a constant.
+ */
+export const MAX_ROOT_FOLDERS = 500;
+export const MAX_DISK_ENTRIES = 500;
 
 // A path compared as a path: either separator, no trailing one, and a Windows
 // drive path case-insensitively ("C:\Movies" and "c:/movies/" are one place).
 function comparablePath(p: string): string {
-  let s = p.replace(/\\/g, "/");
-  while (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
-  return /^[A-Za-z]:/.test(s) ? s.toLowerCase() : s;
+  const s = p.replace(/\\/g, "/");
+  // One slice, never one per trailing separator (a path can end in hundreds).
+  // Not a /\/+$/ regex either: it backtracks over every run of separators.
+  let end = s.length;
+  while (end > 1 && s.charCodeAt(end - 1) === 47) end--;
+  const t = end === s.length ? s : s.slice(0, end);
+  return /^[A-Za-z]:/.test(t) ? t.toLowerCase() : t;
+}
+
+// A disk list with each path made comparable ONCE. Matching is roots × disks
+// (projectRootFolders, and the monitor's readDisks calling rootDisk/diskFor
+// per root over one list), and comparablePath per (root, disk) pair cost
+// seconds at the caps. Remembered per list, and re-made when any entry or its
+// path changed since, so a caller that edits a list is never matched stale.
+interface ComparableDisk { disk: ArrDisk; path: string; cmp: string; prefix: string }
+const comparableDiskLists = new WeakMap<readonly ArrDisk[], ComparableDisk[]>();
+
+function comparableDisks(disks: readonly ArrDisk[]): ComparableDisk[] {
+  const known = comparableDiskLists.get(disks);
+  if (known && known.length === disks.length) {
+    let same = true;
+    for (let i = 0; i < known.length && same; i++) {
+      const d = disks[i];
+      same = known[i].disk === d && known[i].path === d.path;
+    }
+    if (same) return known;
+  }
+  const out: ComparableDisk[] = [];
+  for (const disk of disks) {
+    const cmp = comparablePath(disk.path);
+    out.push({ disk, path: disk.path, cmp, prefix: cmp.endsWith("/") ? cmp : `${cmp}/` });
+  }
+  comparableDiskLists.set(disks, out);
+  return out;
+}
+
+// diskFor over a comparable list, for a comparable path.
+function holderOf(p: string, disks: readonly ComparableDisk[]): ComparableDisk | null {
+  let best: ComparableDisk | null = null;
+  for (const d of disks) {
+    if ((p === d.cmp || p.startsWith(d.prefix)) && d.cmp.length > (best?.cmp.length ?? -1)) best = d;
+  }
+  return best;
 }
 
 /**
@@ -551,18 +617,7 @@ function comparablePath(p: string): string {
  * never "/mnt/media2/movies"; "/" holds everything when nothing nearer does).
  */
 export function diskFor(path: string, disks: readonly ArrDisk[]): ArrDisk | null {
-  const p = comparablePath(path);
-  let best: ArrDisk | null = null;
-  let bestLen = -1;
-  for (const d of disks) {
-    const dp = comparablePath(d.path);
-    const holds = p === dp || p.startsWith(dp.endsWith("/") ? dp : `${dp}/`);
-    if (holds && dp.length > bestLen) {
-      best = d;
-      bestLen = dp.length;
-    }
-  }
-  return best;
+  return holderOf(comparablePath(path), comparableDisks(disks))?.disk ?? null;
 }
 
 /**
@@ -588,10 +643,16 @@ export const DISK_MATCH_TOLERANCE_RATIO = 0.01;
  * guardrail 7c), so the two never disagree about which disk a folder is on.
  */
 export function rootDisk(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks: readonly ArrDisk[]): ArrDisk | null {
-  const disk = diskFor(root.path, disks);
-  if (!disk) return null;
+  return rootDiskIn(root, comparableDisks(disks));
+}
+
+function rootDiskIn(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks: readonly ComparableDisk[]): ArrDisk | null {
+  const p = comparablePath(root.path);
+  const holder = holderOf(p, disks);
+  if (!holder) return null;
+  const disk = holder.disk;
   if (root.freeSpace === null || disk.freeSpace === null) {
-    return comparablePath(disk.path) === "/" && comparablePath(root.path) !== "/" ? null : disk;
+    return holder.cmp === "/" && p !== "/" ? null : disk;
   }
   const tolerance = Math.max(DISK_MATCH_TOLERANCE_BYTES, disk.freeSpace * DISK_MATCH_TOLERANCE_RATIO);
   return Math.abs(root.freeSpace - disk.freeSpace) <= tolerance ? disk : null;
@@ -608,14 +669,15 @@ export function rootDisk(root: Pick<ArrRootFolder, "path" | "freeSpace">, disks:
 export function projectRootFolders(raw: unknown, disks: readonly ArrDisk[] = []): ArrRootFolder[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrRootFolder[] = [];
-  for (const x of raw) {
+  const comparable = comparableDisks(disks);
+  for (const x of scanOf(raw, MAX_ROOT_FOLDERS)) {
     const r = obj(x);
     const id = posInt(r?.id);
     const path = textOrNull(r?.path, 1_000);
     if (!r || id === null || path === null) continue;
     const unmapped: UnmappedFolder[] = [];
     const list = Array.isArray(r.unmappedFolders) ? r.unmappedFolders : [];
-    for (const u of list) {
+    for (const u of scanOf(list, MAX_UNMAPPED)) {
       const f = obj(u);
       const name = textOrNull(f?.name, 300);
       if (!f || name === null) continue;
@@ -628,10 +690,11 @@ export function projectRootFolders(raw: unknown, disks: readonly ArrDisk[] = [])
       path,
       accessible: r.accessible !== false,
       freeSpace,
-      totalSpace: bytesOrNull(r.totalSpace) ?? rootDisk({ path, freeSpace }, disks)?.totalSpace ?? null,
+      totalSpace: bytesOrNull(r.totalSpace) ?? rootDiskIn({ path, freeSpace }, comparable)?.totalSpace ?? null,
       unmappedFolders: unmapped.sort((a, b) => a.name.localeCompare(b.name)),
       unmappedCount: list.length,
     });
+    if (out.length >= MAX_ROOT_FOLDERS) break;
   }
   return out.sort((a, b) => a.path.localeCompare(b.path));
 }
@@ -639,11 +702,14 @@ export function projectRootFolders(raw: unknown, disks: readonly ArrDisk[] = [])
 export function projectDisks(raw: unknown): ArrDisk[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrDisk[] = [];
-  for (const x of raw) {
+  const seen = new Set<string>();
+  for (const x of scanOf(raw, MAX_DISK_ENTRIES)) {
     const r = obj(x);
     const path = textOrNull(r?.path, 1_000);
-    if (!r || path === null || out.some((d) => d.path === path)) continue;
+    if (!r || path === null || seen.has(path)) continue;
+    seen.add(path);
     out.push({ path, label: textOrNull(r.label, 200), freeSpace: bytesOrNull(r.freeSpace), totalSpace: bytesOrNull(r.totalSpace) });
+    if (out.length >= MAX_DISK_ENTRIES) break;
   }
   return out.sort((a, b) => a.path.localeCompare(b.path));
 }

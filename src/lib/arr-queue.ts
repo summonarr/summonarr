@@ -88,11 +88,17 @@ export interface QueueItem {
 
 // Bounds on what one row carries to the browser. A pathological import can
 // report hundreds of status lines; the page needs the first few.
-const MAX_MESSAGES = 6;
+export const MAX_MESSAGES = 6;
 const MAX_MESSAGE_LEN = 300;
 const MAX_TEXT = 500;
-const MAX_LABELS = 20;
+export const MAX_LABELS = 20;
 const MAX_LABEL_LEN = 100;
+// A record's lists come from the arr, capped only by arrFetch's 50 MB, and the
+// fold runs synchronously (the arr-watch cron, the queue page, the Why?
+// status). So each list is deduped through a Set, kept to its cap, and READ at
+// most this many times its cap (guardrail 5i). arr-system.ts's constant,
+// repeated: this module has no imports, and arr-system imports it.
+export const PROJECTION_SCAN_FACTOR = 10;
 
 const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
 const nonNegInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null);
@@ -200,31 +206,48 @@ export function needsAttention(r: Pick<QueueRecord, "status" | "trackedDownloadS
   return status === "failed" || status === "warning" || status === "downloadclientunavailable";
 }
 
+// The first MAX_MESSAGES distinct messages, in order. Collection stops at the
+// cap, and each list (statusMessages, and every entry's messages) is read at
+// most PROJECTION_SCAN_FACTOR × the cap deep.
 function messagesOf(r: QueueRecord): string[] {
   const out: string[] = [];
+  const seen = new Set<string>();
+  const scan = MAX_MESSAGES * PROJECTION_SCAN_FACTOR;
   const push = (m: unknown) => {
-    const s = typeof m === "string" ? m.trim() : "";
-    if (s && !out.includes(s.slice(0, MAX_MESSAGE_LEN))) out.push(s.slice(0, MAX_MESSAGE_LEN));
+    const s = typeof m === "string" ? m.trim().slice(0, MAX_MESSAGE_LEN) : "";
+    if (s && !seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
   };
   push(r.errorMessage);
   if (Array.isArray(r.statusMessages)) {
-    for (const sm of r.statusMessages as Array<{ title?: unknown; messages?: unknown } | null>) {
+    const list = r.statusMessages as Array<{ title?: unknown; messages?: unknown } | null>;
+    for (let i = 0, n = Math.min(list.length, scan); i < n && out.length < MAX_MESSAGES; i++) {
+      const sm = list[i];
       if (!sm || typeof sm !== "object") continue;
-      if (Array.isArray(sm.messages) && sm.messages.length > 0) for (const m of sm.messages) push(m);
-      else push(sm.title);
+      const messages = sm.messages;
+      if (Array.isArray(messages) && messages.length > 0) {
+        for (let j = 0, k = Math.min(messages.length, scan); j < k && out.length < MAX_MESSAGES; j++) push(messages[j]);
+      } else push(sm.title);
     }
   }
-  return out.slice(0, MAX_MESSAGES);
+  return out;
 }
 
 /** The `name`s of a list of {id, name} objects (languages, custom formats) — deduplicated, bounded. */
 function namesOf(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
+  const list = v as Array<{ name?: unknown } | null>;
   const out: string[] = [];
-  for (const x of v as Array<{ name?: unknown } | null>) {
-    const n = typeof x?.name === "string" ? x.name.trim().slice(0, MAX_LABEL_LEN) : "";
-    if (n && !out.includes(n)) out.push(n);
-    if (out.length >= MAX_LABELS) break;
+  const seen = new Set<string>();
+  for (let i = 0, n = Math.min(list.length, MAX_LABELS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_LABELS; i++) {
+    const x = list[i];
+    const name = typeof x?.name === "string" ? x.name.trim().slice(0, MAX_LABEL_LEN) : "";
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      out.push(name);
+    }
   }
   return out;
 }
@@ -303,11 +326,18 @@ function toItem(service: QueueService, instance: string, r: QueueRecord, id: num
   };
 }
 
+const episodeKey = (e: QueueEpisode): string => `${e.seasonNumber}:${e.episodeNumber}`;
+
 // Folding a later episode record into the row its download already started.
-function mergeInto(row: QueueItem, next: QueueItem): void {
+// `episodeKeys` is the row's episodes as a Set: the folded list has no cap (one
+// entry per record), so a scan of it per record was quadratic.
+function mergeInto(row: QueueItem, next: QueueItem, episodeKeys: Set<string>): void {
   row.ids.push(...next.ids);
   for (const e of next.episodes) {
-    if (!row.episodes.some((x) => x.seasonNumber === e.seasonNumber && x.episodeNumber === e.episodeNumber)) row.episodes.push(e);
+    const key = episodeKey(e);
+    if (episodeKeys.has(key)) continue;
+    episodeKeys.add(key);
+    row.episodes.push(e);
   }
   for (const m of next.messages) if (row.messages.length < MAX_MESSAGES && !row.messages.includes(m)) row.messages.push(m);
   row.attention ||= next.attention;
@@ -338,7 +368,7 @@ function mergeInto(row: QueueItem, next: QueueItem): void {
  */
 export function foldQueueRecords(service: QueueService, instance: string, records: readonly unknown[]): QueueItem[] {
   const rows: QueueItem[] = [];
-  const byDownload = new Map<string, QueueItem>();
+  const byDownload = new Map<string, { row: QueueItem; episodeKeys: Set<string> }>();
   // The queue is read page by page while it changes (the arr's default order is
   // time left, which moves with progress), so a record can land on two pages.
   // One record is one record: a repeat would be a second row with the same key,
@@ -354,10 +384,10 @@ export function foldQueueRecords(service: QueueService, instance: string, record
     const key = service === "sonarr" && item.downloadId ? `${item.downloadId}:${item.arrMediaId ?? ""}` : null;
     const existing = key ? byDownload.get(key) : undefined;
     if (existing) {
-      mergeInto(existing, item);
+      mergeInto(existing.row, item, existing.episodeKeys);
       continue;
     }
-    if (key) byDownload.set(key, item);
+    if (key) byDownload.set(key, { row: item, episodeKeys: new Set(item.episodes.map(episodeKey)) });
     rows.push(item);
   }
   for (const row of rows) row.episodes.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);

@@ -50,7 +50,7 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { role: true, permissions: true, name: true, email: true },
+    select: { role: true, permissions: true, name: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
   if (isAdminTarget(target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
@@ -85,14 +85,16 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   await revokeAllUserSessions(id);
   if (before.enabled) void notifyMfaSecurityEvent(id, "mfa-reset");
 
-  // Committed — a failed audit write must not 500 it (guardrail 26).
+  // Committed — a failed audit write must not 500 it (guardrail 26). The target
+  // is named by id (+ display name), never by email (audit-scrub.ts).
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? "unknown",
     action: "MFA_RESET",
     target: `user:${id}`,
     details: {
-      targetUser: target.name ?? target.email,
+      targetUserId: id,
+      ...(target.name ? { targetUser: target.name } : {}),
       role: target.role,
       before: { totp: before.totpEnabled, passkeys: before.passkeys.length, recoveryCodes: before.recoveryRemaining },
     },
