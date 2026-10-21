@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.35.0",
+  "version": "0.35.1",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -26,16 +26,16 @@
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
   },
   "dependencies": {
-    "@base-ui/react": "^1.8.0",
-    "@prisma/adapter-pg": "^7.10.0",
-    "@prisma/client": "^7.10.0",
+    "@base-ui/react": "^1.9.0",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/client": "^7.10.1",
     "jose": "^6.2.12",
-    "next": "16.3.8",
+    "next": "16.4.0",
     "openid-client": "^6.8.8",
     "pg": "^8.23.1",
-    "prisma": "^7.10.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "prisma": "^7.10.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "overrides": {
     "@babel/core": "^7.29.6",
@@ -53,14 +53,14 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^10.11.0",
-    "eslint-config-next": "16.3.8",
+    "eslint": "^10.12.0",
+    "eslint-config-next": "16.4.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "playwright": "^1.63.0",
+    "playwright": "^1.64.0",
     "tailwindcss": "^4.3.1",
     "tsgo": "npm:typescript@^7.0.2",
     "typescript": "^6"

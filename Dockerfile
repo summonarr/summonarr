@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ── Stage 1: deps ─────────────────────────────────────────────────────────────
-FROM node:26.10.0-alpine3.23@sha256:c3c6e314fd42e41962360b2482fc18d150beb47976c3aa7b8b9689d7ef42a5c2 AS deps
+FROM node:26.11.1-alpine3.23@sha256:f1394b3ffc021bc3f4aaf363e70a8d9667f7a9a63538bc824d7cc583129fffad AS deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/root/.npm \
 # @prisma/adapter-pg (Driver Adapter mode), not the native query engine — so
 # it is safe and much faster to generate on $BUILDPLATFORM and copy the
 # output into the target-arch builder stage.
-FROM --platform=$BUILDPLATFORM node:26.10.0-alpine3.23@sha256:c3c6e314fd42e41962360b2482fc18d150beb47976c3aa7b8b9689d7ef42a5c2 AS prisma-gen
+FROM --platform=$BUILDPLATFORM node:26.11.1-alpine3.23@sha256:f1394b3ffc021bc3f4aaf363e70a8d9667f7a9a63538bc824d7cc583129fffad AS prisma-gen
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -52,7 +52,7 @@ ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
 RUN npx prisma generate
 
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
-FROM node:26.10.0-alpine3.23@sha256:c3c6e314fd42e41962360b2482fc18d150beb47976c3aa7b8b9689d7ef42a5c2 AS builder
+FROM node:26.11.1-alpine3.23@sha256:f1394b3ffc021bc3f4aaf363e70a8d9667f7a9a63538bc824d7cc583129fffad AS builder
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -86,7 +86,7 @@ RUN rm -rf .next/standalone/node_modules/@img/sharp-libvips-linux-* \
 # Install ONLY what the entrypoint needs at boot (prisma CLI for `db push`,
 # plus dotenv and pg), pinned to the lockfile's exact versions.
 # No build tools needed — prisma has no native addons (engines are pre-compiled binaries).
-FROM node:26.10.0-alpine3.23@sha256:c3c6e314fd42e41962360b2482fc18d150beb47976c3aa7b8b9689d7ef42a5c2 AS migrate-deps
+FROM node:26.11.1-alpine3.23@sha256:f1394b3ffc021bc3f4aaf363e70a8d9667f7a9a63538bc824d7cc583129fffad AS migrate-deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -130,7 +130,7 @@ RUN out=$(DATABASE_URL="postgresql://smoke:smoke@127.0.0.1:9/smoke" \
       echo "[migrate-deps] smoke test FAILED: pruned prisma CLI cannot reach P1001 — module graph is broken"; exit 1; }
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
-FROM node:26.10.0-alpine3.23@sha256:c3c6e314fd42e41962360b2482fc18d150beb47976c3aa7b8b9689d7ef42a5c2 AS runner
+FROM node:26.11.1-alpine3.23@sha256:f1394b3ffc021bc3f4aaf363e70a8d9667f7a9a63538bc824d7cc583129fffad AS runner
 WORKDIR /app
 
 # Upgrade Alpine packages (fixes libssl3/libcrypto3/busybox/musl CVEs).
