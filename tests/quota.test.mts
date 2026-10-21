@@ -162,14 +162,15 @@ test("quotaUsageWhere counts what a user requested AND what they filed for other
 });
 
 test("no quota counter in src/ builds its own where clause", async () => {
-  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { readdirSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const offenders: string[] = [];
   const walk = (dir: string) => {
-    for (const name of readdirSync(dir)) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const name = entry.name;
       const p = join(dir, name);
       if (p.startsWith(join("src", "generated"))) continue;
-      if (statSync(p).isDirectory()) walk(p);
+      if (entry.isDirectory()) walk(p);
       else if (/\.tsx?$/.test(p) && p !== join("src", "lib", "quota.ts")) {
         const src = readFileSync(p, "utf-8");
         if (/createdAt: \{ gte: [^}]*\}, status: \{ notIn: \["DECLINED"\] \}/.test(src)) offenders.push(p);

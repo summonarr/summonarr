@@ -196,7 +196,7 @@ for (const [name, src, setter, field, writing] of [
 
   test(`${name}: a snapshot only fills an empty list, and touches nothing else`, () => {
     const apply = callbackBody(src, "applySnapshot");
-    assert.match(apply, new RegExp(`${setter}\\(\\(prev\\) => \\(snapshotMayPaint\\(prev !== null, ${writing.replace(/[.]/g, "\\.")}\\) \\? data\\.${field} : prev\\)\\);`));
+    assert.match(apply, new RegExp(`${setter}\\(\\(prev\\) => \\(snapshotMayPaint\\(prev !== null, ${writing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\? data\\.${field} : prev\\)\\);`));
     for (const forbidden of ["setError", "setSelected", "setConfirmDelete", "setRenames", "setRenameSelected", "setNotice", "setBusy", "setLoadFailed", "setLoading", "markLive", "watch("]) {
       assert.ok(!apply.includes(forbidden), `${name} applySnapshot must not call ${forbidden}`);
     }

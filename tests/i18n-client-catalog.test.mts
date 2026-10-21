@@ -111,7 +111,21 @@ for (const [f, text] of TEXT) {
   GRAPH.set(f, deps);
 }
 
-const isClient = (f: string) => /^(?:\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/))*\s*['"]use client['"]/.test(TEXT.get(f)!);
+// Skip leading whitespace and comments one at a time (a single regex with a
+// repeated \s*-led group backtracks polynomially), then look for the directive.
+const isClient = (f: string) => {
+  let s = TEXT.get(f)!.trimStart();
+  for (;;) {
+    if (s.startsWith("//")) {
+      const nl = s.indexOf("\n");
+      s = nl < 0 ? "" : s.slice(nl + 1).trimStart();
+    } else if (s.startsWith("/*")) {
+      const end = s.indexOf("*/", 2);
+      s = end < 0 ? "" : s.slice(end + 2).trimStart();
+    } else break;
+  }
+  return /^['"]use client['"]/.test(s);
+};
 const CLIENTS = FILES.filter(isClient);
 
 function closure(roots: string[]): Set<string> {

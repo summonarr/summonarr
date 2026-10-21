@@ -16,7 +16,7 @@
 // settings.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import dns from "node:dns/promises";
@@ -168,9 +168,10 @@ test("C111/C011: no source POSTs /api/v3/release except postReleaseGrab", () => 
   let allowedCalls = 0;
   let allowedPaths = 0;
   const walk = (dir: string) => {
-    for (const name of readdirSync(dir)) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const name = entry.name;
       const p = join(dir, name);
-      if (statSync(p).isDirectory()) { if (name !== "generated") walk(p); continue; }
+      if (entry.isDirectory()) { if (name !== "generated") walk(p); continue; }
       if (!/\.(ts|tsx)$/.test(name)) continue;
       const src = readFileSync(p, "utf8");
       for (const c of callsOf(src, "arrFetch\\w*")) {

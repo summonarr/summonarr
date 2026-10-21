@@ -262,7 +262,7 @@ test("scrubLegacySessionRevokePii finds an email with a quote, a backslash or a 
     ];
     // A look-alike the LIKE wildcard in this email would also match.
     if (/[_%]/.test(email)) {
-      rows.push({ id: "s3", action: "SESSION_REVOKE", target: "session:3", details: JSON.stringify({ targetUser: "Y", targetEmail: email.replace(/[_%]/, "z"), deviceLabel: "d" }) });
+      rows.push({ id: "s3", action: "SESSION_REVOKE", target: "session:3", details: JSON.stringify({ targetUser: "Y", targetEmail: email.replace(/[_%]/g, "z"), deviceLabel: "d" }) });
     }
     const { db } = fakeDb(rows);
     assert.equal(await scrubLegacySessionRevokePii(db, "u1", email), 1, email);

@@ -25,7 +25,7 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import dns from "node:dns/promises";
@@ -356,9 +356,10 @@ test("C112: no source builds a series-only /api/v3/release query", () => {
   const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
   const files: Array<{ path: string; code: string }> = [];
   const walk = (dir: string) => {
-    for (const name of readdirSync(dir)) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const name = entry.name;
       const p = join(dir, name);
-      if (statSync(p).isDirectory()) { if (name !== "generated") walk(p); continue; }
+      if (entry.isDirectory()) { if (name !== "generated") walk(p); continue; }
       if (/\.(ts|tsx)$/.test(name)) files.push({ path: p, code: stripComments(readFileSync(p, "utf8")) });
     }
   };

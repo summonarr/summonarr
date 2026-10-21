@@ -61,6 +61,19 @@
 #    this one is allowlisted rather than edited: gitleaks scans history, so
 #    changing the working tree would leave the string in the commit that
 #    introduced it and the scan would still flag it.
+#
+# 6. tests/arr-fix-system.test.mts uses a fake Radarr/Sonarr API key,
+#    "c0ffee0123456789c0ffee0123456789" (a "c0ffee" word plus a counting
+#    run, repeated), only to check that it never reaches a response, log
+#    or audit row. It clears generic-api-key's entropy floor on shape
+#    alone. Allowlisted (not edited) for the same history reason as item 5.
+#
+#    The same release added two more: a NEXTAUTH_SECRET fixture,
+#    "purge-pii-2026-10-20-secret-0123456789ab" (the item-5 shape, one
+#    character short of the counting run), in
+#    tests/audit-2026-10-20-purge-pii.test.mts, and a fourth invented
+#    Discord snowflake, "876543210987654321" (a descending digit run, item
+#    5's pattern), in tests/discord-routes.test.mts.
 
 [extend]
 useDefault = true
@@ -82,4 +95,7 @@ regexes = [
   '''111222333444555666''',
   '''987654321098765432''',
   '''tv-availability-route-secret-0123456789ab''',
+  '''c0ffee0123456789c0ffee0123456789''',
+  '''purge-pii-2026-10-20-secret-0123456789ab''',
+  '''876543210987654321''',
 ]

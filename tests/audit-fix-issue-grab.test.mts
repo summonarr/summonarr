@@ -26,7 +26,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
@@ -319,9 +319,10 @@ test("a failed create retires nothing and throws (the route's catch); a failed r
 test("every IssueGrab create in src/ goes through recordIssueGrab — no route writes one bare", () => {
   const offenders: string[] = [];
   const walk = (dir: string) => {
-    for (const name of readdirSync(dir)) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const name = entry.name;
       const p = join(dir, name);
-      if (statSync(p).isDirectory()) {
+      if (entry.isDirectory()) {
         if (name !== "generated") walk(p);
       } else if (/\.tsx?$/.test(name) && p !== join("src", "lib", "issue-grab.ts")) {
         if (/issueGrab\.(create|createMany|upsert)\s*\(/.test(readFileSync(p, "utf8"))) offenders.push(p);

@@ -260,14 +260,15 @@ test("isNativeSessionForStepUp: no AuthSession row, no session id, or an unreada
 // would test a Promise — always truthy, so `!promise` would exempt EVERY
 // session. Both step-up routes the iOS app calls must use it, awaited.
 test("every isNativeSessionForStepUp call is awaited, and both native-exempt routes use it", async () => {
-  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { readdirSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const callers = new Map<string, { calls: number; awaited: number }>();
   const walk = (dir: string) => {
-    for (const name of readdirSync(dir)) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const name = entry.name;
       const p = join(dir, name);
       if (p.startsWith(join("src", "generated"))) continue;
-      if (statSync(p).isDirectory()) walk(p);
+      if (entry.isDirectory()) walk(p);
       else if (/\.(ts|tsx)$/.test(p) && p !== join("src", "lib", "step-up-auth.ts")) {
         const src = readFileSync(p, "utf-8");
         const calls = src.match(/\bisNativeSessionForStepUp\(/g)?.length ?? 0;
@@ -296,15 +297,16 @@ test("the security notice lists what is still connected — for a password chang
 // its own, unaudited guess budget again. Only the sign-in path (auth.ts — its
 // own login-email/login-ip limiter) and this module may call it.
 test("no route verifies a step-up password except through verifyStepUpPassword", async () => {
-  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { readdirSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const allowed = new Set(["src/lib/password-hash.ts", "src/lib/step-up-auth.ts", "src/lib/auth.ts"]);
   const offenders: string[] = [];
   const walk = (dir: string) => {
-    for (const name of readdirSync(dir)) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const name = entry.name;
       const p = join(dir, name);
       if (p.startsWith(join("src", "generated"))) continue;
-      if (statSync(p).isDirectory()) walk(p);
+      if (entry.isDirectory()) walk(p);
       else if (/\.(ts|tsx)$/.test(p) && !allowed.has(p) && /\bverifyPassword\(/.test(readFileSync(p, "utf-8"))) offenders.push(p);
     }
   };
