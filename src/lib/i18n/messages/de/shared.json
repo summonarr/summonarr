@@ -54,5 +54,7 @@
   "shared.bell.loadFailed": "Benachrichtigungen konnten nicht geladen werden.",
   "shared.bell.loading": "Benachrichtigungen werden geladen…",
   "shared.common.clearSearch": "Suche löschen",
-  "shared.thread.placeholderShortcut": "Nachricht schreiben… ({shortcut} zum Senden)"
+  "shared.thread.placeholderShortcut": "Nachricht schreiben… ({shortcut} zum Senden)",
+  "shared.rateLimited.generic": "Zu viele Anfragen. Bitte versuche es gleich noch einmal.",
+  "shared.rateLimited.seconds": "Zu viele Anfragen. Versuche es in {seconds} s erneut."
 }

@@ -149,7 +149,7 @@ test("missing NEXTAUTH_SECRET: sign rejects, verify swallows to null", async () 
   try {
     await assert.rejects(
       signSessionJwt(CLAIMS, { expiresInSeconds: 3600 }),
-      /\[session-jwt\] NEXTAUTH_SECRET must be set/,
+      /\[signing-keys\] NEXTAUTH_SECRET must be set/,
     );
     assert.equal(await verifySessionJwt(token), null);
   } finally {

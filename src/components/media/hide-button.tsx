@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { EyeOff, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
@@ -49,7 +50,7 @@ export function HideButton({
       if (!res.ok && res.status !== 409) {
         const data = await res.json().catch(() => ({}));
         setHidden(!next); // rollback
-        setMsg(data.error ?? t("request.somethingWrong"));
+        setMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
       } else {
         toast({ title: next ? t("detail.hide.hiddenToast") : t("detail.hide.shownToast"), variant: "success" });
       }

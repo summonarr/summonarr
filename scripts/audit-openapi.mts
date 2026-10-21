@@ -97,7 +97,6 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/admin/trash-guides/spec/{id}", reason: "admin TRaSH-guides spec" },
   // Settings sub-routes — admin config surface.
   { route: "/settings/plex", reason: "admin Plex settings" },
-  { route: "/settings/webhook-urls", reason: "admin webhook URL settings" },
   // Jellyfin self-service notification-email verification (send + public confirm).
   { route: "/profile/notification-email", reason: "start email verification (Jellyfin self-service)" },
   { route: "/profile/notification-email/confirm", reason: "public email-verification confirm landing" },

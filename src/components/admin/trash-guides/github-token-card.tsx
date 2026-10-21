@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useDelayed } from "@/hooks/use-delayed";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, XCircle } from "@/components/icons";
@@ -21,6 +22,7 @@ export function GithubTokenCard() {
   const [masked, setMasked] = useState<string>("");
   const [value, setValue] = useState("");
   const [state, setState] = useState<ActionState>("idle");
+  const later = useDelayed();
 
   useEffect(() => {
     void (async () => {
@@ -51,7 +53,7 @@ export function GithubTokenCard() {
     } catch {
       setState("error");
     }
-    setTimeout(() => setState("idle"), 2000);
+    later(() => setState("idle"), 2000);
   }
 
   return (

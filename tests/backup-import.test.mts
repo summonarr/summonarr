@@ -80,6 +80,18 @@ const fakeTx = {
       freshnessReads.push({ kind: "user.count" });
       return userCount;
     },
+    // Guardrail 6g: the restore ends every session — recorded in the op stream so
+    // the order (after the data, inside the one transaction) is pinned.
+    updateMany: async (args: { data: { sessionsRevokedAt?: Date } }) => {
+      txOps.push(`user.updateMany(${Object.keys(args.data).join(",")})`);
+      return { count: 0 };
+    },
+  },
+  authSession: {
+    deleteMany: async (args: unknown) => {
+      txOps.push(`authSession.deleteMany(${JSON.stringify(args)})`);
+      return { count: 0 };
+    },
   },
 };
 
@@ -494,6 +506,12 @@ test("happy path: exact op order (lock → full TRUNCATE → dump order), ON CON
     // Legacy dumps without the clause get it appended for duplicate tolerance.
     `${STMT.settingInsert} ON CONFLICT DO NOTHING`,
     `${STMT.requestInsert} ON CONFLICT DO NOTHING`,
+    // Guardrail 6g: the restore never brings sessions back. The dump's
+    // AuthSession rows go, and every account's cutoff moves to now, so no token
+    // from before the restore (a device signed out since the backup was taken)
+    // works again — in the SAME transaction as the data.
+    "authSession.deleteMany({})",
+    "user.updateMany(sessionsRevokedAt)",
   ]);
 
   // One transaction, with the restore-sized timeout options.
@@ -512,8 +530,9 @@ test("happy path: exact op order (lock → full TRUNCATE → dump order), ON CON
     conflictSkippedByTable: {},
     conflictSkippedTotal: 0,
   });
-  // Fingerprint present+matching, TEK matching, no conflicts ⇒ no warning.
-  assert.equal(res.warning, null);
+  // Fingerprint present+matching, TEK matching, no conflicts ⇒ the only
+  // warning is that everyone was signed out.
+  assert.match(res.warning ?? "", /^Every account was signed out by the restore/);
   assert.deepEqual(errors, []);
 });
 

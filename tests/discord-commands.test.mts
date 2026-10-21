@@ -174,6 +174,9 @@ async function waitForPuts(count: number, timeoutTurns = 50): Promise<void> {
 // 429. Every test below reads these two captured payloads.
 let manualPut: PutCall;
 let settingsPut: PutCall;
+// The global-set clear that follows each guild-scoped registration.
+let manualClear: PutCall;
+let settingsClear: PutCall;
 
 before(async () => {
   // Configured Discord bot, guild-scoped — so both paths target the same URL and
@@ -188,8 +191,9 @@ before(async () => {
     undefined,
   );
   assert.equal(manualRes.status, 200, "manual registration should succeed in this harness");
-  assert.equal(commandPuts.length, 1, "manual registration should publish exactly one command PUT");
+  assert.equal(commandPuts.length, 2, "manual registration should publish the guild set, then clear the global one");
   manualPut = commandPuts[0];
+  manualClear = commandPuts[1];
 
   // Path 2 — a settings save that CHANGES a registration input. The route only
   // re-registers on a real change to discordBotToken/discordClientId/discordGuildId
@@ -207,9 +211,10 @@ before(async () => {
     undefined,
   );
   assert.equal(patchRes.status, 200, "the settings write should succeed in this harness");
-  await waitForPuts(2);
-  assert.equal(commandPuts.length, 2, "a discord* settings change should re-register the commands");
-  settingsPut = commandPuts[1];
+  await waitForPuts(4);
+  assert.equal(commandPuts.length, 4, "a discord* settings change should re-register the commands");
+  settingsPut = commandPuts[2];
+  settingsClear = commandPuts[3];
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -431,8 +436,29 @@ test("the published command set preserves every name, description and option", (
       ],
     },
   ];
-  assert.deepEqual(stripLocalizations(JSON.parse(manualPut.body)), expected);
-  assert.deepEqual(stripLocalizations(JSON.parse(settingsPut.body)), expected);
+  // Every command is guild-only (the next test pins that on its own).
+  const guildOnly = expected.map((cmd) => ({ ...cmd, contexts: [0], integration_types: [0] }));
+  assert.deepEqual(stripLocalizations(JSON.parse(manualPut.body)), guildOnly);
+  assert.deepEqual(stripLocalizations(JSON.parse(settingsPut.body)), guildOnly);
+});
+
+test("every published command is GUILD-only: contexts [0], integration_types [0] — never a DM or a user install", () => {
+  for (const [label, put] of [["manual", manualPut], ["settings", settingsPut]] as const) {
+    const commands = JSON.parse(put.body) as Array<{ name: string; contexts?: unknown; integration_types?: unknown }>;
+    assert.ok(commands.length > 0);
+    for (const cmd of commands) {
+      assert.deepEqual(cmd.contexts, [0], `${label} /${cmd.name}: 1 (BOT_DM) / 2 (PRIVATE_CHANNEL) would offer it outside the server`);
+      assert.deepEqual(cmd.integration_types, [0], `${label} /${cmd.name}: 1 (USER_INSTALL) would let anyone run it anywhere`);
+    }
+  }
+});
+
+test("a guild-scoped registration CLEARS the global command set, after the guild PUT", () => {
+  for (const [label, clear] of [["manual", manualClear], ["settings", settingsClear]] as const) {
+    assert.equal(clear.method, "PUT", `${label}: a full replace`);
+    assert.match(clear.url.pathname, new RegExp(`/applications/${CLIENT_ID}/commands$`), `${label}: the GLOBAL endpoint`);
+    assert.deepEqual(JSON.parse(clear.body), [], `${label}: with an empty set`);
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════

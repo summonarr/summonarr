@@ -90,10 +90,11 @@ test("backup messages: known lib messages translate, English round-trips, unknow
   assert.equal(localizeBackupMessage(dynamic, es), dynamic);
 });
 
-test("fix-match registry: the concurrency refusal speaks the starter's language, English without a translator", async () => {
+test("fix-match registry: the full-queue refusal speaks the starter's language, English without a translator", async () => {
   _resetFixMatchJobsForTests();
   const never = () => new Promise<never>(() => {});
-  for (let i = 0; i < 4; i++) startFixMatchJob(`k${i}`, never);
+  // 4 running + a full queue of 50: the next job is refused.
+  for (let i = 0; i < 4 + 50; i++) startFixMatchJob(`k${i}`, never);
   const refusal = (t?: typeof en) => {
     try {
       startFixMatchJob("k-extra", never, Date.now(), t);
@@ -102,10 +103,10 @@ test("fix-match registry: the concurrency refusal speaks the starter's language,
       assert.equal(err.status, 429);
       return err.message;
     }
-    assert.fail("expected the running-job cap to refuse");
+    assert.fail("expected the full queue to refuse");
   };
   const plain = refusal();
-  assert.equal(plain, "Too many fix-match operations are already running — wait for one to finish and try again.");
+  assert.equal(plain, "Too many fix-match operations are already queued — wait for some to finish and try again.");
   assert.equal(refusal(en), plain);
   assert.match(refusal(es), /^Ya hay demasiadas correcciones/);
   _resetFixMatchJobsForTests();

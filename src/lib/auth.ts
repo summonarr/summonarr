@@ -1,14 +1,16 @@
 import { prisma } from "@/lib/prisma";
 import { headers } from "next/headers";
-import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
-import { createHash, createHmac } from "crypto";
+import { dummyVerify, hashPassword, needsRehash, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { createHash } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { checkRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
+import { checkRateLimit, peekRateLimit, reserveRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
+import { claimSignInLockoutNotice, notifyAccountSecurityEvent, notifySignInLockout } from "@/lib/account-security-notify";
 import { logAudit } from "@/lib/audit";
-import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
-import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
+import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
+import { signSessionJwt, type SessionClaims, type SessionTransport } from "@/lib/session-jwt";
+import { purposeHmacHex, signingKey } from "@/lib/signing-keys";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { machineIpAllowed } from "@/lib/api-auth";
@@ -16,26 +18,41 @@ import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
-import { NEVER_EXPIRES_AT_SEC } from "@/lib/session-lifetime";
+import { MAX_CONFIGURABLE_SESSION_SECONDS, NEVER_EXPIRES_AT_SEC } from "@/lib/session-lifetime";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, plexSettingKey, mediaInstanceLabel } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
+import { jellyfinFirstSeenInstance } from "@/lib/jellyfin-identity";
+import { isReservedEmailDomain } from "@/lib/reserved-email";
 
 // Wherever User.passwordHash is updated (e.g. src/app/api/profile/password/route.ts
 // and admin password-set endpoints), the same code path must also call
 // revokeAllUserSessions(userId) so the AuthSession rows are deleted and stale
-// JWTs cannot refresh on any replica. This file does not write passwordHash directly.
+// JWTs cannot refresh on any replica. The one write in this file is the sign-in
+// rehash (rehashPassword), which stores the SAME password at a higher cost and so
+// deliberately revokes nothing.
 
 import { normalizeEmail } from "@/lib/email-normalize";
+import { passwordVersion } from "@/lib/mfa/mfa-store";
 // Re-exported so existing imports of `normalizeEmail` from "@/lib/auth"
 // continue to work.
 export { normalizeEmail };
 
-// Hashes the lowercased email for audit storage. Truncated to 16 hex chars so a
-// password accidentally typed in the email field can't be recovered from logs while
+// Keyed fingerprint of the lowercased email for audit storage (and the
+// per-account login bucket key). Truncated to 16 hex chars so a password
+// accidentally typed in the email field can't be recovered from logs, while
 // still letting an operator correlate failed-login attempts on the same input.
+//
+// An HMAC under its own HKDF subkey of NEXTAUTH_SECRET (the "audit-email"
+// purpose in signing-keys.ts, guardrail 6h), not a bare SHA-256: an unkeyed hash
+// of an email is reversed by hashing a list of candidate addresses, so anyone
+// holding an audit export (or a backup) could confirm which addresses had tried
+// to sign in. Rows written before this used the unkeyed form; they no longer
+// correlate with new ones, which the retention scrub makes moot (auth-event
+// details are cleared once aged). The same value keys the per-account sign-in
+// limiter and lockout notice, so it always uses the CURRENT secret.
 export function hashAuditEmail(email: string): string {
-  return createHash("sha256").update(email).digest("hex").slice(0, 16);
+  return purposeHmacHex(signingKey("audit-email"), email).slice(0, 16);
 }
 
 // Sentinel returned when a provider-bound lookup refuses sign-in due to an email
@@ -51,6 +68,40 @@ export type ProviderRebindRequired = typeof PROVIDER_REBIND_REQUIRED;
 // first-admin bootstrap — refuse instead. See runFirstAdminPromotion.
 export const PROVIDER_SETUP_REQUIRED = Symbol("provider-setup-required");
 export type ProviderSetupRequired = typeof PROVIDER_SETUP_REQUIRED;
+
+// Every other refusal a provider lookup can return (guardrail 34e). `reason`
+// is what the AUTH_LOGIN_FAILED audit row records; the client only ever sees a
+// coarse message for it.
+export type ProviderRefusalReason =
+  // Jellyfin: the id is bound to a different configured server.
+  | "instance_mismatch"
+  // OIDC: the (provider, sub) row was bound under a different issuer.
+  | "issuer_mismatch"
+  // OIDC: linking or creating needs an IdP-verified email.
+  | "email_unverified"
+  | "email_missing"
+  // The address is in a domain Summonarr mints for itself (reserved-email.ts).
+  | "reserved_email"
+  // OIDC allowlist (oidc-allowlist.ts).
+  | "not_in_allowed_group"
+  | "email_domain_not_allowed"
+  | "existing_users_only"
+  | "allowlist_unreadable";
+
+export class ProviderRefusal {
+  readonly reason: ProviderRefusalReason;
+  constructor(reason: ProviderRefusalReason) {
+    this.reason = reason;
+  }
+}
+
+// Narrows a findOrCreate*User result to the user it resolved, i.e. none of the
+// refusals above.
+export function isAuthorizedDbUser(
+  result: AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal,
+): result is AuthorizedDbUser {
+  return typeof result !== "symbol" && !(result instanceof ProviderRefusal);
+}
 
 export type AuthorizedDbUser = { id: string; email: string; name: string | null; role: string };
 
@@ -74,6 +125,7 @@ export async function findOrCreatePlexUser({
   name,
   image,
   plexClientId,
+  emailIsFresh = true,
 }: {
   plexUserId: string;
   email: string;
@@ -81,7 +133,12 @@ export async function findOrCreatePlexUser({
   image?: string | null;
   // The browser's X-Plex-Client-Identifier, when the sign-in carried a valid one.
   plexClientId?: string | null;
-}): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
+  // False when `email` came from the PlexTokenCache (up to 30 days old) rather than
+  // a live plex.tv answer. A cached address is good enough to ADMIT a member but
+  // must not overwrite notificationEmail, which would revert a newer address the
+  // last live sign-in (or the user's profile) had set.
+  emailIsFresh?: boolean;
+}): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   const normalized = normalizeEmail(email);
   // Provider-supplied display names are untrusted — strip HTML/control chars so
   // the name can't carry markup into any downstream sink (email/Discord/push),
@@ -103,7 +160,7 @@ export async function findOrCreatePlexUser({
     await prisma.user.update({
       where: { id: bySub.id },
       data: {
-        notificationEmail: normalized,
+        ...(emailIsFresh ? { notificationEmail: normalized } : {}),
         ...(name ? { name } : {}),
         ...(image ? { image } : {}),
         ...(plexClientId ? { plexClientId } : {}),
@@ -123,6 +180,14 @@ export async function findOrCreatePlexUser({
   if (byEmail) {
     console.warn(`[auth] Refused plex sign-in: ${normalized} matches an existing user with no plexUserId. Manual rebind required.`);
     return PROVIDER_REBIND_REQUIRED;
+  }
+
+  // A plex.tv account can carry any address, a Summonarr-minted one included
+  // (reserved-email.ts). Minting a row under `jellyfin-<id>@jellyfin.local`
+  // would squat that Jellyfin user's address and block their provisioning.
+  if (isReservedEmailDomain(normalized)) {
+    console.warn("[auth] Refused plex sign-in: the account's email is in a domain Summonarr reserves for its own placeholder addresses.");
+    return new ProviderRefusal("reserved_email");
   }
 
   // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
@@ -151,43 +216,72 @@ export async function findOrCreatePlexUser({
 export async function findOrCreateJellyfinUser(
   jellyfinId: string,
   name: string,
-  // Retained in the signature (the sign-in call sites pass their instance) even
-  // though resolution is now instance-agnostic: it keyed the removed real-email
-  // probe, and a future per-instance branch would want it back.
-  _instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
-): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
+  // The configured Jellyfin server the credential was verified against. The
+  // identity is bound to it (guardrail 34e): a returning id signing in through
+  // any other server is refused, and so is a new one first seen elsewhere.
+  instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   // Provider-supplied display name is untrusted — strip HTML/control chars so it
   // can't carry markup into any downstream sink (email/Discord/push).
   name = sanitizeText(name);
-  // Synthetic address is retained as a backward-compat anchor for users that
-  // signed in before the (provider, sub) binding columns existed.
+  // Jellyfin's API exposes no user email (UserDto carries none in any version),
+  // so every Jellyfin account's login address is this placeholder. It is an
+  // ADDRESS only — never a lookup key (see step 2).
   const syntheticEmail = `jellyfin-${jellyfinId}@jellyfin.local`;
 
-  // 1) Provider-subject lookup wins.
+  // 1) Provider-subject lookup, then the server binding. The id alone is not the
+  //    identity: whoever runs a second registered server controls its database
+  //    and could mint a user carrying another server's id.
   const bySub = await prisma.user.findUnique({ where: { jellyfinUserId: jellyfinId } });
   if (bySub) {
+    if (bySub.jellyfinInstance !== instance) {
+      // A row bound before the column existed (null) adopts THIS instance unless
+      // the id was first seen on another one (jellyfinFirstSeenInstance — the
+      // boot backfill applies the same rule). Conditional on the column still
+      // being null, so two first sign-ins through different servers can't both
+      // adopt; the loser re-reads and compares.
+      let bound = bySub.jellyfinInstance;
+      if (bound === null) {
+        const firstSeen = await jellyfinFirstSeenInstance(jellyfinId);
+        if (firstSeen === null || firstSeen === instance) {
+          const { count } = await prisma.user.updateMany({
+            where: { id: bySub.id, jellyfinInstance: null },
+            data: { jellyfinInstance: instance },
+          });
+          if (count === 1) {
+            bound = instance;
+          } else {
+            const reread = await prisma.user.findUnique({ where: { id: bySub.id }, select: { jellyfinInstance: true } });
+            bound = reread?.jellyfinInstance ?? null;
+          }
+        } else {
+          bound = firstSeen;
+        }
+      }
+      if (bound !== instance) {
+        console.warn(`[auth] Refused jellyfin sign-in through ${mediaInstanceLabel("jellyfin", instance)}: this Jellyfin id is bound to a different configured server.`);
+        return new ProviderRefusal("instance_mismatch");
+      }
+    }
     if (name && name !== bySub.name) {
       await prisma.user.updateMany({ where: { id: bySub.id }, data: { name } }).catch(() => {});
     }
     return { id: bySub.id, email: bySub.email, name: name ?? bySub.name, role: bySub.role };
   }
 
-  // 2) Synthetic-email lookup for legacy rows. Backfill jellyfinUserId so
-  //    subsequent sign-ins use the (sub) path.
-  const bySynthetic = await prisma.user.findUnique({ where: { email: syntheticEmail } });
-  if (bySynthetic) {
-    await prisma.user.update({
-      where: { id: bySynthetic.id },
-      data: { jellyfinUserId: jellyfinId, ...(name ? { name } : {}) },
-    }).catch(() => {});
-    return { id: bySynthetic.id, email: bySynthetic.email, name: name ?? bySynthetic.name, role: bySynthetic.role };
+  // 2) The synthetic address is NOT a lookup key. Sign-in used to bind to ANY
+  //    row carrying it, so a delegate or an OIDC user who created
+  //    `jellyfin-<id>@jellyfin.local` inherited that Jellyfin user's next
+  //    sign-in. Legacy rows that relied on it were bound once by the boot
+  //    backfill (jellyfin-identity.ts), and the reserved domains are refused at
+  //    every account-creating path (reserved-email.ts). A row still holding the
+  //    address is not this identity's: refuse rather than fail the create on
+  //    the unique email.
+  const squatter = await prisma.user.findUnique({ where: { email: syntheticEmail }, select: { id: true } });
+  if (squatter) {
+    console.warn(`[auth] Refused jellyfin sign-in for ${jellyfinId}: an account not bound to this Jellyfin id holds its placeholder address. Manual rebind required.`);
+    return PROVIDER_REBIND_REQUIRED;
   }
-
-  // 3) NOTE on email: Jellyfin's API exposes no user email field (UserDto
-  //    carries none in any version), so the old "real email" probe here always
-  //    came back empty — every Jellyfin account anchors on the synthetic
-  //    address. Email remains never a trusted cross-provider identity anchor;
-  //    only the provider subject id (jellyfinUserId) is.
 
   // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
   if (await isPreSetupBootstrapBlocked()) {
@@ -195,7 +289,16 @@ export async function findOrCreateJellyfinUser(
     return PROVIDER_SETUP_REQUIRED;
   }
 
-  // 4) New user.
+  // 3) New user, bound to the server it signed in through — unless the id was
+  //    first seen on another one. Same rule as the null adoption above: a twin
+  //    planted on a later server must not claim an identity whose owner just
+  //    hasn't signed in yet (the subject-matched attribution, guardrail 34,
+  //    would hand it their watch history and lock the owner out).
+  const firstSeen = await jellyfinFirstSeenInstance(jellyfinId);
+  if (firstSeen !== null && firstSeen !== instance) {
+    console.warn(`[auth] Refused jellyfin sign-in through ${mediaInstanceLabel("jellyfin", instance)}: this Jellyfin id was first seen on a different server (registered now or since removed).`);
+    return new ProviderRefusal("instance_mismatch");
+  }
   const created = await prisma.user.create({
     data: {
       email: syntheticEmail,
@@ -203,6 +306,7 @@ export async function findOrCreateJellyfinUser(
       role: "USER",
       permissions: defaultPermissionsForRole("USER"),
       jellyfinUserId: jellyfinId,
+      jellyfinInstance: instance,
     },
     select: { id: true, email: true, name: true, role: true },
   });
@@ -210,6 +314,8 @@ export async function findOrCreateJellyfinUser(
 }
 
 export interface OidcUserClaims {
+  // The ID token's `iss` — the namespace `sub` is unique within.
+  issuer: string;
   sub: string;
   email: string | null;
   emailVerified: boolean;
@@ -222,22 +328,19 @@ export interface OidcUserClaims {
   expiresAt: number | null;
 }
 
-// Finds or creates a User for an OIDC sub (the IdP's stable user id), used by
-// the OIDC callback. The Prisma extension auto-encrypts
+// Finds or creates a User for an OIDC identity — (issuer, sub), the IdP's
+// stable user id within its own namespace. Used by both OIDC sign-in routes
+// through resolveOidcSignIn (oidc-signin.ts), which applies the admin allowlist
+// first. The Prisma extension auto-encrypts
 // Account.{access_token,refresh_token,id_token} on write per guardrail 7a —
 // callers must pass raw tokens.
+//
+// `allowCreate: false` is the allowlist's "existing users only" mode: a sign-in
+// that would mint a new account is refused instead.
 export async function findOrCreateOidcUser(
   claims: OidcUserClaims,
-): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
-  if (!claims.emailVerified) {
-    throw new Error("OIDC account email is not verified");
-  }
-  if (!claims.email) {
-    console.error("[auth/oidc] provider returned no email — rejecting sign-in for sub:", claims.sub);
-    throw new Error("[auth/oidc] provider returned no email");
-  }
-  const normalizedEmail = normalizeEmail(claims.email);
-
+  { allowCreate = true }: { allowCreate?: boolean } = {},
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   const accountTokens = {
     access_token: claims.accessToken,
     refresh_token: claims.refreshToken,
@@ -250,6 +353,30 @@ export async function findOrCreateOidcUser(
     include: { user: true },
   });
   if (byAccount?.user) {
+    // `sub` is unique only WITHIN an issuer (OIDC Core §2), so the row matches
+    // only under the issuer it was bound to — a changed OIDC_ISSUER must not
+    // sign a different IdP's user into this account (guardrail 34e). A row from
+    // before the column existed adopts this issuer, conditionally, so of two
+    // racing first sign-ins exactly one decides it; the loser re-reads.
+    // (The adoption writes `issuer` alone: account.updateMany refuses token
+    // columns, guardrail 7a.)
+    let boundIssuer = byAccount.issuer;
+    if (boundIssuer === null) {
+      const { count } = await prisma.account.updateMany({
+        where: { id: byAccount.id, issuer: null },
+        data: { issuer: claims.issuer },
+      });
+      if (count === 1) {
+        boundIssuer = claims.issuer;
+      } else {
+        const reread = await prisma.account.findUnique({ where: { id: byAccount.id }, select: { issuer: true } });
+        boundIssuer = reread?.issuer ?? null;
+      }
+    }
+    if (boundIssuer !== claims.issuer) {
+      console.warn("[auth/oidc] Refused sign-in: the subject is bound under a different issuer.");
+      return new ProviderRefusal("issuer_mismatch");
+    }
     // Refresh the stored OAuth tokens — extension handles encryption
     await prisma.account
       .update({ where: { id: byAccount.id }, data: accountTokens })
@@ -260,6 +387,27 @@ export async function findOrCreateOidcUser(
       name: byAccount.user.name,
       role: byAccount.user.role,
     };
+  }
+
+  // Email trust is only needed to LINK or CREATE by email. A returning user is
+  // already bound by (issuer, sub) above — the sub is the identity, so an IdP
+  // that stops sending email_verified (or the email) must not lock them out.
+  // New links and new accounts keep the strict requirement.
+  if (!claims.emailVerified) {
+    return new ProviderRefusal("email_unverified");
+  }
+  if (!claims.email) {
+    console.error("[auth/oidc] provider returned no email — rejecting sign-in for sub:", claims.sub);
+    return new ProviderRefusal("email_missing");
+  }
+  const normalizedEmail = normalizeEmail(claims.email);
+
+  // An IdP that lets users pick their address could hand back one Summonarr
+  // mints for itself (reserved-email.ts) — e.g. a Jellyfin user's placeholder,
+  // squatting it so that user can never be provisioned.
+  if (isReservedEmailDomain(normalizedEmail)) {
+    console.warn("[auth/oidc] Refused sign-in: the email is in a domain Summonarr reserves for its own placeholder addresses.");
+    return new ProviderRefusal("reserved_email");
   }
 
   // Same account-takeover guard as the Plex/Jellyfin paths: an existing user with
@@ -275,6 +423,8 @@ export async function findOrCreateOidcUser(
     console.warn(`[auth/oidc] Refused sign-in: ${normalizedEmail} matches an existing user with no oidc account binding. Manual rebind required.`);
     return PROVIDER_REBIND_REQUIRED;
   }
+
+  if (!allowCreate) return new ProviderRefusal("existing_users_only");
 
   // Refuse to MINT THE FIRST USER via OIDC before setup has run. With OAuth
   // bootstrap disabled (the default), runFirstAdminPromotion won't promote this
@@ -318,6 +468,7 @@ export async function findOrCreateOidcUser(
         type: "oidc",
         provider: "oidc",
         providerAccountId: claims.sub,
+        issuer: claims.issuer,
         ...accountTokens,
       },
     });
@@ -345,7 +496,10 @@ const DEFAULT_MAX_SESSION_SECONDS    = 2_592_000;
 // Hard ceiling for ADMIN-CONFIGURABLE durations (the sessionDefault/Mobile/Max settings)
 // — prevents an admin from configuring an unbounded JWT lifetime. The native sentinel
 // above is a deliberate code-level constant and is intentionally not bound by this.
-const MAX_ALLOWED_SESSION_SECONDS = 90 * 24 * 60 * 60;
+// Shared with session-jwt.ts, which tells a legacy native token from a browser one
+// by a deadline past this horizon (guardrail 6h), so the value lives in
+// session-lifetime.ts.
+const MAX_ALLOWED_SESSION_SECONDS = MAX_CONFIGURABLE_SESSION_SECONDS;
 
 type SessionDurations = { desktopDuration: number; mobileDuration: number; maxDuration: number };
 
@@ -426,16 +580,13 @@ export async function auth(): Promise<SummonarrSession | null> {
 // role-based redirect cannot assume the proxy's DB check has run. Same
 // SummonarrSession shape as auth(), so it is a drop-in replacement at the guard.
 export async function authActive(): Promise<SummonarrSession | null> {
+  // Cookie transport (page renders are cookie/SSR only), so a bearer-bound
+  // native token is refused inside the read (guardrail 6h). There is no
+  // User-Agent fingerprint check: the client writes that header, so it never
+  // stopped a replayed cookie (guardrail 6h retired it everywhere).
   const claims = await readActiveSummonarrSession();
   if (!claims) return null;
-  // UA-fingerprint replay check — parity with the proxy and the withAuth/withAdmin
-  // wrappers ([api-auth.ts]). The proxy's matcher skips prefetch requests, so the
-  // page-render path must re-enforce the cookie→device binding here too: otherwise a
-  // stolen cookie replayed with a prefetch-looking header could render protected
-  // pages. Page renders are cookie/SSR only (no bearer); machine:/no-fingerprint
-  // sessions are skipped inside the helper.
   const h = await headers();
-  if (!matchesStoredFingerprint(claims.uaFingerprint, h.get("user-agent"))) return null;
   // A machine session carries a mint-time IP allowlist; the API guards + isCronAuthorized
   // enforce it, so bind the page-render path too — else a leaked machine JWT could render
   // admin pages from a disallowed IP. Absent/empty allowlist ⇒ true (no restriction).
@@ -447,7 +598,10 @@ export function invalidateUserSession(userId: string): void {
   markUserForceRevalidate(userId);
 }
 
-export async function revokeSessionById(sessionId: string): Promise<void> {
+export async function revokeSessionById(
+  sessionId: string,
+  guard?: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0], userId: string) => Promise<void>,
+): Promise<void> {
   // Deliberately does NOT touch sessionsRevokedAt.
   //
   // It used to bump the cutoff to the revoked row's createdAt, on the theory that
@@ -469,6 +623,10 @@ export async function revokeSessionById(sessionId: string): Promise<void> {
   // is correct for its everywhere semantics.
   try {
     await prisma.$transaction(async (tx) => {
+      if (guard) {
+        const row = await tx.authSession.findUnique({ where: { sessionId }, select: { userId: true } });
+        if (row) await guard(tx, row.userId);
+      }
       await tx.authSession.delete({ where: { sessionId } });
     });
   } catch (err) {
@@ -492,12 +650,16 @@ function isPrismaNotFound(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2025";
 }
 
-export async function revokeAllUserSessions(userId: string): Promise<void> {
+export async function revokeAllUserSessions(
+  userId: string,
+  guard?: (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => Promise<void>,
+): Promise<void> {
   // The read, the delete and the sessionsRevokedAt stamp share one $transaction,
   // so either all of them land or none do. Without it, a failed stamp could leave
   // the rows deleted but no cutoff set, and a JWT still inside its short
   // dbCheckedAt fast-path window (see session-refresh.ts) could keep working.
   const sessionIds = await prisma.$transaction(async (tx) => {
+    if (guard) await guard(tx); // e.g. role re-read under lock 42 (admin routes)
     const sessions = await tx.authSession.findMany({
       where: { userId },
       select: { sessionId: true },
@@ -614,6 +776,11 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
     expiresAt = Math.floor(Date.now() / 1000) + ttl;
   }
   token.expiresAt = expiresAt;
+  // The transport binding (guardrail 6h), decided by the same header as the
+  // deadline: the never-expiring native session is presented as a bearer and
+  // nothing else, a browser session as the cookie and nothing else. Every
+  // reader refuses the token on the other one.
+  token.transport = isNativeClient ? "bearer" : "cookie";
 
   const userId = user.id as string | undefined;
   if (!token.mediaServer && userId) {
@@ -646,6 +813,27 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   return token;
 }
 
+
+// Replaces a hash written with older parameters by one at the current cost
+// (guardrail 6i). The password itself is unchanged, so — unlike a password change —
+// nothing is revoked and passwordChangedAt is left alone. Conditional on the stored
+// hash still being the one just verified, so a password change landing in between
+// is never overwritten with the old password. Best-effort: on failure the old hash
+// stays (it still verifies) and the sign-in carries on.
+// Returns the hash the row holds afterwards as far as this call knows: the new
+// one when the compare-and-swap landed, else the verified one (a concurrent
+// password change won, or the write failed). The two-factor challenge
+// fingerprints THIS value, so it must match what the MFA step will re-read.
+async function rehashPassword(userId: string, verifiedHash: string, password: string): Promise<string> {
+  try {
+    const passwordHash = await hashPassword(password);
+    const { count } = await prisma.user.updateMany({ where: { id: userId, passwordHash: verifiedHash }, data: { passwordHash } });
+    return count === 1 ? passwordHash : verifiedHash;
+  } catch (err) {
+    console.error("[auth] password rehash failed:", err instanceof Error ? err.message : err);
+    return verifiedHash;
+  }
+}
 
 export async function authorizeWithCredentials(
   credentials: Partial<Record<string, unknown>>,
@@ -701,9 +889,9 @@ export async function authorizeWithCredentials(
   // Short-circuited on an IP rejection: that attempt never reaches the verify, so
   // reserving (and never refunding) an account slot for it would charge the
   // account bucket for an attempt it never judged.
-  const accountAllowed = ipAllowed && checkRateLimit(accountKey, accountLimit, accountWindowMs);
+  const accountHitAt = ipAllowed ? reserveRateLimit(accountKey, accountLimit, accountWindowMs) : null;
 
-  if (!ipAllowed || !accountAllowed) {
+  if (!ipAllowed || accountHitAt === null) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
     return null;
   }
@@ -711,25 +899,61 @@ export async function authorizeWithCredentials(
   const user = await prisma.user.findUnique({ where: { email } });
 
   let valid = false;
+  // The exact hash the password was checked against — the two-factor challenge
+  // fingerprints THIS one (guardrail 6d), never a later re-read that a password
+  // change landing in between could have replaced.
+  let verifiedHash: string | null = null;
   if (user?.passwordHash) {
     valid = await verifyPassword(credentials.password as string, user.passwordHash);
+    if (valid) verifiedHash = user.passwordHash;
   } else {
     await dummyVerify();
   }
 
-  if (!valid || !user) {
+  if (!valid || !user || !verifiedHash) {
     // The hit was already reserved at the gate above — a genuine wrong password (or an
     // unknown account, which also reached the dummyVerify branch) simply keeps it.
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
+    // This failure spent the last of the account's budget of wrong passwords, so
+    // the owner's own password sign-in is refused from now on too: tell them, ONCE
+    // per window however many attempts follow (guardrail 6i). Noticed here, where
+    // the row is already loaded, so a refused attempt still never reads the DB; the
+    // claim is synchronous and the mail detached, so the caller's response and
+    // timing don't change. Only a live local-password account has one to guess.
+    if (
+      user?.passwordHash &&
+      !user.deactivatedAt &&
+      !peekRateLimit(accountKey, accountLimit, accountWindowMs) &&
+      claimSignInLockoutNotice(emailHash, accountWindowMs)
+    ) {
+      void notifySignInLockout(user.id, accountWindowMs);
+    }
     return null;
   }
 
   // Successful sign-in: give the reserved slot back so the account bucket still counts
   // only failures, exactly as the peek/record split intended.
-  refundHit(accountKey);
+  refundHit(accountKey, accountHitAt);
+
+  // The plaintext is in hand and proven, so upgrade a hash written with older
+  // parameters (guardrail 6i). AWAITED on purpose: the two-factor challenge minted
+  // next fingerprints the stored hash (passwordVersion), so a rehash landing after
+  // it would kill the challenge and fail the owner's sign-in once.
+  //
+  // The challenge's fingerprint must follow the hash the row holds NOW: the MFA
+  // step re-reads the stored hash and compares fingerprints, so fingerprinting
+  // the pre-rehash hash expired every legacy-hash owner's first 2FA sign-in.
+  let currentHash = verifiedHash;
+  if (needsRehash(verifiedHash)) {
+    currentHash = await rehashPassword(user.id, verifiedHash, credentials.password as string);
+  }
 
   const device = buildDeviceMeta(headers);
-  return { id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device };
+  return {
+    id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device,
+    // A keyed fingerprint, never the hash itself (it rides along to the mint).
+    _passwordVersion: passwordVersion(currentHash),
+  };
 }
 
 export async function authorizeWithPlex(
@@ -759,9 +983,10 @@ export async function authorizeWithPlex(
       : undefined;
 
     const plexToken = credentials.plexToken as string;
-    const plexTokenHashSecret = process.env.NEXTAUTH_SECRET;
-    if (!plexTokenHashSecret) throw new Error("[auth] NEXTAUTH_SECRET required for plex token hashing");
-    const tokenHash = createHmac("sha256", plexTokenHashSecret).update(plexToken).digest("hex");
+    // Keyed with the cache's own subkey, never the raw NEXTAUTH_SECRET
+    // (guardrail 6h). Rows hashed under an older key simply miss, and the miss
+    // path below re-verifies the token against plex.tv and writes a fresh row.
+    const tokenHash = purposeHmacHex(signingKey("plex-token-cache"), plexToken);
 
     const CACHE_TTL_DAYS = 30;
     const cacheCutoff = new Date(Date.now() - CACHE_TTL_DAYS * 24 * 60 * 60 * 1000);
@@ -806,6 +1031,7 @@ export async function authorizeWithPlex(
     let plexUserSub:   string | null = null;
     let plexName: string | null = null;
     let plexThumb: string = "";
+    let emailIsFresh = false;
 
     if (cached && cached.verifiedAt > cacheCutoff) {
       // Cache hit is only honored when the row carries the Plex
@@ -847,6 +1073,7 @@ export async function authorizeWithPlex(
     if (!verifiedEmail || !plexUserSub) {
       const plexUser = await getPlexUser(plexToken, browserClientId);
       verifiedEmail = normalizeEmail(plexUser.email);
+      emailIsFresh  = true;
       plexUserSub   = plexUser.id;
       plexName = plexUser.username;
       plexThumb = plexUser.thumb;
@@ -893,10 +1120,13 @@ export async function authorizeWithPlex(
         name: plexName,
         image: plexThumb,
         plexClientId: browserClientId,
+        emailIsFresh,
       });
 
       if (plexDbUser === PROVIDER_REBIND_REQUIRED) {
         void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "email_collision_needs_rebind", emailHash: hashAuditEmail(verifiedEmail) } });
+      } else if (plexDbUser instanceof ProviderRefusal) {
+        void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: plexDbUser.reason, emailHash: hashAuditEmail(verifiedEmail) } });
       } else if (plexDbUser === PROVIDER_SETUP_REQUIRED) {
         void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "setup_required", emailHash: hashAuditEmail(verifiedEmail) } });
       } else {
@@ -941,12 +1171,12 @@ export async function authorizeWithPlex(
 //
 // Both the restrict-sign-in policy and the membership check are scoped to the
 // instance the credential was verified against — a server B account must not
-// be admitted by server A's MediaServerUser rows (or vice versa). The
-// "already-bound returning user" bypass stays GLOBAL and unscoped: identity
-// binding (User.jellyfinUserId) is a single cross-instance anchor by design
-// (see the multi-server plan's decision #6), so a user who has ever bound to
-// this jellyfinUserId on ANY instance must not be locked out by an instance's
-// restrict policy.
+// be admitted by server A's MediaServerUser rows (or vice versa). So is the
+// "already-bound returning user" bypass (guardrail 34e): an identity is bound
+// to the server it was first seen on (User.jellyfinInstance), and a binding
+// made through server A says nothing about a credential server B vouches for.
+// A pre-34e row (null instance) passes here and findOrCreateJellyfinUser — the
+// chokepoint that refuses a mismatched instance — decides it.
 async function isJellyfinSignInAllowed(jellyfinUserId: string, instance: MediaInstanceKey): Promise<boolean> {
   const restrictRow = await prisma.setting.findUnique({ where: { key: jellyfinSettingKey(instance, "RestrictSignIn") } });
   const restrict = (restrictRow?.value ?? "true").trim().toLowerCase() !== "false";
@@ -956,9 +1186,18 @@ async function isJellyfinSignInAllowed(jellyfinUserId: string, instance: MediaIn
       where: { source: "jellyfin", serverInstance: instance, sourceUserId: jellyfinUserId, active: true },
       select: { id: true },
     }),
-    prisma.user.findUnique({ where: { jellyfinUserId }, select: { id: true } }),
+    prisma.user.findUnique({ where: { jellyfinUserId }, select: { id: true, jellyfinInstance: true } }),
   ]);
-  return Boolean(member || existing);
+  const boundHere = existing !== null && (existing.jellyfinInstance === instance || existing.jellyfinInstance === null);
+  return Boolean(member || boundHere);
+}
+
+// The AUTH_LOGIN_FAILED reason for a Jellyfin lookup refusal. Shared by the
+// password and QuickConnect paths.
+function jellyfinRefusalReason(result: ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal): string {
+  if (result === PROVIDER_SETUP_REQUIRED) return "setup_required";
+  if (result === PROVIDER_REBIND_REQUIRED) return "email_collision_needs_rebind";
+  return result.reason;
 }
 
 export async function authorizeWithJellyfin(
@@ -1036,10 +1275,9 @@ export async function authorizeWithJellyfin(
     return null;
   }
   const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
-  if (jfDbUser === PROVIDER_REBIND_REQUIRED || jfDbUser === PROVIDER_SETUP_REQUIRED) {
+  if (!isAuthorizedDbUser(jfDbUser)) {
     await dummyVerify();
-    const reason = jfDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason } });
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: jellyfinRefusalReason(jfDbUser) } });
     return null;
   }
   const device = buildDeviceMeta(headers);
@@ -1096,9 +1334,8 @@ export async function authorizeWithJellyfinQuickConnect(
     return null;
   }
   const qcDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
-  if (qcDbUser === PROVIDER_REBIND_REQUIRED || qcDbUser === PROVIDER_SETUP_REQUIRED) {
-    const reason = qcDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason } });
+  if (!isAuthorizedDbUser(qcDbUser)) {
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: jellyfinRefusalReason(qcDbUser) } });
     return null;
   }
   const device = buildDeviceMeta(headers);
@@ -1115,6 +1352,10 @@ export interface SignInResult {
   token: string;
   expiresInSeconds: number;
   sessionId: string;
+  // The transport the token is bound to (guardrail 6h). buildSignInResponse
+  // delivers it on exactly this one: the body for "bearer", Set-Cookie for
+  // "cookie".
+  transport: SessionTransport;
   user: {
     id: string;
     role: string;
@@ -1270,6 +1511,7 @@ export async function signInAndMintSession(params: {
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = token.expiresAt as number;
   const expiresInSeconds = Math.max(60, expiresAt - now);
+  const transport: SessionTransport = token.transport === "bearer" ? "bearer" : "cookie";
 
   const jwt = await signSessionJwt(
     {
@@ -1285,14 +1527,29 @@ export async function signInAndMintSession(params: {
       isMobile: token.isMobile as boolean | undefined,
       deviceLabel: token.deviceLabel as string | undefined,
       expiresAt,
+      transport,
     },
     { expiresInSeconds },
   );
+
+  // A NATIVE session was just minted (the X-Summonarr-Client caller, whose
+  // deadline is the never-reached sentinel — guardrail 6c). Nothing time-based
+  // will ever end it, so a stolen password or media-server credential used from
+  // a native client would hold the account until someone notices: email the
+  // owner on every one, with the device, so they can sign it out. Best-effort
+  // and never awaited — it can't fail or slow the sign-in, and it runs only
+  // after initializeTokenOnSignIn has written the AuthSession row it reports.
+  if (userId && expiresAt === NEVER_EXPIRES_AT_SEC) {
+    void notifyAccountSecurityEvent(userId, "app-signed-in", {
+      device: (token.deviceLabel as string | undefined) ?? null,
+    });
+  }
 
   return {
     token: jwt,
     expiresInSeconds,
     sessionId: token.sessionId as string,
+    transport,
     user: {
       id: token.id as string,
       role: token.role as string,

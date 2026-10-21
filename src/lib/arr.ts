@@ -1,11 +1,15 @@
 import { prisma } from "./prisma";
 import { arrRequesterTagLabel } from "./arr-tags";
 import { arrSettingKey, isRadarrMinimumAvailability, type ArrInstanceKey, type RadarrMinimumAvailability } from "./arr-instances";
-import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
+import { SafeFetchError, safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
+import type { ArrErrorKind } from "./arr-error-kind";
+import type { Translator } from "./i18n/translate";
+import { int, namesOf } from "./arr-parse";
 import { sanitizeForLog } from "./sanitize";
 import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
 import { tmdbAuth } from "./tmdb-auth";
 import { sonarrSeriesCompletion, type SonarrSeriesCompletion, type SonarrSeriesStatsRow } from "./sonarr-completion";
+import { seriesReleaseScopeSearchable } from "./release-scope";
 
 const QUALITY_PROFILE_TTL_MS = 10 * 60 * 1000;
 const QUEUE_STATE_TTL_MS = 15 * 1000;
@@ -198,6 +202,26 @@ export async function getArrCfg(service: "radarr" | "sonarr", variant: ArrVarian
   return { url: cfg.url, apiKey: cfg.apiKey };
 }
 
+/**
+ * An instance's configured add defaults — what a request's add uses — for the
+ * admin's own Add form to preselect. null when the instance isn't configured.
+ */
+export async function getArrAddDefaults(service: "radarr" | "sonarr", variant: ArrVariant = ""): Promise<{
+  rootFolder: string | null;
+  qualityProfileId: number | null;
+  minimumAvailability: string | null;
+  languageProfileId: number | null;
+} | null> {
+  const cfg = await getCfg(service, variant);
+  if (!cfg) return null;
+  return {
+    rootFolder: cfg.rootFolder ?? null,
+    qualityProfileId: cfg.qualityProfileId ?? null,
+    minimumAvailability: cfg.minimumAvailability ?? null,
+    languageProfileId: cfg.languageProfileId ?? null,
+  };
+}
+
 // Whether a given instance is configured (only the default one is expected to be).
 export async function isArrConfigured(service: "radarr" | "sonarr", variant: ArrVariant = ""): Promise<boolean> {
   return (await getCfg(service, variant)) !== null;
@@ -270,15 +294,44 @@ export class ArrResponseError extends Error {
   // Explicit fields (not constructor parameter properties) so the module loads
   // under Node's strip-only TS mode — the unit suite imports it.
   public readonly status: number;
-  public readonly body: string;
+  public readonly body!: string;
   constructor(status: number, body: string) {
     super(`Arr service returned a non-200 response (${status})`);
     this.status = status;
-    this.body = body;
+    // NOT enumerable: console.error(err) prints an error's own enumerable
+    // properties, and the arr's body can quote an indexer URL with its apikey
+    // (guardrail 5e). Every reader names `err.body`, which still reads it.
+    Object.defineProperty(this, "body", { value: body, enumerable: false, writable: false, configurable: false });
   }
 }
 
+/**
+ * Might a WRITE that threw have happened anyway? A timeout or a dropped
+ * connection fails AFTER the request went out, and a gateway's 502/504 is a
+ * proxy giving up on (or losing the answer to) a request the arr may still be
+ * processing — Radarr's and Sonarr's handlers take no abort token, so the
+ * arr carries on. A 503 (nothing behind the proxy took it) and every answer the
+ * arr itself sent are definite. Guardrail 14b: a deliberate delete whose
+ * outcome is unknown keeps its `cleanedUpAt` stamps.
+ */
+export function arrWriteOutcomeUnknown(err: unknown): boolean {
+  if (err instanceof SafeFetchError) return err.reason === "timeout" || err.reason === "network";
+  if (err instanceof ArrResponseError) return err.status === 502 || err.status === 504;
+  return err instanceof Error && err.name === "TimeoutError";
+}
+
 const ARR_FETCH_TIMEOUT_MS = 30_000;
+// A Sonarr season search across many indexers routinely outlasts 30s; cut off,
+// the admin saw a failure while the arr kept searching. EVERY interactive
+// release read uses it — the request "Pick release" and the issue Replace too,
+// not only the title manager's.
+export const RELEASE_SEARCH_TIMEOUT_MS = 120_000;
+// A grab (POST /api/v3/release) answers only after the arr has fetched the
+// .torrent/.nzb from the indexer — often through Prowlarr or FlareSolverr — and
+// handed it to the download client. Cut at the 30 s default, the admin was told
+// the grab failed (and its handle was spent, nothing audited) while the arr
+// finished it.
+export const RELEASE_GRAB_TIMEOUT_MS = 120_000;
 
 // Raised from 10 MB — libraries with >3k movies were being silently truncated at the old cap
 const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
@@ -287,11 +340,45 @@ const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
 // reports the failure itself — the Download Queue page re-reads every 20s, and
 // a down instance is one unchanged condition it logs once (guardrail 7b). The
 // error is still thrown, unchanged.
-export type ArrFetchOptions = RequestInit & { quietErrors?: boolean };
+// `timeoutMs`: only for a call that is slow by nature — an interactive release
+// search waits on every indexer the instance has.
+export type ArrFetchOptions = RequestInit & { quietErrors?: boolean; timeoutMs?: number };
 
 export async function arrFetch<T>(cfg: ArrCfg, path: string, options: ArrFetchOptions = {}): Promise<T> {
   const res = await arrRequest(cfg, path, options);
   return res.json() as Promise<T>;
+}
+
+/**
+ * The arr refusing the grab POST ITSELF (release-grab.ts reads its 404 as
+ * "search again" and its 409 as the indexer or client refusing) — never a
+ * lookup made before it: a 404 from `/api/v3/movie?tmdbId=` is not an expired
+ * search cache. A subclass, so every `instanceof ArrResponseError` still holds.
+ */
+export class ArrReleaseGrabError extends ArrResponseError {}
+
+/**
+ * Whether a grab reached the point of sending POST /api/v3/release. The grab
+ * helpers set `sent` on the line before they call postReleaseGrab, so a route
+ * holding a claimed release handle can tell a failure BEFORE the grab (the
+ * title lookup, a missing config — nothing reached the arr, the handle goes
+ * back) from one during it (the outcome may be unknown — release-grab.ts).
+ */
+export interface GrabProgress {
+  sent: boolean;
+}
+
+/**
+ * POST /api/v3/release — the ONE way a release is grabbed (request Pick
+ * release, issue Replace, the title manager), with the grab's own timeout.
+ */
+export async function postReleaseGrab(cfg: ArrCfg, body: Record<string, unknown>): Promise<void> {
+  try {
+    await arrFetch<unknown>(cfg, "/api/v3/release", { method: "POST", body: JSON.stringify(body), timeoutMs: RELEASE_GRAB_TIMEOUT_MS });
+  } catch (err) {
+    if (err instanceof ArrResponseError) throw new ArrReleaseGrabError(err.status, err.body);
+    throw err;
+  }
 }
 
 // arrFetch for a call whose success answer carries no JSON body — Radarr's and
@@ -310,7 +397,7 @@ async function arrRequest(cfg: ArrCfg, path: string, options: ArrFetchOptions): 
     body,
     ...(signal ? { signal } : {}),
     cache: "no-store",
-    timeoutMs: ARR_FETCH_TIMEOUT_MS,
+    timeoutMs: options.timeoutMs ?? ARR_FETCH_TIMEOUT_MS,
     maxResponseBytes: ARR_FETCH_MAX_BYTES,
     headers: { "X-Api-Key": cfg.apiKey, "Content-Type": "application/json", ...(options.headers ?? {}) },
   });
@@ -367,15 +454,65 @@ function pathCollisionTarget(err: unknown): string | null {
 // request release search: "re-push it first") tests for it.
 export class ArrItemNotFoundError extends Error {}
 
+/**
+ * What kind of failure this was, for the admin (arr-error-kind.ts). A gateway
+ * in front of the arr answering 502/503 means the arr behind it is down; 504 and
+ * 408 are timeouts wherever they were raised.
+ */
+export function arrErrorKind(err: unknown): ArrErrorKind {
+  if (err instanceof ArrResponseError) {
+    if (err.status === 401 || err.status === 403) return "auth";
+    if (err.status === 404) return "notFound";
+    if (err.status === 408 || err.status === 504) return "timeout";
+    if (err.status === 502 || err.status === 503) return "unreachable";
+    if (err.status >= 500) return "server";
+    return "other";
+  }
+  if (err instanceof SafeFetchError) {
+    if (err.reason === "timeout") return "timeout";
+    if (err.reason === "network" || err.reason === "ssrf-blocked") return "unreachable";
+    return "other";
+  }
+  if (err instanceof Error && err.name === "TimeoutError") return "timeout";
+  return "other";
+}
+
+// Radarr and Sonarr never answer 502 or 504 themselves — those come from a
+// reverse proxy in front of them, which is where the failure is recorded. The
+// old "check the arr service logs" hint sent the admin to logs that had no
+// trace of the request. 503 keeps that hint: Sonarr answers 503 itself under
+// import load (guardrail 14a).
 export function arrErrorMessage(err: unknown): string {
   if (err instanceof ArrResponseError) {
     if (err.status === 401 || err.status === 403) return `Arr authentication failed (${err.status}) — check the API key`;
     if (err.status === 404) return `Item not found in arr (${err.status})`;
+    if (err.status === 502) return `Bad gateway (502) from a proxy in front of the arr — check the reverse proxy and the network path to the arr`;
+    if (err.status === 504) return `Gateway timeout (504) from a proxy in front of the arr — the arr was slow or unreachable; check the proxy and the arr`;
     if (err.status >= 500) return `Arr server error (${err.status}) — check the arr service logs`;
     return `Arr request failed (${err.status})`;
   }
   if (err instanceof Error) return err.message;
   return "Arr request failed";
+}
+
+/**
+ * arrErrorMessage for a caller who may be a non-ADMIN delegate (MANAGE_REQUESTS,
+ * MANAGE_ISSUES). An ArrResponseError's text is already a generic status phrase;
+ * any other error is named by its KIND only. A SafeFetchError's message carries
+ * the arr's internal URL, host, IP and port ("fetch failed for
+ * http://10.0.0.5:7878/api/v3/command: … ECONNREFUSED 10.0.0.5:7878"), which no
+ * delegate-facing arr surface shows (guardrail 5g). Log arrErrorMessage beside it.
+ */
+export function arrErrorMessageForClient(err: unknown, t: Translator): string {
+  if (err instanceof ArrResponseError) return arrErrorMessage(err);
+  switch (arrErrorKind(err)) {
+    case "timeout":
+      return t("apiUser.common.arrTimeout");
+    case "unreachable":
+      return t("apiUser.common.arrUnreachable");
+    default:
+      return t("apiUser.common.arrFailed");
+  }
 }
 
 async function getAllowedQualityIds(cfg: ArrCfg, profileId?: number): Promise<Set<number> | null> {
@@ -421,6 +558,12 @@ async function getAllowedQualityIds(cfg: ArrCfg, profileId?: number): Promise<Se
 // return through, where no caller can forget it. Nested `quality` is projected
 // too so the shape is literally the interface and nothing else.
 export function toArrRelease(r: ArrRelease): ArrRelease {
+  // The fields below the interface's original list are read off the raw
+  // resource defensively: they are newer (Radarr v4+/Sonarr v4) or shaped
+  // differently on older builds (Sonarr v3 sends one `language` object).
+  const raw = r as unknown as Record<string, unknown>;
+  const languages = namesOf(raw.languages);
+  const single = raw.language && typeof raw.language === "object" ? namesOf([raw.language]) : [];
   return {
     guid: r.guid,
     title: r.title,
@@ -432,6 +575,10 @@ export function toArrRelease(r: ArrRelease): ArrRelease {
       revision: { version: r.quality.revision?.version ?? 1 },
     },
     qualityWeight: r.qualityWeight,
+    releaseWeight: int(raw.releaseWeight),
+    customFormatScore: int(raw.customFormatScore),
+    customFormats: namesOf(raw.customFormats),
+    languages: languages.length > 0 ? languages : single,
     protocol: r.protocol,
     seeders: r.seeders ?? null,
     leechers: r.leechers ?? null,
@@ -442,12 +589,35 @@ export function toArrRelease(r: ArrRelease): ArrRelease {
   };
 }
 
+// The quality profile a movie/series row from the arr names for itself, or
+// undefined (no allowed/not-allowed split) when the row carries none.
+function ownProfileId(row: { qualityProfileId?: unknown }): number | undefined {
+  return typeof row.qualityProfileId === "number" && Number.isInteger(row.qualityProfileId) && row.qualityProfileId > 0
+    ? row.qualityProfileId
+    : undefined;
+}
+
+/**
+ * Releases the arr would let us grab, in the arr's OWN order. Radarr/Sonarr
+ * answer an interactive search already prioritised for the title — quality
+ * against the title's profile, custom-format score, protocol, size, age — and
+ * number that order in `releaseWeight`. `qualityWeight` is NOT a substitute:
+ * the arr computes it against its DEFAULT profile, not the title's, and it
+ * knows nothing of custom formats, so sorting on it put releases the arr would
+ * rank last (a low-score WEB-DL tied on quality) at the top, pre-selected.
+ * Releases whose quality the TITLE's own profile doesn't allow still go last
+ * (`allowedIds` comes from the movie/series row's own qualityProfileId —
+ * `ownProfileId` — never the instance's add default; null = no split, the
+ * arr's own order); arrs too old to send releaseWeight keep the old
+ * quality/seeders order.
+ */
 function filterAndSortReleases(releases: ArrRelease[], allowedIds: Set<number> | null): ArrRelease[] {
   const downloadable = releases.filter((r) => r.downloadAllowed).map(toArrRelease);
   return downloadable.sort((a, b) => {
     const aMatch = allowedIds ? (allowedIds.has(a.quality.quality.id) ? 1 : 0) : 1;
     const bMatch = allowedIds ? (allowedIds.has(b.quality.quality.id) ? 1 : 0) : 1;
     if (bMatch !== aMatch) return bMatch - aMatch;
+    if (a.releaseWeight !== null && b.releaseWeight !== null && a.releaseWeight !== b.releaseWeight) return a.releaseWeight - b.releaseWeight;
     if (b.qualityWeight !== a.qualityWeight) return b.qualityWeight - a.qualityWeight;
     return (b.seeders ?? 0) - (a.seeders ?? 0);
   });
@@ -461,6 +631,12 @@ export interface ArrRelease {
   indexer: string;
   quality: { quality: { id: number; name: string }; revision: { version: number } };
   qualityWeight: number;
+  /** The arr's own ranking of this release for the title (0 = what it would grab first); null on arrs that don't send it. */
+  releaseWeight: number | null;
+  customFormatScore: number | null;
+  /** Custom format and language NAMES only. */
+  customFormats: string[];
+  languages: string[];
   protocol: "torrent" | "usenet";
   seeders: number | null;
   leechers: number | null;
@@ -845,7 +1021,7 @@ async function lookupSeriesByTvdbCrossRef<T extends { tmdbId?: number; tvdbId?: 
 
 // `tvdbCrossRef: false` keeps a resolution Sonarr-sourced only — see the webhook's
 // download verify, the one caller that must not let TMDB data decide.
-async function lookupSeriesByTmdbId<T extends { tmdbId?: number; tvdbId?: number }>(
+export async function lookupSeriesByTmdbId<T extends { tmdbId?: number; tvdbId?: number }>(
   cfg: ArrCfg,
   tmdbId: number,
   opts: { tvdbCrossRef?: boolean } = {},
@@ -1066,19 +1242,35 @@ export async function getReleasesForMovie(tmdbId: number, variant: ArrVariant = 
   const cfg = await getCfg("radarr", variant);
   if (!cfg) throw new Error("Radarr is not configured");
 
-  const movies = await arrFetch<{ id: number; tmdbId: number }[]>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`);
+  const movies = await arrFetch<{ id: number; tmdbId: number; qualityProfileId?: number }[]>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`);
   const movie = movies.find((m) => m.tmdbId === tmdbId);
   if (!movie) throw new ArrItemNotFoundError("Movie not found in Radarr library");
 
+  // The split is by the MOVIE's own profile (read off the row just fetched),
+  // never cfg.qualityProfileId — that is the instance's ADD default, and a
+  // title approved with an override or re-profiled since differs from it.
   const [releases, allowedQualityIds] = await Promise.all([
-    arrFetch<ArrRelease[]>(cfg, `/api/v3/release?movieId=${movie.id}`),
-    getAllowedQualityIds(cfg, cfg.qualityProfileId),
+    arrFetch<ArrRelease[]>(cfg, `/api/v3/release?movieId=${movie.id}`, { timeoutMs: RELEASE_SEARCH_TIMEOUT_MS }),
+    getAllowedQualityIds(cfg, ownProfileId(movie)),
   ]);
 
   return filterAndSortReleases(releases, allowedQualityIds);
 }
 
-export async function grabMovieRelease(tmdbId: number, guid: string, indexerId: number, variant: ArrVariant = ""): Promise<void> {
+// Interactive search by the arr's OWN ids — the admin title manager already
+// holds the movie/series/episode id, so nothing is re-resolved. `query` is the
+// /api/v3/release query (movieId=, seriesId=&seasonNumber=, episodeId=);
+// releases matching the title's own quality profile sort first. Projected
+// through toArrRelease like every other release list.
+export async function searchReleasesByArrId(cfg: ArrCfg, query: string, qualityProfileId?: number | null): Promise<ArrRelease[]> {
+  const [releases, allowedQualityIds] = await Promise.all([
+    arrFetch<ArrRelease[]>(cfg, `/api/v3/release?${query}`, { timeoutMs: RELEASE_SEARCH_TIMEOUT_MS }),
+    getAllowedQualityIds(cfg, qualityProfileId ?? undefined),
+  ]);
+  return filterAndSortReleases(Array.isArray(releases) ? releases : [], allowedQualityIds);
+}
+
+export async function grabMovieRelease(tmdbId: number, guid: string, indexerId: number, variant: ArrVariant = "", progress?: GrabProgress): Promise<void> {
   const cfg = await getCfg("radarr", variant);
   if (!cfg) throw new Error("Radarr is not configured");
 
@@ -1086,10 +1278,8 @@ export async function grabMovieRelease(tmdbId: number, guid: string, indexerId: 
   const movie = movies.find((m) => m.tmdbId === tmdbId);
   if (!movie) throw new ArrItemNotFoundError("Movie not found in Radarr library");
 
-  await arrFetch<unknown>(cfg, "/api/v3/release", {
-    method: "POST",
-    body: JSON.stringify({ guid, indexerId, movieId: movie.id }),
-  });
+  if (progress) progress.sent = true;
+  await postReleaseGrab(cfg, { guid, indexerId, movieId: movie.id });
 }
 
 // Returns null when the queue could not be read AND no stale cache exists, so
@@ -1228,6 +1418,15 @@ export async function testRadarrConnection(url: string, apiKey: string): Promise
   return status.version;
 }
 
+/**
+ * A Sonarr release search needs a season or an episode: `/api/v3/release`
+ * with only `seriesId` answers with the indexers' RSS FEED — other shows'
+ * episodes, some of them grabbable — not a search for this series. Thrown
+ * before any release call for a whole-series (FULL) scope, or a season or
+ * episode scope missing its numbers.
+ */
+export class ReleaseSeasonRequiredError extends Error {}
+
 export async function getReleasesForSeries(
   tvdbId: number,
   scope: "FULL" | "SEASON" | "EPISODE",
@@ -1235,10 +1434,13 @@ export async function getReleasesForSeries(
   episodeNumber?: number | null,
   variant: ArrVariant = "",
 ): Promise<ArrRelease[]> {
+  if (!seriesReleaseScopeSearchable(scope, seasonNumber, episodeNumber)) {
+    throw new ReleaseSeasonRequiredError("a Sonarr release search needs a season or an episode");
+  }
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
 
-  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
+  const library = await arrFetch<{ id: number; tvdbId: number; qualityProfileId?: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
   if (!series) throw new ArrItemNotFoundError("Series not found in Sonarr library");
 
@@ -1250,15 +1452,15 @@ export async function getReleasesForSeries(
     const ep = episodes.find((e) => e.seasonNumber === seasonNumber && e.episodeNumber === episodeNumber);
     if (!ep) throw new Error(`Episode S${seasonNumber}E${episodeNumber} not found in Sonarr`);
     releasePath = `/api/v3/release?episodeId=${ep.id}`;
-  } else if (scope === "SEASON" && seasonNumber != null) {
-    releasePath = `/api/v3/release?seriesId=${series.id}&seasonNumber=${seasonNumber}`;
   } else {
-    releasePath = `/api/v3/release?seriesId=${series.id}`;
+    // SEASON with its number (checked above). Never a series-only query — the RSS feed.
+    releasePath = `/api/v3/release?seriesId=${series.id}&seasonNumber=${seasonNumber}`;
   }
 
+  // The SERIES' own profile, as for a movie above — never the add default.
   const [releases, allowedQualityIds] = await Promise.all([
-    arrFetch<ArrRelease[]>(cfg, releasePath),
-    getAllowedQualityIds(cfg, cfg.qualityProfileId),
+    arrFetch<ArrRelease[]>(cfg, releasePath, { timeoutMs: RELEASE_SEARCH_TIMEOUT_MS }),
+    getAllowedQualityIds(cfg, ownProfileId(series)),
   ]);
 
   return filterAndSortReleases(releases, allowedQualityIds);
@@ -1271,6 +1473,7 @@ export async function grabSeriesRelease(
   seasonNumber?: number | null,
   episodeNumber?: number | null,
   variant: ArrVariant = "",
+  progress?: GrabProgress,
 ): Promise<void> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
@@ -1288,10 +1491,8 @@ export async function grabSeriesRelease(
     if (ep) episodeId = ep.id;
   }
 
-  await arrFetch<unknown>(cfg, "/api/v3/release", {
-    method: "POST",
-    body: JSON.stringify({ guid, indexerId, seriesId: series.id, ...(episodeId != null && { episodeId }) }),
-  });
+  if (progress) progress.sent = true;
+  await postReleaseGrab(cfg, { guid, indexerId, seriesId: series.id, ...(episodeId != null && { episodeId }) });
 }
 
 export interface SonarrSeasonSummary {
@@ -1426,9 +1627,14 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
         }),
       });
       if (seriesReleased) {
-        await arrFetch<unknown>(cfg, "/api/v3/command", {
-          method: "POST",
-          body: JSON.stringify({ name: "SeriesSearch", seriesId: row.id }),
+        // The Missing plan (SeasonSearch for a fully-missing season, EpisodeSearch for the
+        // rest), NOT SeriesSearch: this is a missing-only action — the add path's own
+        // searchForMissingEpisodes is missing-only too — and SeriesSearch would also hunt
+        // upgrades for every episode already on disk. Dynamic import: arr-missing-data
+        // imports this module. Nothing missing is fine (nothing to search).
+        const { searchMissing, NothingMissingError } = await import("./arr-missing-data");
+        await searchMissing("sonarr", variant === "hd" ? "" : variant, row.id, new Date()).catch((e) => {
+          if (!(e instanceof NothingMissingError)) throw e;
         });
       }
     } catch (remErr) {

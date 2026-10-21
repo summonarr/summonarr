@@ -4,7 +4,7 @@ import { safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit } from "./concurrency";
 import { resolveTvdbToTmdb } from "./arr";
-import type { PlexLegacyGuidRef, PlexLibraryItemData } from "./plex";
+import { foldDuplicateRatingKeys, plexLibraryRatingKeys, getPlexTmdbIds, type PlexLegacyGuidRef, type PlexLibraryItemData, type PlexSection } from "./plex";
 
 // Resolves the legacy-agent secondary channel (see PlexLegacyGuidRef in
 // plex.ts) to tmdb ids via TMDB /find — com.plexapp.agents.thetvdb:// shows
@@ -113,10 +113,54 @@ export function mergeResolvedLegacyItems(
   items: Map<number, PlexLibraryItemData>,
   ratingKeyToTmdb?: Map<string, number[]>,
 ): void {
-  for (const r of resolved) {
-    if (!items.has(r.tmdbId)) items.set(r.tmdbId, r.data);
+  // Two legacy items can resolve to ONE tmdb id (a split duplicate, two sections).
+  // The first one merged becomes the stored row, and `resolved` arrives in the
+  // order the legacy map was filled — by section walks that run concurrently
+  // (Promise.all in getPlexTmdbIds), so arrival order varies between runs and
+  // would flip which copy owns the row's ratingKey/filePath. Order by ratingKey
+  // (numeric-aware) so the same copy wins every time (guardrail 37b's rule).
+  const ordered = [...resolved].sort((a, b) =>
+    a.ratingKey.localeCompare(b.ratingKey, "en", { numeric: true }) || a.tmdbId - b.tmdbId,
+  );
+  const otherCopyKeys = new Map<number, string[]>();
+  for (const r of ordered) {
+    if (items.has(r.tmdbId)) {
+      // The modern-agent row keeps the title; the legacy copy's ratingKey stays
+      // addressable so its plays still resolve (guardrail 37c). Folded once
+      // below, not per copy (see foldDuplicateRatingKeys in plex.ts).
+      let keys = otherCopyKeys.get(r.tmdbId);
+      if (!keys) {
+        keys = [];
+        otherCopyKeys.set(r.tmdbId, keys);
+      }
+      for (const k of plexLibraryRatingKeys(r.data)) keys.push(k);
+    } else {
+      items.set(r.tmdbId, r.data);
+    }
     if (ratingKeyToTmdb && !ratingKeyToTmdb.has(r.ratingKey)) {
       ratingKeyToTmdb.set(r.ratingKey, [r.tmdbId]);
     }
   }
+  for (const [tmdbId, keys] of otherCopyKeys) {
+    items.set(tmdbId, foldDuplicateRatingKeys(items.get(tmdbId)!, keys));
+  }
+}
+
+// The show ratingKey -> tmdb ids map a WHOLE-table TVEpisodeCache rewrite needs,
+// legacy-agent shows included. getPlexTVEpisodes' own fallback walk only reads
+// modern Guid[] shows, so a rewrite fed by it (the standalone tv-episodes route,
+// the per-source Plex resync's recentOnly path) silently dropped the episodes of
+// every thetvdb:// / imdb:// show the orchestrator had cached, until its next
+// run. Same listing the internal walk pages, so no extra requests.
+export async function buildPlexShowKeyMap(
+  serverUrl: string,
+  token: string,
+  selectedKeys: Set<string> | undefined,
+  sections: PlexSection[],
+): Promise<Map<string, number[]>> {
+  const ratingKeyToTmdb = new Map<string, number[]>();
+  const tvLegacy = new Map<string, PlexLegacyGuidRef>();
+  const tvIds = await getPlexTmdbIds(serverUrl, token, "TV", false, selectedKeys, sections, ratingKeyToTmdb, tvLegacy, true);
+  mergeResolvedLegacyItems(await resolvePlexLegacyGuids(tvLegacy, "TV"), tvIds, ratingKeyToTmdb);
+  return ratingKeyToTmdb;
 }

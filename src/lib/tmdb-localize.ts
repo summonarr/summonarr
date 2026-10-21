@@ -383,7 +383,9 @@ export async function nonEnglishInUse(): Promise<boolean> {
   if (instanceDefaultLocale() !== "en") return true;
   const [stored, seen] = await Promise.all([
     prisma.user.count({ where: { deactivatedAt: null, locale: { not: null, notIn: ["en"] } } }),
-    prisma.setting.findMany({ where: { key: { startsWith: SEEN_PREFIX } }, select: { value: true } }),
+    // Select the key too: without it the Prisma extension can't tell these
+    // plaintext timestamps from a secret and logs "Setting.?" for each.
+    prisma.setting.findMany({ where: { key: { startsWith: SEEN_PREFIX } }, select: { key: true, value: true } }),
   ]);
   if (stored > 0) return true;
   const cutoff = Date.now() - SEEN_WINDOW_MS;

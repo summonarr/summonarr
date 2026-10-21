@@ -109,7 +109,7 @@ const authSessionsById = new Map<string, { userId: string; deviceLabel: string |
 const settings = new Map<string, string>();
 const settingReads: string[] = [];
 
-type LibRow = { tmdbId: number; mediaType: string; serverInstance: string; filePath: string | null; plexRatingKey?: string; jellyfinItemId?: string; jellyfinItemIds?: string[] };
+type LibRow = { tmdbId: number; mediaType: string; serverInstance: string; filePath: string | null; plexRatingKey?: string; plexRatingKeys?: string[]; jellyfinItemId?: string; jellyfinItemIds?: string[] };
 const plexRows: LibRow[] = [];
 const jellyfinRows: LibRow[] = [];
 
@@ -157,9 +157,15 @@ function libraryDelegate(name: "plexLibraryItem" | "jellyfinLibraryItem", rows: 
 let otherInstanceHolders = 0;
 // Per-test knob for the tx's read of the TARGET (corrected-id) row — the
 // pre-existing copy whose `jellyfinItemIds` the upsert must MERGE, not replace.
-let existingTargetRow: { jellyfinItemIds: string[] } | null = null;
+let existingTargetRow: Record<string, unknown> | null = null;
+// Per-test knob for the tx's read of the OLD-id row being removed (tmdbId 111 in
+// these tests) — its descriptive columns must carry over to the corrected row.
+let removedRow: Record<string, unknown> | null = null;
 // Per-test knob: make the DB phase fail AFTER the remote remap landed.
 let txThrows = false;
+// Per-test knob for item mode (the library match check's Fix): the rows the
+// tx finds holding the remapped item's key.
+let itemHolders: Array<Record<string, unknown>> = [];
 
 function makeTx() {
   const libTx = (name: "plexLibraryItem" | "jellyfinLibraryItem") => ({
@@ -175,15 +181,36 @@ function makeTx() {
     },
     deleteMany: async (args: unknown) => { rec(`${name}.deleteMany`, args); return { count: 0 }; },
     count: async (args: unknown) => { rec(`${name}.count`, args); return otherInstanceHolders; },
-    findUnique: async (args: unknown) => { rec(`${name}.findUnique`, args); return existingTargetRow; },
+    findUnique: async (args: unknown) => {
+      rec(`${name}.findUnique`, args);
+      const k = (args as { where: { tmdbId_mediaType_serverInstance?: { tmdbId: number } } }).where.tmdbId_mediaType_serverInstance;
+      return k?.tmdbId === 111 ? removedRow : existingTargetRow;
+    },
     upsert: async (args: unknown) => { rec(`${name}.upsert`, args); return {}; },
+    findMany: async (args: unknown) => { rec(`${name}.findMany`, args); return itemHolders; },
+    create: async (args: unknown) => { rec(`${name}.create`, args); return {}; },
+    update: async (args: unknown) => { rec(`${name}.update`, args); return {}; },
   });
   return {
     playHistory: { updateMany: async (args: unknown) => { rec("playHistory.updateMany", args); return { count: 0 }; } },
     activeSession: { updateMany: async (args: unknown) => { rec("activeSession.updateMany", args); return { count: 0 }; } },
-    $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      rec("$executeRaw", { sql: strings.join("?"), values });
+    // Both call shapes: a tagged template, or one Prisma.sql value (guardrail 23a).
+    $executeRaw: async (strings: TemplateStringsArray | { strings: readonly string[]; values: unknown[] }, ...values: unknown[]) => {
+      if (Array.isArray(strings)) rec("$executeRaw", { sql: strings.join("?"), values });
+      else { const q = strings as { strings: readonly string[]; values: unknown[] }; rec("$executeRaw", { sql: q.strings.join("?"), values: q.values }); }
       return 0;
+    },
+    setting: {
+      findUnique: async (args: { where: { key: string } }) => {
+        rec("setting.findUnique", args);
+        const value = settings.get(args.where.key);
+        return value === undefined ? null : { key: args.where.key, value };
+      },
+      update: async (args: { where: { key: string }; data: { value: string } }) => {
+        rec("setting.update", args);
+        settings.set(args.where.key, args.data.value);
+        return {};
+      },
     },
     plexLibraryItem: libTx("plexLibraryItem"),
     jellyfinLibraryItem: libTx("jellyfinLibraryItem"),
@@ -211,6 +238,8 @@ const fakePrisma = {
     update: async () => ({}), // lastSeenAt fire-and-forget touch
   },
   setting: {
+    findMany: async (args: { where: { key: { in: string[] } } }) =>
+      args.where.key.in.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) as string })),
     findUnique: async (args: { where: { key: string } }) => {
       settingReads.push(args.where.key);
       const value = settings.get(args.where.key);
@@ -268,6 +297,8 @@ const { GET: candidates } = await import("../src/app/api/admin/fix-match/candida
 const { GET: fileInfo } = await import("../src/app/api/admin/fix-match/file-info/route.ts");
 const { GET: thumb } = await import("../src/app/api/admin/fix-match/thumb/route.ts");
 const { GET: fixMatchStatus } = await import("../src/app/api/admin/fix-match/status/route.ts");
+const { clearCandidateCache } = await import("../src/lib/fix-match-candidate-cache.ts");
+const { GET: fixMatchJobs } = await import("../src/app/api/admin/fix-match/jobs/route.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -325,6 +356,7 @@ function configureServers() {
 const origins = () => [...new Set(fetchCalls.map((c) => c.url.origin))];
 
 beforeEach(() => {
+  clearCandidateCache();
   ops = [];
   fetchCalls.length = 0;
   settingReads.length = 0;
@@ -337,7 +369,9 @@ beforeEach(() => {
   jellyfinRows.length = 0;
   otherInstanceHolders = 0;
   existingTargetRow = null;
+  removedRow = null;
   txThrows = false;
+  itemHolders = [];
   respond = (url) => { throw new Error(`unexpected fetch ${url}`); };
 });
 
@@ -450,7 +484,7 @@ test("POST (plex, MOVIE): plays and live sessions recorded under the wrong id ar
   assert.ok(names.indexOf("plexLibraryItem.upsert") < names.indexOf("playHistory.updateMany"));
   // filePath follows the ratingKey on the update branch too.
   const up = opsOf("plexLibraryItem.upsert")[0].args as { update: Record<string, unknown> };
-  assert.deepEqual(up.update, { plexRatingKey: "2002", filePath: "/d/rem.mkv" });
+  assert.deepEqual(up.update, { plexRatingKey: "2002", plexRatingKeys: ["2002"], filePath: "/d/rem.mkv" });
 });
 
 test("POST (plex, TV): re-attribution is scoped on the row key (source + instance + mediaType + old tmdbId) — an episode play's sourceItemId is the EPISODE's key, never the show's", async () => {
@@ -531,7 +565,7 @@ test("POST (jellyfin): the upsert's update branch writes the UNION of the target
   ), undefined);
   assert.equal(res.status, 200);
 
-  const read = opsOf("jellyfinLibraryItem.findUnique")[0]?.args as { where: { tmdbId_mediaType_serverInstance: Record<string, unknown> } };
+  const read = opsOf("jellyfinLibraryItem.findUnique").map((o) => o.args as { where: { tmdbId_mediaType_serverInstance: { tmdbId: number } } }).find((a) => a.where.tmdbId_mediaType_serverInstance.tmdbId === 222) as { where: { tmdbId_mediaType_serverInstance: Record<string, unknown> } };
   assert.deepEqual(read.where.tmdbId_mediaType_serverInstance, { tmdbId: 222, mediaType: "MOVIE", serverInstance: "" }, "the TARGET row is read inside the tx");
   const up = opsOf("jellyfinLibraryItem.upsert")[0].args as { create: { jellyfinItemIds: string[] }; update: { jellyfinItemId: string; jellyfinItemIds: string[]; filePath: string | null } };
   assert.deepEqual(up.update.jellyfinItemIds, ["cccccccc", "aaaaaaaa"], "copy C must survive the remap of copy A (guardrail 37)");
@@ -743,6 +777,30 @@ test("POST rejects an invalid serverInstance with 400 before touching the DB or 
 
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /invalid serverInstance/);
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(opsOf("plexLibraryItem.findFirst").length, 0);
+});
+
+test("POST / candidates / file-info refuse a tmdbId past INT4 with 400 — never a Prisma 500 — before any read or fetch", async () => {
+  const a = await admin();
+  configureServers();
+  const TOO_BIG = 2_147_483_648;
+  for (const [field, body] of [
+    ["tmdbId", { server: "plex", tmdbId: TOO_BIG, mediaType: "MOVIE", correctTmdbId: 222 }],
+    ["correctTmdbId", { server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: TOO_BIG }],
+  ] as const) {
+    const res = await fixMatch(postBody(body, a.header), undefined);
+    assert.equal(res.status, 400, `POST ${field}`);
+  }
+  for (const params of [
+    { server: "plex", tmdbId: String(TOO_BIG), mediaType: "MOVIE", correctTmdbId: "222" },
+    { server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: String(TOO_BIG) },
+  ]) {
+    const res = await candidates(req(candidatesUrl(params), { headers: a.header }), undefined);
+    assert.equal(res.status, 400, `candidates ${JSON.stringify(params)}`);
+  }
+  const fi = await fileInfo(req(fileInfoUrl({ tmdbId: String(TOO_BIG), mediaType: "MOVIE" }), { headers: a.header }), undefined);
+  assert.equal(fi.status, 400, "file-info");
   assert.equal(fetchCalls.length, 0);
   assert.equal(opsOf("plexLibraryItem.findFirst").length, 0);
 });
@@ -1579,4 +1637,384 @@ test("all four routes: no session → 401, a plain USER → 403, and nothing is 
   assert.equal(fetchCalls.length, 0, "no upstream call may escape for an unauthorized caller");
   assert.equal(opsOf("plexLibraryItem.findFirst").length, 0, "no handler body may run for an unauthorized caller");
   assert.equal(opsOf("plexLibraryItem.upsert").length, 0);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Item mode — the library match check's Fix rematches ONE flagged item
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A title can hold a correct copy beside a wrong one ("Ghost in the Shell
+// (2017)" matched to the 1995 film's TMDB id). The tmdbId mode remaps EVERY
+// copy holding the id (guardrail 37) — the correct 1995 copy included. Item mode
+// names one item the last match check flagged; its id, media type and path are
+// read from the stored flag, never the body.
+
+const COPY_OK = "a".repeat(32);
+const COPY_WRONG = "b".repeat(32);
+
+function storeMatchReport(flags: Array<Record<string, unknown>>) {
+  settings.set("libraryMatchCheck:report", JSON.stringify({
+    version: 1, checkedAt: "2026-10-13T00:00:00.000Z", sources: [],
+    counts: { checked: 10, agreed: 8, notManaged: 0, flagged: flags.length }, flags, truncated: 0,
+  }));
+}
+const wrongCopyFlag = (over: Record<string, unknown> = {}) => ({
+  kind: "wrongMatch", server: "jellyfin", serverInstance: "", mediaType: "MOVIE", itemKey: COPY_WRONG,
+  title: "Ghost in the Shell", year: 1995, folder: "Ghost in the Shell (2017)", file: "b.mkv", path: "/m/Ghost in the Shell (2017)/b.mkv",
+  serverTmdbId: 9323, arr: { service: "radarr", instance: "", tmdbId: 315837, tvdbId: null, title: "Ghost in the Shell", year: 2017 }, sibling: false,
+  ...over,
+});
+
+test("POST itemKey (jellyfin): rematches ONLY the flagged copy — the correct copy keeps its row, its plays and its server match", async () => {
+  const a = await admin();
+  configureServers();
+  storeMatchReport([wrongCopyFlag(), wrongCopyFlag({ itemKey: "c".repeat(32), folder: "Other (2001)" })]);
+  itemHolders = [{ tmdbId: 9323, jellyfinItemId: COPY_OK, jellyfinItemIds: [COPY_OK, COPY_WRONG] }];
+  respond = jellyfinRemapResponder(JF_DEFAULT, COPY_WRONG, 315837);
+
+  const res = await fixMatch(postBody(
+    // tmdbId in the body is ignored in item mode — the stored flag's id is used.
+    { server: "jellyfin", tmdbId: 1, mediaType: "MOVIE", correctTmdbId: 315837, itemKey: COPY_WRONG },
+    a.header,
+  ), undefined);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+
+  assert.ok(fetchCalls.length > 0 && fetchCalls.every((c) => !c.url.pathname.includes(COPY_OK)), "the correct copy is never sent to Jellyfin");
+  assert.equal(opsOf("jellyfinLibraryItem.findFirst").length, 0, "item mode never resolves the item through the title's row");
+
+  // The old title keeps its correct copy: an update, never the tmdbId mode's deleteMany.
+  assert.equal(opsOf("jellyfinLibraryItem.deleteMany").length, 0);
+  assert.deepEqual(opsOf("jellyfinLibraryItem.update")[0]?.args, {
+    where: { tmdbId_mediaType_serverInstance: { tmdbId: 9323, mediaType: "MOVIE", serverInstance: "" } },
+    data: { jellyfinItemIds: [COPY_OK] },
+  });
+  assert.deepEqual(opsOf("jellyfinLibraryItem.create")[0]?.args, {
+    data: { tmdbId: 315837, mediaType: "MOVIE", serverInstance: "", jellyfinItemId: COPY_WRONG, jellyfinItemIds: [COPY_WRONG], filePath: "/m/Ghost in the Shell (2017)/b.mkv" },
+  });
+
+  // Plays of THIS item only — by its own key, whatever id they were recorded under.
+  const expectedWhere = { source: "jellyfin", serverInstance: "", mediaType: "MOVIE", sourceItemId: { in: [COPY_WRONG] } };
+  assert.deepEqual(opsOf("playHistory.updateMany")[0]?.args, { where: expectedWhere, data: { tmdbId: 315837 } });
+  assert.deepEqual(opsOf("activeSession.updateMany")[0]?.args, { where: expectedWhere, data: { tmdbId: 315837 } });
+  assert.equal(opsOf("tVEpisodeCache.deleteMany").length, 0, "the episode cache is left to the next full sync");
+
+  // The fixed flag leaves the stored report in the same transaction; the other stays.
+  const stored = JSON.parse(settings.get("libraryMatchCheck:report")!) as { flags: Array<{ itemKey: string }>; counts: { flagged: number } };
+  assert.deepEqual(stored.flags.map((f) => f.itemKey), ["c".repeat(32)]);
+  assert.equal(stored.counts.flagged, 1);
+
+  await flush();
+  const audit = auditRows.find((r) => r.action === "FIX_MATCH");
+  assert.equal(audit?.target, "tmdb:9323");
+  assert.deepEqual(JSON.parse(String(audit?.details)), {
+    type: "fix-match", mode: "item", source: "jellyfin", itemKey: COPY_WRONG, fromTmdbId: 9323, toTmdbId: 315837, mediaType: "MOVIE", serverInstance: "",
+  });
+});
+
+test("POST itemKey (plex): an UNMATCHED item (no TMDB id) is matched; its plays move whatever id they carried", async () => {
+  const a = await admin();
+  configureServers();
+  storeMatchReport([wrongCopyFlag({ kind: "noTmdbId", server: "plex", serverInstance: "remote", itemKey: "2002", serverTmdbId: null, path: "/d/Invictus (2009)/x.mkv" })]);
+  tmdbCacheRows.set("movie:22954:details", JSON.stringify({ title: "Invictus", releaseYear: "2009" }));
+  respond = plexRemapResponder(PLEX_REMOTE, "2002", 22954);
+
+  const res = await fixMatch(postBody(
+    { server: "plex", mediaType: "MOVIE", correctTmdbId: 22954, itemKey: "2002", serverInstance: "remote", canonicalGuid: "plex://movie/x" },
+    a.header,
+  ), undefined);
+  assert.equal(res.status, 200);
+  assert.deepEqual(origins(), [new URL(PLEX_REMOTE).origin]);
+  assert.deepEqual(opsOf("plexLibraryItem.create")[0]?.args, {
+    data: { tmdbId: 22954, mediaType: "MOVIE", serverInstance: "remote", plexRatingKey: "2002", plexRatingKeys: ["2002"], filePath: "/d/Invictus (2009)/x.mkv" },
+  });
+  const where = (opsOf("playHistory.updateMany")[0]?.args as { where: Record<string, unknown> }).where;
+  assert.deepEqual(where, { source: "plex", serverInstance: "remote", mediaType: "MOVIE", sourceItemId: { in: ["2002"] } });
+  assert.ok(!("tmdbId" in where), "an unmatched item's plays were recorded with no id — never filter on one");
+  await flush();
+  assert.equal(auditRows.find((r) => r.action === "FIX_MATCH")?.target, "tmdb:22954");
+});
+
+test("POST itemKey (TV): an episode's plays move by its SHOW's key", async () => {
+  const a = await admin();
+  configureServers();
+  storeMatchReport([wrongCopyFlag({ mediaType: "TV", itemKey: COPY_WRONG, serverTmdbId: 37854, path: "/tv/ONE PIECE (2023)" })]);
+  respond = jellyfinRemapResponder(JF_DEFAULT, COPY_WRONG, 111110);
+  const res = await fixMatch(postBody({ server: "jellyfin", mediaType: "TV", correctTmdbId: 111110, itemKey: COPY_WRONG }, a.header), undefined);
+  assert.equal(res.status, 200);
+  assert.deepEqual((opsOf("playHistory.updateMany")[0]?.args as { where: unknown }).where,
+    { source: "jellyfin", serverInstance: "", mediaType: "TV", sourceShowId: { in: [COPY_WRONG] } });
+});
+
+test("POST itemKey is refused — with nothing sent and nothing written — unless the last match check flagged that item on that server", async () => {
+  const a = await admin();
+  configureServers();
+  respond = (url) => { throw new Error(`nothing may be fetched: ${url}`); };
+  const post = (body: Record<string, unknown>) => fixMatch(postBody({ server: "jellyfin", mediaType: "MOVIE", correctTmdbId: 315837, ...body }, a.header), undefined);
+
+  assert.equal((await post({ itemKey: COPY_WRONG })).status, 404, "no stored report");
+  storeMatchReport([wrongCopyFlag()]);
+  assert.equal((await post({ itemKey: COPY_WRONG, serverInstance: "remote" })).status, 404, "flagged on ANOTHER server");
+  assert.equal((await post({ itemKey: COPY_WRONG, server: "plex" })).status, 400, "a Jellyfin id is not a Plex ratingKey");
+  assert.equal((await post({ itemKey: "c".repeat(32) })).status, 404, "an item the check didn't flag");
+  assert.equal((await post({ itemKey: COPY_WRONG, mediaType: "TV" })).status, 404, "the flag's media type wins");
+  assert.equal((await post({ itemKey: "../Items/x" })).status, 400);
+  assert.equal((await post({ itemKey: 42 })).status, 400);
+  assert.equal((await post({ itemKey: COPY_WRONG, correctTmdbId: 9323 })).status, 400, "rematching to the id it already has");
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(ops.filter((o) => o.op.includes("update") || o.op.includes("create") || o.op.includes("delete")).length, 0);
+});
+
+test("item-mode jobs are keyed by the ITEM: two unmatched items fixed to one title are two jobs", async () => {
+  const { fixMatchJobKey } = await import("../src/lib/fix-match-jobs.ts");
+  const base = { server: "jellyfin", serverInstance: "", mediaType: "MOVIE", tmdbId: 0, correctTmdbId: 5 };
+  assert.notEqual(fixMatchJobKey({ ...base, itemKey: "x" }), fixMatchJobKey({ ...base, itemKey: "y" }));
+  assert.equal(fixMatchJobKey({ ...base, tmdbId: 3 }), "jellyfin::MOVIE:3->5", "the tmdbId mode's key is unchanged");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// fix-match review: Plex copies, unmatched-on-apply-failure, metadata carry-over
+// ════════════════════════════════════════════════════════════════════════════
+
+// A multi-key Plex conversation: each key starts on the OLD id and flips to the
+// new one once its /match PUT lands. `failMatch` keys answer 500 to /match.
+function plexCopiesResponder(base: string, keys: string[], oldId: number, newId: number, opts: { failMatch?: string[]; claimsOther?: string[] } = {}) {
+  const fixed = new Set<string>();
+  return (url: URL, method: string): Response => {
+    if (url.origin !== new URL(base).origin) throw new Error(`WRONG SERVER: ${url.origin}`);
+    const p = url.pathname;
+    if (p === "/library/clean/bundles") return new Response("", { status: 200 });
+    const m = /^\/library\/metadata\/(\d+)(?:\/(unmatch|match|refresh))?$/.exec(p);
+    if (!m || !keys.includes(m[1])) throw new Error(`unexpected Plex path ${p}`);
+    const [, key, action] = m;
+    if (action === "match") {
+      if (opts.failMatch?.includes(key)) return new Response("", { status: 500 });
+      fixed.add(key);
+      return new Response("", { status: 200 });
+    }
+    if (action) return new Response("", { status: 200 });
+    void method;
+    const id = fixed.has(key) ? newId : (opts.claimsOther?.includes(key) ? 999 : oldId);
+    return okJson({ MediaContainer: { Metadata: [{ guid: "plex://movie/abc", Guid: [{ id: `tmdb://${id}` }] }] } });
+  };
+}
+
+test("POST (plex): EVERY copy of the title is remapped, not just the canonical key (guardrail 37c twin)", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001", plexRatingKeys: ["1001", "1002"] });
+  respond = plexCopiesResponder(PLEX_DEFAULT, ["1001", "1002"], 111, 222);
+
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz" }, a.header), undefined);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  const matched = fetchCalls.filter((c) => c.method === "PUT" && c.url.pathname.endsWith("/match")).map((c) => c.url.pathname);
+  assert.deepEqual(matched, ["/library/metadata/1001/match", "/library/metadata/1002/match"]);
+  const up = opsOf("plexLibraryItem.upsert")[0].args as { create: { plexRatingKeys: string[] } };
+  assert.deepEqual(up.create.plexRatingKeys, ["1001", "1002"], "both copies' keys land on the corrected row");
+  const ph = opsOf("playHistory.updateMany")[0].args as { where: { sourceItemId: { in: string[] } } };
+  assert.deepEqual(ph.where.sourceItemId.in, ["1001", "1002"], "plays filed under either copy move");
+  assert.equal(opsOf("plexLibraryItem.deleteMany").length, 1, "nothing left on the old row");
+});
+
+test("POST (plex): a rider key that does NOT carry the old id is left alone, not unmatched", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001", plexRatingKeys: ["1001", "1002"] });
+  respond = plexCopiesResponder(PLEX_DEFAULT, ["1001", "1002"], 111, 222, { claimsOther: ["1002"] });
+
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz" }, a.header), undefined);
+  assert.equal(res.status, 200);
+  assert.ok(!fetchCalls.some((c) => c.url.pathname === "/library/metadata/1002/unmatch"), "an item that belongs to another title is never unmatched");
+  assert.equal(opsOf("plexLibraryItem.deleteMany").length, 1);
+});
+
+test("POST (plex): a copy that fails stays on the OLD row and the result carries the partial warning", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001", plexRatingKeys: ["1001", "1002"] });
+  respond = plexCopiesResponder(PLEX_DEFAULT, ["1001", "1002"], 111, 222, { failMatch: ["1002"] });
+
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz" }, a.header), undefined);
+  assert.equal(res.status, 200);
+  const body = await res.json() as { ok: boolean; warning?: string };
+  assert.ok(body.warning, "a partial remap must say so");
+  assert.equal(opsOf("plexLibraryItem.deleteMany").length, 0, "the old row survives while a copy still carries the old match");
+  const upd = opsOf("plexLibraryItem.update")[0].args as { data: { plexRatingKey: string; plexRatingKeys: string[]; filePath: null } };
+  assert.deepEqual(upd.data, { plexRatingKey: "1002", plexRatingKeys: ["1002"], filePath: null });
+  const up = opsOf("plexLibraryItem.upsert")[0].args as { create: { plexRatingKeys: string[] } };
+  assert.deepEqual(up.create.plexRatingKeys, ["1001"]);
+});
+
+test("POST (plex): an apply failure AFTER the unmatch reports the UNMATCHED state, not the generic failure", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001" });
+  respond = plexCopiesResponder(PLEX_DEFAULT, ["1001"], 111, 222, { failMatch: ["1001"] });
+
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz" }, a.header), undefined);
+  assert.equal(res.status, 502);
+  const body = await res.json() as { error: string };
+  assert.ok(/unmatched/i.test(body.error), `expected the UNMATCHED message, got: ${body.error}`);
+  assert.ok(errors.some((e) => e.includes("(PlexUnmatchedError)")));
+  assert.equal(opsOf("plexLibraryItem.upsert").length, 0);
+});
+
+test("POST (plex): the corrected row keeps the removed row's title/year/overview/addedAt, and a pre-existing target's keys survive", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001" });
+  const addedAt = new Date("2024-05-01T00:00:00Z");
+  removedRow = { title: "Old Title", year: "2018", overview: "o", contentRating: "R", addedAt };
+  existingTargetRow = { plexRatingKey: "7777", plexRatingKeys: ["7777"], filePath: "/d/other.mkv", title: "Right Title", year: null, overview: null, contentRating: null, addedAt: null };
+  respond = plexRemapResponder(PLEX_DEFAULT, "1001", 222);
+
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz" }, a.header), undefined);
+  assert.equal(res.status, 200);
+  const up = opsOf("plexLibraryItem.upsert")[0].args as { create: Record<string, unknown>; update: Record<string, unknown> };
+  assert.equal(up.create.year, "2018");
+  assert.equal(up.update.title, undefined, "the target's own title is never overwritten");
+  assert.equal(up.update.year, "2018");
+  assert.equal(up.update.addedAt, addedAt, "addedAt survives so the title stays in recently-added");
+  assert.equal(up.update.plexRatingKey, "7777", "the target's canonical key stays canonical");
+  assert.deepEqual(up.update.plexRatingKeys, ["7777", "1001"], "this run's key joins the target's set instead of replacing it");
+  assert.equal(up.update.filePath, "/d/other.mkv");
+});
+
+test("POST (jellyfin): the corrected row keeps the removed row's title/year/addedAt/communityRating", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", jellyfinItemId: "aaaaaaaa", jellyfinItemIds: ["aaaaaaaa"] });
+  const addedAt = new Date("2024-06-01T00:00:00Z");
+  removedRow = { title: "Old Title", year: "2018", overview: null, contentRating: "PG", addedAt, communityRating: 7.4 };
+  respond = jellyfinRemapResponder(JF_DEFAULT, "aaaaaaaa", 222);
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 }, a.header), undefined);
+  assert.equal(res.status, 200);
+  const up = opsOf("jellyfinLibraryItem.upsert")[0].args as { create: Record<string, unknown>; update: Record<string, unknown> };
+  for (const branch of [up.create, up.update]) {
+    assert.equal(branch.title, "Old Title");
+    assert.equal(branch.addedAt, addedAt);
+    assert.equal(branch.communityRating, 7.4);
+    assert.equal("overview" in branch, false, "a null on the removed row is not carried");
+  }
+});
+
+test("a Plex job reports confirming progress (attempt counts) tagged with the copy it is on", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001", plexRatingKeys: ["1001", "1002"] });
+  respond = plexCopiesResponder(PLEX_DEFAULT, ["1001", "1002"], 111, 222);
+
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz", async: true }, a.header), undefined);
+  const { jobId } = await res.json() as { jobId: string };
+  type Status = { status: string; progress?: { phase: string; remoteApplied: boolean; attempts: number; copy?: number; copies?: number } };
+  let final: Status = { status: "running" };
+  for (let i = 0; i < 400 && final.status === "running"; i++) {
+    await flush();
+    final = await (await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined)).json() as Status;
+  }
+  assert.equal(final.status, "done");
+  assert.equal(final.progress?.phase, "confirming");
+  assert.equal(final.progress?.remoteApplied, true);
+  assert.ok((final.progress?.attempts ?? 0) > 0, "Plex now reports its confirmation window");
+  assert.deepEqual([final.progress?.copy, final.progress?.copies], [2, 2], "the last progress report names the last of the two copies");
+});
+
+test("candidates: the arr cross-check reads EVERY enabled instance — a title only in a NAMED instance is still confirmed (guardrail 32)", async () => {
+  const a = await admin();
+  configureServers();
+  // No default Radarr at all; only the "anime" instance is configured.
+  settings.set("arrRadarrInstances", JSON.stringify([{ slug: "anime", name: "Anime" }]));
+  settings.set("radarrAnimeUrl", "http://10.88.0.20:7878");
+  settings.set("radarrAnimeApiKey", "anime-key");
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/anime/Right Film (2010)/right.mkv", jellyfinItemId: "aaaaaaaa" });
+  tmdbCacheRows.set("movie:222:details", JSON.stringify({ title: "Right Film", releaseYear: "2010", imdbId: "tt0000222" }));
+  const arrHits: string[] = [];
+  respond = (url) => {
+    if (url.origin !== "http://10.88.0.20:7878") throw new Error(`unexpected origin ${url.origin}`);
+    arrHits.push(url.pathname + url.search);
+    if (url.search === "?tmdbId=222") return okJson([{ tmdbId: 222, path: "/media/anime/Right Film (2010)" }]);
+    return okJson([]);
+  };
+
+  const res = await candidates(req(candidatesUrl({ server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222" }), { headers: a.header }), undefined);
+  assert.equal(res.status, 200);
+  const body = await res.json() as { arrConfirmedTmdbId: number | null; arrPathAgrees: boolean | null; arrConfirmedTitle: string | null };
+  assert.equal(body.arrConfirmedTmdbId, 222, "the named instance confirms the corrected id");
+  assert.equal(body.arrPathAgrees, true);
+  assert.equal(body.arrConfirmedTitle, "Right Film");
+  assert.ok(arrHits.includes("/api/v3/movie?tmdbId=222"));
+  assert.ok(settingReads.every((k) => k !== "radarrUrl" && k !== "radarrApiKey"), "the default-instance keys are no longer read raw");
+});
+
+test("jobs feed: lists recent jobs with a title and outcome, coarse only — no ratingKey, path or key — and needs a session", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/secret/path/a.mkv", plexRatingKey: "1001", title: "Dune", year: "2021" } as LibRow);
+  respond = plexRemapResponder(PLEX_DEFAULT, "1001", 222);
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz", async: true }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const { jobId } = await res.json() as { jobId: string };
+  for (let i = 0; i < 400; i++) {
+    await flush();
+    const st = await (await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined)).json() as { status: string };
+    if (st.status !== "running") break;
+  }
+  const feed = await fixMatchJobs(req("http://localhost:3000/api/admin/fix-match/jobs", { headers: a.header }), undefined);
+  assert.equal(feed.status, 200);
+  const text = await feed.text();
+  const body = JSON.parse(text) as { jobs: Array<{ id: string; status: string; title: string | null; server: string }> };
+  const job = body.jobs.find((j) => j.id === jobId);
+  assert.equal(job?.status, "done");
+  assert.equal(job?.title, "Dune (2021)");
+  assert.equal(job?.server, "plex");
+  for (const secret of ["1001", "/secret/path", "plex://movie/xyz", PLEX_DEFAULT, TOKEN_DEFAULT]) {
+    assert.ok(!text.includes(secret), `the feed must not leak ${secret}`);
+  }
+  assert.equal((await fixMatchJobs(req("http://localhost:3000/api/admin/fix-match/jobs"), undefined)).status, 401);
+});
+
+test("candidates (plex): a re-open inside the TTL is served from memory with ZERO Plex calls, and a fix-match run clears it", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/a.mkv", plexRatingKey: "1001" });
+  respond = (url) => {
+    if (url.pathname === "/library/metadata/1001/matches") return okJson({ MediaContainer: { SearchResult: [{ guid: "plex://movie/aaa", name: "Right", year: 2010 }] } });
+    throw new Error(`unexpected ${url}`);
+  };
+  const call = () => candidates(req(candidatesUrl({ server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222" }), { headers: a.header }), undefined);
+  const first = await call();
+  assert.equal(first.status, 200);
+  const callsAfterFirst = fetchCalls.length;
+  assert.ok(callsAfterFirst > 0);
+  const second = await call();
+  assert.deepEqual(await second.json(), await first.json());
+  assert.equal(fetchCalls.length, callsAfterFirst, "the second open made no upstream call");
+
+  // A fix-match run (even a failing one) drops the cached list.
+  respond = (url) => { throw new Error(`unexpected ${url}`); };
+  await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/aaa" }, a.header), undefined);
+  respond = (url) => {
+    if (url.pathname === "/library/metadata/1001/matches") return okJson({ MediaContainer: { SearchResult: [] } });
+    throw new Error(`unexpected ${url}`);
+  };
+  const before = fetchCalls.length;
+  await call();
+  assert.ok(fetchCalls.length > before, "after a fix-match run the list is fetched fresh");
+});
+
+test("candidates: the payload names what the row is matched to NOW (current title + year) for both servers", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/m/w.mkv", jellyfinItemId: "aaaaaaaa", title: "Wrong Film", year: "1995" } as LibRow);
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/m/w.mkv", plexRatingKey: "1001", title: "Wrong Film", year: "1995" } as LibRow);
+  const jf = await (await candidates(req(candidatesUrl({ server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222" }), { headers: a.header }), undefined)).json() as { currentTitle: string | null; currentYear: string | null };
+  assert.deepEqual([jf.currentTitle, jf.currentYear], ["Wrong Film", "1995"]);
+  respond = (url) => {
+    if (url.pathname === "/library/metadata/1001/matches") return okJson({ MediaContainer: { SearchResult: [] } });
+    throw new Error(`unexpected ${url}`);
+  };
+  const px = await (await candidates(req(candidatesUrl({ server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222" }), { headers: a.header }), undefined)).json() as { currentTitle: string | null; currentYear: string | null };
+  assert.deepEqual([px.currentTitle, px.currentYear], ["Wrong Film", "1995"]);
 });

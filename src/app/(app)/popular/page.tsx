@@ -101,19 +101,22 @@ export default async function PopularOnServerPage({
   const sort: PopularSort = validSorts.has(sp.sort as PopularSort)
     ? (sp.sort as PopularSort)
     : "trending";
-  const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+  const requestedPage = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
   const activeSort = SORT_OPTIONS.find((s) => s.value === sort)!;
 
   const [moviesResult, tvResult] = await Promise.all([
     mediaTypeFilter === "tv"
       ? Promise.resolve({ items: [], totalItems: 0, totalPages: 1, page: 1 })
-      : getMostPopularOnServer({ mediaType: "MOVIE", sort, page }),
+      : getMostPopularOnServer({ mediaType: "MOVIE", sort, page: requestedPage }),
     mediaTypeFilter === "movies"
       ? Promise.resolve({ items: [], totalItems: 0, totalPages: 1, page: 1 })
-      : getMostPopularOnServer({ mediaType: "TV", sort, page }),
+      : getMostPopularOnServer({ mediaType: "TV", sort, page: requestedPage }),
   ]);
 
+  // getMostPopularOnServer clamps a deep ?page= (MAX_POPULAR_PAGE); rank and pager
+  // must follow the page it actually served, not the requested one.
+  const page = Math.max(moviesResult.page, tvResult.page);
   const totalPages = Math.max(moviesResult.totalPages, tvResult.totalPages);
   const totalMovies = moviesResult.totalItems;
   const totalTv = tvResult.totalItems;

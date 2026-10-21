@@ -38,9 +38,9 @@
 //
 // Harness: the real handler, real Ed25519 signing, in-memory prisma stubs,
 // scripted discord.com + TMDB. No DB, no network.
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign as cryptoSign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign as cryptoSign } from "node:crypto";
 import dns from "node:dns/promises";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
@@ -134,9 +134,13 @@ const opsOf = (name: string) => ops.filter((o) => o.op === name);
 
 // ── stores ───────────────────────────────────────────────────────────────────
 const settings = new Map<string, string>();
+// A test can park handleCommand's first awaited read (and then fail it) to model
+// a handler that errors AFTER the 25s "taking longer" line went out.
+let welcomeGate: Promise<void> | null = null;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
     rec("setting.findUnique", args.where.key);
+    if (welcomeGate && args.where.key === "discordWelcomeChannelId") await welcomeGate;
     const v = settings.get(args.where.key);
     return v === undefined ? null : { key: args.where.key, value: v };
   },
@@ -203,16 +207,37 @@ for (const m of ["radarrAvailableItem", "sonarrAvailableItem"]) {
   });
 }
 
+// `token` is the stored column, which holds the SHA-256 of the /link code
+// (discord-link-token.ts); tests type LINK_CODE and seed sha256(LINK_CODE).
 type LinkToken = { token: string; userId: string; expiresAt: Date; discordId: string | null; user: Record<string, unknown> };
 let linkTokens: LinkToken[] = [];
+const LINK_CODE = "0123456789ABCDEF0123456789ABCDEF";
+const sha256 = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
+// True while a $transaction callback runs: /link must consume the token inside
+// the merge transaction (so a rollback restores it).
+let inTx = false;
+// Parks /link's token read until `want` redemptions have arrived, so two of them
+// are both past the read before either claims the token.
+let linkReadGate: { want: number; arrived: number; open: Promise<void>; release: () => void } | null = null;
+function gateLinkReads(want: number): void {
+  let release = () => {};
+  const open = new Promise<void>((r) => { release = r; });
+  linkReadGate = { want, arrived: 0, open, release };
+}
 shadowPrismaModel(prisma, "discordLinkToken", {
   findUnique: async (args: { where: { token?: string; userId?: string } }) => {
     rec("discordLinkToken.findUnique", args.where);
-    return linkTokens.find((t) => (args.where.token ? t.token === args.where.token : t.userId === args.where.userId)) ?? null;
+    const hit = linkTokens.find((t) => (args.where.token ? t.token === args.where.token : t.userId === args.where.userId)) ?? null;
+    if (linkReadGate) {
+      const g = linkReadGate;
+      if (++g.arrived >= g.want) g.release();
+      await g.open;
+    }
+    return hit;
   },
   delete: async (args: unknown) => { rec("discordLinkToken.delete", args); return {}; },
   deleteMany: async (args: { where: { token?: string } }) => {
-    rec("discordLinkToken.deleteMany", args.where);
+    rec("discordLinkToken.deleteMany", { ...args.where, inTx });
     const before = linkTokens.length;
     linkTokens = linkTokens.filter((t) => t.token !== args.where.token);
     return { count: before - linkTokens.length };
@@ -283,8 +308,15 @@ for (const m of [
     updateMany: async () => ({ count: 0 }), upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
   });
 }
-shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
-  Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
+shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
+  if (Array.isArray(arg)) return Promise.all(arg);
+  inTx = true;
+  try {
+    return await (arg as (tx: unknown) => Promise<unknown>)(prisma);
+  } finally {
+    inTx = false;
+  }
+});
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => []);
 shadowPrismaClientMethod(prisma, "$executeRaw", async () => 1);
@@ -397,8 +429,19 @@ type PostOpts = {
   contentLength?: string;    // override the Content-Length header
 };
 
+// The configured server (discordGuildId). Every command/component payload is
+// sent FROM it unless the test names a guild_id itself — an explicit
+// `guild_id: undefined` models a DM (JSON drops the key).
+const GUILD_ID = "555555555555555555";
+function fromGuild(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const p = payload as Record<string, unknown>;
+  if ((p.type === 2 || p.type === 3) && !("guild_id" in p)) return { ...p, guild_id: GUILD_ID };
+  return payload;
+}
+
 async function post(payload: unknown, opts: PostOpts = {}): Promise<Response> {
-  const body = opts.rawBody ?? JSON.stringify(payload);
+  const body = opts.rawBody ?? JSON.stringify(fromGuild(payload));
   const timestamp = opts.timestamp ?? String(Math.floor(Date.now() / 1000));
   const signature = opts.signature ?? (opts.signed === false ? "00".repeat(64) : signBody(timestamp, body));
   const headers: Record<string, string> = {
@@ -437,6 +480,8 @@ beforeEach(async () => {
   nonces = new Set();
   nonceWriteThrows = null;
   linkTokens = [];
+  linkReadGate = null;
+  inTx = false;
   appUsers = [];
   fetchCalls.length = 0;
   discordEdits.length = 0;
@@ -445,6 +490,7 @@ beforeEach(async () => {
   settings.clear();
   settings.set("discordPublicKey", PUBLIC_KEY_HEX);
   settings.set("discordBotToken", "a-bot-token");
+  settings.set("discordGuildId", GUILD_ID);
   interactions.invalidatePublicKeyCache();
   invalidateFeatureFlagCache();
   requestRows = [];
@@ -460,6 +506,7 @@ beforeEach(async () => {
   watchlistRows = [];
   hiddenRows = [];
   clearRecentlyAddedCache();
+  welcomeGate = null;
 });
 
 // ── 2: unconfigured bot refuses ──────────────────────────────────────────────
@@ -635,6 +682,83 @@ test("a real interaction while DISABLED gets an ephemeral explanation, not an er
   assert.match(body.data.content, /disabled/i);
 });
 
+// ── the server gate (discord-guild.ts) ───────────────────────────────────────
+// The signature proves an interaction came from Discord, not from OUR server.
+// Commands registered globally (or a leftover global set) work in every server
+// the bot is in, so a stranger who adds the bot to their own server could run
+// /request here. Everything but PING must come from the configured guild.
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+test("server gate: a /request from ANOTHER server is refused ephemerally and nothing runs", async () => {
+  const res = await post({ ...command("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]), guild_id: "666666666666666666" });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.type, 4, "an immediate reply, not a deferral (type 5) that would run the handler");
+  assert.equal(body.data.flags, 64, "ephemeral");
+  assert.equal(body.data.content, "This bot only answers in its own Discord server.");
+  await settle();
+  assert.equal(opsOf("discordSearchCache.create").length, 0, "refused before the replay guard writes a nonce");
+  assert.equal(opsOf("user.findUnique").length, 0, "no account is looked up");
+  assert.equal(opsOf("user.create").length, 0, "no @discord.local shadow account is created");
+  assert.equal(fetchCalls.length, 0, "no TMDB search and no Discord edit");
+});
+
+test("server gate: a DM (no guild_id) is refused — /link from a DM doesn't redeem the token", async () => {
+  appUsers.push({ id: "web-1", email: "web@example.com", name: "Web", discordId: null, role: "USER", deactivatedAt: null });
+  linkTokens.push({ token: sha256("A".repeat(32)), userId: "web-1", expiresAt: new Date(Date.now() + 60_000), discordId: null, user: appUsers[0] });
+  const dm = { ...command("link", [{ name: "token", value: "a".repeat(32) }]), member: undefined, user: { id: "123456789012345678", username: "someone" }, guild_id: undefined };
+  const body = await (await post(dm)).json();
+  assert.equal(body.type, 4);
+  assert.equal(body.data.content, "This bot only answers in its own Discord server.");
+  await settle();
+  assert.equal(opsOf("discordLinkToken.findUnique").length, 0, "the link token is never read");
+  assert.equal(linkTokens.length, 1, "nor consumed");
+  assert.equal(appUsers[0].discordId, null, "and no Discord id is bound");
+});
+
+test("server gate: a button click from another server is refused — an approve never lands", async () => {
+  requestRows = [{ id: "req-x", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, posterPath: null, status: "PENDING", requestedBy: "u-req", qualityProfileId: null, arrInstance: "" }];
+  const click = {
+    id: nextInteractionId(), type: 3, application_id: "app-1", token: "t", guild_id: "666666666666666666",
+    member: { user: { id: "222222222222222222", username: "admin" } },
+    data: { custom_id: "admin_approve:req-x" },
+  };
+  const body = await (await post(click)).json();
+  assert.equal(body.type, 4, "not the type-6 acknowledgement that runs the component handler");
+  assert.equal(body.data.flags, 64);
+  await settle();
+  assert.equal(opsOf("mediaRequest.updateMany").length, 0);
+  assert.equal(requestRows[0].status, "PENDING");
+});
+
+test("server gate: with NO Guild ID configured every interaction is refused (fail closed); PING still answers", async () => {
+  settings.delete("discordGuildId");
+  assert.deepEqual(await (await post(ping())).json(), { type: 1 }, "Discord's endpoint verification keeps passing");
+  for (const payload of [command("status"), { ...command("status"), guild_id: "666666666666666666" }]) {
+    const body = await (await post(payload)).json();
+    assert.equal(body.type, 4);
+    assert.equal(body.data.flags, 64);
+    assert.match(body.data.content, /Guild \(Server\) ID/, "tells the admin what to set");
+  }
+  await settle();
+  assert.equal(opsOf("discordSearchCache.create").length, 0);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("server gate: the refusal follows the invoker's Discord locale", async () => {
+  const body = await (await post({ ...command("status"), guild_id: "666666666666666666", locale: "es-ES" })).json();
+  assert.equal(body.data.content, "Este bot solo responde en su propio servidor de Discord.");
+});
+
+test("server gate: the configured guild passes (with surrounding whitespace in the setting)", async () => {
+  settings.set("discordGuildId", ` ${GUILD_ID} `);
+  const body = await (await post(command("status"))).json();
+  assert.equal(body.type, 5, "deferred — the handler runs");
+});
+
 // ── reply language ───────────────────────────────────────────────────────────
 
 test("replies follow the invoker's Discord locale (es-ES → Spanish); no locale and no linked choice → English", async () => {
@@ -667,7 +791,8 @@ test("with no usable Discord locale, the linked account's stored language is use
 test("a disabled integration runs NO command work", async () => {
   settings.set("feature.integration.discord", "false");
   invalidateFeatureFlagCache();
-  await post(command("link", [{ name: "token", value: "ABC" }]));
+  // A well-formed code, so only the gate (not the code's shape) stops the lookup.
+  await post(command("link", [{ name: "token", value: LINK_CODE }]));
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(opsOf("discordLinkToken.findUnique").length, 0);
 });
@@ -697,9 +822,9 @@ test("DISTINCT interaction ids are both accepted", async () => {
 });
 
 test("a replayed interaction does NO command work", async () => {
-  const payload = command("link", [{ name: "token", value: "TOKEN123" }]);
+  const payload = command("link", [{ name: "token", value: LINK_CODE }]);
   linkTokens = [{
-    token: "TOKEN123", userId: "u1", expiresAt: new Date(Date.now() + 60_000), discordId: null,
+    token: sha256(LINK_CODE), userId: "u1", expiresAt: new Date(Date.now() + 60_000), discordId: null,
     user: { id: "u1", email: "u1@example.com", name: "One", role: "USER" },
   }];
   await post(payload);
@@ -757,7 +882,7 @@ test("an unknown interaction type is a 400", async () => {
 
 function seedLinkToken(over: Partial<LinkToken> = {}): LinkToken {
   const t: LinkToken = {
-    token: "TOKEN123", userId: "u1", expiresAt: new Date(Date.now() + 60_000), discordId: null,
+    token: sha256(LINK_CODE), userId: "u1", expiresAt: new Date(Date.now() + 60_000), discordId: null,
     user: { id: "u1", email: "u1@example.com", name: "One", role: "USER" },
     ...over,
   };
@@ -769,7 +894,7 @@ test("a token BOUND to another Discord account is refused", async () => {
   // The counterpart to generate-link's binding: without this check the token is
   // a bearer credential and whoever sees it inherits the victim's history.
   seedLinkToken({ discordId: "999999999999999999" });
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(linkTokens.length, 1, "a mismatched binding must not consume the token");
   assert.equal(opsOf("user.update").length, 0, "and must not link anything");
@@ -777,21 +902,21 @@ test("a token BOUND to another Discord account is refused", async () => {
 
 test("a token bound to the REDEEMING account is accepted", async () => {
   seedLinkToken({ discordId: "123456789012345678" });
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await waitFor(() => linkTokens.length === 0);
   assert.equal(linkTokens.length, 0, "a matching binding should redeem");
 });
 
 test("an UNBOUND token is redeemable by the caller (the web-UI flow)", async () => {
   seedLinkToken({ discordId: null });
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await waitFor(() => linkTokens.length === 0);
   assert.equal(linkTokens.length, 0);
 });
 
 test("an unknown token is refused without touching any account", async () => {
   seedLinkToken();
-  await post(command("link", [{ name: "token", value: "WRONGTOKEN" }]));
+  await post(command("link", [{ name: "token", value: "F".repeat(32) }]));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(linkTokens.length, 1);
   assert.equal(opsOf("user.update").length, 0);
@@ -799,7 +924,7 @@ test("an unknown token is refused without touching any account", async () => {
 
 test("an EXPIRED token is deleted rather than left redeemable", async () => {
   seedLinkToken({ expiresAt: new Date(Date.now() - 1000) });
-  await post(command("link", [{ name: "token", value: "TOKEN123" }]));
+  await post(command("link", [{ name: "token", value: LINK_CODE }]));
   await waitFor(() => opsOf("discordLinkToken.delete").length > 0);
   assert.ok(opsOf("discordLinkToken.delete").length > 0, "an expired token must be cleaned up");
 });
@@ -809,7 +934,7 @@ test("a successful redemption consumes the token with deleteMany, never a bare d
   // bare delete would throw P2025 and report "unexpected error" for a link that
   // actually SUCCEEDED.
   seedLinkToken();
-  await post(command("link", [{ name: "token", value: "TOKEN123" }]));
+  await post(command("link", [{ name: "token", value: LINK_CODE }]));
   await waitFor(() => opsOf("discordLinkToken.deleteMany").length > 0);
   assert.ok(opsOf("discordLinkToken.deleteMany").length > 0);
 });
@@ -817,7 +942,7 @@ test("a successful redemption consumes the token with deleteMany, never a bare d
 test("a Discord id already linked to a REAL other account blocks the redemption", async () => {
   seedLinkToken();
   appUsers = [{ id: "other", email: "other@example.com", discordId: "123456789012345678", role: "USER" }];
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(linkTokens.length, 1, "the token must survive a blocked redemption");
 });
@@ -826,9 +951,111 @@ test("a @discord.local SHADOW account does NOT block the redemption", async () =
   // Merging the shadow account is the whole point of linking.
   seedLinkToken();
   appUsers = [{ id: "shadow", email: "123456789012345678@discord.local", discordId: "123456789012345678", role: "USER" }];
-  await post(command("link", [{ name: "token", value: "TOKEN123" }], "123456789012345678"));
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "123456789012345678"));
   await waitFor(() => linkTokens.length === 0);
   assert.equal(linkTokens.length, 0);
+});
+
+// ── the code is stored hashed ───────────────────────────────────────────────
+
+test("PIN: /link looks the row up by the SHA-256 of the typed code, normalized first", async () => {
+  // A lower-case, space-padded copy of the code must still redeem: normalize,
+  // then hash, then look up.
+  seedLinkToken();
+  // Own Discord ids from here on: /link is rate-limited per Discord user (10 a
+  // minute), and the tests above have spent the default id's budget.
+  await post(command("link", [{ name: "token", value: `  ${LINK_CODE.toLowerCase()} ` }], "200000000000000001"));
+  await waitFor(() => linkTokens.length === 0);
+  const lookups = opsOf("discordLinkToken.findUnique").map((o) => o.args as { token?: string });
+  assert.deepEqual(lookups, [{ token: sha256(LINK_CODE) }], "the lookup key is the hash, never the typed code");
+  assert.equal(linkTokens.length, 0, "the code redeems");
+  const consumed = opsOf("discordLinkToken.deleteMany").map((o) => o.args as { token: string; inTx: boolean });
+  assert.equal(consumed.length, 1);
+  assert.equal(consumed[0].token, sha256(LINK_CODE), "and is consumed by its hash");
+});
+
+test("PIN: a code stored before hashing shipped is NOT redeemable — it fails once and the user makes a new one", async () => {
+  // The documented upgrade behaviour: a row minted by the old route holds the
+  // plaintext code. Accepting it would need a lookup by the typed value, which
+  // is exactly what would let a value read from the DB be redeemed.
+  seedLinkToken({ token: LINK_CODE });
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000002"));
+  await waitFor(() => discordEdits.length > 0);
+  assert.equal(discordEdits[0].content, "Could not link account: Invalid token.");
+  assert.equal(linkTokens.length, 1, "the legacy row is left for the purge cron");
+  assert.equal(opsOf("user.update").length, 0);
+});
+
+test("PIN: the stored hash itself is not a redeemable code", async () => {
+  // What a database read or a backup file yields. It is refused by shape before
+  // any lookup, and its own hash names no row either.
+  seedLinkToken();
+  await post(command("link", [{ name: "token", value: sha256(LINK_CODE) }], "200000000000000003"));
+  await waitFor(() => discordEdits.length > 0);
+  assert.equal(discordEdits[0].content, "Could not link account: Invalid token.");
+  assert.equal(linkTokens.length, 1);
+  assert.equal(opsOf("user.update").length, 0);
+});
+
+test("a malformed code is answered 'invalid' without a DB read", async () => {
+  seedLinkToken();
+  for (const value of ["ABC", "G".repeat(32), `${LINK_CODE}0`]) {
+    discordEdits.length = 0;
+    ops = [];
+    await post(command("link", [{ name: "token", value }], "200000000000000004"));
+    await waitFor(() => discordEdits.length > 0);
+    assert.equal(discordEdits[0].content, "Could not link account: Invalid token.", value);
+    assert.equal(opsOf("discordLinkToken.findUnique").length, 0, `${value} cost a query`);
+  }
+  assert.equal(linkTokens.length, 1);
+});
+
+// ── single use under concurrency ────────────────────────────────────────────
+
+const linksOf = (discordId: string) =>
+  opsOf("user.update").filter((o) => (o.args as { data?: { discordId?: string } }).data?.discordId === discordId);
+
+test("PIN: /link consumes the token INSIDE the merge transaction, scoped to its owner and still unexpired", async () => {
+  seedLinkToken();
+  await post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000005"));
+  await waitFor(() => linkTokens.length === 0);
+  const consumed = opsOf("discordLinkToken.deleteMany").map((o) => o.args as Record<string, unknown>);
+  assert.equal(consumed.length, 1, "consumed exactly once — by the claim, not again afterwards");
+  assert.equal(consumed[0].inTx, true, "a delete outside the merge transaction survives a rolled-back merge");
+  assert.equal(consumed[0].token, sha256(LINK_CODE));
+  assert.equal(consumed[0].userId, "u1");
+  assert.ok((consumed[0].expiresAt as { gt?: unknown })?.gt instanceof Date, "an expired token can't be claimed");
+});
+
+test("PIN: two Discord accounts redeeming one UNBOUND code at once link it ONCE; the loser is told it's invalid", async () => {
+  // Both used to pass the read and both link — the second overwriting the first.
+  seedLinkToken({ discordId: null });
+  appUsers = [{ id: "u1", email: "u1@example.com", name: "One", role: "USER", discordId: null }];
+  gateLinkReads(2);
+  await Promise.all([
+    post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000006")),
+    post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000007")),
+  ]);
+  await waitFor(() => discordEdits.length >= 2);
+  const linked = [...linksOf("200000000000000006"), ...linksOf("200000000000000007")];
+  assert.equal(linked.length, 1, "exactly one Discord account is linked");
+  const replies = discordEdits.map((e) => String(e.content)).sort();
+  assert.equal(replies.filter((r) => r === "Could not link account: Invalid token.").length, 1, replies.join(" | "));
+  assert.equal(replies.filter((r) => /One/.test(r)).length, 1, "the winner is told it worked");
+  assert.equal(linkTokens.length, 0);
+});
+
+test("the same Discord account submitting /link twice at once links once and is told success both times", async () => {
+  seedLinkToken({ discordId: null });
+  appUsers = [{ id: "u1", email: "u1@example.com", name: "One", role: "USER", discordId: null }];
+  gateLinkReads(2);
+  await Promise.all([
+    post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000008")),
+    post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000008")),
+  ]);
+  await waitFor(() => discordEdits.length >= 2);
+  assert.equal(linksOf("200000000000000008").length, 1);
+  for (const e of discordEdits) assert.match(String(e.content), /One/, "a double-submit is not an error");
 });
 
 test("/link with no token argument does not touch the token table", async () => {
@@ -851,7 +1078,7 @@ test("the endpoint never echoes the bot token or the public key", async () => {
 test("every refusal path answers before any command work runs", async () => {
   for (const opts of [{ signed: false }, { timestamp: String(Math.floor(Date.now() / 1000) - 60) }] as PostOpts[]) {
     ops = [];
-    const res = await post(command("link", [{ name: "token", value: "TOKEN123" }]), opts);
+    const res = await post(command("link", [{ name: "token", value: LINK_CODE }]), opts);
     assert.equal(res.status, 401);
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(opsOf("discordLinkToken.findUnique").length, 0, "a refused interaction must not run its command");
@@ -1306,4 +1533,75 @@ test("the welcome channel takes /link only — /watchlist, /issue and /recent ar
     assert.match(String(lastEdit().content), new RegExp(`/${name}`));
   }
   assert.deepEqual(opsOf("watchlistItem.create"), []);
+});
+
+// ── pick: an auto-approve whose *arr push fails still alerts the admins ─────
+// The row rolls back to PENDING with pendingNotifyAt cleared, so the web path
+// (request-create.ts) announces it like any pending request. The Discord fork
+// replied "an admin will review it" and told the admins nothing.
+test("pick: auto-approve whose push fails announces the PENDING row to the outbound admin channels", async () => {
+  const sid = seedPick("ADMIN"); // no Radarr configured ⇒ the push throws
+  agentRows.push(agentRow("request.created"));
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(() => agentPosts.length >= 1, 400);
+  assert.equal(requestRows.at(-1)?.status ?? "PENDING", "PENDING");
+  assert.deepEqual(agentPosts.map((p) => p.event), ["request.created"]);
+});
+
+test("pick: an undated TMDB result is stored with releaseYear null, never the display word \"Unknown\"", async () => {
+  const sid = seedPick("USER");
+  const key = `p:${sid}:${PICKER}`;
+  const row = pendingRows.get(key)!;
+  const pending = JSON.parse(row.data) as { results: Array<Record<string, unknown>> };
+  pending.results[0].releaseYear = "Unknown";
+  pendingRows.set(key, { ...row, data: JSON.stringify(pending) });
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  const data = (opsOf("mediaRequest.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(data.releaseYear, null);
+});
+
+// ── editOriginal / status / slow-line boundaries ─────────────────────────────
+
+test("editOriginal caps content at Discord's 2000 characters — an over-long reply is truncated, not sent to 400", async () => {
+  settings.set("discordWelcomeChannelId", "777777777777777777");
+  await run(slash("x".repeat(3000), [], MEMBER, { channel_id: "777777777777777777" }));
+  const content = String(lastEdit().content);
+  assert.ok(content.length > 0 && content.length <= 2000, `content was ${content.length} chars`);
+});
+
+test("/status caps each title line at 80 characters", async () => {
+  linkMember();
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...orig,
+    findMany: async () => [{ title: "T".repeat(200), mediaType: "MOVIE", status: "PENDING", tmdbId: 1 }],
+  });
+  try {
+    await run(slash("status", []));
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+  const titleRun = /T+/.exec(String(lastEdit().content))![0];
+  assert.ok(titleRun.length <= 80 && titleRun.length > 10, `title run was ${titleRun.length} chars`);
+});
+
+test("a handler error AFTER the 'taking longer' line is still reported to the user", async () => {
+  let release!: () => void;
+  welcomeGate = new Promise<void>((_, reject) => { release = () => reject(new Error("boom")); });
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    await post(slash("status", []));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    mock.timers.tick(25_000);
+    for (let i = 0; i < 40; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(discordEdits.length, 1, "the slow line went out first");
+    release();
+    for (let i = 0; i < 60 && discordEdits.length < 2; i++) await new Promise((r) => setImmediate(r));
+  } finally {
+    mock.timers.reset();
+  }
+  assert.equal(discordEdits.length, 2, "the failure is reported after the slow line");
+  assert.notEqual(discordEdits[0].content, discordEdits[1].content);
+  assert.ok(errors.some((e) => e.includes("handler error")));
 });

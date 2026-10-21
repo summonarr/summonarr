@@ -95,3 +95,18 @@ export function translateQuotaWindow(
   if (days) return t("apiUser.quota.window.days", { count: Number(days[1]) });
   return l;
 }
+
+// The requests a user's quota counts (guardrail 6g): the ones made FOR them
+// (requestedBy) plus the ones they FILED for someone else on behalf
+// (MediaRequest.filedBy). Without the second half a REQUEST_ON_BEHALF holder's
+// own quota was never charged — they could file a full quota for every user they
+// could name. Declined requests never count. Every quota counter uses this one
+// definition: the single and bulk request routes, and Discord.
+export function quotaUsageWhere(userId: string, mediaType: "MOVIE" | "TV", since: Date) {
+  return {
+    OR: [{ requestedBy: userId }, { filedBy: userId }],
+    mediaType,
+    createdAt: { gte: since },
+    status: { notIn: ["DECLINED" as const] },
+  };
+}

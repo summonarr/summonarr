@@ -168,33 +168,30 @@ export default function PlexDonePage() {
       deepLink ?? safeRedirect(auth.siteUrl) ?? withBasePath("/");
   }
 
-  async function completeSettings(auth: SettingsAuth) {
-    // Settings flow routes through the server-side pin proxy so the admin token never touches the browser
-    let authToken: string | null = null;
+  async function completeSettings() {
+    // The server polls the PIN it bound to this admin (pin id + a per-attempt
+    // client identifier in an HttpOnly cookie) and stores the owner token itself
+    // once Plex approves it — the token never reaches the browser. Plex only
+    // forwards here after approval, so the first poll normally saves it.
+    setMessage(t("auth.plexDone.saving"));
+    let connected = false;
     for (let i = 0; i < 120; i++) {
       try {
-        const r = await fetch(withBasePath(`/api/auth/plex/pin?id=${auth.pinId}`));
-        const d: { authToken?: string | null } = await r.json();
-        if (d.authToken) { authToken = d.authToken; break; }
+        const r = await fetch(withBasePath("/api/auth/plex/pin"), { method: "PATCH" });
+        if (r.status === 400 || r.status === 401 || r.status === 403 || r.status === 422) {
+          // No connect in progress for this session (expired / another admin),
+          // or plex.tv refused the token it issued: retrying the poll can't help.
+          fail(t("auth.plexDone.error.saveFailed"), "settings");
+          return;
+        }
+        const d: { status?: string } = await r.json();
+        if (d.status === "connected") { connected = true; break; }
       } catch { }
       await new Promise((r) => setTimeout(r, 1000));
     }
 
-    if (!authToken) {
+    if (!connected) {
       fail(t("auth.plexDone.error.connectionTimeout"), "settings");
-      return;
-    }
-
-    setMessage(t("auth.plexDone.saving"));
-    try {
-      const res = await fetch(withBasePath("/api/settings/plex"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ authToken }),
-      });
-      if (!res.ok) throw new Error();
-    } catch {
-      fail(t("auth.plexDone.error.saveFailed"), "settings");
       return;
     }
 
@@ -243,7 +240,7 @@ export default function PlexDonePage() {
     if (auth.flow === "login") {
       completeLogin(auth);
     } else {
-      completeSettings(auth);
+      completeSettings();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

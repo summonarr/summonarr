@@ -6,13 +6,26 @@ export type EpisodeRef = { seasonNumber: number; episodeNumber: number };
 export const episodeCode = (e: EpisodeRef) =>
   `S${String(e.seasonNumber).padStart(2, "0")}E${String(e.episodeNumber).padStart(2, "0")}`;
 
-// "S01E01–E08" for a run in one season, otherwise the first few codes.
+// "S01E01–E08" for a contiguous run in one season, otherwise the first few codes.
 export function episodeSummary(eps: readonly EpisodeRef[]): string {
   if (eps.length === 0) return "";
   if (eps.length === 1) return episodeCode(eps[0]);
   const sameSeason = eps.every((e) => e.seasonNumber === eps[0].seasonNumber);
-  if (sameSeason) return `${episodeCode(eps[0])}–E${String(eps[eps.length - 1].episodeNumber).padStart(2, "0")}`;
+  // A range only when the run really is contiguous: E01 + E03 is not "E01–E03".
+  const contiguous = sameSeason && eps[eps.length - 1].episodeNumber - eps[0].episodeNumber + 1 === eps.length;
+  if (contiguous) return `${episodeCode(eps[0])}–E${String(eps[eps.length - 1].episodeNumber).padStart(2, "0")}`;
   return `${eps.slice(0, 3).map(episodeCode).join(", ")}${eps.length > 3 ? ` +${eps.length - 3}` : ""}`;
+}
+
+// A Sonarr season pack is one queue record per episode, so the row alone can't
+// say "pack". The release name can: a season marker with no episode marker
+// (`Show.S01.1080p`, `Show Season 1`). Returns the seasons it spans, or null.
+export function seasonPackSeasons(releaseTitle: string, eps: readonly EpisodeRef[]): number[] | null {
+  if (eps.length < 2) return null;
+  const hasEpisodeMarker = /S\d{1,2}[ ._-]?E\d{1,3}|\b\d{1,2}x\d{2,3}\b/i.test(releaseTitle);
+  const hasSeasonMarker = /\bS\d{1,2}\b|\bseasons?[ ._-]?\d/i.test(releaseTitle);
+  if (hasEpisodeMarker || !hasSeasonMarker) return null;
+  return [...new Set(eps.map((e) => e.seasonNumber))].sort((a, b) => a - b);
 }
 
 export function queueFormatters(locale: string) {

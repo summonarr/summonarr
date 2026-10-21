@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections, type PlexLegacyGuidRef } from "@/lib/plex";
-import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
+import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections, plexLibraryRatingKeys, type PlexLegacyGuidRef } from "@/lib/plex";
+import { resolvePlexLegacyGuids, mergeResolvedLegacyItems, buildPlexShowKeyMap } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -144,7 +144,14 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
     // The precomputed show map is complete only when the walk above was FULL —
     // on recentOnly it covers just the 2h window while this episode rewrite is
     // a full replace, so getPlexTVEpisodes keeps its own walk there.
-    ? getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, recentOnly ? undefined : ratingKeyToTmdb, skipShowFilePaths ? episodeFilePaths : undefined)
+    ? (recentOnly
+        // recentOnly's own map covers only the 2h window, so the full-table rewrite
+        // needs a complete one — built WITH legacy-agent shows resolved, which
+        // getPlexTVEpisodes' own fallback walk cannot see (they'd lose their
+        // episodes until the orchestrator's next run).
+        ? buildPlexShowKeyMap(serverUrl, token, selectedPlexKeys, sections)
+            .then((fullMap) => getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, fullMap))
+        : getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, ratingKeyToTmdb, skipShowFilePaths ? episodeFilePaths : undefined))
     : Promise.resolve(null);
   episodesPromise
     .then(async (episodes) => {
@@ -167,8 +174,8 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   // library onto the DEFAULT server. That silently un-restricts a `restricted` server
   // (slug "" is visible to everyone) and drops its server-local ratingKeys into the
   // default's namespace, where a later fix-match would address the wrong server.
-  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, plexRatingKeys: plexLibraryRatingKeys(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, plexRatingKeys: plexLibraryRatingKeys(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
 
   let finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", instance, "sync/plex");
   let finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows,    "TV",    instance, "sync/plex");

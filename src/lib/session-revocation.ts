@@ -1,9 +1,12 @@
+import { processSingleton } from "./process-singleton";
+
 // In-memory single-replica revocation fast path.
 //
 // The cross-replica source of truth for revocation is the AuthSession row
 // (deleted by revokeAllUserSessions / revokeSessionById / signOut) plus the
 // sessionsRevokedAt cutoff. verifyAndRefreshSession skips that DB lookup inside
-// a short dbCheckedAt cache window (10s admin / 60s user) for the hot path.
+// a short dbCheckedAt cache window (10s for a token with admin-area access —
+// the ADMIN bit or any management bit — 60s otherwise) for the hot path.
 //
 // These sets close that window on the replica that issued the revoke: a session
 // or user marked here forces verifyAndRefreshSession to bypass the cache and hit
@@ -28,8 +31,16 @@ function addBounded(set: Set<string>, key: string): void {
   set.add(key);
 }
 
-const forceRevalidateUserIds = new Set<string>();
-const forceRevokeSessions = new Set<string>();
+// Process-wide, not module-scoped (process-singleton.ts). Turbopack copies this
+// module into every server chunk that imports it: the revoke routes mark in
+// their chunk, while the proxy and every page/layout render read their OWN
+// copies — which nothing ever wrote. A production build showed exactly that (the
+// proxy's and the SSR chunks' copies carried only shouldForceDbCheck over empty
+// Sets), so "takes effect on the very next request" held for withAuth API
+// routes only, and a revoked session kept rendering pages for up to the
+// dbCheckedAt window (10s with admin-area access / 60s otherwise).
+const forceRevalidateUserIds = processSingleton("session-revocation:users", () => new Set<string>());
+const forceRevokeSessions = processSingleton("session-revocation:sessions", () => new Set<string>());
 
 export function markUserForceRevalidate(userId: string): void {
   addBounded(forceRevalidateUserIds, userId);

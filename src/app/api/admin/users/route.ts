@@ -6,8 +6,9 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { normalizeEmail } from "@/lib/email-normalize";
+import { isReservedEmailDomain } from "@/lib/reserved-email";
 import { sanitizeOptional } from "@/lib/sanitize";
-import { Permission, hasPermission, defaultPermissionsForRole } from "@/lib/permissions";
+import { Permission, hasPermission, defaultPermissionsForRole, rolePresetExceeds, presetExceeds } from "@/lib/permissions";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { deriveUserSource } from "@/lib/user-source";
@@ -156,6 +157,13 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminCreate") }, { status: 403 });
   }
 
+  // Subset rule: the role seeds the new account's bitmask, so a delegate may only
+  // create a role whose management bits it holds itself (ISSUE_ADMIN needs
+  // MANAGE_ISSUES) — else it mints a sock-puppet carrying bits it was never given.
+  if (rolePresetExceeds(role, session.user.permissions) || presetExceeds(role, session.user.permissions)) {
+    return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
+  }
+
   // Normalize FIRST, validate the normalized value: NFKC folds a fullwidth "＠"
   // (not whitespace, not "@") into a real "@", so checking the raw string let
   // `a＠b@c.com` pass the single-@ rule and be stored as `a@b@c.com`.
@@ -173,6 +181,31 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   const domainDot = parts[1]?.lastIndexOf(".") ?? -1;
   if (parts.length !== 2 || !parts[0] || !parts[1] || domainDot < 1 || domainDot === parts[1].length - 1) {
     return NextResponse.json({ error: t("apiAdmin.users.invalidEmail") }, { status: 400 });
+  }
+  // Summonarr mints addresses in these domains for itself (reserved-email.ts,
+  // guardrail 34e). Not even an ADMIN may create one: a local account holding
+  // `jellyfin-<id>@jellyfin.local` blocks that Jellyfin user from ever being
+  // provisioned, and before 34e it inherited their sign-in.
+  if (isReservedEmailDomain(normalized)) {
+    return NextResponse.json({ error: t("apiAdmin.users.reservedEmail") }, { status: 400 });
+  }
+
+  // A delegate must not create an account under a media-server user's email.
+  // Play-history attribution falls back to an EMAIL match for any identity with
+  // no provider-bound account (resolveMediaServerUser, play-history.ts) — the
+  // typical Plex friend who never signed in here. So a delegate could create
+  // `friend@…` with a password of their choosing, let the next 5s poll bind the
+  // friend's identity to it, then sign in as that account and read the friend's
+  // watch history (and the friend's own later Plex/OIDC sign-in would be refused
+  // as an email collision). An admin may still do this deliberately.
+  if (!hasPermission(session.user.permissions, Permission.ADMIN)) {
+    const serverUser = await prisma.mediaServerUser.findFirst({
+      where: { email: { equals: normalized, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (serverUser) {
+      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminCreateServerEmail") }, { status: 403 });
+    }
   }
 
   const password = body.password;
@@ -220,7 +253,11 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     userName: session.user.name ?? session.user.email,
     action: "USER_CREATE",
     target: `user:${user.id}`,
-    details: { targetUser: name ?? normalized, targetEmail: normalized, role },
+    // The account is named by its id (and display name, when it has one) —
+    // never its email: audit details outlive the retention scrub of everything
+    // else unless the scrub reaches them (audit-scrub.ts), and an email is the
+    // one value that identifies the person everywhere.
+    details: { targetUserId: user.id, ...(name ? { targetUser: name } : {}), role },
     ...auditContext(req, session),
   });
 

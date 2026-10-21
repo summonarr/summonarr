@@ -12,6 +12,7 @@ export function ArrowUp({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <path d="m5 12 7-7 7 7" />

@@ -12,6 +12,7 @@ export function Network({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <rect x="16" y="16" width="6" height="6" rx="1" />

@@ -16,6 +16,7 @@
 // `monitored` is reported, never filtered on: an unmonitored title is missing
 // for a different reason (nothing is searching for it), and the page decides
 // whether to show it.
+import { PROJECTION_SCAN_FACTOR } from "./arr-queue";
 import { sonarrSeriesCompletion, type SonarrSeriesStatsRow } from "./sonarr-completion";
 
 const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
@@ -49,6 +50,25 @@ export function tmdbPosterPathFromImages(images: unknown): string | null {
     if (m) return m[1];
   }
   return null;
+}
+
+// The listing is the instance's whole /api/v3/movie or /api/v3/series, which
+// arrFetch caps only by size (50 MB — hundreds of thousands of minimal rows),
+// judged synchronously on every page load and its snapshot refresh. So each
+// instance keeps at most this many titles — far past any real backlog (50 MB of
+// real Radarr rows is ~15k movies) — and its raw list is read at most
+// PROJECTION_SCAN_FACTOR times that deep (guardrail 5i).
+export const MAX_MISSING_ITEMS = 20_000;
+
+function judgeListing<T>(rows: unknown, judge: (row: Record<string, unknown>) => T | null): T[] {
+  if (!Array.isArray(rows)) return [];
+  const out: T[] = [];
+  for (let i = 0, n = Math.min(rows.length, MAX_MISSING_ITEMS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_MISSING_ITEMS; i++) {
+    const row: unknown = rows[i];
+    const judged = row && typeof row === "object" ? judge(row as Record<string, unknown>) : null;
+    if (judged) out.push(judged);
+  }
+  return out;
 }
 
 // ── movies ───────────────────────────────────────────────────────────────────
@@ -105,6 +125,11 @@ export function missingMovie(row: RadarrMovieRow, instance: string, nowMs: numbe
     releasedAt: new Date(releasedMs).toISOString(),
     daysMissing: daysSince(releasedMs, nowMs),
   };
+}
+
+/** One instance's /api/v3/movie listing → its missing movies, in listing order (at most MAX_MISSING_ITEMS). */
+export function missingMovieList(rows: unknown, instance: string, nowMs: number): MissingMovie[] {
+  return judgeListing(rows, (row) => missingMovie(row, instance, nowMs));
 }
 
 // ── series ───────────────────────────────────────────────────────────────────
@@ -193,6 +218,11 @@ export function missingSeries(row: SonarrSeriesRow, instance: string): MissingSe
   };
 }
 
+/** One instance's /api/v3/series listing → its missing series, in listing order (at most MAX_MISSING_ITEMS). */
+export function missingSeriesList(rows: unknown, instance: string): MissingSeries[] {
+  return judgeListing(rows, (row) => missingSeries(row, instance));
+}
+
 // ── episodes (one series, on demand) ─────────────────────────────────────────
 
 export type SonarrEpisodeRow = {
@@ -266,7 +296,8 @@ export function planSeriesSearch(rows: readonly SonarrEpisodeRow[], nowMs: numbe
   for (const season of [...missingBySeason.keys()].sort((a, b) => a - b)) {
     const ids = missingBySeason.get(season)!;
     if (ids.length > 1 && !seasonsWithFile.has(season)) plan.seasons.push(season);
-    else plan.episodeIds.push(...ids);
+    // One by one: a spread of an upstream-sized season throws RangeError (guardrail 5i).
+    else for (const id of ids) plan.episodeIds.push(id);
   }
   return plan;
 }
@@ -391,8 +422,15 @@ export function cutoffSeriesFromEpisodes(
   profiles: ReadonlyMap<number, QualityProfileInfo>,
 ): CutoffSeries[] {
   const bySeries = new Map<number, CutoffSeries>();
+  // The listing is paged while it changes: an episode on two pages is one episode.
+  const seenEpisodes = new Set<number>();
   for (const r of records) {
     if (!r || typeof r !== "object" || r.hasFile !== true) continue;
+    const episodeId = posInt(r.id);
+    if (episodeId !== null) {
+      if (seenEpisodes.has(episodeId)) continue;
+      seenEpisodes.add(episodeId);
+    }
     const seriesId = posInt(r.seriesId) ?? posInt(r.series?.id);
     const seasonNumber = typeof r.seasonNumber === "number" && Number.isInteger(r.seasonNumber) && r.seasonNumber >= 0 ? r.seasonNumber : null;
     const episodeNumber = typeof r.episodeNumber === "number" && Number.isInteger(r.episodeNumber) && r.episodeNumber >= 0 ? r.episodeNumber : null;

@@ -1,0 +1,9 @@
+# "For You" recommendations
+
+_Moved verbatim from CLAUDE.md "Core architecture"._
+
+**"For You" recommendations** — [src/lib/recommendations.ts](../../src/lib/recommendations.ts) + [src/lib/recommendation-graph.ts](../../src/lib/recommendation-graph.ts) + [src/lib/recommendation-quality.ts](../../src/lib/recommendation-quality.ts)
+- Split by what varies: the SERVER-WIDE half (a title's suggestion edges and its quality verdict) is precomputed once per instance into `TitleSuggestion` + `RecommendationTitle`; the PER-USER half (seed selection, weighting, exclusions, ranking) is arithmetic over the caller's own rows — server play history, the imported Trakt history (guardrail 34c, merged into the history pool under the same cap), watchlist and requests.
+- The `warm-library` cron (daily) pre-builds the same suggestion edges alongside its metadata walk (`prewarmSuggestionEdges`), so the graph is normally already warm — an accelerant only; the required build below still runs unconditionally.
+- `warmRecommendationsCache` (the `warm-recommendations` cron, 12h) runs in three phases: **select** every active user's seeds, **build** the graph for exactly that union (uncapped), then **compute** each user from the same plan. There is no live fallback anywhere — the ordering is what guarantees coverage, and `conclusive` (seed-coverage based) is what stops an incomplete build from replacing a good shelf. Guardrail 40 has the rules.
+- `getUserRecommendations` is the only live-request read: it re-filters the stored shelf against the user's CURRENT watchlist/watched/hidden/requested state, which is genuinely per-user and stays that way. `recommendedBecause.seeds` is attached only with `{ includeSeeds: true }` (the /for-you page and `/api/recommendations`); the home rails take the default and carry `seedCount` alone.

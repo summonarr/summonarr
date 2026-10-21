@@ -28,6 +28,7 @@ import {
 } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
+import { useNavBadges } from "@/components/layout/admin-nav-groups";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -45,6 +46,8 @@ type Tab = {
 
 export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const tr = useT();
+  // The same badges as the sidebar — one NavBadgesProvider feeds both.
+  const navBadges = useNavBadges();
   const pathname = usePathname();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
@@ -273,6 +276,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
         open={drawerOpen}
         onOpenChange={onDrawerOpenChange}
         featureFlags={featureFlags}
+        navBadges={navBadges}
       />
     </>
   );
@@ -387,7 +391,8 @@ function buildTabs(
   // always points at a page this user is allowed to open (not a hardcoded
   // "/admin" that some delegates would be redirected away from).
   const permsStr = sessionPerms;
-  // Also drop items whose feature flag is off — those pages render a 404.
+  // Also drop items whose feature flag is off — those pages render a 404 (the
+  // Radarr/Sonarr pages an empty state), so the tab must never target one.
   const adminItems = filterNavByFeatures(
     getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role),
     featureFlags,

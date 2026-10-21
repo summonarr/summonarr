@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import {
   loadCutoffMovies,
   loadCutoffSeries,
@@ -16,8 +17,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // episode that has no file. `mode=cutoff` lists instead what HAS a file below
 // the quality profile's cutoff (Radarr/Sonarr's own /wanted/cutoff, monitored
 // titles only). One live listing per configured instance of the requested
-// service; nothing is cached or written.
-export const GET = withAdmin(async (req) => {
+// service; nothing is written. The last answer is kept for display only
+// (`?cached=1`, src/lib/arr-snapshot.ts) — each row's Search re-judges live.
+export const GET = withAdmin(snapshotted(async (req) => {
   const t = translatorForRequest(req);
   const params = req.nextUrl.searchParams;
   const service = parseMissingService(params.get("service"));
@@ -33,4 +35,4 @@ export const GET = withAdmin(async (req) => {
       ? service === "radarr" ? await loadCutoffMovies() : await loadCutoffSeries()
       : service === "radarr" ? await loadMissingMovies(new Date()) : await loadMissingSeries();
   return NextResponse.json(report);
-});
+}));

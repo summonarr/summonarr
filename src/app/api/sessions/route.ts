@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { verifyPassword } from "@/lib/password-hash";
+import { requireStepUp } from "@/lib/step-up-auth";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { revokeSessionById } from "@/lib/auth";
@@ -39,8 +39,6 @@ export const GET = withAuth(async (_req, _ctx, session) => {
   );
 });
 
-const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
-
 export const DELETE = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   // Per-user revoke rate cap (10 per minute). Bounds how fast a hijacked cookie or
@@ -78,53 +76,21 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     // Revoking a session OTHER than the caller's own is high-value: a hijacked or
     // CSRF-riding session could sign the user out everywhere or kick a victim off so
     // the attacker alone remains. Require step-up auth; self-revocation is benign and
-    // skips it. Credential users re-enter their password (bcrypt-verified below); SSO
-    // users have no passwordHash, so instead require the caller's own session be
-    // younger than STEP_UP_MAX_AGE_MS — i.e. a recent full IdP sign-in.
-    const user = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { passwordHash: true },
+    // skips it. Credential users re-enter their password; SSO users must have signed
+    // in within STEP_UP_MAX_AGE_MS (step-up-auth.ts).
+    const denied = await requireStepUp({
+      req,
+      session,
+      confirmPassword,
+      context: "session-revoke",
+      messages: {
+        passwordRequired: t("apiAuth.sessions.confirmPasswordRevoke"),
+        recentSignInRequired: t("apiAuth.sessions.recentSignInRevoke"),
+      },
+      t,
     });
-
-    if (!user) {
-      return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
-    }
-
-    if (user.passwordHash) {
-      if (!confirmPassword || typeof confirmPassword !== "string") {
-        return NextResponse.json(
-          { error: "password-required", message: t("apiAuth.sessions.confirmPasswordRevoke") },
-          { status: 401 },
-        );
-      }
-      const ok = await verifyPassword(confirmPassword, user.passwordHash);
-      if (!ok) {
-        return NextResponse.json({ error: "invalid-password" }, { status: 401 });
-      }
-      steppedUp = true;
-    } else {
-      // SSO path: with no local password to challenge, the step-up proof is
-      // recency of the caller's own sign-in. Require a caller AuthSession that was
-      // created within STEP_UP_MAX_AGE_MS, evidencing a recent full IdP login.
-      const callerSessionId = session.sessionId;
-      if (!callerSessionId) {
-        return NextResponse.json(
-          { error: "session-too-old", message: t("apiAuth.sessions.recentSignInRevoke") },
-          { status: 401 },
-        );
-      }
-      const caller = await prisma.authSession.findUnique({
-        where: { sessionId: callerSessionId },
-        select: { createdAt: true },
-      });
-      if (!caller || Date.now() - caller.createdAt.getTime() > STEP_UP_MAX_AGE_MS) {
-        return NextResponse.json(
-          { error: "session-too-old", message: t("apiAuth.sessions.recentSignInRevoke") },
-          { status: 401 },
-        );
-      }
-      steppedUp = true;
-    }
+    if (denied) return denied;
+    steppedUp = true;
   }
 
   try {

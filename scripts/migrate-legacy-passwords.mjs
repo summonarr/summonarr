@@ -63,6 +63,13 @@ function connectionParams() {
       database: process.env.PGDATABASE,
     };
   }
+  // Bundled Postgres (the docker-container/ compose): docker-entrypoint.sh builds
+  // DATABASE_URL from POSTGRES_PASSWORD at startup and ignores any DATABASE_URL in
+  // .env — but `docker compose exec` runs a fresh process that never sees that
+  // export, so read the database exactly the way the entrypoint does.
+  if (process.env.POSTGRES_PASSWORD) {
+    return { user: "summonarr", password: process.env.POSTGRES_PASSWORD, host: "postgres", port: 5432, database: "summonarr" };
+  }
   if (process.env.DATABASE_URL) {
     // Parsed by hand rather than with pg's URL parser, which rejects the
     // unescaped reserved chars ("/", "=") a hand-written URL can carry. The
@@ -76,7 +83,7 @@ function connectionParams() {
     const password = decodeCredential(rawPassword);
     return { user, password, host, port: port ? parseInt(port, 10) : 5432, database };
   }
-  throw new Error("Set DATABASE_URL or PGHOST/PGUSER/PGPASSWORD/PGDATABASE");
+  throw new Error("Set POSTGRES_PASSWORD (bundled Postgres), DATABASE_URL, or PGHOST/PGUSER/PGPASSWORD/PGDATABASE");
 }
 
 async function main() {

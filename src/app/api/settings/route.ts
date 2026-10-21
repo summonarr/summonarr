@@ -22,6 +22,25 @@ import { WATCH_GRADE_SETTING_KEYS, watchGradeCrossFieldError, watchGradeSettingE
 import { mergedWatchGradeSettings } from "@/lib/watch-grade-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { processSingleton } from "@/lib/process-singleton";
+import { TRACKING_STAMP_KEYS, trackingStampsFor } from "@/lib/never-watched";
+import { NEVER_WATCHED_FEATURE_KEY } from "@/lib/never-watched-data";
+import { CLEANUP_FEATURE_KEY } from "@/lib/library-cleanup-data";
+import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
+import { clearArrSnapshots, isArrConfigKey } from "@/lib/arr-snapshot";
+
+// The settings this route writes that the never-watched report reads (guardrail
+// 14d): a tracking switch (and its stamp) moves a server's coverage, retention
+// moves the coverage floor, and the two feature flags decide whether a row can
+// be "eligible" at all. The report is cached ~2 minutes; a write of any of these
+// drops it, after the commit (switching tracking OFF changes the verdict too, so
+// this keys on the switches themselves, not only on the stamps written).
+const NEVER_WATCHED_INPUT_KEYS: ReadonlySet<string> = new Set([
+  ...Object.keys(TRACKING_STAMP_KEYS),
+  "playHistoryRetentionDays",
+  CLEANUP_FEATURE_KEY,
+  NEVER_WATCHED_FEATURE_KEY,
+]);
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -214,6 +233,7 @@ const SETTINGS_SCHEMA = [
   ["feature.admin.backup",            false],
   ["feature.admin.apiDocs",           false],
   ["feature.admin.cleanup",           false],
+  ["feature.admin.neverWatched",      false],
 ] as const satisfies ReadonlyArray<readonly [string, boolean]>;
 
 type AllowedKey = (typeof SETTINGS_SCHEMA)[number][0];
@@ -273,7 +293,7 @@ const HTTPS_ONLY_URL_KEYS = new Set<string>([
 
 // Per-key write cooldown prevents rapid settings toggling (e.g. maintenanceEnabled spam)
 const KEY_COOLDOWN_MS = 10_000;
-const lastKeyWriteAt = new Map<string, number>();
+const lastKeyWriteAt = processSingleton("settings:lastKeyWriteAt", () => new Map<string, number>());
 // Feature-flag keys are exempt from the cooldown. The Features admin tab is a
 // rapid-toggle UI by design — a 10s cooldown makes the second click of an
 // accidental double-click look "stuck" (PATCH returns 429 → client rolls back
@@ -292,12 +312,14 @@ const COOLDOWN_EXEMPT = new Set<string>([
   "plexWatchlistServerAutoEnroll",
   "requireMfaForAdmins",
 ]);
-setInterval(() => {
-  const cutoff = Date.now() - KEY_COOLDOWN_MS;
-  for (const [key, ts] of lastKeyWriteAt) {
-    if (ts < cutoff) lastKeyWriteAt.delete(key);
-  }
-}, 60_000).unref();
+processSingleton("settings:lastKeyWriteSweep", () =>
+  setInterval(() => {
+    const cutoff = Date.now() - KEY_COOLDOWN_MS;
+    for (const [key, ts] of lastKeyWriteAt) {
+      if (ts < cutoff) lastKeyWriteAt.delete(key);
+    }
+  }, 60_000).unref(),
+);
 
 // Boolean switches. Every reader compares against the literal ("=== \"true\"", or
 // "!== \"false\"" for the default-on ones), so any other string silently reads as
@@ -880,6 +902,13 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
 
   const auditIp = getClientIp(req.headers as Headers);
   const auditUa = req.headers.get("user-agent")?.slice(0, 512) ?? null;
+  // Tracking stamps are computed up front so a connectivity-test rollback can
+  // restore them too (they are written in the same transaction as the flip).
+  const stampEntries = [...trackingStampsFor(entries, new Map(oldRows.map((r) => [r.key, r.value])), new Date())];
+  const oldStampRows = stampEntries.length
+    ? await prisma.setting.findMany({ where: { key: { in: stampEntries.map(([k]) => k) } } })
+    : [];
+  const preWriteStamps = new Map(oldStampRows.map((r) => [r.key, r.value]));
   try {
     await prisma.$transaction(async (tx) => {
       // Sequential, not Promise.all: an interactive tx runs on one pinned
@@ -894,6 +923,12 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           update: { value },
           create: { key, value },
         });
+      }
+      // A play while a tracking switch was off was never recorded, so the
+      // never-watched verdict trusts recording only from the moment a switch last
+      // came back on (guardrail 14d). Stamped in the same transaction as the flip.
+      for (const [key, value] of stampEntries) {
+        await tx.setting.upsert({ where: { key }, update: { value }, create: { key, value } });
       }
       await tx.auditLog.create({
         data: {
@@ -915,6 +950,12 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // Feature flags are memoized (features.ts); drop the memo so a toggle in this
   // write is visible on the very next check instead of after the TTL.
   invalidateFeatureFlagCache();
+  const neverWatchedInputChanged = changedKeys.some((k) => NEVER_WATCHED_INPUT_KEYS.has(k));
+  if (neverWatchedInputChanged) invalidateNeverWatchedReport();
+  // A Radarr/Sonarr connection or integration switch changed: the admin arr
+  // pages' snapshots may name an instance that is gone or switched off (5h).
+  const arrConfigChanged = changedKeys.some(isArrConfigKey);
+  if (arrConfigChanged) clearArrSnapshots();
   // Same for the APNs relay config, which push.ts memoizes for 30s. The admin
   // flow is "save the relay key, then press Send test notification", so a stale
   // read lands on exactly the interaction used to verify the change.
@@ -1063,6 +1104,12 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     for (const [key, value] of entries) {
       (currentByKey.get(key) === value ? restorable : superseded).push(key);
     }
+    // Tracking stamps this request wrote ride along with their switch: restored
+    // only while the stamp is still the one written here.
+    const stampRows = new Map(
+      (await prisma.setting.findMany({ where: { key: { in: stampEntries.map(([k]) => k) } } })).map((r) => [r.key, r.value]),
+    );
+    const restorableStamps = stampEntries.filter(([k, v]) => stampRows.get(k) === v).map(([k]) => k);
     if (superseded.length > 0) {
       console.warn(
         `[settings] rollback skipped — modified by a concurrent write: ${superseded.join(", ")}`,
@@ -1070,6 +1117,11 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
     try {
       await prisma.$transaction(async (tx) => {
+        for (const key of restorableStamps) {
+          const prior = preWriteStamps.get(key);
+          if (prior === undefined) await tx.setting.deleteMany({ where: { key } });
+          else await tx.setting.upsert({ where: { key }, update: { value: prior }, create: { key, value: prior } });
+        }
         for (const key of restorable) {
           const prior = preWriteByKey.get(key);
           if (prior === undefined) {
@@ -1113,6 +1165,8 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // The rollback rewrote Setting rows — drop the flag memo again.
     invalidateFeatureFlagCache();
     invalidateApnsRelayCache();
+    if (neverWatchedInputChanged) invalidateNeverWatchedReport();
+    if (arrConfigChanged) clearArrSnapshots();
     // Same for the Discord public key and the session-duration TTLs: both memos were
     // dropped BEFORE the connectivity tests ran, so anything that repopulated them
     // during the test window (a Discord interaction, a sign-in) cached the value this

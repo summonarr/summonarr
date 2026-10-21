@@ -24,7 +24,7 @@
 //     episode page entirely;
 //   - getPlexSessions: the EXACT PlexSessionData shape the play-history poller
 //     consumes (full deepEqual), episode title composition, the DirectPlay/
-//     DirectStream/Transcode decision + humanized transcodeReason, "0"/"1"/
+//     DirectStream/Transcode decision + the stream-only transcodeReason, "0"/"1"/
 //     boolean secure-relayed normalization, friendly device naming, and
 //     empty-session defaults;
 //   - getPlexMarkers: split credits markers merge earliest-start/latest-end;
@@ -128,6 +128,7 @@ const {
   getPlexAccounts,
   getPlexMachineId,
   getPlexFriendEmails,
+  listPlexMatchEntries,
 } = await import("../src/lib/plex.ts");
 
 // ── extractTmdbIdFromGuids (pure) ───────────────────────────────────────────
@@ -548,6 +549,47 @@ test("getPlexTmdbIds lists sections, fans out over matching types only, and comb
   );
 });
 
+// guardrail 37c: a title in two sections is two Plex items with two ratingKeys.
+// The merge keeps the first-seen entry but must keep the other copy's key
+// addressable, or every play/history entry filed under it resolves to nobody.
+test("getPlexTmdbIds records the losing section copy's ratingKey, without leaking it onto a conflated sibling", async () => {
+  const S = "http://plex-comb3.test:32400";
+  respond = (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [
+        { key: "1", title: "Movies", type: "movie" },
+        { key: "2", title: "4K Movies", type: "movie" },
+      ] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      return mediaContainer([
+        // One conflated item claiming two tmdb ids — ONE entry object is shared by both.
+        { type: "movie", ratingKey: "100", title: "Merged", Guid: [{ id: "tmdb://10" }, { id: "tmdb://11" }] },
+      ], { totalSize: 1 });
+    }
+    if (url.pathname === "/library/sections/2/all") {
+      return mediaContainer([
+        { type: "movie", ratingKey: "200", title: "4K copy", Guid: [{ id: "tmdb://10" }] },
+        // A split duplicate inside one section: both items stay addressable.
+        { type: "movie", ratingKey: "300", title: "Dup A", Guid: [{ id: "tmdb://30" }] },
+        { type: "movie", ratingKey: "301", title: "Dup B", Guid: [{ id: "tmdb://30" }] },
+      ], { totalSize: 3 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const { plexLibraryRatingKeys } = await import("../src/lib/plex.ts");
+  const combined = await getPlexTmdbIds(S, "t", "MOVIE");
+  assert.equal(combined.get(10)?.ratingKey, "100", "the first-seen copy still owns the row");
+  assert.deepEqual(plexLibraryRatingKeys(combined.get(10)!), ["100", "200"]);
+  assert.deepEqual(
+    plexLibraryRatingKeys(combined.get(11)!),
+    ["100"],
+    "the conflated sibling shares the entry object — an in-place push would hand it a copy it isn't",
+  );
+  assert.deepEqual(plexLibraryRatingKeys(combined.get(30)!), ["301", "300"]);
+});
+
 test("getPlexTmdbIds with provided sections + selectedKeys skips the section listing and fetches only the selected key", async () => {
   const S = "http://plex-comb2.test:32400";
   respond = (url) => {
@@ -586,8 +628,9 @@ test("getPlexTVEpisodes maps episodes through the show ratingKey→tmdb table, f
     if (url.searchParams.get("type") === "4") {
       return mediaContainer(
         [
-          { grandparentRatingKey: "301", parentIndex: 1, index: 1 },
-          { grandparentRatingKey: "301", parentIndex: 1, index: 1 }, // duplicate → deduped
+          { grandparentRatingKey: "301", parentIndex: 1, index: 1, addedAt: 1_700_000_500 },
+          // duplicate → deduped, keeping the EARLIER arrival (dates the season)
+          { grandparentRatingKey: "301", parentIndex: 1, index: 1, addedAt: 1_700_000_000 },
           { grandparentRatingKey: "301", parentIndex: 0, index: 5 }, // specials season → dropped
           { grandparentRatingKey: "301", parentIndex: 2, index: 0 }, // episode 0 → dropped
           { grandparentRatingKey: "301", parentIndex: 1.5, index: 2 }, // non-integer season → dropped
@@ -605,8 +648,8 @@ test("getPlexTVEpisodes maps episodes through the show ratingKey→tmdb table, f
   const sections = [{ key: "7", title: "Shows", type: "show" as const }];
   const episodes = await getPlexTVEpisodes(S, "t", undefined, sections);
   assert.deepEqual(episodes, [
-    { tmdbId: 1399, seasonNumber: 1, episodeNumber: 1 },
-    { tmdbId: 1399, seasonNumber: 2, episodeNumber: 3 },
+    { tmdbId: 1399, seasonNumber: 1, episodeNumber: 1, addedAt: new Date(1_700_000_000_000) },
+    { tmdbId: 1399, seasonNumber: 2, episodeNumber: 3, addedAt: null },
   ]);
 });
 
@@ -650,7 +693,7 @@ test("the type=2 walk accumulates ratingKey→tmdb ids, and a precomputed map sk
   };
   const sections = [{ key: "3", title: "Shows", type: "show" as const }];
   const eps = await getPlexTVEpisodes(S, "t", undefined, sections, out);
-  assert.deepEqual(eps, [{ tmdbId: 95396, seasonNumber: 1, episodeNumber: 2 }]);
+  assert.deepEqual(eps, [{ tmdbId: 95396, seasonNumber: 1, episodeNumber: 2, addedAt: null }]);
   assert.ok(
     fetchCalls.every((c) => c.url.searchParams.get("type") !== "2"),
     "the precomputed map must skip the duplicate type=2 show walk",
@@ -690,7 +733,7 @@ test("skipShowFilePaths: the full show walk skips the per-show allLeaves probe; 
   const sections = [{ key: "3", title: "Shows", type: "show" as const }];
   const files = new Map<string, string>();
   const eps = await getPlexTVEpisodes(S, "t", undefined, sections, out, files);
-  assert.deepEqual(eps, [{ tmdbId: 95396, seasonNumber: 1, episodeNumber: 1 }]);
+  assert.deepEqual(eps, [{ tmdbId: 95396, seasonNumber: 1, episodeNumber: 1, addedAt: null }]);
   assert.deepEqual(
     [...files.entries()],
     [["70", "/tv/severance/special.mkv"]],
@@ -704,10 +747,10 @@ test("getPlexEpisodesForShow pages the show's allLeaves and stamps the caller's 
     if (url.pathname === "/library/metadata/444/allLeaves") {
       return mediaContainer(
         [
-          { parentIndex: 1, index: 2 },
+          { parentIndex: 1, index: 2, addedAt: 1_700_000_000 },
           { parentIndex: 0, index: 1 }, // specials → dropped
           { index: 3 }, // missing season → dropped
-          { parentIndex: 3, index: 4 },
+          { parentIndex: 3, index: 4 }, // undated → addedAt null
         ],
         { totalSize: 4 },
       );
@@ -716,9 +759,12 @@ test("getPlexEpisodesForShow pages the show's allLeaves and stamps the caller's 
   };
 
   const episodes = await getPlexEpisodesForShow(S, "t", "444", 777);
+  // addedAt is mapped exactly as getPlexTVEpisodes maps it: fix-match rebuilds
+  // a show's TVEpisodeCache rows from this helper, and one undated episode
+  // makes its season unobservable on the never-watched report (14d).
   assert.deepEqual(episodes, [
-    { tmdbId: 777, seasonNumber: 1, episodeNumber: 2 },
-    { tmdbId: 777, seasonNumber: 3, episodeNumber: 4 },
+    { tmdbId: 777, seasonNumber: 1, episodeNumber: 2, addedAt: new Date(1_700_000_000_000) },
+    { tmdbId: 777, seasonNumber: 3, episodeNumber: 4, addedAt: null },
   ]);
   // Base has no query string, so pagination starts with "?" not "&".
   assert.equal(
@@ -864,7 +910,9 @@ test("getPlexSessions: episode title composition and the Transcode/DirectStream 
   const [ep, copied, audio] = await getPlexSessions(S, "t");
   assert.equal(ep.title, "Severance — Half Loop");
   assert.equal(ep.playMethod, "Transcode");
-  assert.equal(ep.transcodeReason, "Video codec not supported, Subtitle burn-in");
+  // Plex reports WHICH stream it transcoded, never why — the label must not
+  // claim a cause (it used to say "Video codec not supported" for every one).
+  assert.equal(ep.transcodeReason, "Video transcoded, Subtitle burn-in");
   assert.equal(ep.videoDecision, "transcode");
   assert.equal(ep.audioDecision, "copy");
   assert.equal(ep.parentIndex, 1);
@@ -874,7 +922,7 @@ test("getPlexSessions: episode title composition and the Transcode/DirectStream 
   assert.equal(copied.transcodeReason, undefined);
 
   assert.equal(audio.playMethod, "Transcode");
-  assert.equal(audio.transcodeReason, "Audio codec not supported");
+  assert.equal(audio.transcodeReason, "Audio transcoded");
 });
 
 test("getPlexSessions degrades an empty raw session to safe defaults; sessionKey falls back to Session.id; state and toBool normalize", async () => {
@@ -1174,4 +1222,177 @@ test("getPlexFriendEmails direct contract: a non-2xx /api/users THROWS; valid em
     ids: new Set(["1", "3", "4"]),
     emails: new Set(["friend@example.com"]),
   });
+});
+
+// ── getPlexWatchHistory (the never-watched report's upstream evidence) ───────
+// Appended for src/lib/upstream-watch-data.ts. Pins the exact history URL, the
+// newest-first sort, the token header, paging, parse-while-paging, the
+// records-vs-entries split, and both stops (maxItems, AbortSignal — guardrail 41).
+
+const { getPlexWatchHistory, PLEX_WATCH_HISTORY_MAX_ITEMS } = await import("../src/lib/plex.ts");
+
+test("getPlexWatchHistory hits the exact all-account history URL, newest first, with the server token; a trailing slash is normalized", async () => {
+  const S = "http://plex-hist1.test:32400";
+  respond = () => mediaContainer(
+    [
+      { type: "movie", ratingKey: "10", viewedAt: 1_700_000_000, accountID: 1 },
+      { type: "episode", ratingKey: "21", grandparentRatingKey: "20", parentIndex: 1, viewedAt: 1_700_000_100, accountID: 2 },
+      { type: "track", ratingKey: "30", viewedAt: 1_700_000_200 },
+      { type: "movie", title: "no key at all" },
+    ],
+    { totalSize: 4 },
+  );
+  const h = await getPlexWatchHistory(`${S}/`, "hist-token");
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(
+    fetchCalls[0].raw,
+    `${S}/status/sessions/history/all?sort=viewedAt:desc&X-Plex-Container-Start=0&X-Plex-Container-Size=1000`,
+  );
+  assert.equal(fetchCalls[0].headers.get("x-plex-token"), "hist-token");
+  assert.deepEqual(h.entries.map((e) => [e.kind, e.itemKey, e.showKey, e.seasonNumber]), [["movie", "10", null, null], ["episode", "21", "20", 1]]);
+  assert.equal(h.records, 3, "the track is not a watch record; the unplaceable movie IS (that is how a reshaped response shows up)");
+  assert.equal(h.truncated, false);
+  assert.equal(PLEX_WATCH_HISTORY_MAX_ITEMS, 500_000);
+});
+
+test("getPlexWatchHistory pages by X-Plex-Container-Start and stops at maxItems, marking the result truncated", async () => {
+  const S = "http://plex-hist2.test:32400";
+  const mv = (id: number) => ({ type: "movie", ratingKey: String(id), viewedAt: 1_700_000_000 - id });
+  respond = (url) => {
+    const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+    return mediaContainer([mv(start + 1), mv(start + 2)], { totalSize: 100 });
+  };
+  const h = await getPlexWatchHistory(S, "t", { maxItems: 3 });
+  assert.equal(fetchCalls.length, 2, "the walk stops once maxItems records were read, despite totalSize=100");
+  assert.equal(fetchCalls[1].url.searchParams.get("X-Plex-Container-Start"), "2");
+  assert.deepEqual(h.entries.map((e) => e.itemKey), ["1", "2", "3"]);
+  assert.equal(h.truncated, true);
+});
+
+test("getPlexWatchHistory stops paging when its AbortSignal fires (guardrail 41) and does nothing when already aborted", async () => {
+  const S = "http://plex-hist3.test:32400";
+  const controller = new AbortController();
+  respond = (url) => {
+    controller.abort();
+    const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+    return mediaContainer([{ type: "movie", ratingKey: String(start + 1) }], { totalSize: 50 });
+  };
+  await getPlexWatchHistory(S, "t", { signal: controller.signal });
+  assert.equal(fetchCalls.length, 1, "no further page after the abort");
+
+  fetchCalls.length = 0;
+  const h = await getPlexWatchHistory(S, "t", { signal: controller.signal });
+  assert.equal(fetchCalls.length, 0);
+  assert.deepEqual(h, { entries: [], records: 0, truncated: false });
+});
+
+test("getPlexWatchHistory follows a totalSize that GROWS mid-walk (a view recorded while paging) and reads the shifted oldest record", async () => {
+  // viewedAt-desc: a new view is prepended, every older record shifts one
+  // offset down, and a total frozen at page 0 (2000) ended the walk before
+  // the oldest record — the same one on every run of a busy server.
+  const S = "http://plex-hist-grow.test:32400";
+  const mv = (id: number) => ({ type: "movie", ratingKey: String(id), viewedAt: 1_700_000_000 - id });
+  respond = (url) => {
+    const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+    if (start === 0) return mediaContainer(Array.from({ length: 1000 }, (_, i) => mv(i + 1)), { totalSize: 2000 });
+    // One view landed: this page repeats the previous page's last record.
+    if (start === 1000) return mediaContainer(Array.from({ length: 1000 }, (_, i) => mv(i + 1000)), { totalSize: 2001 });
+    if (start === 2000) return mediaContainer([mv(5_000_000)], { totalSize: 2001 });
+    throw new Error(`unexpected page start=${start}`);
+  };
+  const h = await getPlexWatchHistory(S, "t");
+  assert.ok(
+    fetchCalls.some((c) => c.url.searchParams.get("X-Plex-Container-Start") === "2000"),
+    "the walk must follow the refreshed total past the page-0 count",
+  );
+  assert.ok(h.entries.some((e) => e.itemKey === "5000000"), "the oldest record is read");
+  assert.equal(fetchCalls.length, 3);
+});
+
+test("getPlexWatchHistory THROWS on a non-2xx (a 4xx fast-fails) — the caller must keep its previous snapshot, never read it as 'no history'", async () => {
+  const S = "http://plex-hist4.test:32400";
+  respond = () => new Response("unauthorized", { status: 401 });
+  await assert.rejects(() => getPlexWatchHistory(S, "bad"), /Plex paginated fetch failed: 401/);
+  assert.equal(fetchCalls.length, 1, "a 401 is not retried");
+});
+
+// Audit C159 (part 5): the cap counts WATCH RECORDS, not raw ones — a music-
+// heavy history used to hit it on track plays and drop the oldest VIDEO views
+// (the pre-install ones the snapshot exists for). Raw records have their own
+// ceiling below the pager's silent 2M, which ALSO reports truncated. A history
+// of exactly maxItems records is complete.
+test("getPlexWatchHistory: music tracks don't advance the cap; the raw ceiling reports truncated; exactly maxItems is complete", async () => {
+  const S = "http://plex-hist5.test:32400";
+  const page = [
+    { type: "track", ratingKey: "1" }, { type: "track", ratingKey: "2" }, { type: "track", ratingKey: "3" },
+    { type: "movie", ratingKey: "10", viewedAt: 1_700_000_000 },
+    { type: "movie", ratingKey: "11", viewedAt: 1_699_000_000 },
+  ];
+  respond = () => mediaContainer(page, { totalSize: page.length });
+  const h = await getPlexWatchHistory(S, "t", { maxItems: 2 });
+  assert.deepEqual(h.entries.map((e) => e.itemKey), ["10", "11"], "three track plays did not use up a cap of 2");
+  assert.equal(h.records, 2);
+  assert.equal(h.truncated, false, "exactly maxItems watch records, nothing past them: complete");
+
+  fetchCalls.length = 0;
+  const raw = await getPlexWatchHistory(S, "t", { maxItems: 100, maxRaw: 3 });
+  assert.equal(raw.truncated, true, "the raw ceiling stops the walk AND says so");
+  assert.deepEqual(raw.entries, [], "only the three tracks were read");
+  assert.equal(fetchCalls.length, 1);
+
+  fetchCalls.length = 0;
+  const capped = await getPlexWatchHistory(S, "t", { maxItems: 1 });
+  assert.equal(capped.truncated, true, "a watch record past the cap exists");
+  assert.deepEqual(capped.entries.map((e) => e.itemKey), ["10"]);
+});
+
+// ── listPlexMatchEntries (the library match check) ──────────────────────────
+
+test("listPlexMatchEntries lists EVERY item of the selected sections — copies, unmatched and legacy items included — with each one's own ids and path", async () => {
+  const S = "http://plex-match1.test:32400";
+  respond = (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [
+        { key: "1", title: "Movies", type: "movie" },
+        { key: "2", title: "4K Movies", type: "movie" },
+        { key: "3", title: "Shows", type: "show" },
+      ] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      assert.equal(url.searchParams.get("type"), "1");
+      assert.equal(url.searchParams.get("includeGuids"), "1");
+      return mediaContainer([
+        { type: "movie", ratingKey: "10", title: "Ghost in the Shell", year: 1995, Guid: [{ id: "tmdb://9323" }, { id: "imdb://tt0113568" }], Media: [{ Part: [{ file: "/m/Ghost in the Shell (1995)/a.mkv" }] }] },
+        // Same tmdb id, other folder: the sync folds this one into 9323's row; the check must see it.
+        { type: "movie", ratingKey: "11", title: "Ghost in the Shell", year: 1995, Guid: [{ id: "tmdb://9323" }], Media: [{ Part: [{ file: "/m/Ghost in the Shell (2017)/b.mkv" }] }] },
+        { type: "movie", ratingKey: "12", title: "Unmatched.Rip", Guid: [], Media: [{ Part: [{ file: "/m/Unmatched.Rip.mkv" }] }] },
+        { type: "movie", ratingKey: "13", title: "Old Agent", guid: "com.plexapp.agents.imdb://tt0000013?lang=en", Media: [{ Part: [{ file: "/m/Old (1990)/o.mkv" }] }] },
+        { type: "collection", ratingKey: "99", title: "A Collection" },
+      ], { totalSize: 5 });
+    }
+    if (url.pathname === "/library/sections/2/all") throw new Error("section 2 was not selected");
+    if (url.pathname === "/library/sections/3/all") {
+      assert.equal(url.searchParams.get("type"), "2");
+      return mediaContainer([
+        { type: "show", ratingKey: "20", title: "Doctor Who", year: 2005, Guid: [{ id: "tmdb://57243" }, { id: "tvdb://78804" }], Location: [{ path: "/tv/Doctor Who (2005)" }] },
+        { type: "show", ratingKey: "21", title: "No Location", Guid: [{ id: "tvdb://1" }] },
+      ], { totalSize: 2 });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const movies = await listPlexMatchEntries(S, "tok", "remote", "MOVIE", new Set(["1"]));
+  assert.deepEqual(movies.map((e) => [e.itemKey, e.tmdbIds, e.imdbId, e.path, e.legacyPlaced]), [
+    ["10", [9323], "tt0113568", "/m/Ghost in the Shell (1995)/a.mkv", false],
+    ["11", [9323], null, "/m/Ghost in the Shell (2017)/b.mkv", false],
+    ["12", [], null, "/m/Unmatched.Rip.mkv", false],
+    ["13", [], "tt0000013", "/m/Old (1990)/o.mkv", true],
+  ]);
+  assert.ok(movies.every((e) => e.server === "plex" && e.serverInstance === "remote" && e.mediaType === "MOVIE"));
+  assert.equal(movies[0].year, 1995);
+
+  const shows = await listPlexMatchEntries(S, "tok", "", "TV");
+  assert.deepEqual(shows.map((e) => [e.itemKey, e.tmdbIds, e.tvdbId, e.path]), [
+    ["20", [57243], 78804, "/tv/Doctor Who (2005)"],
+    ["21", [], 1, null],
+  ]);
 });

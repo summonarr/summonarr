@@ -142,3 +142,58 @@ test("a letter-suffixed guardrail has a numeric parent and sits directly after i
     `letter-suffixed guardrails must be adjacent to their parent:\n  ${problems.join("\n  ")}`,
   );
 });
+
+// ---- Detail files (docs/guardrails, docs/architecture, docs/testing.md) -------
+// Long rules keep their id + headline + rule index in CLAUDE.md and move the
+// full text to a detail file. These pins keep that split from rotting.
+import { existsSync, readdirSync } from "node:fs";
+
+const ROOT = new URL("../", import.meta.url);
+const DETAIL_LINK = /\]\((docs\/(?:guardrails|architecture)\/[A-Za-z0-9._-]+\.md|docs\/testing\.md)\)/g;
+
+test("every detail link in CLAUDE.md points at an existing file", () => {
+  const missing: string[] = [];
+  let m: RegExpExecArray | null;
+  const re = new RegExp(DETAIL_LINK);
+  while ((m = re.exec(CLAUDE_MD)) !== null) {
+    if (!existsSync(new URL(m[1], ROOT))) missing.push(m[1]);
+  }
+  assert.deepEqual(missing, [], `CLAUDE.md links detail file(s) that do not exist: ${missing.join(", ")}`);
+});
+
+test("each docs/guardrails/<id>.md is linked from, and headed by, its own guardrail", () => {
+  const ids = new Set(GUARDRAILS.map((g) => g.id));
+  const problems: string[] = [];
+  const dir = new URL("docs/guardrails/", ROOT);
+  if (!existsSync(dir)) return;
+  for (const f of readdirSync(dir)) {
+    const id = f.replace(/\.md$/, "");
+    if (!ids.has(id)) { problems.push(`${f}: no guardrail ${id} in CLAUDE.md`); continue; }
+    if (!CLAUDE_MD.includes(`](docs/guardrails/${f})`)) problems.push(`${f}: guardrail ${id} does not link to it`);
+    const body = readFileSync(new URL(f, dir), "utf8");
+    if (!new RegExp(`^${id}\\. \\*\\*`, "m").test(body)) problems.push(`${f}: missing its own '${id}. **' heading`);
+  }
+  assert.deepEqual(problems, []);
+});
+
+test("`guardrail N` cross-references inside the detail files resolve too", () => {
+  const ids = new Set(GUARDRAILS.map((g) => g.id));
+  const dangling = new Set<string>();
+  const re = /guardrails?\s+((?:\d+[a-z]?)(?:\s*[/,]\s*(?:\d+[a-z]?))*)/gi;
+  for (const sub of ["docs/guardrails/", "docs/architecture/"]) {
+    const dir = new URL(sub, ROOT);
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir)) {
+      const body = readFileSync(new URL(f, dir), "utf8");
+      let m: RegExpExecArray | null;
+      const r = new RegExp(re);
+      while ((m = r.exec(body)) !== null) {
+        for (const raw of m[1].split(/[/,]/)) {
+          const id = raw.trim();
+          if (id && !ids.has(id)) dangling.add(`${sub}${f}: ${id}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual([...dangling].sort(), []);
+});

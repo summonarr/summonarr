@@ -631,9 +631,9 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
               try {
                 const res = await fetch(withBasePath("/api/discord/sync-roles"), { method: "POST" });
                 const data: { synced?: number; error?: string } = await res.json();
-                if (data.error) {
+                if (!res.ok || data.error) {
                   setSyncRolesStatus("error");
-                  setSyncRolesMessage(data.error);
+                  setSyncRolesMessage(data.error ?? t("settings.form.common.requestFailed"));
                 } else {
                   setSyncRolesStatus("ok");
                   setSyncRolesMessage(t("settings.form.discord.syncedUsers", { count: data.synced ?? 0 }));

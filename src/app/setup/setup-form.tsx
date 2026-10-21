@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useT } from "@/components/i18n/i18n-provider";
 
 // Mirrors the server's floor in /api/auth/register (`password.length < 12`) and
@@ -45,7 +46,7 @@ export function SetupForm() {
 
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error ?? t("auth.setup.error.registrationFailed"));
+        setError(rateLimitMessage(res, t) ?? data.error ?? t("auth.setup.error.registrationFailed"));
         setLoading(false);
         return;
       }

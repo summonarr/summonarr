@@ -70,11 +70,33 @@ const fetchCalls: Array<{ url: URL; method: string; body?: string }> = [];
 let arrOk = true;
 let arrFailTmdbIds = new Set<number>();
 let profilesOk = true;
+// A Sonarr library for PATCH { search: true } on a TV request: the series row
+// the tvdbId resolves to (id 77) and its episode list. null ⇒ the branches
+// below stay out of the way and every other test sees the old stub.
+// `seriesRows` overrides what the tvdbId lookup answers; `acceptCommands`
+// accepts that many commands and answers 500 to every later one.
+let sonarrSearch: { episodes: unknown[]; seriesRows?: unknown[]; acceptCommands?: number } | null = null;
+let commandSeq = 500;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchCalls.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
+
+  if (sonarrSearch) {
+    const method = init?.method ?? "GET";
+    if (method === "GET" && url.pathname.endsWith("/api/v3/series") && url.searchParams.has("tvdbId")) {
+      return json(sonarrSearch.seriesRows ?? [{ id: 77, tvdbId: Number(url.searchParams.get("tvdbId")) }]);
+    }
+    if (method === "GET" && url.pathname.endsWith("/api/v3/series/77")) return json({ id: 77 });
+    if (method === "GET" && url.pathname.endsWith("/api/v3/episode") && url.searchParams.get("seriesId") === "77") {
+      return json(sonarrSearch.episodes);
+    }
+    if (method === "POST" && url.pathname.endsWith("/api/v3/command")) {
+      if (sonarrSearch.acceptCommands !== undefined && sonarrSearch.acceptCommands-- <= 0) return json({ message: "COMMAND REFUSED" }, 500);
+      return json({ id: ++commandSeq });
+    }
+  }
 
   if (url.pathname.includes("/api/v3/qualityprofile")) {
     return profilesOk ? json([{ id: 1, name: "HD-1080p" }, { id: 2, name: "Ultra-HD" }]) : json({ error: "ARR PROFILES DOWN" }, 500);
@@ -411,6 +433,7 @@ beforeEach(() => {
   arrOk = true;
   arrFailTmdbIds = new Set();
   profilesOk = true;
+  sonarrSearch = null;
   failTvdbBookkeeping = false;
   agentRows.length = 0;
   invalidateAgentCache();
@@ -1004,6 +1027,161 @@ test("search on a TV request with no tvdbId returns a translated arrError and ne
   assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "not routed through the generic arr catch");
 });
 
+// The Why? panel offers this Search for an incomplete series. SeriesSearch
+// would search every monitored season, files on disk included — upgrade grabs
+// nobody asked for and a season search per complete season — so the TV branch
+// queues the Missing page's plan instead (planSeriesSearch), never SeriesSearch.
+const AIRED = "2020-01-01T00:00:00Z";
+const ep = (id: number, seasonNumber: number, episodeNumber: number, over: Record<string, unknown> = {}) =>
+  ({ id, seasonNumber, episodeNumber, airDateUtc: AIRED, monitored: true, hasFile: false, title: `E${id}`, ...over });
+const sonarrCommands = () => fetchCalls
+  .filter((c) => c.method === "POST" && c.url.pathname.endsWith("/api/v3/command"))
+  .map((c) => ({ host: c.url.host, body: JSON.parse(c.body!) as Record<string, unknown> }));
+
+test("search on a TV request queues only what is missing — SeasonSearch/EpisodeSearch, never SeriesSearch", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  sonarrSearch = {
+    episodes: [
+      ep(11, 1, 1, { hasFile: true }), ep(12, 1, 2, { hasFile: true }),                // season 1 complete
+      ep(21, 2, 1), ep(22, 2, 2), ep(23, 2, 3),                                        // season 2: nothing on disk
+      ep(31, 3, 1, { hasFile: true }), ep(32, 3, 2), ep(33, 3, 3),                     // season 3: partly on disk
+      ep(1, 0, 1),                                                                     // a missing special
+      ep(34, 3, 4, { monitored: false }),                                              // unmonitored
+      ep(35, 3, 5, { airDateUtc: "2999-01-01T00:00:00Z" }),                            // not aired
+    ],
+  };
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, mediaType: "TV", status: "APPROVED", tvdbId: 4242 })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.arrError, null);
+  const commands = sonarrCommands();
+  assert.ok(commands.every((c) => c.body.name !== "SeriesSearch"), "never a whole-series SeriesSearch");
+  assert.deepEqual(commands.map((c) => c.body), [
+    { name: "SeasonSearch", seriesId: 77, seasonNumber: 2 },
+    { name: "EpisodeSearch", episodeIds: [32, 33] },
+  ]);
+  assert.ok(commands.every((c) => c.host === "10.0.0.3:8989"), "on the request's own (default) Sonarr");
+  const lookup = fetchCalls.find((c) => c.url.pathname.endsWith("/api/v3/series") && c.url.searchParams.has("tvdbId"));
+  assert.equal(lookup?.url.searchParams.get("tvdbId"), "4242", "the series is resolved by the request's tvdbId");
+});
+
+test("search on a COMPLETE series answers a translated arrError and queues nothing — no upgrade hunt", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  sonarrSearch = { episodes: [ep(11, 1, 1, { hasFile: true }), ep(12, 1, 2, { hasFile: true }), ep(1, 0, 1)] };
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, mediaType: "TV", status: "AVAILABLE", tvdbId: 4242 })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.arrError, "Nothing to search — no aired, monitored episode of this series is missing");
+  assert.equal(body.status, "AVAILABLE");
+  assert.deepEqual(sonarrCommands(), [], "no command at all");
+  assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "an answer, not a logged failure");
+});
+
+// NothingMissingError also answers a series none of whose AIRED episodes is
+// monitored (added with "Monitor: Future", or unmonitored since) — zero files on
+// disk. The answer must not claim the series is downloaded.
+test("search on a series whose aired episodes are all UNMONITORED says nothing is missing — never 'already downloaded'", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  sonarrSearch = {
+    episodes: [
+      ep(11, 1, 1, { monitored: false }), ep(12, 1, 2, { monitored: false }),        // aired, unmonitored, no file
+      ep(21, 2, 1, { airDateUtc: "2999-01-01T00:00:00Z" }),                         // the monitored upcoming one
+    ],
+  };
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, mediaType: "TV", status: "APPROVED", tvdbId: 4242 })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal(res.status, 200);
+  const body = await res.json() as { arrError: string | null; status: string };
+  assert.equal(body.arrError, "Nothing to search — no aired, monitored episode of this series is missing");
+  assert.ok(!/downloaded/i.test(body.arrError ?? ""), "zero episodes are on disk");
+  assert.equal(body.status, "APPROVED");
+  assert.deepEqual(sonarrCommands(), [], "no command at all");
+});
+
+test("search on a TV request on a NAMED instance runs on that instance (guardrail 32)", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  settings.set("arrSonarrInstances", JSON.stringify([{ slug: "anime", name: "Anime" }]));
+  settings.set("sonarrAnimeUrl", "http://10.0.0.9:8989");
+  settings.set("sonarrAnimeApiKey", "anime-key");
+  sonarrSearch = { episodes: [ep(41, 1, 1, { hasFile: true }), ep(42, 1, 2)] };
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, mediaType: "TV", status: "APPROVED", tvdbId: 4242, arrInstance: "anime" })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal((await res.json()).arrError, null);
+  const commands = sonarrCommands();
+  assert.deepEqual(commands.map((c) => c.body), [{ name: "EpisodeSearch", episodeIds: [42] }]);
+  assert.deepEqual(commands.map((c) => c.host), ["10.0.0.9:8989"], "the anime instance, not the default");
+  assert.ok(
+    fetchCalls.filter((c) => c.url.pathname.startsWith("/api/v3/")).every((c) => c.url.host === "10.0.0.9:8989"),
+    "every Sonarr read and write went to the request's own instance",
+  );
+});
+
+test("search on a TV request whose named instance left the registry answers a translated arrError, never a blank one", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  // Connection keys outlived the registry entry: the lookup can reach the
+  // instance, but the Missing plan refuses an instance the registry doesn't list.
+  settings.set("sonarrGoneUrl", "http://10.0.0.8:8989");
+  settings.set("sonarrGoneApiKey", "gone-key");
+  sonarrSearch = { episodes: [ep(42, 1, 2)] };
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, mediaType: "TV", status: "APPROVED", tvdbId: 4242, arrInstance: "gone" })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).arrError, "This request's Sonarr instance isn't configured any more");
+  assert.deepEqual(sonarrCommands(), [], "nothing queued on an unregistered instance");
+  assert.deepEqual(fetchCalls.filter((c) => c.url.host === "10.0.0.8:8989"), [], "not even the series lookup reaches an instance the registry doesn't list (guardrail 32)");
+});
+
+// searchMissing answers `partial` (not a throw) once Sonarr refused a command
+// after earlier ones were queued — those ARE running. The request row must not
+// read that as the whole plan having started.
+test("search whose plan Sonarr refused part-way answers the translated partial arrError, not a bare success", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  sonarrSearch = {
+    episodes: [ep(11, 1, 1), ep(12, 1, 2), ep(21, 2, 1), ep(22, 2, 2)],               // two fully missing seasons
+    acceptCommands: 1,
+  };
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, mediaType: "TV", status: "APPROVED", tvdbId: 4242 })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal(res.status, 200);
+  const body = await res.json() as { arrError: string | null; status: string };
+  assert.equal(body.arrError, "Only part of the search started — Sonarr refused the rest. Search again later for what is still missing.");
+  assert.equal(body.status, "APPROVED");
+  assert.deepEqual(sonarrCommands().map((c) => c.body), [
+    { name: "SeasonSearch", seriesId: 77, seasonNumber: 1 },                          // accepted
+    { name: "SeasonSearch", seriesId: 77, seasonNumber: 2 },                          // refused — nothing after it
+  ]);
+  assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "the queued part is running: an answer, not a failed search");
+});
+
+// The series left the request's Sonarr instance (deleted there since the push):
+// a translated arrError pointing at Re-push, never the English
+// "Series not found in Sonarr library" the old lookup threw into the generic catch.
+for (const [label, seriesRows] of [
+  ["answers no row", []],
+  ["ignores the tvdbId filter and lists another series", [{ id: 91, tvdbId: 9999 }]],
+] as const) {
+  test(`search on a series no longer on its instance (Sonarr ${label}) answers a translated arrError and queues nothing`, async () => {
+    const { token } = await manager();
+    const owner = await mintSession();
+    sonarrSearch = { episodes: [ep(42, 1, 2)], seriesRows: [...seriesRows] };
+    reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, mediaType: "TV", status: "APPROVED", tvdbId: 4242 })];
+    const res = await doPatch(token, "r1", { search: true });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).arrError, "This series isn't in this request's Sonarr instance — re-push the request to add it again");
+    assert.deepEqual(sonarrCommands(), [], "nothing queued");
+    assert.ok(!fetchCalls.some((c) => c.url.pathname.endsWith("/api/v3/episode")), "no plan read for a series that isn't there");
+    assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "an answer, not a logged failure");
+  });
+}
+
 test("the approve write carries a CAS predicate on the CURRENT status", async () => {
   // The transition-table check ran against a stale read, so two concurrent
   // admins could both pass it; the status predicate makes the write atomic.
@@ -1152,6 +1330,16 @@ test("quality-profiles routes MOVIE to radarr and TV to sonarr", async () => {
   fetchCalls.length = 0;
   await doProfiles(token, "?mediaType=TV");
   assert.ok(fetchCalls.some((c) => c.url.hostname === "10.0.0.3"), "TV should hit sonarr");
+});
+
+test("quality-profiles is rate-limited per user (live arr read)", async () => {
+  const { token } = await mintSession({ permissions: Permission.REQUEST_ADVANCED });
+  for (let i = 0; i < 120; i++) {
+    assert.notEqual((await doProfiles(token, "?mediaType=MOVIE")).status, 429, `call ${i + 1} is inside the 120/min budget`);
+  }
+  const over = await doProfiles(token, "?mediaType=MOVIE");
+  assert.equal(over.status, 429, "the 121st call within a minute is refused");
+  assert.ok(over.headers.get("retry-after"));
 });
 
 test("quality-profiles returns the profile list and the default id", async () => {

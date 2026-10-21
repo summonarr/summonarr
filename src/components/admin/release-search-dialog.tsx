@@ -6,6 +6,11 @@
 // season or an episode — and searches the first season with missing episodes.
 // The release rows are the same projected ArrRelease list the Issue "Replace"
 // panel shows (no indexer download URL ever reaches the browser).
+//
+// With a `target` instead of a request it is the admin title manager's
+// "Interactive search" (GET/POST /api/admin/arr/title/releases): one title on
+// one instance, for the movie, one season or one episode the manager chose —
+// no season picker, it searches at once.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -15,17 +20,20 @@ import { AlertTriangle, Check, ChevronDown, ChevronUp, Download, Loader2, Magnet
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { ArrRelease, SonarrSeasonSummary } from "@/lib/arr";
+import { RELEASE_SEARCH_POLL_MS, runReleaseSearchJob } from "@/lib/client/release-search-job";
 
-function sizeFormatter(locale: string) {
+export function sizeFormatter(locale: string) {
   const gb = new Intl.NumberFormat(locale, { style: "unit", unit: "gigabyte", unitDisplay: "narrow", maximumFractionDigits: 1 });
   const mb = new Intl.NumberFormat(locale, { style: "unit", unit: "megabyte", unitDisplay: "narrow", maximumFractionDigits: 0 });
   return (bytes: number) => (bytes >= 1e9 ? gb.format(bytes / 1e9) : mb.format(bytes / 1e6));
 }
 
-function ageFormatter(locale: string) {
+export function ageFormatter(locale: string) {
   const d = new Intl.NumberFormat(locale, { style: "unit", unit: "day", unitDisplay: "narrow", maximumFractionDigits: 0 });
   return (days: number) => d.format(Math.max(0, Math.round(days)));
 }
+
+const SLOW_SEARCH_MS = 15_000;
 
 // The season to search first: the earliest with something missing, else the latest.
 export function defaultSeason(seasons: readonly SonarrSeasonSummary[]): number | null {
@@ -33,20 +41,42 @@ export function defaultSeason(seasons: readonly SonarrSeasonSummary[]): number |
   return (seasons.find((s) => s.missing > 0) ?? seasons[seasons.length - 1]).seasonNumber;
 }
 
+/** One title on one instance, and what to search for: the movie, a season, or an episode. */
+export interface TitleReleaseTarget {
+  service: "radarr" | "sonarr";
+  instance: string;
+  arrId: number;
+  scope: { seasonNumber: number } | { episodeId: number } | null;
+}
+
+function titleScopeParams(target: TitleReleaseTarget): Record<string, string | number> {
+  if (!target.scope) return {};
+  return "seasonNumber" in target.scope ? { season: target.scope.seasonNumber } : { episodeId: target.scope.episodeId };
+}
+
 export function ReleaseSearchDialog({
   open,
   onOpenChange,
   requestId,
   mediaType,
+  target,
+  subtitle,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  requestId: string;
-  mediaType: string;
+  /** The request queue's search — or `target` for the title manager's. */
+  requestId?: string;
+  mediaType?: string;
+  target?: TitleReleaseTarget;
+  /** Shown under the heading ("Season 2", "S02E05"). */
+  subtitle?: string;
 }) {
   const t = useT();
   const locale = useLocale();
-  const isTv = mediaType !== "MOVIE";
+  // A target names its own scope, so it never shows the season picker.
+  const isTv = !target && mediaType !== "MOVIE";
+  // Effects key on the target's VALUE: a parent re-render hands a new object.
+  const targetKey = target ? JSON.stringify(target) : "";
   const [seasons, setSeasons] = useState<SonarrSeasonSummary[] | null>(null);
   const [season, setSeason] = useState<number | null>(null);
   const [releases, setReleases] = useState<ArrRelease[] | null>(null);
@@ -56,6 +86,8 @@ export function ReleaseSearchDialog({
   const [filter, setFilter] = useState("");
   const [showRejected, setShowRejected] = useState(false);
   const [grabbed, setGrabbed] = useState(false);
+  // A search past SLOW_SEARCH_MS says it is still going (indexers are slow, not stuck).
+  const [slow, setSlow] = useState(false);
   // Only the newest search may write state — switching seasons quickly must
   // never leave one season's releases offered for another (the grab would then
   // send that release to the wrong season's episodes). Closing the dialog bumps
@@ -80,12 +112,29 @@ export function ReleaseSearchDialog({
     setSelected(null);
     setShowRejected(false);
     setFilter("");
+    setSlow(false);
     try {
-      const qs = s !== null ? `?season=${s}` : "";
-      const res = await fetch(withBasePath(`/api/requests/${requestId}/releases${qs}`));
-      const data = (await res.json().catch(() => null)) as { releases?: ArrRelease[]; error?: string } | null;
-      if (id !== seq.current) return;
-      if (!res.ok || !data?.releases) {
+      let url: string;
+      if (targetKey) {
+        const tg = JSON.parse(targetKey) as TitleReleaseTarget;
+        const q = new URLSearchParams({ service: tg.service, instance: tg.instance, id: String(tg.arrId) });
+        for (const [k, v] of Object.entries(titleScopeParams(tg))) q.set(k, String(v));
+        url = `/api/admin/arr/title/releases?${q.toString()}`;
+      } else {
+        url = `/api/requests/${requestId}/releases${s !== null ? `?season=${s}` : ""}`;
+      }
+      // In the background (release-search-jobs.ts): indexers can take a minute
+      // or two, longer than a reverse proxy keeps one request open. Time is
+      // counted in polls, not read off the clock.
+      const answer = await runReleaseSearchJob(fetch, withBasePath(url), {
+        isAlive: () => id === seq.current,
+        onPoll: (polls) => {
+          if (polls * RELEASE_SEARCH_POLL_MS >= SLOW_SEARCH_MS) setSlow(true);
+        },
+      });
+      if (answer === null || id !== seq.current) return;
+      const data = answer.data as { releases?: ArrRelease[]; error?: string } | null;
+      if (answer.status < 200 || answer.status >= 300 || !data?.releases) {
         setError(data?.error ?? tRef.current("adminQueue.releases.failed"));
         return;
       }
@@ -96,15 +145,21 @@ export function ReleaseSearchDialog({
     } finally {
       if (id === seq.current) setLoading(null);
     }
-  }, [requestId]);
+  }, [requestId, targetKey]);
 
   // Fresh state on every open; a movie searches straight away, a series loads
   // its seasons first.
   useEffect(() => {
     if (!open) return;
     const t = tRef.current;
-    // The counter object itself (not a value read from it) for the cleanup below.
+    // The counter object itself (not a value read from it) for the cleanup:
+    // closing (or switching request) invalidates whatever is still in flight —
+    // a movie's or a title manager's search too, whose poll would otherwise
+    // keep running for minutes behind a closed (or unmounted) dialog.
     const counter = seq;
+    const invalidate = () => {
+      counter.current++;
+    };
     seq.current++;
     setSeasons(null);
     setSeason(null);
@@ -113,7 +168,7 @@ export function ReleaseSearchDialog({
     setGrabbed(false);
     if (!isTv) {
       void search(null);
-      return;
+      return invalidate;
     }
     const id = ++seq.current;
     setLoading("seasons");
@@ -143,10 +198,7 @@ export function ReleaseSearchDialog({
         }
       }
     })();
-    // Closing (or switching request) invalidates whatever is still in flight.
-    return () => {
-      counter.current++;
-    };
+    return invalidate;
   }, [open, isTv, requestId, search]);
 
   async function grab() {
@@ -155,13 +207,19 @@ export function ReleaseSearchDialog({
     setLoading("grab");
     setError("");
     try {
-      const res = await fetch(withBasePath(`/api/requests/${requestId}/releases`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // `guid` on these rows is the server's opaque handle for the release,
-        // never the indexer's own guid (which can embed an apikey).
-        body: JSON.stringify({ release: rel.guid, ...(isTv && season !== null ? { season } : {}) }),
-      });
+      // `guid` on these rows is the server's opaque handle for the release,
+      // never the indexer's own guid (which can embed an apikey).
+      const res = target
+        ? await fetch(withBasePath("/api/admin/arr/title/releases"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ service: target.service, instance: target.instance, id: target.arrId, release: rel.guid, ...titleScopeParams(target) }),
+        })
+        : await fetch(withBasePath(`/api/requests/${requestId}/releases`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ release: rel.guid, ...(isTv && season !== null ? { season } : {}) }),
+        });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         setError(data?.error ?? t("adminQueue.releases.grabFailed"));
@@ -188,7 +246,10 @@ export function ReleaseSearchDialog({
         <DialogBackdrop />
         <DialogPopup className="max-w-3xl">
           <div className="flex items-center justify-between gap-3 px-6 py-4 border-b border-zinc-700 flex-shrink-0">
-            <DialogTitle className="text-base font-semibold text-zinc-100">{t("adminQueue.releases.title")}</DialogTitle>
+            <div className="min-w-0">
+              <DialogTitle className="text-base font-semibold text-zinc-100">{t("adminQueue.releases.title")}</DialogTitle>
+              {subtitle && <p className="m-0 mt-0.5 text-xs text-zinc-500 truncate">{subtitle}</p>}
+            </div>
             <div className="flex items-center gap-3">
               {isTv && seasons && seasons.length > 0 && (
                 <StyledSelect
@@ -227,12 +288,14 @@ export function ReleaseSearchDialog({
           {loading === "seasons" || loading === "releases" ? (
             <div className="flex items-center justify-center gap-3 text-sm text-zinc-500 py-16">
               <Loader2 className="w-5 h-5 animate-spin" />
-              {t("adminQueue.releases.searching")}
+              {slow ? t("adminQueue.releases.searchingSlow") : t("adminQueue.releases.searching")}
             </div>
           ) : grabbed ? (
             <div className="flex items-center justify-center gap-2 text-sm text-green-400 py-16 px-6 text-center">
               <Check className="w-4 h-4 shrink-0" />
-              {t("adminQueue.releases.grabbed")}
+              {target
+                ? t("adminQueue.releases.grabbedTitle", { service: target.service === "radarr" ? "Radarr" : "Sonarr" })
+                : t("adminQueue.releases.grabbed")}
             </div>
           ) : error && releases === null ? (
             <div role="alert" className="flex items-center justify-center gap-2 text-sm py-16 px-6 text-center" style={{ color: "var(--ds-danger)" }}>
@@ -275,7 +338,7 @@ export function ReleaseSearchDialog({
                         <div className="flex items-center gap-3 mt-1 flex-wrap">
                           <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${rel.rejected ? "bg-zinc-800 text-zinc-500" : "bg-sky-500/10 text-sky-400"}`}>
                             {rel.quality.quality.name}
-                            {rel.quality.revision.version > 1 && " v2"}
+                            {rel.quality.revision.version > 1 && ` v${rel.quality.revision.version}`}
                           </span>
                           <span className="text-xs text-zinc-500">{size(rel.size)}</span>
                           <span className="text-xs text-zinc-500">{rel.indexer}</span>
@@ -285,9 +348,24 @@ export function ReleaseSearchDialog({
                             </span>
                           )}
                           <span className="text-xs text-zinc-500">{age(rel.age)}</span>
+                          {rel.customFormatScore !== null && (rel.customFormatScore !== 0 || rel.customFormats.length > 0) && (
+                            <span
+                              className={`text-xs font-medium px-1.5 py-0.5 rounded ${rel.customFormatScore < 0 ? "bg-red-500/10 text-red-400" : "bg-zinc-800 text-zinc-300"}`}
+                              title={rel.customFormats.length > 0 ? rel.customFormats.join(", ") : undefined}
+                            >
+                              {t("adminQueue.releases.score", { score: rel.customFormatScore > 0 ? `+${rel.customFormatScore}` : String(rel.customFormatScore) })}
+                            </span>
+                          )}
+                          {rel.languages.length > 0 && (
+                            <span className="text-xs text-zinc-500 truncate max-w-[12rem]" title={rel.languages.join(", ")}>{rel.languages.join(", ")}</span>
+                          )}
                         </div>
                         {rel.rejected && rel.rejections.length > 0 && (
-                          <p className="text-xs text-amber-400 mt-0.5 truncate">{rel.rejections[0]}</p>
+                          <ul className="m-0 mt-0.5 p-0 list-none">
+                            {rel.rejections.slice(0, 4).map((r, i) => (
+                              <li key={i} className="text-xs text-amber-400 truncate" title={r}>{r}</li>
+                            ))}
+                          </ul>
                         )}
                       </div>
                       {isSelected && <Check className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />}

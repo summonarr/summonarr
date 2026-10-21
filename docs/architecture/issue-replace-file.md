@@ -1,0 +1,7 @@
+# Issue "Replace file"
+
+_Moved verbatim from CLAUDE.md "Core architecture"._
+
+**Issue "Replace file"** — `GET/POST /api/issues/[id]/files` (ADMIN — deleting files is ADMIN-only; ISSUE_ADMIN keeps Refetch and Replace-release), rules in [issue-replace.ts](../../src/lib/issue-replace.ts), panel in [issue-actions.tsx](../../src/components/admin/issue-actions.tsx). While a file is on disk Radarr/Sonarr only take an UPGRADE of it, so an issue's Refetch can never replace a broken file already at the profile cutoff: this deletes the file first, then marks its grab failed (blocklist + the arr's redownload) or searches. Guardrail 5f.
+- One replace per issue at a time, process-wide (claimed before the status CAS): a second POST while one runs is 409 with nothing written or sent — the CAS alone lets IN_PROGRESS → IN_PROGRESS through for every caller.
+- The browser runs it as a BACKGROUND job (`async: true` → 202 `{ job }`, poll `GET ?job=` — the 37a pattern through `startArrJob`/`jobResponse`, client [replace-file-job.ts](../../src/lib/client/replace-file-job.ts)): its marks run in sequence, each re-reading the title's history, and a long series outlasts a reverse proxy's hold. The same admin posting for the same issue while it runs JOINS it; the synchronous default stays for API callers. A restart drops the job — the poll 404s and the dialog says to reload the issue, never to run it again.

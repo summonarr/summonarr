@@ -533,7 +533,9 @@ class PlexEventStreamManager {
     await Promise.all(
       stale.map(async (session) => {
         try {
-          await recordCompletedSession(applyFinalTick(session, now), { stoppedAt: now });
+          // Absent past the grace: no final tick, stoppedAt = lastSeenAt (see the
+          // poller's absence sweep) — the gap since lastSeenAt is not playtime.
+          await recordCompletedSession(session);
           // Ledger AFTER the PlayHistory write commits (guardrail 27): a failed record must
           // not ledger-lock the sessionKey for an hour with no history row — leave
           // it un-finalized so the next poll re-creates the row and retries.

@@ -10,6 +10,8 @@ import {
   traktUsesFor,
 } from "@/lib/trakt-user";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { readJsonCappedOr } from "@/lib/body-size";
+import { requireStepUp } from "@/lib/step-up-auth";
 
 // Start connecting the caller's Trakt account (device-code flow, guardrail 34c).
 // Answers the short code to enter at trakt.tv/activate; the device code itself
@@ -26,6 +28,24 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!cfg || (!uses.watchlist && !uses.history)) {
     return NextResponse.json({ error: t("apiAuth.profile.trakt.unavailable") }, { status: 400 });
   }
+  // Step-up (guardrail 6g): a connected Trakt account files its watchlist as
+  // this user's requests and survives a password change, so a hijacked session
+  // must not be able to connect the hijacker's own Trakt. (No native client
+  // calls this route.)
+  const parsed = await readJsonCappedOr<{ confirmPassword?: unknown }>(req, 16 * 1024, {});
+  if (parsed instanceof NextResponse) return parsed;
+  const denied = await requireStepUp({
+    req,
+    session,
+    confirmPassword: parsed.confirmPassword,
+    context: "trakt-connect",
+    messages: {
+      passwordRequired: t("apiAuth.stepUp.passwordRequired"),
+      recentSignInRequired: t("apiAuth.stepUp.recentSignIn"),
+    },
+    t,
+  });
+  if (denied) return denied;
   try {
     return NextResponse.json(await startTraktDeviceAuth(session.user.id, cfg));
   } catch (err) {

@@ -24,10 +24,11 @@ import {
   Permission,
 } from "@/lib/permissions";
 import { getMediaInstanceAccessLists, visibleInstancesFor } from "@/lib/media-visibility";
-import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, quotaUsageWhere } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
 import { mapLimit } from "@/lib/concurrency";
 import { readJsonCapped } from "@/lib/body-size";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
@@ -76,13 +77,16 @@ class QuotaExceeded extends Error {
   readonly limit: number;
   readonly windowLabel: string;
   readonly used: number;
+  // Whose quota ran out: the target's, or (on behalf) the FILER's own.
+  readonly whose: "target" | "filer";
 
-  constructor(mt: MediaType, limit: number, windowLabel: string, used: number) {
+  constructor(mt: MediaType, limit: number, windowLabel: string, used: number, whose: "target" | "filer" = "target") {
     super("QUOTA_EXCEEDED");
     this.mt = mt;
     this.limit = limit;
     this.windowLabel = windowLabel;
     this.used = used;
+    this.whose = whose;
   }
 }
 
@@ -131,9 +135,16 @@ export const POST = withPermission([
 
   const parsed: { tmdbId: number; mediaType: MediaType }[] = [];
   for (const raw of body.items) {
-    const it = raw as { tmdbId?: unknown; mediaType?: unknown };
+    // A null/primitive element is a malformed item, not a TypeError (500).
+    const it = (raw !== null && typeof raw === "object" ? raw : {}) as { tmdbId?: unknown; mediaType?: unknown };
     if (!Number.isInteger(it.tmdbId) || (it.tmdbId as number) <= 0) {
       return NextResponse.json({ error: t("apiUser.requests.bulk.itemTmdbId") }, { status: 400 });
+    }
+    // Bulk carries no per-item _token (the single POST's HMAC token is minted only
+    // for an in-range id), so an INT4-overflowing id would reach the first keyed
+    // mediaRequest read below and throw out of Prisma as a 500.
+    if (!isTmdbIdInRange(it.tmdbId as number)) {
+      return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
     }
     if (it.mediaType !== "MOVIE" && it.mediaType !== "TV") {
       return NextResponse.json({ error: t("apiUser.requests.bulk.itemMediaType") }, { status: 400 });
@@ -222,6 +233,39 @@ export const POST = withPermission([
     );
   }
 
+  // Named-instance grants and media-server grants are NOT permission bits, so the
+  // subset check above cannot see them. A non-ADMIN on-behalf filer may only use a
+  // named instance they could request on / auto-approve on themselves (grant only
+  // what you hold), and only sees "already available" for servers they can view
+  // themselves (the per-item results would otherwise leak a restricted library).
+  const filerChecked = isOnBehalf && !hasPermission(session.user.permissions, Permission.ADMIN);
+  const filerRow = filerChecked
+    ? await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: {
+          instanceGrants: true,
+          mediaServerGrants: true,
+          maxContentRating: true,
+          movieQuotaLimit: true,
+          movieQuotaDays: true,
+          tvQuotaLimit: true,
+          tvQuotaDays: true,
+        },
+      })
+    : null;
+  const filerGrants = parseInstanceGrants(filerRow?.instanceGrants);
+  const filerMay = (
+    inst: { slug: string; restricted: boolean; serverAll: boolean },
+    mediaType: MediaType,
+    serverAll4k: boolean,
+    autoApprove = false,
+  ) =>
+    !filerChecked ||
+    inst.slug === "" ||
+    (autoApprove
+      ? canAutoApproveInstance(session.user.permissions, inst, filerGrants, mediaType)
+      : canRequestInstance(session.user.permissions, inst, filerGrants, mediaType, serverAll4k));
+
   // discordRequireLinkedAccountSite only gates SELF requests — an admin acting on
   // behalf is trusted and shouldn't be blocked by the target's link state.
   if (!isOnBehalf) {
@@ -302,7 +346,7 @@ export const POST = withPermission([
       const routed = slugByKey.get(key);
       if (routed === undefined || routed === "") continue;
       const inst = configuredByType[it.mediaType].find((i) => i.slug === routed) ?? DEFAULT_ACCESS;
-      if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k)) {
+      if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k) || !filerMay(inst, it.mediaType, serverAll4k)) {
         slugByKey.delete(key); // slugOf() now returns "" (default instance)
       }
     }
@@ -314,12 +358,26 @@ export const POST = withPermission([
   // (and vice versa — an admin bulk-requesting on behalf of a plain user must not have their
   // own broader visibility silently swallow the items). Same targetPerms/target-grants rule
   // the instance and quota gates above already follow.
-  const visible = visibleInstancesFor(
+  const targetVisible = visibleInstancesFor(
     targetPerms,
     parseMediaServerGrants(target.mediaServerGrants),
     mediaAccess.plex,
     mediaAccess.jellyfin,
   );
+  const filerVisible = filerChecked
+    ? visibleInstancesFor(
+        session.user.permissions,
+        parseMediaServerGrants(filerRow?.mediaServerGrants),
+        mediaAccess.plex,
+        mediaAccess.jellyfin,
+      )
+    : null;
+  const visible = filerVisible
+    ? {
+        plex: targetVisible.plex.filter((x) => filerVisible.plex.includes(x)),
+        jellyfin: targetVisible.jellyfin.filter((x) => filerVisible.jellyfin.includes(x)),
+      }
+    : targetVisible;
 
   // Authoritative existing-state lookup — never trust client-supplied availability.
   // Every mediaRequest / arr-availability query is scoped to each item's ROUTED
@@ -381,13 +439,18 @@ export const POST = withPermission([
       continue;
     }
     const inst = instOf(it);
-    if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k)) {
+    if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k) || !filerMay(inst, it.mediaType, serverAll4k)) {
       skipped.push({ ...it, result: "no-permission" });
       continue;
     }
     // skipLibraryCheck instances (e.g. 4K) ignore the shared Plex/Jellyfin
     // library — only that instance's own arr availability short-circuits.
-    if ((!inst.skipLibraryCheck && libraryAvailSet.has(k)) || arrAvailSet.has(k)) {
+    // The *arr-available cache short-circuits ONLY for a requester who would be
+    // auto-approved — exactly request-create.ts (`isAutoApprove && arrHasInstance`)
+    // and the Discord path (`mayAutoApprove && arrHasInstance`). Everyone else files a
+    // normal request, so the sync's arr marking pass can notify them when it lands.
+    const arrCounts = arrAvailSet.has(k) && canAutoApproveInstance(targetPerms, inst, grants, it.mediaType) && filerMay(inst, it.mediaType, serverAll4k, true);
+    if ((!inst.skipLibraryCheck && libraryAvailSet.has(k)) || arrCounts) {
       skipped.push({ ...it, result: "already-available" });
       continue;
     }
@@ -417,9 +480,17 @@ export const POST = withPermission([
   // DECLINED history row and then create nothing, silently erasing it. Only capped,
   // non-admin targets pay the per-item certification fetch; unknown/unrated titles
   // are allowed (see content-rating.ts).
+  //
+  // A non-ADMIN on-behalf filer's OWN cap applies too (the stricter wins): the
+  // permission-bit subset rule above can't see a cap, so a capped delegate could
+  // otherwise file titles above their own rating by naming an uncapped user —
+  // and with AUTO_APPROVE on both, straight into Radarr/Sonarr.
   let ratingBlocked: CreateOutcome[] = [];
-  if (target.maxContentRating && !hasPermission(targetPerms, Permission.ADMIN)) {
-    const cap = target.maxContentRating;
+  const caps = [
+    target.maxContentRating && !hasPermission(targetPerms, Permission.ADMIN) ? target.maxContentRating : null,
+    filerChecked ? filerRow?.maxContentRating ?? null : null,
+  ].filter((c): c is string => typeof c === "string" && c.length > 0);
+  if (caps.length > 0) {
     const checked = await mapLimit(toCreate, ARR_CONCURRENCY, async (it) => {
       let cert: string | undefined;
       try {
@@ -428,7 +499,7 @@ export const POST = withPermission([
       } catch {
         cert = undefined;
       }
-      return { it, blocked: exceedsCap(cert, cap) };
+      return { it, blocked: caps.some((cap) => exceedsCap(cert, cap)) };
     });
     toCreate = checked.filter((c) => !c.blocked).map((c) => c.it);
     ratingBlocked = checked
@@ -462,7 +533,9 @@ export const POST = withPermission([
           title: r.meta.title,
           posterPath: r.meta.posterPath,
           releaseYear: r.meta.releaseYear,
-          autoApprove: canAutoApproveInstance(targetPerms, instOf(r.it), grants, r.it.mediaType),
+          autoApprove:
+            canAutoApproveInstance(targetPerms, instOf(r.it), grants, r.it.mediaType) &&
+            filerMay(instOf(r.it), r.it.mediaType, serverAll4k, true),
         }]
       : [],
   );
@@ -490,9 +563,15 @@ export const POST = withPermission([
   const mirroredKeys = new Set<string>();
   if (prepared.length > 0) {
     const enforceQuota = !hasPermission(targetPerms, Permission.QUOTA_UNLIMITED);
+    // A non-ADMIN on-behalf filer's OWN quota is charged too (guardrail 6g): the
+    // rows carry filedBy, and quotaUsageWhere counts what a user filed for others
+    // beside what was filed for them — so naming other users can't multiply what
+    // a delegate may file.
+    const enforceFilerQuota =
+      filerChecked && filerRow !== null && !hasPermission(session.user.permissions, Permission.QUOTA_UNLIMITED);
     let gLimit = 0;
     let gPeriod = "week";
-    if (enforceQuota) {
+    if (enforceQuota || enforceFilerQuota) {
       const qrows = await prisma.setting.findMany({ where: { key: { in: ["quotaLimit", "quotaPeriod"] } } });
       const qmap = Object.fromEntries(qrows.map((s) => [s.key, s.value]));
       gLimit = parseQuotaLimit(qmap.quotaLimit);
@@ -516,16 +595,22 @@ export const POST = withPermission([
                 where: { id: { in: staleDeclinedIds }, status: "DECLINED", permanentlyDeclined: false },
               });
             }
-            if (enforceQuota) {
-              for (const mt of ["MOVIE", "TV"] as MediaType[]) {
-                const n = prepared.filter((p) => p.mediaType === mt).length;
-                if (n === 0) continue;
+            for (const mt of ["MOVIE", "TV"] as MediaType[]) {
+              const n = prepared.filter((p) => p.mediaType === mt).length;
+              if (n === 0) continue;
+              if (enforceQuota) {
                 const rq = resolveUserQuota(mt, target, gLimit, gPeriod);
-                if (rq.limit <= 0) continue;
-                const used = await tx.mediaRequest.count({
-                  where: { requestedBy: targetUserId, mediaType: mt, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
-                });
-                if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used);
+                if (rq.limit > 0) {
+                  const used = await tx.mediaRequest.count({ where: quotaUsageWhere(targetUserId, mt, rq.since) });
+                  if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used);
+                }
+              }
+              if (enforceFilerQuota && filerRow) {
+                const rq = resolveUserQuota(mt, filerRow, gLimit, gPeriod);
+                if (rq.limit > 0) {
+                  const used = await tx.mediaRequest.count({ where: quotaUsageWhere(session.user.id, mt, rq.since) });
+                  if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used, "filer");
+                }
               }
             }
             // Capture rows that existed BEFORE this insert so the side effects below
@@ -544,18 +629,21 @@ export const POST = withPermission([
             // already APPROVED or AVAILABLE, the content is greenlit/fulfilled — mirror
             // that status so the bulk requester is tracked (and gets the "now available"
             // ping) instead of queuing a duplicate PENDING for an admin to re-review.
-            // Matches the single POST /api/requests "mirror-approved" branch.
+            // Matches the single POST /api/requests "mirror-approved" branch,
+            // including its `cleanedUpAt: null`: a stamped row records a
+            // deliberate removal, not a greenlight (guardrail 14b) — mirroring it
+            // as APPROVED would let the sync re-push the deleted title.
             const greenlit = await tx.mediaRequest.findMany({
-              where: { status: { in: ["APPROVED", "AVAILABLE"] }, OR: createPairs },
+              where: { status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null, OR: createPairs },
               select: { tmdbId: true, mediaType: true, status: true },
             });
             // An AVAILABLE peer is mirrored as APPROVED, matching the single route
             // (request-create.ts): the peer may have been marked off a restricted
             // server this target holds no grant for (guardrail 35). Every item here
             // has ALREADY been found absent from the target's visible libraries AND
-            // from the routed instance's *arr-available cache (the already-available
-            // gate above), so the one ungated signal that would justify copying
-            // AVAILABLE is known to be missing. The grant-gated sync marking pass
+            // (for an auto-approver) from the routed instance's *arr-available cache.
+            // Mirroring APPROVED is always safe: the sync's marking passes promote
+            // it. The grant-gated sync marking pass
             // promotes (and notifies) the row once the title is visible to them.
             const greenlitKeys = new Set<string>();
             for (const g of greenlit) greenlitKeys.add(keyOf(g.tmdbId, g.mediaType));
@@ -580,6 +668,8 @@ export const POST = withPermission([
                   releaseYear: p.releaseYear,
                   note: null,
                   requestedBy: targetUserId,
+                  // Who filed it, when on behalf — the filer's quota key (guardrail 6g).
+                  ...(isOnBehalf ? { filedBy: session.user.id } : {}),
                   status,
                   // No availableAt: a mirrored row is never created AVAILABLE (above).
                   // Auto-approve is an approval (MediaRequest.approvedAt). A mirrored
@@ -604,11 +694,16 @@ export const POST = withPermission([
         const remaining = Math.max(0, err.limit - err.used);
         return NextResponse.json(
           {
-            error: t(err.mt === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv", {
-              limit: err.limit,
-              window: translateQuotaWindow(t, err.windowLabel),
-              remaining,
-            }),
+            error: t(
+              err.whose === "filer"
+                ? err.mt === "MOVIE" ? "apiUser.requests.bulk.filerQuotaMovie" : "apiUser.requests.bulk.filerQuotaTv"
+                : err.mt === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv",
+              {
+                limit: err.limit,
+                window: translateQuotaWindow(t, err.windowLabel),
+                remaining,
+              },
+            ),
           },
           { status: 429 },
         );
@@ -710,15 +805,16 @@ export const POST = withPermission([
 
   const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
   const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;
-  const requesterName = target.name ?? target.email;
 
   if (isOnBehalf) {
+    // The account by id (+ display name), never the email — the convention for
+    // a row ABOUT a user (audit-scrub.ts).
     void logAudit({
       userId: session.user.id,
       userName: session.user.name ?? session.user.email,
       action: "REQUEST_ON_BEHALF",
       target: `user:${targetUserId}`,
-      details: { targetUser: requesterName, created: createdCount, results },
+      details: { targetUserId, ...(target.name ? { targetUser: target.name } : {}), created: createdCount, results },
       ...auditContext(req, session),
     });
   }

@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
-import { confirmTotpEnrollmentInTx, ensureRecoveryCodesInTx, getMfaState, type ConfirmTotpResult } from "@/lib/mfa/mfa-store";
+import { confirmTotpEnrollmentInTx, ensureRecoveryCodesInTx, getMfaState, lockUserMfaInTx, type ConfirmTotpResult } from "@/lib/mfa/mfa-store";
 import { mfaEligibleUser } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -19,7 +19,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // was already active), and only that response ever carried it. A secret issued
 // on the password alone, before the account had any factor, is deleted when a
 // passkey becomes the first factor instead (passkeys/route.ts) — so it can
-// never be confirmed onto an account that has 2FA by then.
+// never be confirmed onto an account that has 2FA by then. The confirm runs
+// under the per-user MFA lock, which that passkey transaction also holds, and
+// judges "first factor" from the state re-read inside it.
 //
 // When this is the account's FIRST second factor the response carries ten
 // one-time recovery codes (shown once) and every OTHER session is signed out.
@@ -38,12 +40,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const user = await mfaEligibleUser(session, t);
   if (user instanceof NextResponse) return user;
 
-  const before = await getMfaState(user.id);
   const code = parsed.code;
   const outcome = await prisma.$transaction(async (tx) => {
+    // Lock FIRST, then read: a passkey registration racing this confirm either
+    // committed before (its delete of the pending secret is visible, and this
+    // is not the first factor) or waits for this one to commit.
+    await lockUserMfaInTx(tx, user.id);
+    const before = await getMfaState(user.id, tx);
     const result: ConfirmTotpResult = await confirmTotpEnrollmentInTx(tx, user.id, code);
-    if (result !== "ok") return { result, recoveryCodes: null as string[] | null };
-    return { result, recoveryCodes: await ensureRecoveryCodesInTx(tx, user.id) };
+    if (result !== "ok") return { result, recoveryCodes: null as string[] | null, firstFactor: false };
+    return { result, recoveryCodes: await ensureRecoveryCodesInTx(tx, user.id), firstFactor: !before.enabled };
   });
   if (outcome.result === "no-pending") {
     return NextResponse.json({ error: t("apiAuth.mfa.startSetupFirst") }, { status: 400 });
@@ -55,14 +61,15 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAuth.mfa.codeMismatch") }, { status: 400 });
   }
 
-  const revoked = before.enabled ? 0 : await revokeOtherUserSessions(user.id, session.sessionId);
+  const { firstFactor } = outcome;
+  const revoked = firstFactor ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
   void notifyMfaSecurityEvent(user.id, "totp-enabled");
   void logAudit({
     userId: user.id,
     userName: user.name ?? user.email,
     action: "MFA_CHANGE",
     target: `user:${user.id}`,
-    details: { kind: "totp-enabled", firstFactor: !before.enabled, otherSessionsRevoked: revoked },
+    details: { kind: "totp-enabled", firstFactor, otherSessionsRevoked: revoked },
     ...auditContext(req, session),
   });
   return NextResponse.json(

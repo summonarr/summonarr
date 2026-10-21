@@ -476,3 +476,79 @@ test("settingKeyFromArgs names the row a key-less select cannot name itself", as
   assert.equal(settingKeyFromArgs(undefined), undefined);
   assert.equal(settingKeyFromArgs(null), undefined);
 });
+
+// ── behaviour: what actually reaches the database ───────────────────────────
+// Everything above reads the handler SOURCE. These record the statement values
+// the pg driver is handed, by stubbing pg.Client for the length of one call, so
+// "the `{ set }` form is encrypted" is observed on the wire rather than inferred.
+// The stub reports no rows; Prisma's own "record not found" for the update is
+// tolerated — only the bound parameters matter.
+async function recordedValues(run: () => Promise<unknown>): Promise<unknown[]> {
+  const pg = (await import("pg")).default as unknown as { Client: { prototype: Record<string, unknown> } };
+  const proto = pg.Client.prototype;
+  const saved = { connect: proto.connect, query: proto.query, end: proto.end };
+  const seen: unknown[] = [];
+  proto.connect = function (cb?: (e: Error | null) => void) { if (cb) { cb(null); return undefined; } return Promise.resolve(); };
+  proto.end = function (cb?: () => void) { if (cb) { cb(); return undefined; } return Promise.resolve(); };
+  // pg-pool's pool.query() calls client.query(config, callback); fail the
+  // statement with a stub error so Prisma gives up at once.
+  proto.query = function (...args: unknown[]) {
+    const cb = args.find((a) => typeof a === "function") as ((e: Error) => void) | undefined;
+    const q = args[0];
+    const cfg = (typeof q === "string" ? { text: q, values: args[1] } : q) as { text?: string; values?: unknown[] };
+    if (/^\s*(INSERT|UPDATE)/i.test(String(cfg.text))) seen.push(...(cfg.values ?? []));
+    const err = new Error("stub db");
+    if (cb) { cb(err); return undefined; }
+    return Promise.reject(err);
+  };
+  try {
+    await run().catch(() => {});
+  } finally {
+    Object.assign(proto, saved);
+  }
+  return seen;
+}
+
+test("setting.update with value:{ set } on a sensitive key is stored as enc:v1 ciphertext, never plaintext", async () => {
+  const values = await recordedValues(() =>
+    prisma.setting.update({ where: { key: "radarrApiKey" }, data: { value: { set: "PLAINTEXT-API-KEY" } } }),
+  );
+  assert.ok(values.some((v) => typeof v === "string" && v.startsWith("enc:v1:")), `no ciphertext bound: ${JSON.stringify(values)}`);
+  assert.ok(!values.includes("PLAINTEXT-API-KEY"), "the plaintext reached the driver");
+});
+
+test("setting.upsert with update.value:{ set } on a sensitive key is stored as enc:v1 ciphertext", async () => {
+  const values = await recordedValues(() =>
+    prisma.setting.upsert({
+      where: { key: "radarrApiKey" },
+      create: { key: "radarrApiKey", value: "CREATE-PLAINTEXT" },
+      update: { value: { set: "UPDATE-PLAINTEXT" } },
+    }),
+  );
+  assert.ok(values.some((v) => typeof v === "string" && v.startsWith("enc:v1:")), `no ciphertext bound: ${JSON.stringify(values)}`);
+  assert.ok(!values.includes("UPDATE-PLAINTEXT"), "the { set } plaintext reached the driver");
+  assert.ok(!values.includes("CREATE-PLAINTEXT"), "the create plaintext reached the driver");
+});
+
+test("setting.update / upsert with any value operator other than { set: string } are refused before a query", async () => {
+  const bad = [{ increment: 1 }, { set: 5 }, { set: null }, {}] as unknown[];
+  for (const value of bad) {
+    const u = await thrown(() => prisma.setting.update({ where: { key: "radarrApiKey" }, data: { value: value as never } }));
+    assert.match(u?.message ?? "", /non-string `value` operation is forbidden/, `update ${JSON.stringify(value)}`);
+    const s = await thrown(() =>
+      prisma.setting.upsert({ where: { key: "radarrApiKey" }, create: { key: "radarrApiKey", value: "x" }, update: { value: value as never } }),
+    );
+    assert.match(s?.message ?? "", /non-string `value` operation is forbidden/, `upsert ${JSON.stringify(value)}`);
+  }
+});
+
+test("account.update with token:{ set } is stored as enc:v1 ciphertext for all three token columns", async () => {
+  const values = await recordedValues(() =>
+    prisma.account.update({
+      where: { id: "acc1" },
+      data: { access_token: { set: "AT-PLAIN" }, refresh_token: { set: "RT-PLAIN" }, id_token: { set: "IT-PLAIN" } },
+    }),
+  );
+  for (const plain of ["AT-PLAIN", "RT-PLAIN", "IT-PLAIN"]) assert.ok(!values.includes(plain), `${plain} reached the driver`);
+  assert.equal(values.filter((v) => typeof v === "string" && v.startsWith("enc:v1:")).length, 3);
+});

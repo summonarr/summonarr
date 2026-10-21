@@ -254,6 +254,7 @@ test("movie cold miss: exact TMDB wire shape, :details cache write with US cert 
     vote_average: 8.4,
     vote_count: 27000,
     genres: [{ id: 18, name: "Drama" }],
+    production_countries: [{ iso_3166_1: "US", name: "United States of America" }, { iso_3166_1: "DE", name: "Germany" }],
     belongs_to_collection: { id: 9999, name: "Fight Club Collection" },
     videos: {
       results: [
@@ -304,6 +305,10 @@ test("movie cold miss: exact TMDB wire shape, :details cache write with US cert 
   assert.equal(blob.trailerKey, "official-key");
   assert.equal(blob.collectionId, 9999);
   assert.equal(blob.collectionName, "Fight Club Collection");
+  // ISO codes stay index-aligned with the display names (localizedProductionCountry
+  // needs them; dropping them on rewrite shows non-English viewers the English name).
+  assert.deepEqual(blob.productionCountries, ["United States of America", "Germany"]);
+  assert.deepEqual(blob.productionCountryCodes, ["US", "DE"]);
   assert.equal("seasons" in blob, false); // movies never carry a seasons array
   // A 1999 release lands in the 30-day back-catalog TTL bucket (loose window —
   // the bucket values are owned by tests/tmdb-cache-ttl.test.mts).

@@ -132,6 +132,11 @@ function makeTx() {
     // Tagged-template form: strings array + interpolated bind values. Both the
     // role-change CAS and anonymize's last-admin CAS read the row count back.
     $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      // reactivateUser now runs INSIDE the lock-42 tx; route its guarded restore to
+      // the same stub the top-level client used.
+      if (/UPDATE "User" SET "deactivatedAt" = NULL/.test(strings.join("?"))) {
+        return (fakePrisma as unknown as { $executeRaw: (s: TemplateStringsArray, ...v: unknown[]) => Promise<number> }).$executeRaw(strings, ...values);
+      }
       txOps.push({ op: "$executeRaw", args: { sql: strings.join("?"), values } });
       return casRows;
     },
@@ -150,6 +155,16 @@ function makeTx() {
     userTotp: { deleteMany: rec("userTotp.deleteMany") },
     webAuthnCredential: { deleteMany: rec("webAuthnCredential.deleteMany") },
     mfaRecoveryCode: { deleteMany: rec("mfaRecoveryCode.deleteMany") },
+    // The purge reads the account's own request ids for its exact moderation-row
+    // scrub (audit-scrub.ts scrubOwnedRequestPii): none here.
+    mediaRequest: {
+      findMany: async (args?: unknown) => { txOps.push({ op: "mediaRequest.findMany", args }); return []; },
+    },
+    // The purge's audit-trail scrub (audit-scrub.ts): no aged rows here.
+    auditLog: {
+      findMany: async (args?: unknown) => { txOps.push({ op: "auditLog.findMany", args }); return []; },
+      updateMany: rec("auditLog.updateMany"),
+    },
     // The TMDB reset's graph half. Both live in ONE transaction so an unstamped
     // node can never be observed alongside its still-present edges (or, far
     // worse, the reverse) — see the route's comment.
@@ -164,6 +179,15 @@ function makeTx() {
       updateMany: rec("mediaServerUser.updateMany"),
       deleteMany: async () => {
         throw new Error("guardrail 28 violated: MediaServerUser must never be hard-deleted");
+      },
+      // The manual link (server-users/[id] PATCH) re-reads the row and writes it
+      // inside a transaction.
+      findUnique: async (args: { where: { id: string } }) => serverUsersById.get(args.where.id) ?? null,
+      update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+        txOps.push({ op: "mediaServerUser.update", args });
+        const row = serverUsersById.get(args.where.id);
+        if (row) Object.assign(row, args.data);
+        return {};
       },
     },
     authSession: {
@@ -195,6 +219,12 @@ function makeTx() {
         return u ? { sessionsRevokedAt: u.sessionsRevokedAt, deactivatedAt: u.deactivatedAt, purgedAt: u.purgedAt } : null;
       },
       update: rec("user.update"),
+      // The manual link's admin re-check reads the current and the new owner.
+      findMany: async (args: { where: { id: { in: string[] } } }) =>
+        args.where.id.in.flatMap((id) => {
+          const u = usersById.get(id);
+          return u ? [{ role: u.role, permissions: u.permissions }] : [];
+        }),
       // purgeUserDataInTx's final write — atomically re-checks deactivatedAt in
       // the SAME statement that scrubs the row, closing a race where a
       // concurrent reactivate could otherwise leave a purged-but-active zombie.
@@ -251,10 +281,19 @@ const fakePrisma = {
     },
   },
   mediaRequest: { count: async () => counts.requests },
+  // The admin 2FA reset's before-state read (getMfaState): no factors enrolled.
+  userTotp: { findUnique: async () => null },
+  webAuthnCredential: { findMany: async () => [] },
+  mfaRecoveryCode: { count: async () => 0 },
   issue: { count: async () => counts.issues },
   deletionVote: { count: async () => counts.votes },
   mediaServerUser: {
-    findUnique: async (args: { where: { id: string } }) => serverUsersById.get(args.where.id) ?? null,
+    // A SNAPSHOT, like real Prisma — a live reference would make a stale read
+    // look fresh and hide a missing in-transaction re-read.
+    findUnique: async (args: { where: { id: string } }) => {
+      const row = serverUsersById.get(args.where.id);
+      return row ? { ...row } : null;
+    },
     update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
       txOps.push({ op: "mediaServerUser.update(top)", args });
       const row = serverUsersById.get(args.where.id);
@@ -318,6 +357,7 @@ const fakePrisma = {
 const { NextRequest } = await import("next/server");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
+const { Permission } = await import("../src/lib/permissions.ts");
 
 const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
 const { DELETE: clearCache } = await import("../src/app/api/admin/clear-cache/route.ts");
@@ -326,6 +366,7 @@ const { PATCH: userPatch, DELETE: userDelete } = await import("../src/app/api/ad
 const { GET: sessionsList, DELETE: sessionsRevoke } = await import("../src/app/api/admin/users/[id]/sessions/route.ts");
 const { POST: userReactivate } = await import("../src/app/api/admin/users/[id]/reactivate/route.ts");
 const { POST: userPurge } = await import("../src/app/api/admin/users/[id]/purge/route.ts");
+const { DELETE: userMfaReset } = await import("../src/app/api/admin/users/[id]/mfa/route.ts");
 const { PATCH: serverUserPatch } = await import("../src/app/api/admin/server-users/[id]/route.ts");
 const { DELETE: trashDelete } = await import("../src/app/api/admin/trash-guides/applications/[id]/route.ts");
 const { POST: plexTerminate } = await import("../src/app/api/admin/play-history/terminate-session/route.ts");
@@ -539,6 +580,12 @@ test("user-delete: happy path → 200 and one USER_DEACTIVATE audit row", async 
   assert.equal(auditRows.length, 1);
   assert.equal(auditRows[0].action, "USER_DEACTIVATE");
   assert.equal(auditRows[0].target, `user:${targetId}`);
+  // Named by id (+ display name), never by email.
+  const details = JSON.parse(auditRows[0].details as string);
+  assert.equal(details.targetUserId, targetId);
+  assert.equal(details.targetUser, usersById.get(targetId)!.name);
+  assert.ok(!("targetEmail" in details));
+  assert.ok(!(auditRows[0].details as string).includes("@example.com"), "no email anywhere in the details");
 });
 
 test("GUARDRAIL 26 (role-change): auditLog throws → 200 kept, the demotion CAS ran, swallow logged", async () => {
@@ -564,6 +611,22 @@ test("role-change: happy path → 200 and exactly one USER_ROLE_CHANGE audit row
   await flush();
   assert.equal(auditRows.length, 1, "a single successful role change must audit exactly once");
   assert.equal(auditRows[0].action, "USER_ROLE_CHANGE");
+  const details = JSON.parse(auditRows[0].details as string);
+  assert.deepEqual(details, { targetUserId: targetId, targetUser: usersById.get(targetId)!.name, before: { role: "ADMIN" }, after: { role: "USER" } });
+});
+
+test("role-change: a target with NO display name is named by id alone — the email never stands in for it", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("ADMIN");
+  usersById.get(targetId)!.name = null;
+  casRows = 1;
+  const res = await userPatch(req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "PATCH", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ role: "USER" }) }), ctxFor(targetId));
+  assert.equal(res.status, 200);
+  await flush();
+  const details = JSON.parse(auditRows[0].details as string);
+  assert.equal(details.targetUserId, targetId);
+  assert.ok(!("targetUser" in details), "no name to record — and the email is not used instead");
+  assert.ok(!(auditRows[0].details as string).includes("@example.com"));
 });
 
 test("GUARDRAIL 26 (Plex terminate): auditLog throws → 200 {ok:true} kept, the terminate fired, swallow logged", async () => {
@@ -1004,6 +1067,62 @@ test("a DEPARTED server user can still be linked — its history outlives the ac
   assert.equal(policy.status, 404);
 });
 
+// ── a MANAGE_USERS delegate (no ADMIN bit) — guardrail 34d ─────────────────
+//
+// Linking an identity is what makes its watch history readable by its new owner
+// (/api/play-history/mine*). A delegate can create local accounts with a
+// password they choose, so ANY link a delegate could make was a way to read a
+// member's history: create a puppet account, point the member's identity at it,
+// sign in as the puppet. The older self/admin/server-owner checks didn't stop
+// that, so link, unlink and auto-link are ADMIN-only. Delegates keep the
+// download-policy half of the route.
+
+test("delegate link: every link, unlink and auto-link is refused — linking is ADMIN-only", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const memberAccount = seedUser("USER");
+  const puppet = seedUser("USER"); // an ordinary account the delegate could have created
+  const msuId = seedServerUser({ userId: memberAccount, manualUserLink: false });
+  for (const body of [
+    { userId: puppet },
+    { userId: delegate.userId },
+    { userId: null },
+    { autoLink: true },
+    // The policy half riding along must not smuggle a link through.
+    { downloadsEnabled: false, userId: puppet },
+  ]) {
+    const res = await serverUserPatch(linkReq(msuId, body, delegate.header), ctxFor(msuId));
+    assert.equal(res.status, 403, `${JSON.stringify(body)} from a delegate`);
+    assert.match((await res.json()).error, /Only an admin can link or unlink/);
+  }
+  assert.equal(serverUsersById.get(msuId)?.userId, memberAccount, "the binding must be untouched");
+  assert.equal(serverUsersById.get(msuId)?.manualUserLink, false, "the pin must be untouched");
+  assert.ok(!txOps.some((o) => o.op.startsWith("mediaServerUser.update")), "nothing may be written");
+  await flush();
+  assert.equal(auditRows.filter((r) => r.action === "SERVER_USER_LINK").length, 0);
+});
+
+test("delegate link: refused before the identity is read — an unknown id is 403, not 404", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const res = await serverUserPatch(linkReq("no-such-msu", { userId: seedUser("USER") }, delegate.header), ctxFor("no-such-msu"));
+  assert.equal(res.status, 403);
+});
+
+test("delegate policy: a MANAGE_USERS delegate still sets a member's Jellyfin download policy", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const msuId = seedServerUser({ source: "jellyfin", userId: seedUser("USER") });
+  const res = await serverUserPatch(linkReq(msuId, { downloadsEnabled: false }, delegate.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  assert.equal((serverUsersById.get(msuId) as ServerUserRow & { downloadsEnabled?: boolean }).downloadsEnabled, false);
+});
+
+test("an ADMIN may still link anything, including to themselves and the server owner's identity", async () => {
+  const admin = await mintSession("ADMIN");
+  const owner = seedServerUser({ source: "plex", isServerAdmin: true });
+  const res = await serverUserPatch(linkReq(owner, { userId: admin.userId }, admin.header), ctxFor(owner));
+  assert.equal(res.status, 200);
+  assert.equal(serverUsersById.get(owner)?.userId, admin.userId);
+});
+
 test("link: no session → 401, non-admin → 403, and the binding is untouched", async () => {
   const msuId = seedServerUser();
   const targetId = seedUser("USER");
@@ -1336,9 +1455,11 @@ test("mediaServerGrants: the map is normalized, written, echoed and audited — 
   assert.equal(auditRows.length, 1, "a grants change is audited like a permission change");
   assert.equal(auditRows[0].action, "USER_PERMISSIONS_CHANGE");
   assert.equal(auditRows[0].target, `user:${targetId}`);
-  // logAudit serializes `details` to a JSON string before the insert.
+  // logAudit serializes `details` to a JSON string before the insert. The
+  // target is named by id (+ display name), never by email (audit-scrub.ts).
   assert.deepEqual(JSON.parse(auditRows[0].details as string), {
     field: "mediaServerGrants",
+    targetUserId: targetId,
     targetUser: usersById.get(targetId)!.name,
     after: expected,
   });
@@ -1526,4 +1647,109 @@ test("i18n (role-change validation): a templated message keeps its dynamic part 
   const es = await patch({ "accept-language": "es" });
   assert.equal(es.status, 400);
   assert.deepEqual(await es.json(), { error: "movieQuotaLimit debe ser un número entero no negativo o null" });
+});
+
+test("delegate SUBSET rule: a MANAGE_USERS delegate cannot promote an account to ISSUE_ADMIN without holding MANAGE_ISSUES", async () => {
+  const MANAGE_USERS = 1n << 1n;
+  const MANAGE_ISSUES = 1n << 3n;
+  const delegate = await mintSession("USER", MANAGE_USERS);
+  const targetId = seedUser("USER");
+  const patch = (d: { header: Record<string, string> }) => userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...d.header, "content-type": "application/json" },
+      body: JSON.stringify({ role: "ISSUE_ADMIN" }),
+    }),
+    ctxFor(targetId),
+  );
+  assert.equal((await patch(delegate)).status, 403);
+  // Holding the role's WHOLE preset (its request bits too) is what allows it.
+  const holder = await mintSession("USER", MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV | MANAGE_ISSUES);
+  assert.equal((await patch(holder)).status, 200);
+});
+
+test("delegate SUBSET rule: (re-)setting a role can't hand out REQUEST bits the delegate doesn't hold", async () => {
+  // An admin restricted the target to movie requests. A delegate WITHOUT
+  // REQUEST_TV "re-set" them to USER — a same-role PATCH is accepted and
+  // re-seeds the whole preset — and handed them TV requests. Account creation
+  // already refused this (presetExceeds); the role branch only checked
+  // management bits.
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE);
+  const targetId = seedUser("USER");
+  usersById.get(targetId)!.permissions = Permission.REQUEST | Permission.REQUEST_MOVIE;
+  const res = await userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...delegate.header, "content-type": "application/json" },
+      body: JSON.stringify({ role: "USER" }),
+    }),
+    ctxFor(targetId),
+  );
+  assert.equal(res.status, 403);
+  assert.equal(txOps.filter((o) => o.op === "user.update").length, 0, "no re-seed was written");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// USER-TARGET AUDIT ROWS NAME THE ACCOUNT BY ID. Every `user:<id>` row these
+// routes write carries `targetUserId` (+ `targetUser` only when the account has
+// a display name), never the email — not as a `targetUser` fallback for an
+// unnamed account (a typical OIDC or Jellyfin user), and not as `targetEmail`.
+// Audit details outlive everything but the retention scrub (audit-scrub.ts).
+// USER_PURGE is the documented exception and is pinned above.
+// ════════════════════════════════════════════════════════════════════════════
+
+test("user-target audit rows (permissions, both grant maps, reactivate, 2FA reset) name the account by targetUserId, never by email", async () => {
+  for (const name of ["Named Person", null]) {
+    const named = name ? { targetUser: name } : {};
+    const admin = await mintSession("ADMIN", Permission.ADMIN);
+    const onlyRow = (action: string): Record<string, unknown> => {
+      assert.equal(auditRows.length, 1, `${action}: one audit row`);
+      assert.equal(auditRows[0].action, action);
+      const raw = auditRows[0].details as string;
+      assert.ok(!raw.includes("@example.com"), `${action} (${name ?? "no name"}): no email anywhere in the details`);
+      auditRows.length = 0;
+      return JSON.parse(raw) as Record<string, unknown>;
+    };
+    const patch = async (targetId: string, body: unknown) => {
+      const res = await userPatch(
+        req(`http://localhost:3000/api/admin/users/${targetId}`, {
+          method: "PATCH",
+          headers: { ...admin.header, "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        ctxFor(targetId),
+      );
+      assert.equal(res.status, 200);
+      await flush();
+      return res.json() as Promise<Record<string, unknown>>;
+    };
+
+    const targetId = seedUser("USER");
+    usersById.get(targetId)!.name = name;
+
+    await patch(targetId, { permissions: "16" });
+    assert.deepEqual(onlyRow("USER_PERMISSIONS_CHANGE"), { targetUserId: targetId, ...named, before: "0", after: "16" });
+
+    const inst = await patch(targetId, { instanceGrants: { anime: { request: true } } });
+    assert.deepEqual(onlyRow("USER_PERMISSIONS_CHANGE"), { field: "instanceGrants", targetUserId: targetId, ...named, after: inst.instanceGrants });
+
+    const media = await patch(targetId, { mediaServerGrants: { plex: { remote: { view: true } } } });
+    assert.deepEqual(onlyRow("USER_PERMISSIONS_CHANGE"), { field: "mediaServerGrants", targetUserId: targetId, ...named, after: media.mediaServerGrants });
+
+    const resetRes = await userMfaReset(req(`http://localhost:3000/api/admin/users/${targetId}/mfa`, { method: "DELETE", headers: admin.header }), ctxFor(targetId));
+    assert.equal(resetRes.status, 200);
+    assert.deepEqual(await resetRes.json(), { ok: true }, "wire contract unchanged");
+    await flush();
+    assert.deepEqual(onlyRow("MFA_RESET"), {
+      targetUserId: targetId, ...named, role: "USER", before: { totp: false, passkeys: 0, recoveryCodes: 0 },
+    });
+
+    const disabledId = seedDisabledUser("USER");
+    usersById.get(disabledId)!.name = name;
+    const reRes = await userReactivate(req(`http://localhost:3000/api/admin/users/${disabledId}/reactivate`, { method: "POST", headers: admin.header }), ctxFor(disabledId));
+    assert.equal(reRes.status, 200);
+    assert.deepEqual(await reRes.json(), { ok: true }, "wire contract unchanged");
+    await flush();
+    assert.deepEqual(onlyRow("USER_REACTIVATE"), { targetUserId: disabledId, ...named, role: "USER" }, "no targetEmail either");
+  }
 });

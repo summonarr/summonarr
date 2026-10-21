@@ -37,24 +37,29 @@ import { promisify } from "node:util";
 
 const scrypt = promisify(scryptCb);
 
-const SCRYPT_N = 1 << 15;
+// >>> password-hash — mirrors hashPassword() in src/lib/password-hash.ts: the
+// scrypt:2 format at OWASP's N=2^17, r=8, p=1. tests/password-hash.test.mts runs
+// this block and checks its output with the app's own verifyPassword/needsRehash,
+// so a drifted copy fails the suite instead of writing a hash sign-in rejects.
+const SCRYPT_LN = 17; // N = 2^17
 const SCRYPT_R = 8;
 const SCRYPT_P = 1;
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_SALT_BYTES = 16;
-const SCRYPT_MAXMEM = 64 * 1024 * 1024;
-const PREFIX = "scrypt:1:";
+// Node refuses a derivation whose memory (~128·N·r) reaches maxmem.
+const SCRYPT_MAXMEM = 2 * 128 * 2 ** SCRYPT_LN * SCRYPT_R;
 
 async function hashPassword(password) {
   const salt = randomBytes(SCRYPT_SALT_BYTES);
   const key = await scrypt(password, salt, SCRYPT_KEYLEN, {
-    N: SCRYPT_N,
+    N: 2 ** SCRYPT_LN,
     r: SCRYPT_R,
     p: SCRYPT_P,
     maxmem: SCRYPT_MAXMEM,
   });
-  return `${PREFIX}${salt.toString("base64")}:${key.toString("base64")}`;
+  return `scrypt:2:${SCRYPT_LN}:${SCRYPT_R}:${SCRYPT_P}:${salt.toString("base64")}:${key.toString("base64")}`;
 }
+// <<< password-hash
 
 function usage(code = 0) {
   console.log(
@@ -118,6 +123,13 @@ function connectionParams() {
       database: process.env.PGDATABASE,
     };
   }
+  // Bundled Postgres (the docker-container/ compose): docker-entrypoint.sh builds
+  // DATABASE_URL from POSTGRES_PASSWORD at startup and ignores any DATABASE_URL in
+  // .env — but `docker compose exec` runs a fresh process that never sees that
+  // export, so read the database exactly the way the entrypoint does.
+  if (process.env.POSTGRES_PASSWORD) {
+    return { user: "summonarr", password: process.env.POSTGRES_PASSWORD, host: "postgres", port: 5432, database: "summonarr" };
+  }
   if (process.env.DATABASE_URL) {
     // Parsed by hand rather than with pg's URL parser, which rejects the
     // unescaped reserved chars ("/", "=") a hand-written URL can carry. The
@@ -135,14 +147,36 @@ function connectionParams() {
       database,
     };
   }
-  throw new Error("Set DATABASE_URL or PGHOST/PGUSER/PGPASSWORD/PGDATABASE");
+  throw new Error("Set POSTGRES_PASSWORD (bundled Postgres), DATABASE_URL, or PGHOST/PGUSER/PGPASSWORD/PGDATABASE");
+}
+
+// The same floor the app enforces at registration, password change and admin
+// create — a break-glass reset must not be the one way to set a weaker password.
+const MIN_PASSWORD_LENGTH = 12;
+
+// The ADMIN superbit (Permission.ADMIN in src/lib/permissions.ts), as the
+// decimal the BIGINT column takes. --admin sets it WITH the role, as the app's
+// role change does — a role without its bitmask is a half-promoted account.
+const ADMIN_PERMISSIONS = "1";
+
+async function hasColumn(client, table, column) {
+  const { rows } = await client.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
+    [table, column],
+  );
+  return rows.length > 0;
+}
+
+async function hasTable(client, table) {
+  const { rows } = await client.query(`SELECT to_regclass($1) AS t`, [`public."${table}"`]);
+  return rows[0]?.t != null;
 }
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const password = opts.fromStdin ? await readStdin() : opts.password;
-  if (!password || password.length < 8) {
-    console.error("Password must be at least 8 characters.");
+  if (!password || password.length < MIN_PASSWORD_LENGTH) {
+    console.error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
     process.exit(1);
   }
 
@@ -151,25 +185,60 @@ async function main() {
   await client.connect();
   try {
     await client.query("BEGIN");
+    // The same invalidation the in-app password change performs (guardrail
+    // 6g): both cutoffs move to now, so every session token minted before
+    // dies on its next request — native (never-expiring) ones included.
     const sql = opts.promote
       ? `UPDATE "User"
             SET "passwordHash" = $1,
                 "passwordChangedAt" = NOW(),
-                role = 'ADMIN'
+                "sessionsRevokedAt" = NOW(),
+                role = 'ADMIN',
+                permissions = $3::bigint
           WHERE LOWER(email) = LOWER($2)
         RETURNING id, email, role`
       : `UPDATE "User"
             SET "passwordHash" = $1,
-                "passwordChangedAt" = NOW()
+                "passwordChangedAt" = NOW(),
+                "sessionsRevokedAt" = NOW()
           WHERE LOWER(email) = LOWER($2)
         RETURNING id, email, role`;
-    const { rows } = await client.query(sql, [hash, opts.email]);
+    const { rows } = await client.query(sql, opts.promote ? [hash, opts.email, ADMIN_PERMISSIONS] : [hash, opts.email]);
     if (rows.length === 0) {
       await client.query("ROLLBACK");
       console.error(`No user found with email ${opts.email}.`);
       process.exit(2);
     }
     const u = rows[0];
+    // ...and what the in-app change removes alongside the sessions: the device
+    // rows, the calendar feed URL (a bearer credential), push registrations,
+    // pending Discord link/merge codes and a pending notification-email
+    // verification a session holder could have planted. Each is probed first so
+    // the break-glass still works on a database whose schema predates it.
+    if (await hasTable(client, "AuthSession")) {
+      await client.query(`DELETE FROM "AuthSession" WHERE "userId" = $1`, [u.id]);
+    }
+    if (await hasColumn(client, "User", "calendarTokenHash")) {
+      await client.query(
+        `UPDATE "User" SET "calendarTokenHash" = NULL, "calendarTokenCreatedAt" = NULL WHERE id = $1`,
+        [u.id],
+      );
+    }
+    for (const table of ["PushSubscription", "DiscordLinkToken", "DiscordMergeCode"]) {
+      if (await hasTable(client, table)) {
+        await client.query(`DELETE FROM "${table}" WHERE "userId" = $1`, [u.id]);
+      }
+    }
+    // The verification link's row is keyed by identifier, not userId
+    // ("notif-email:<userId>:<email>", src/lib/notification-email-verify.ts), and
+    // its confirm route is public: left unexpired, it binds the holder's address
+    // and the owner's security mail goes there. A prefix compare, not LIKE, so a
+    // `_` or `%` in the id can't act as a wildcard.
+    if (await hasTable(client, "VerificationToken")) {
+      await client.query(`DELETE FROM "VerificationToken" WHERE left(identifier, length($1)) = $1`, [
+        `notif-email:${u.id}:`,
+      ]);
+    }
     if (opts.resetMfa) {
       // Same write set as the in-app admin reset (deleteAllMfaInTx in
       // src/lib/mfa/mfa-store.ts): authenticator secret, passkeys, recovery codes.
@@ -178,10 +247,7 @@ async function main() {
       }
       // ...and the persistent code lockout (clearMfaLockoutInTx). Probed first so
       // the break-glass still works on a database whose schema predates it.
-      const { rows: lockCols } = await client.query(
-        `SELECT 1 FROM information_schema.columns WHERE table_name = 'User' AND column_name = 'mfaLockedUntil'`,
-      );
-      if (lockCols.length > 0) {
+      if (await hasColumn(client, "User", "mfaLockedUntil")) {
         await client.query(
           `UPDATE "User" SET "mfaFailedAttempts" = 0, "mfaLockoutCount" = 0, "mfaLockedUntil" = NULL WHERE id = $1`,
           [u.id],

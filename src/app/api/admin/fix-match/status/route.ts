@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
-import { getFixMatchJob } from "@/lib/fix-match-jobs";
+import { fixMatchQueueAhead, getFixMatchJob } from "@/lib/fix-match-jobs";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Poll target for a background fix-match started with `async: true` (guardrail
@@ -20,6 +20,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   return NextResponse.json({
     id: job.id,
     status: job.status,
+    ...(job.status === "queued" ? { queueAhead: fixMatchQueueAhead(job.id) ?? 0 } : {}),
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
     ...(job.progress ? { progress: job.progress } : {}),

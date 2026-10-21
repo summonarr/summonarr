@@ -5,10 +5,12 @@ import { checkRateLimit, getClientIpKey, parseRateLimit } from "@/lib/rate-limit
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { normalizeEmail } from "@/lib/auth";
+import { isReservedEmailDomain } from "@/lib/reserved-email";
 import { defaultPermissionsForRole } from "@/lib/permissions";
 import { readJsonCapped } from "@/lib/body-size";
 import { parseBearerToken, hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { logAudit, auditContext } from "@/lib/audit";
 
 // In-process flag: the DB advisory lock below is the real guard; this just turns away an obvious double-submit early.
 let registrationInFlight = false;
@@ -94,6 +96,11 @@ export async function POST(req: NextRequest) {
   if (domainDot < 1 || domainDot === emailParts[1].length - 1) {
     return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
   }
+  // Summonarr mints addresses in these domains for itself (reserved-email.ts,
+  // guardrail 34e); a human account must never hold one.
+  if (isReservedEmailDomain(normalizedEmail)) {
+    return NextResponse.json({ error: t("apiAuth.common.reservedEmail") }, { status: 400 });
+  }
 
   if (name !== undefined && name !== null && (typeof name !== "string" || name.trim().length > 100)) {
     return NextResponse.json({ error: t("apiAuth.register.nameTooLong") }, { status: 400 });
@@ -176,6 +183,20 @@ export async function POST(req: NextRequest) {
   } finally {
     registrationInFlight = false;
   }
+
+  // The instance's first ADMIN was just created by an unauthenticated request —
+  // the one moment anyone who reaches the setup page can take the server. The
+  // row records who did it and from where. Post-commit and swallowing
+  // (guardrail 26): the account exists either way. Named by id, not email.
+  void logAudit({
+    userId: user.id,
+    userName: user.name ?? user.email,
+    action: "USER_CREATE",
+    target: `user:${user.id}`,
+    details: { kind: "first-admin", targetUserId: user.id, role: user.role },
+    ...auditContext(req),
+    provider: "credentials",
+  });
 
   return NextResponse.json(user, { status: 201 });
 }

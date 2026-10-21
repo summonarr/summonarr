@@ -9,7 +9,8 @@ import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { Prisma } from "@/generated/prisma";
-import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
+import { DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
+import { hashDiscordLinkToken, isWellFormedDiscordLinkToken, normalizeDiscordLinkToken } from "@/lib/discord-link-token";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
@@ -24,10 +25,11 @@ import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import { isBlacklisted } from "@/lib/blacklist";
 import { exceedsCap } from "@/lib/content-rating";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
-import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isFeatureEnabled } from "@/lib/features";
+import { discordGuildVerdict } from "@/lib/discord-guild";
 import { isLocale, type Locale } from "@/lib/i18n/locales";
 import { getRecentlyAdded } from "@/lib/recently-added";
 import { addToWatchlist, takeWatchlistAddToken } from "@/lib/watchlist-add";
@@ -257,7 +259,16 @@ async function cachedSearchTmdb(query: string, type: "movie" | "tv", discordUser
   return results;
 }
 
-async function editOriginal(appId: string, token: string, payload: Record<string, unknown>): Promise<void> {
+// Discord answers a message with content over 2000 characters with a 400 and
+// changes nothing, which leaves the deferred "thinking…" reply up for the whole
+// 15-minute token life. Titles and queries are upstream/user text, so cap the
+// content at the one edit boundary.
+const DISCORD_CONTENT_MAX = 2000;
+
+async function editOriginal(appId: string, token: string, rawPayload: Record<string, unknown>): Promise<void> {
+  const payload = typeof rawPayload.content === "string" && rawPayload.content.length > DISCORD_CONTENT_MAX
+    ? { ...rawPayload, content: truncateText(rawPayload.content, DISCORD_CONTENT_MAX) }
+    : rawPayload;
   const res = await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}/messages/@original`, {
     allowedHosts: DISCORD_HOSTS,
     method: "PATCH",
@@ -388,6 +399,13 @@ async function loadPending<T>(key: string): Promise<T | null> {
 
 function mediaTypeOption(value: unknown): "movie" | "tv" | null {
   return value === "movie" || value === "tv" ? value : null;
+}
+
+// searchTmdb labels an undated title "Unknown" for display; the stored
+// MediaRequest.releaseYear (and the admin notifications) must carry null, as the
+// web path's verified metadata does.
+function releaseYearOf(r: { releaseYear: string }): string | null {
+  return /^\d{4}$/.test(r.releaseYear) ? r.releaseYear : null;
 }
 
 function truncateText(text: string, max: number): string {
@@ -653,6 +671,44 @@ async function handleRecentCommand(
   await editOriginal(appId, token, { content: `${t("notify.bot.recent.header")}\n${lines.join("\n")}` });
 }
 
+// Admin fan-out for a request that ends up PENDING, shared by the plain pending
+// branch of a pick and the auto-approve rollback (a failed *arr push leaves a
+// PENDING row that otherwise reaches admins through no channel at all — the web
+// path, request-create.ts, announces it the same way). Only the EARLIEST pending
+// request for a title alerts, ordered by (createdAt, id), so concurrent
+// duplicates alert once.
+async function announcePendingToAdmins(
+  request: { id: string; createdAt: Date },
+  media: { tmdbId: number; mediaType: "MOVIE" | "TV"; arrInstance: string; title: string; posterPath: string | null; releaseYear: string | null },
+  requestedBy: string,
+  requesterId: string,
+): Promise<void> {
+  const earlierPending = await prisma.mediaRequest.findFirst({
+    where: {
+      tmdbId: media.tmdbId,
+      mediaType: media.mediaType,
+      arrInstance: media.arrInstance,
+      status: "PENDING",
+      id: { not: request.id },
+      OR: [
+        { createdAt: { lt: request.createdAt } },
+        { createdAt: request.createdAt, id: { lt: request.id } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (earlierPending) return;
+  emitNotificationEvent({
+    event: "request.created",
+    media: { type: media.mediaType, tmdbId: media.tmdbId, title: media.title, year: media.releaseYear, posterPath: media.posterPath },
+    request: { id: request.id, instance: media.arrInstance },
+    actor: { name: requestedBy },
+  });
+  void notifyAdminsNewRequest({ title: media.title, mediaType: media.mediaType, requestedBy, note: null, posterPath: media.posterPath, tmdbId: media.tmdbId, releaseYear: media.releaseYear, excludeUserId: requesterId });
+  void notifyAdminsNewRequestPush({ title: media.title, mediaType: media.mediaType, tmdbId: media.tmdbId, requestedBy, requestId: request.id, excludeUserId: requesterId });
+  void notifyAdminsNewRequestDiscord({ requestId: request.id, title: media.title, mediaType: media.mediaType, tmdbId: media.tmdbId, requestedBy, note: null, posterPath: media.posterPath });
+}
+
 function withDiscordTimeout(
   fn: () => Promise<void>,
   appId: string,
@@ -660,9 +716,7 @@ function withDiscordTimeout(
   t: Translator,
   timeoutMs = 25_000,
 ): void {
-  let timedOut = false;
   const timer = setTimeout(() => {
-    timedOut = true;
     void editOriginal(appId, token, {
       content: t("notify.bot.slow"),
     }).catch(() => {});
@@ -670,12 +724,12 @@ function withDiscordTimeout(
 
   void fn()
     .catch((err) => {
-      if (!timedOut) {
-        console.error("[interactions] handler error:", err);
-        void editOriginal(appId, token, {
-          content: t("notify.bot.unexpected"),
-        }).catch(() => {});
-      }
+      // Reported even after the "taking longer" line went out: that line promises
+      // a result, and a handler that then fails would otherwise leave it standing.
+      console.error("[interactions] handler error:", err);
+      void editOriginal(appId, token, {
+        content: t("notify.bot.unexpected"),
+      }).catch(() => {});
     })
     .finally(() => clearTimeout(timer));
 }
@@ -831,7 +885,7 @@ async function handleCommand(interaction: any): Promise<void> {
           statusLabel = inQueue ? t("notify.bot.status.APPROVED_QUEUE") : t("notify.bot.status.APPROVED_PENDING");
         }
         const media = r.mediaType === "MOVIE" ? t("notify.bot.status.movie") : t("notify.bot.status.tv");
-        return `${emoji[r.status] ?? "❓"} **${escMd(r.title)}** (${media}) — ${statusLabel}`;
+        return `${emoji[r.status] ?? "❓"} **${escMd(truncateText(r.title, 80))}** (${media}) — ${statusLabel}`;
       });
       await editOriginal(appId, token, { content: `${t("notify.bot.status.header")}\n${lines.join("\n")}` });
     }
@@ -848,19 +902,29 @@ async function handleCommand(interaction: any): Promise<void> {
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const tokenValue = (data.options?.find((o: any) => o.name === "token")?.value as string ?? "").trim().toUpperCase();
+      const tokenValue = normalizeDiscordLinkToken(data.options?.find((o: any) => o.name === "token")?.value as string ?? "");
       if (!tokenValue) {
         await editOriginal(appId, token, { content: t("notify.bot.link.missingToken") });
         return;
       }
+      if (!isWellFormedDiscordLinkToken(tokenValue)) {
+        await editOriginal(appId, token, { content: t("notify.bot.link.invalid") });
+        return;
+      }
 
-      const row = await prisma.discordLinkToken.findUnique({ where: { token: tokenValue }, include: { user: true } });
+      // Only the code's SHA-256 is stored, so the row is looked up by the hash of
+      // what was typed — never by the typed value itself, which would let a
+      // value read from the DB or a backup redeem the row. A code minted before
+      // hashing shipped (plaintext in the column) therefore misses here and the
+      // user generates a new one (discord-link-token.ts).
+      const tokenHash = hashDiscordLinkToken(tokenValue);
+      const row = await prisma.discordLinkToken.findUnique({ where: { token: tokenHash }, include: { user: true } });
       if (!row) {
         await editOriginal(appId, token, { content: t("notify.bot.link.invalid") });
         return;
       }
       if (row.expiresAt < new Date()) {
-        await prisma.discordLinkToken.delete({ where: { token: tokenValue } });
+        await prisma.discordLinkToken.delete({ where: { token: tokenHash } });
         await editOriginal(appId, token, { content: t("notify.bot.link.expired") });
         return;
       }
@@ -884,24 +948,44 @@ async function handleCommand(interaction: any): Promise<void> {
         return;
       }
 
+      const userName = row.user.name ?? row.user.email;
       let transferNote = "";
       try {
-        const { migrated } = await mergeDiscordIntoWebAccount(row.userId, discordUserId);
+        // The token is consumed INSIDE the merge transaction (claimCode). Two
+        // redemptions of one code used to both get here and both link — an
+        // unbound token typed by two Discord accounts linked the account twice,
+        // the second overwriting the first. Now the loser's conditional delete
+        // finds nothing and the merge rolls back; and a failed merge rolls the
+        // delete back too, so the code survives for a retry.
+        const { migrated } = await mergeDiscordIntoWebAccount(row.userId, discordUserId, {
+          claimCode: async (tx) => {
+            const { count } = await tx.discordLinkToken.deleteMany({
+              where: { token: tokenHash, userId: row.userId, expiresAt: { gt: new Date() } },
+            });
+            return count === 1;
+          },
+        });
         if (migrated > 0) {
           transferNote = ` ${t("notify.bot.link.transferred", { count: migrated })}`;
         }
       } catch (err) {
+        if (err instanceof DiscordCodeAlreadyUsedError) {
+          // Lost the claim. The same Discord account submitting twice already
+          // has its link, so tell it so; any other account gets "invalid".
+          const owner = await prisma.user.findUnique({ where: { id: row.userId }, select: { discordId: true } });
+          await editOriginal(appId, token, {
+            content: owner?.discordId === discordUserId
+              ? t("notify.bot.link.success", { name: escMd(userName), transfer: "" })
+              : t("notify.bot.link.invalid"),
+          });
+          return;
+        }
         console.error("[interactions] link account failed:", (err as Error).message);
         await editOriginal(appId, token, { content: t("notify.bot.link.failed") });
         return;
       }
 
-      // deleteMany (not delete): a concurrent duplicate /link submit races both
-      // callers past the merge; the loser's bare delete would throw P2025 into the
-      // outer catch and report "unexpected error" for a link that SUCCEEDED.
-      await prisma.discordLinkToken.deleteMany({ where: { token: tokenValue } });
       void assignDiscordRolesOnLink(discordUserId, row.user.email, row.user.role);
-      const userName = row.user.name ?? row.user.email;
       await editOriginal(appId, token, { content: t("notify.bot.link.success", { name: escMd(userName), transfer: transferNote }) });
     }
 
@@ -1156,7 +1240,7 @@ async function handleComponent(interaction: any): Promise<void> {
         );
         if (rq && rq.limit > 0) {
           const count = await prisma.mediaRequest.count({
-            where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+            where: quotaUsageWhere(dbUser.id, mediaType, rq.since),
           });
           if (count >= rq.limit) {
             confirmEmbed.color = 0xed4245;
@@ -1240,7 +1324,7 @@ async function handleComponent(interaction: any): Promise<void> {
         arrInstance: routedSlug,
         title: selected.title,
         posterPath: selected.posterPath ?? null,
-        releaseYear: selected.releaseYear ?? null,
+        releaseYear: releaseYearOf(selected),
         note: null,
         requestedBy: dbUser.id,
       } as const;
@@ -1300,7 +1384,7 @@ async function handleComponent(interaction: any): Promise<void> {
             prisma.$transaction(async (tx) => {
               if (quotaApplies && rq && rq.limit > 0) {
                 const count = await tx.mediaRequest.count({
-                  where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+                  where: quotaUsageWhere(dbUser.id, mediaType, rq.since),
                 });
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
               }
@@ -1348,6 +1432,14 @@ async function handleComponent(interaction: any): Promise<void> {
             // admin request list doesn't stay stuck at APPROVED (parity with the web
             // POST/PATCH rollback paths, which emit the same corrective event).
             emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: dbUser.id });
+            // The row now sits in the admin queue like any pending request and
+            // pendingNotifyAt is cleared, so this is the only alert admins get.
+            await announcePendingToAdmins(
+              request,
+              { tmdbId: selected.id, mediaType, arrInstance: routedSlug, title: selected.title, posterPath: selected.posterPath ?? null, releaseYear: releaseYearOf(selected) },
+              dbUser.name ?? dbUser.email ?? dbUser.id,
+              dbUser.id,
+            );
             // The push failed and the request rolled back to PENDING — don't tell
             // the user it's "being downloaded"; surface that an admin will review it.
             note = t("notify.bot.pick.arrFailed");
@@ -1380,7 +1472,7 @@ async function handleComponent(interaction: any): Promise<void> {
               mirrored = false; // reset — the callback re-runs on a P2034 retry
               if (quotaApplies && rq && rq.limit > 0) {
                 const count = await tx.mediaRequest.count({
-                  where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+                  where: quotaUsageWhere(dbUser.id, mediaType, rq.since),
                 });
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
               }
@@ -1392,9 +1484,11 @@ async function handleComponent(interaction: any): Promise<void> {
                 await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
               }
               // No approvedAt on the copy, as in the web route: the watch grade
-              // counts it through the approval of the request it copied.
+              // counts it through the approval of the request it copied. A row
+              // stamped `cleanedUpAt` records a deliberate removal, not a
+              // greenlight (guardrail 14b) — never copied, or the sync re-pushes it.
               const alreadyGreenlit = await tx.mediaRequest.findFirst({
-                where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
+                where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null },
                 select: { status: true },
               });
               if (alreadyGreenlit) {
@@ -1427,35 +1521,12 @@ async function handleComponent(interaction: any): Promise<void> {
             note = t("notify.bot.pick.mirrored");
             confirmEmbed.color = 0x57f287;
           } else {
-            const pendingRequest = createdRequest;
-            const requestedBy = dbUser.name ?? dbUser.email ?? dbUser.id;
-            // Only the earliest PENDING request for a title alerts admins — a later duplicate
-            // (different user requesting the same still-pending title) is nothing new to review.
-            const earlierPending = await prisma.mediaRequest.findFirst({
-              where: {
-                tmdbId: selected.id,
-                mediaType,
-                arrInstance: routedSlug,
-                status: "PENDING",
-                id: { not: pendingRequest.id },
-                OR: [
-                  { createdAt: { lt: pendingRequest.createdAt } },
-                  { createdAt: pendingRequest.createdAt, id: { lt: pendingRequest.id } },
-                ],
-              },
-              select: { id: true },
-            });
-            if (!earlierPending) {
-              emitNotificationEvent({
-                event: "request.created",
-                media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: selected.id, title: selected.title, year: selected.releaseYear ?? null, posterPath: selected.posterPath ?? null },
-                request: { id: pendingRequest.id, instance: routedSlug },
-                actor: { name: requestedBy },
-              });
-              void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null, excludeUserId: dbUser.id });
-              void notifyAdminsNewRequestPush({ title: selected.title, mediaType, tmdbId: selected.id, requestedBy, requestId: pendingRequest.id, excludeUserId: dbUser.id });
-              void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, tmdbId: selected.id, requestedBy, note: null, posterPath: selected.posterPath ?? null });
-            }
+            await announcePendingToAdmins(
+              createdRequest,
+              { tmdbId: selected.id, mediaType, arrInstance: routedSlug, title: selected.title, posterPath: selected.posterPath ?? null, releaseYear: releaseYearOf(selected) },
+              dbUser.name ?? dbUser.email ?? dbUser.id,
+              dbUser.id,
+            );
             note = t("notify.bot.pick.pending");
             confirmEmbed.color = 0x57f287;
           }
@@ -1546,7 +1617,7 @@ async function handleComponent(interaction: any): Promise<void> {
       const row = await prisma.watchlistItem.findFirst({ where, select: { title: true } });
       // deleteMany: a title already removed elsewhere is a no-op, not an error.
       await prisma.watchlistItem.deleteMany({ where });
-      const notice = row ? t("notify.bot.watchlist.removed", { title: escMd(row.title) }) : null;
+      const notice = row ? t("notify.bot.watchlist.removed", { title: escMd(truncateText(row.title, 80)) }) : null;
       await editOriginal(appId, token, await watchlistListPayload(t, linked.user.id, discordUserId, notice));
     }
 
@@ -1911,6 +1982,22 @@ export async function POST(req: NextRequest) {
   // the feature is off; real interactions get an ephemeral explanation (type 4 + flags 64).
   if (!(await isFeatureEnabled("feature.integration.discord"))) {
     return NextResponse.json({ type: 4, data: { content: interactionTranslatorSync(interaction)("notify.bot.disabled"), flags: 64 } });
+  }
+
+  // Server gate (discord-guild.ts): the signature proves the interaction came
+  // from Discord, not from OUR server. Anything outside the configured guild —
+  // another server the bot was added to, or a DM — is answered with an
+  // ephemeral refusal and touches nothing else. Before the replay guard, so a
+  // refused interaction doesn't even write a nonce row. Only the two types this
+  // route acts on (2 command, 3 component) are gated; every other type is the
+  // 400 at the bottom anyway.
+  if (interaction.type === 2 || interaction.type === 3) {
+    const guildRow = await prisma.setting.findUnique({ where: { key: "discordGuildId" } });
+    const guildVerdict = discordGuildVerdict(interaction, guildRow?.value);
+    if (guildVerdict !== "ok") {
+      const key = guildVerdict === "not-configured" ? "notify.bot.serverNotConfigured" : "notify.bot.wrongServer";
+      return NextResponse.json({ type: 4, data: { content: interactionTranslatorSync(interaction)(key), flags: 64 } });
+    }
   }
 
   // Replay guard (defense-in-depth beyond the 5s timestamp window above): a captured,

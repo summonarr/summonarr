@@ -10,7 +10,7 @@ import { getMediaInstances } from "./media-instance-registry";
 import { isFeatureEnabled } from "./features";
 import { coalesce } from "./concurrency";
 import { processSingleton } from "./process-singleton";
-import { loadArrLibraryIndex, type ArrLibraryEntry } from "./library-cleanup-arr";
+import { getCachedArrLibraryIndex, type ArrLibraryEntry } from "./library-cleanup-arr";
 import { CLEANUP_FEATURE_KEY, computeCleanupReport } from "./library-cleanup-data";
 import { getWatchGradeSummaries } from "./watch-grade-data";
 import { watchGradeSpread, type WatchGradeSpread } from "./watch-grade";
@@ -22,6 +22,8 @@ import {
   mergeDiskGroups,
   type MergedDisk,
 } from "./admin-stats";
+import { NEVER_WATCHED_FEATURE_KEY, shareLibraryWatchFacts } from "./never-watched-data";
+import { getNeverWatchedReport } from "./never-watched-report";
 
 type Status = "PENDING" | "APPROVED" | "DECLINED" | "AVAILABLE";
 type Media = "MOVIE" | "TV";
@@ -724,6 +726,19 @@ export interface StorageStats {
   listingErrors: Array<{ service: "radarr" | "sonarr"; slug: string; name: string }>;
   // Present only while Library cleanup is enabled.
   reclaimable: { titles: number; bytes: number } | null;
+  // Present only while the never-watched page is enabled (guardrail 14d).
+  // `unknown`/`possible` count the titles AND seasons the verdict could not
+  // call either way, so zero never-watched is not read as "all watched" while
+  // nothing could be judged (`neverWatchedLine` in admin-stats.ts).
+  neverWatched: {
+    titles: number;
+    bytes: number;
+    seasons: number;
+    seasonBytes: number;
+    unknown: number;
+    possible: number;
+    trackingOn: boolean;
+  } | null;
   computedAt: string;
 }
 
@@ -736,20 +751,22 @@ const storageCache = processSingleton("admin-stats:storage", () => ({ value: nul
 export async function getStorageStats(opts: { fresh?: boolean } = {}): Promise<StorageStats> {
   if (!opts.fresh && storageCache.value && Date.now() - storageCache.at < STORAGE_TTL_MS) return storageCache.value;
   return coalesce("admin-stats:storage", async () => {
-    const value = await computeStorageStats();
+    const value = await computeStorageStats(opts.fresh === true);
     storageCache.value = value;
     storageCache.at = Date.now();
     return value;
   });
 }
 
-async function computeStorageStats(): Promise<StorageStats> {
-  const [disk, index, radarr, sonarr, cleanupOn] = await Promise.all([
+async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
+  const [disk, { index, at: indexAt }, radarr, sonarr, cleanupOn, neverWatchedOn] = await Promise.all([
     getArrDiskSpace(),
-    loadArrLibraryIndex(),
+    // Shared with the never-watched report (same 5-minute window).
+    getCachedArrLibraryIndex({ fresh }),
     getArrInstances("radarr"),
     getArrInstances("sonarr"),
     isFeatureEnabled(CLEANUP_FEATURE_KEY),
+    isFeatureEnabled(NEVER_WATCHED_FEATURE_KEY),
   ]);
   const instName = (service: "radarr" | "sonarr", slug: string) =>
     (service === "radarr" ? radarr : sonarr).find((i) => i.slug === slug)?.name ?? slug;
@@ -776,10 +793,45 @@ async function computeStorageStats(): Promise<StorageStats> {
   for (const list of index.byKey.values()) list.forEach(add);
   for (const list of index.tvdbOnly.values()) list.forEach(add);
 
-  let reclaimable: StorageStats["reclaimable"] = null;
-  if (cleanupOn) {
+  // Both reports below read the same whole-library watch facts (five
+  // whole-table PlayHistory aggregates, sessions, upstream evidence, requests,
+  // coverage): ONE load for this computation, for the same index and the same
+  // `now`, handed to each — and each still computes exactly what it computes on
+  // its own page (SharedWatchFacts). Lazy: a never-watched cache hit with
+  // cleanup off loads nothing.
+  const shared = cleanupOn || neverWatchedOn
+    ? shareLibraryWatchFacts(index, indexAt, { now: new Date(), seasons: neverWatchedOn })
+    : null;
+
+  // The never-watched report FIRST: its cache reads its generation before the
+  // shared load starts, so a report computed here can be stored for the page.
+  // Started by the cleanup report first, the load could predate an
+  // invalidation, and the report would be computed for this figure only.
+  let neverWatched: StorageStats["neverWatched"] = null;
+  if (neverWatchedOn && shared) {
     try {
-      const report = await computeCleanupReport(index, new Date());
+      const { totals, seasons, trackingOn } = await getNeverWatchedReport({ shared });
+      neverWatched = {
+        titles: totals.never.titles,
+        bytes: totals.never.bytes,
+        seasons: totals.seasons.count,
+        seasonBytes: totals.seasons.bytes,
+        // The report's totals count unjudged TITLES only; a watched show's
+        // season can be unjudged too (an undated episode).
+        unknown: totals.unknown + seasons.filter((s) => s.state === "unobservable").length,
+        possible: totals.possible + seasons.filter((s) => s.state === "possiblyWatched").length,
+        trackingOn,
+      };
+    } catch (err) {
+      console.warn("[admin-stats] never-watched report failed:", err instanceof Error ? err.message : err);
+    }
+  }
+
+  let reclaimable: StorageStats["reclaimable"] = null;
+  if (cleanupOn && shared) {
+    try {
+      // "cached": a page render never waits on TMDB (CrossRefMode).
+      const report = await computeCleanupReport(index, shared.now, undefined, { resolveTargets: true, crossRef: "cached", shared });
       const candidates = report.rows.filter((r) => r.candidate);
       reclaimable = {
         titles: candidates.length,
@@ -796,6 +848,7 @@ async function computeStorageStats(): Promise<StorageStats> {
     libraries: [...sizes.values()].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name)),
     listingErrors: index.errors.map((e) => ({ service: e.service, slug: e.instance, name: svcLabel(e.service, e.instance) })),
     reclaimable,
+    neverWatched,
     computedAt: new Date().toISOString(),
   };
 }

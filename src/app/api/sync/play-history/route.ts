@@ -16,6 +16,7 @@ import {
   SESSION_ABSENCE_GRACE_MS,
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } from "@/lib/plex";
+import { indexPlexRowsByKey } from "@/lib/plex-dedupe";
 import { getJellyfinSessions } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -191,13 +192,22 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   const ratingKeysNeedingLookup = valid
     .filter((s) => s.type !== "episode" && extractTmdbIdFromGuids(s.Guid) == null && !!s.ratingKey)
     .map((s) => s.ratingKey);
+  // ORed across both ratingKey columns (guardrail 37c): a movie in two sections
+  // has two ratingKeys and only one is the stored plexRatingKey.
   const libRows = ratingKeysNeedingLookup.length > 0
     ? await prisma.plexLibraryItem.findMany({
-        where: { plexRatingKey: { in: ratingKeysNeedingLookup }, serverInstance: instance },
-        select: { plexRatingKey: true, tmdbId: true, mediaType: true },
+        where: {
+          serverInstance: instance,
+          OR: [{ plexRatingKey: { in: ratingKeysNeedingLookup } }, { plexRatingKeys: { hasSome: ratingKeysNeedingLookup } }],
+        },
+        select: { plexRatingKey: true, plexRatingKeys: true, tmdbId: true, mediaType: true },
       })
     : [];
-  const libMap = new Map(libRows.map((r) => [r.plexRatingKey, r]));
+  // Keyed by EVERY key a row answers to, or widening the query only finds a row
+  // the map then misses — and each key resolves to its ONE owner (canonical
+  // holder, else lowest tmdbId: `indexPlexRowsByKey`), never to whichever row
+  // findMany happened to return first, because the answer is persisted.
+  const libMap = indexPlexRowsByKey(libRows);
 
   // Resolve media server users in parallel — each upserts independently.
   // isServerAdmin = accountId matches the admin token's plex user id. When
@@ -466,6 +476,9 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
           // is write-once here and copied verbatim into PlayHistory.
           episodeTitle: s.type === "episode" ? stripShowPrefix(s.title, s.grandparentTitle) : null,
           sourceItemId: s.ratingKey,
+          // The show's own key, kept so a play recorded before its show reached the
+          // library cache (tmdbId null) can still be attributed later (guardrail 14d).
+          sourceShowId: s.type === "episode" ? (s.grandparentRatingKey || null) : null,
           posterPath,
           progressPercent,
           progressMs: BigInt(s.viewOffset),
@@ -564,7 +577,13 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
       // skipSSE: caller (syncPlayHistory POST) emits a single batched
       // activity:history-updated after the full sync run completes, so we
       // don't trigger N refetches per cron tick.
-      return recordCompletedSession(applyFinalTick(session, now), { skipSSE: true, stoppedAt: now })
+      // No final tick and no stoppedAt: the session has been ABSENT for >= the
+      // grace, so the interval since lastSeenAt is not playtime, and the stop
+      // happened right after lastSeenAt, not at `now` (the defaults —
+      // lastSeenAt as stoppedAt, increment 0 — are cleanupStaleSessions' rule).
+      // applyFinalTick(session, now) credited ~60s of phantom watch time to every
+      // session that ended without an SSE stop.
+      return recordCompletedSession(session, { skipSSE: true })
         .then(() => {
           // Ledger AFTER the write commits (guardrail 27): gate re-create against a racey
           // Plex reappearance only once the PlayHistory row exists, so a failed
@@ -869,6 +888,8 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
           episodeNumber: s.episodeNumber ?? null,
           episodeTitle: s.itemType === "Episode" ? stripShowPrefix(s.title, s.seriesName) : null,
           sourceItemId: s.itemId,
+          // See the Plex create branch.
+          sourceShowId: s.itemType === "Episode" ? (s.seriesId || null) : null,
           posterPath: jfPosterPath,
           progressPercent,
           progressMs: BigInt(positionMs),
@@ -917,7 +938,8 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
   const finalized = await Promise.all(
     stale.map((session) =>
       // skipSSE: see Plex branch above; one batched SSE per cron run.
-      recordCompletedSession(applyFinalTick(session, now), { skipSSE: true, stoppedAt: now })
+      // See the Plex sweep: absent past the grace ⇒ no final tick, stoppedAt = lastSeenAt.
+      recordCompletedSession(session, { skipSSE: true })
         .then(() => true)
         .catch((err) => {
           console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);

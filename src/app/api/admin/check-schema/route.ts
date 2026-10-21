@@ -10,24 +10,27 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // they are missing while a pre-instance column list would still report allOk.
 const EXPECTED: Record<string, string[]> = {
   User:                ["id","name","email","passwordHash","role","permissions","mediaServer","discordId","autoApprove","quotaExempt","deactivatedAt","purgedAt"],
-  PlexLibraryItem:     ["tmdbId","mediaType","serverInstance","filePath","plexRatingKey","title","year","overview"],
+  PlexLibraryItem:     ["tmdbId","mediaType","serverInstance","filePath","plexRatingKey","plexRatingKeys","title","year","overview"],
   JellyfinLibraryItem: ["tmdbId","mediaType","serverInstance","filePath","jellyfinItemId","jellyfinItemIds","title","year","overview"],
-  TVEpisodeCache:      ["source","tmdbId","seasonNumber","episodeNumber"],
-  TVEpisodeCacheStaging: ["runId","source","tmdbId","seasonNumber","episodeNumber"],
-  PlayHistory:         ["id","source","serverInstance","tmdbId","mediaType","title","year","posterPath","startedAt","watched"],
+  TVEpisodeCache:      ["source","tmdbId","seasonNumber","episodeNumber","addedAt"],
+  TVEpisodeCacheStaging: ["runId","source","tmdbId","seasonNumber","episodeNumber","addedAt"],
+  PlayHistory:         ["id","source","serverInstance","tmdbId","mediaType","title","year","posterPath","startedAt","watched","sourceShowId"],
   MediaRequest:        ["id","tmdbId","mediaType","arrInstance","title","posterPath","status","requestedBy"],
   TmdbCache:           ["key","data","expiresAt"],
-  ActiveSession:       ["id","source","serverInstance","tmdbId","title"],
+  ActiveSession:       ["id","source","serverInstance","tmdbId","title","sourceShowId"],
   MediaServerUser:     ["id","source","serverInstance","sourceUserId","username"],
   RadarrWantedItem:    ["tmdbId","arrInstance"],
   SonarrWantedItem:    ["tmdbId","arrInstance"],
   RadarrAvailableItem: ["tmdbId","arrInstance"],
   SonarrAvailableItem: ["tmdbId","arrInstance"],
+  // A table, not a column: absent ⇒ every column below reads missing (the
+  // never-watched upstream snapshot, guardrail 14d).
+  UpstreamWatchEvidence: ["source","serverInstance","itemKey","seasonNumber","mediaType","playCount","lastPlayedAt","fetchedAt"],
 };
 
 // withAdmin requires an admin session. The extra isCronAuthorized check does
 // NOT demand the cron token too: for an admin it re-checks the session and, for
-// a cookie session, adds a same-origin + device-fingerprint check. A bare
+// a cookie session, adds a same-origin check. A bare
 // `Bearer <CRON_SECRET>` never gets this far — withAdmin rejects it first (401).
 export const GET = withAdmin(async (request, _ctx, _session) => {
   const t = translatorForRequest(request);

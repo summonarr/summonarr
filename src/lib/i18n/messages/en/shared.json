@@ -54,5 +54,7 @@
   "shared.bell.loadFailed": "Couldn't load notifications.",
   "shared.bell.loading": "Loading notifications…",
   "shared.common.clearSearch": "Clear search",
-  "shared.thread.placeholderShortcut": "Write a message… ({shortcut} to send)"
+  "shared.thread.placeholderShortcut": "Write a message… ({shortcut} to send)",
+  "shared.rateLimited.generic": "Too many requests. Please try again shortly.",
+  "shared.rateLimited.seconds": "Too many requests. Try again in {seconds}s."
 }

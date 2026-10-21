@@ -11,11 +11,13 @@ import {
   getVisibleAdminItems,
   filterNavByFeatures,
   navItemLabel,
+  navItemHref,
   isNavItemActive,
   type NavItem,
 } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { useT } from "@/components/i18n/i18n-provider";
+import { AdminNavGroupList, NavCountBadge, useNavBadges } from "@/components/layout/admin-nav-groups";
 
 export function Sidebar({
   siteTitle,
@@ -24,6 +26,9 @@ export function Sidebar({
   siteTitle?: string;
   featureFlags?: FeatureFlags;
 }) {
+  // href → count, e.g. the Download Queue's downloads needing attention — from
+  // the layout's ONE NavBadgesProvider, kept fresh between full loads. Absent ⇒ no badges.
+  const navBadges = useNavBadges();
   const pathname = usePathname();
   const t = useT();
   const { session } = useSummonarrSession();
@@ -114,9 +119,15 @@ export function Sidebar({
 
         {visibleAdminItems.length > 0 && (
           <NavSection label={t("nav.section.admin")}>
-            {visibleAdminItems.map((item) => (
-              <NavLink key={item.href} item={item} active={isActive(item)} />
-            ))}
+            <AdminNavGroupList
+              variant="sidebar"
+              items={visibleAdminItems}
+              isActive={isActive}
+              badges={navBadges}
+              renderItem={(item) => (
+                <NavLink key={item.href} item={item} active={isActive(item)} badge={navBadges?.[item.href]} />
+              )}
+            />
           </NavSection>
         )}
       </nav>
@@ -194,12 +205,12 @@ function NavSection({
   );
 }
 
-function NavLink({ item, active }: { item: NavItem; active: boolean }) {
+function NavLink({ item, active, badge }: { item: NavItem; active: boolean; badge?: number }) {
   const t = useT();
   const Icon = item.icon;
   return (
     <Link
-      href={item.href}
+      href={navItemHref(item, badge)}
       aria-current={active ? "page" : undefined}
       // ds-hover-tint draws the hover tint on top of the inline background
       // (so the active highlight stays visible underneath) and adds a
@@ -239,6 +250,7 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
         }}
       />
       <span>{navItemLabel(item, t)}</span>
+      <NavCountBadge count={badge} href={item.href} />
     </Link>
   );
 }

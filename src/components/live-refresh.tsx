@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import type { LiveEvent } from "@/hooks/use-live-events";
+import { runOrDefer } from "@/lib/client/refresh-hold";
 
 export function LiveRefresh({
   on,
@@ -31,7 +32,9 @@ export function LiveRefresh({
       return;
     }
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => router.refresh(), 500);
+    // Deferred while a dialog holds the page (refresh-hold.ts): the refresh
+    // would drop an issue the dialog is still showing the result for.
+    timerRef.current = setTimeout(() => runOrDefer(() => router.refresh()), 500);
   });
 
   useEffect(() => () => {

@@ -228,7 +228,7 @@ export interface WatchProvider {
 const IMAGE_BASE = "https://image.tmdb.org/t/p";
 
 // Paths that don't start with "/" are invalid TMDB paths (e.g. empty strings from older cache rows)
-export function posterUrl(path: string | null, size: "w342" | "w500" | "original" = "w342") {
+export function posterUrl(path: string | null, size: "w92" | "w342" | "w500" | "original" = "w342") {
   return path && path.startsWith("/") ? `${IMAGE_BASE}/${size}${path}` : null;
 }
 

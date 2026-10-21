@@ -5,6 +5,18 @@ import { arrFetch } from "@/lib/arr";
 import { arrSettingKey, isValidInstanceSlug } from "@/lib/arr-instances";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
+// The instance's major version from /system/status, or null when it can't be
+// read or parsed. Never throws: the options fetch must not fail on it.
+async function readMajorVersion(cfg: { url: string; apiKey: string }): Promise<number | null> {
+  try {
+    const status = await arrFetch<{ version?: unknown }>(cfg, "/api/v3/system/status");
+    const m = typeof status?.version === "string" ? /^\s*(\d+)\./.exec(status.version) : null;
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 export const GET = withAdmin(async (req, _ctx, _session) => {
   const t = translatorForRequest(req);
   const service = req.nextUrl.searchParams.get("service");
@@ -33,9 +45,10 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const cfg = { url: map[urlKey].replace(/\/$/, ""), apiKey: map[keyKey] };
 
   try {
-    const [rootFolders, qualityProfiles] = await Promise.all([
+    const [rootFolders, qualityProfiles, sonarrMajor] = await Promise.all([
       arrFetch<{ path: string }[]>(cfg, "/api/v3/rootfolder"),
       arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/qualityprofile"),
+      service === "sonarr" ? readMajorVersion(cfg) : Promise.resolve(null),
     ]);
 
     // Sonarr v3 only: language profiles for the per-instance default picker.
@@ -44,8 +57,12 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     // means "this Sonarr has no language profiles" and the field is omitted
     // entirely rather than failing the whole options fetch. The UI hides the
     // picker when the field is absent.
+    // A Sonarr that reports v4+ is not asked at all: v4 still answers the
+    // endpoint but logs "API call made to deprecated endpoint" on every
+    // Settings visit. An unknown version is still asked, because a v3 add
+    // needs a language profile.
     let languageProfiles: { id: number; name: string }[] | undefined;
-    if (service === "sonarr") {
+    if (service === "sonarr" && (sonarrMajor === null || sonarrMajor < 4)) {
       try {
         const raw = await arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/languageprofile");
         const usable = (Array.isArray(raw) ? raw : []).filter((p) => p?.name !== "Deprecated");

@@ -165,6 +165,37 @@ test("per-subject cap: minting a sixth live token for one user evicts THAT user'
   assert.ok(isTokenUsable(other.jti), "another user's token is untouched");
 });
 
+test("per-PURPOSE cap: password-only sign-in challenges can never evict the owner's step-up or passkey-registration token", async () => {
+  // A sign-in challenge needs only the password. With one shared per-user cap,
+  // five sign-ins by anyone holding it evicted the signed-in owner's in-progress
+  // step-up challenge and passkey-registration token.
+  const stepUp = await signMfaStepUpToken({ userId: "owner", sessionId: "s1", challenge: "Y2g" });
+  const reg = await signPasskeyRegisterToken({ userId: "owner", sessionId: "s1", challenge: "Y2g", factorVerified: true });
+  for (let i = 0; i < MAX_LIVE_PER_SUBJECT * 3; i++) await signMfaSigninToken({ ...INPUT, userId: "owner" });
+  assert.ok(isTokenUsable(stepUp.jti), "the step-up challenge survives a flood of sign-in challenges");
+  assert.ok(isTokenUsable(reg.jti), "so does the passkey-registration token");
+  assert.equal(mfaTokenLedgerSizeForTests().forSubject("owner", "mfa-signin"), MAX_LIVE_PER_SUBJECT, "sign-in challenges are still capped");
+  assert.equal(mfaTokenLedgerSizeForTests().forSubject("owner"), MAX_LIVE_PER_SUBJECT + 2);
+  assert.equal(consumeToken(stepUp.jti), true);
+  assert.equal(consumeToken(reg.jti), true);
+});
+
+test("per-PURPOSE cap: each purpose keeps its own five slots — a sixth step-up evicts the oldest step-up, not a sign-in", async () => {
+  const signin = await signMfaSigninToken({ ...INPUT, userId: "u-p" });
+  const first = await signMfaStepUpToken({ userId: "u-p", sessionId: "s", challenge: "Y2g" });
+  for (let i = 0; i < MAX_LIVE_PER_SUBJECT; i++) await signMfaStepUpToken({ userId: "u-p", sessionId: "s", challenge: "Y2g" });
+  assert.equal(isTokenUsable(first.jti), false, "the oldest STEP-UP went");
+  assert.ok(isTokenUsable(signin.jti), "the sign-in challenge is in another bucket");
+  assert.equal(mfaTokenLedgerSizeForTests().forSubject("u-p", "mfa-stepup"), MAX_LIVE_PER_SUBJECT);
+});
+
+test("an IN-FLIGHT token is never evicted by newer mints (its verifier may already have burned a recovery code)", async () => {
+  const mine = await signMfaSigninToken({ ...INPUT, userId: "owner" });
+  assert.equal(reserveToken(mine.jti), true);
+  for (let i = 0; i < MAX_LIVE_PER_SUBJECT + 3; i++) await signMfaSigninToken({ ...INPUT, userId: "owner" });
+  assert.equal(commitToken(mine.jti), true, "the reservation holder can still redeem");
+});
+
 test("a burned token can't be un-burned by eviction pressure on its subject", async () => {
   const burned = await signMfaSigninToken({ ...INPUT, userId: "u-burn" });
   for (let i = 0; i < MAX_TOKEN_FAILURES; i++) recordTokenFailure(burned.jti);
@@ -180,6 +211,23 @@ test("a step-up token binds user, session and challenge and is its own purpose",
   const { token: signin } = await signMfaSigninToken(INPUT);
   assert.equal(await verifyMfaStepUpToken(signin), null, "sign-in → step-up");
   assert.equal(await verifySessionJwt(token), null, "never a session");
+});
+
+test("global cap: the oldest entry is skipped when it is IN FLIGHT — the next-oldest live one is evicted instead", async () => {
+  resetMfaTokenLedgerForTests(3);
+  try {
+    const a = await signMfaSigninToken({ ...INPUT, userId: "a" });
+    const b = await signMfaSigninToken({ ...INPUT, userId: "b" });
+    const c = await signMfaSigninToken({ ...INPUT, userId: "c" });
+    assert.equal(reserveToken(a.jti), true); // oldest, being verified right now
+    const d = await signMfaSigninToken({ ...INPUT, userId: "d" });
+    assert.equal(commitToken(a.jti), true, "the in-flight oldest survives global eviction");
+    assert.equal(isTokenUsable(b.jti), false, "the oldest NON-in-flight entry went instead");
+    assert.ok(isTokenUsable(c.jti));
+    assert.ok(isTokenUsable(d.jti));
+  } finally {
+    resetMfaTokenLedgerForTests();
+  }
 });
 
 test("global cap: a full ledger evicts EXPIRED entries first, then the oldest live one — it never refuses the newcomer", async () => {

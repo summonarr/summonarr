@@ -253,6 +253,18 @@ test("PIN: loadExceptions rejects `id: \"GHSA\"` so --allowlist-only (the blocki
   assert.match(errors[0], /"id" must be a full GHSA id/);
 });
 
+test("PIN: loadExceptions reports an impossible calendar date (V8 would roll 2026-02-31 into March) as malformed", () => {
+  for (const expires of ["2026-02-31", "2026-04-31", "2025-02-29", "2026-13-01"]) {
+    const { exceptions, errors } = loadExceptionsFrom([{ ...exception(A), expires }]);
+    assert.equal(exceptions.length, 0, expires);
+    assert.equal(errors.length, 1, expires);
+    assert.match(errors[0], /"expires" must be an ISO date/, expires);
+  }
+  const ok = loadExceptionsFrom([{ ...exception(A), expires: "2028-02-29" }]);
+  assert.deepEqual(ok.errors, [], "a real leap day stays valid");
+  assert.equal(ok.exceptions.length, 1);
+});
+
 test("loadExceptions accepts both documented id forms", () => {
   const { exceptions, errors } = loadExceptionsFrom([
     exception(A),

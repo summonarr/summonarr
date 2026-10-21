@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useDelayed } from "@/hooks/use-delayed";
 import { useRouter } from "next/navigation";
 import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -8,6 +9,8 @@ import { safeExternalHref } from "@/lib/safe-url";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
+import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
 
 // Renders a translated template whose {name} placeholders are React nodes
 // (inline <code>/<strong>), so word order stays with the translation.
@@ -26,28 +29,45 @@ function TokenLinkFlow() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Minting a link code needs a step-up (guardrail 6g): the server answers
+  // "password-required" and this flow asks for the password inline.
+  const [stepUp, setStepUp] = useState(false);
+  const [stepUpError, setStepUpError] = useState<string | null>(null);
+  const later = useDelayed();
 
   async function copyToken() {
     if (!token) return;
     try {
       await navigator.clipboard.writeText(token);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      later(() => setCopied(false), 2000);
     } catch {
       /* clipboard unavailable (insecure context) or blocked — the token is
          rendered beside this button for manual selection */
     }
   }
 
-  async function generateToken() {
+  async function generateToken(confirmPassword?: string) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(withBasePath("/api/discord/generate-link"), { method: "POST" });
+      const res = await fetch(withBasePath("/api/discord/generate-link"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(withStepUpPassword({}, confirmPassword)),
+      });
       // A proxy 502/504 answers with an HTML page (or nothing), and a bare
       // res.json() would surface the raw SyntaxError text to the user.
-      const data = (await res.json().catch(() => ({}))) as { token?: string; expiresAt?: string; error?: string };
-      if (!res.ok) throw new Error(data.error ?? t("profile.discord.error.generate"));
+      const data = (await res.json().catch(() => ({}))) as { token?: string; expiresAt?: string; error?: string; message?: string };
+      const need = stepUpNeedOf(res.status, data);
+      if (need) {
+        setStepUp(true);
+        setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
+        return;
+      }
+      if (!res.ok) throw new Error(data.message ?? data.error ?? t("profile.discord.error.generate"));
+      setStepUp(false);
+      setStepUpError(null);
       if (!data.token || !data.expiresAt) throw new Error(t("profile.discord.error.malformed"));
       setToken(data.token);
       setExpiresAt(new Date(data.expiresAt));
@@ -69,10 +89,19 @@ function TokenLinkFlow() {
         </li>
       </ol>
 
-      <Button type="button" onClick={generateToken} disabled={loading}>
-        {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-        {loading ? t("profile.discord.generating") : t("profile.discord.generate")}
-      </Button>
+      {stepUp ? (
+        <StepUpPasswordForm
+          busy={loading}
+          error={stepUpError}
+          onSubmit={(password) => void generateToken(password)}
+          onCancel={() => { setStepUp(false); setStepUpError(null); }}
+        />
+      ) : (
+        <Button type="button" onClick={() => void generateToken()} disabled={loading}>
+          {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+          {loading ? t("profile.discord.generating") : t("profile.discord.generate")}
+        </Button>
+      )}
 
       {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
 
@@ -114,18 +143,29 @@ function WebMergeFlow() {
   const [migrated, setMigrated] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Sending a merge code from the web needs a step-up (guardrail 6g).
+  const [stepUp, setStepUp] = useState(false);
+  const [stepUpError, setStepUpError] = useState<string | null>(null);
 
-  async function sendCode() {
+  async function sendCode(confirmPassword?: string) {
     setLoading(true);
     setError(null);
     try {
       const res = await fetch(withBasePath("/api/discord/initiate-merge"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ discordId: discordId.trim() }),
+        body: JSON.stringify(withStepUpPassword({ discordId: discordId.trim() }, confirmPassword)),
       });
       const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+      const need = stepUpNeedOf(res.status, data);
+      if (need) {
+        setStepUp(true);
+        setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
+        return;
+      }
       if (!res.ok) throw new Error(data.message ?? data.error ?? t("profile.discord.error.sendCode"));
+      setStepUp(false);
+      setStepUpError(null);
       setStep("code-sent");
     } catch (err) {
       setError(err instanceof Error ? err.message : t("profile.error.generic"));
@@ -195,14 +235,22 @@ function WebMergeFlow() {
             />
             <Button
               type="button"
-              onClick={sendCode}
-              disabled={loading || !/^\d{17,20}$/.test(discordId.trim())}
+              onClick={() => void sendCode()}
+              disabled={loading || stepUp || !/^\d{17,20}$/.test(discordId.trim())}
               className="shrink-0"
             >
               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
               {t("profile.discord.sendCode")}
             </Button>
           </div>
+          {stepUp && (
+            <StepUpPasswordForm
+              busy={loading}
+              error={stepUpError}
+              onSubmit={(password) => void sendCode(password)}
+              onCancel={() => { setStepUp(false); setStepUpError(null); }}
+            />
+          )}
         </>
       )}
 

@@ -4,15 +4,17 @@
 // attaches automatically. A native app (iOS) can't use that cookie, so it
 // authenticates by presenting the SAME session JWT as a bearer token —
 // `Authorization: Bearer <jwt>` — and tags every request with the
-// X-Summonarr-Client header.
+// X-Summonarr-Client header. Each token is bound to the transport it was minted
+// for and refused on the other (guardrail 6h).
 //
-// Why these two headers are safe CSRF-skip + fingerprint-skip signals: a
+// Why these two headers are safe CSRF-skip signals: a
 // cross-origin web page CANNOT attach a custom request header (`Authorization`
 // or `X-Summonarr-Client`) to a *credentialed* request — doing so makes it a
 // non-simple request, which the browser gates behind a CORS preflight the
 // server never approves. So a request carrying either header was not forged by
 // another site riding the victim's ambient cookie, which is exactly the threat
-// the Origin check and UA-fingerprint binding defend against.
+// the Origin check defends against. (That is about FORGERY. A STOLEN browser
+// cookie replayed as a bearer is stopped by the transport binding instead.)
 
 export const NATIVE_CLIENT_HEADER = "x-summonarr-client";
 

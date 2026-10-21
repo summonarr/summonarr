@@ -71,3 +71,73 @@ test("structural: the client lib throws only FixMatchClientError — never a bar
     assert.ok(err instanceof Error);
   }
 });
+
+// ── stall-based give-up (replaces the fixed 20-minute window) ────────────────
+import { hasStalled, progressSignature, runFixMatch, STALL_LIMIT_MS, NO_PROGRESS_LIMIT_MS } from "../src/lib/client/fix-match.ts";
+
+test("progressSignature changes with any attempt/phase/copy movement and is empty without progress", () => {
+  const base = { phase: "confirming" as const, remoteApplied: true, attempt: 3, attempts: 120, readFailures: 0 };
+  assert.equal(progressSignature(undefined), "");
+  assert.notEqual(progressSignature(base), progressSignature({ ...base, attempt: 4 }));
+  assert.notEqual(progressSignature(base), progressSignature({ ...base, copy: 2, copies: 3 }));
+  assert.equal(progressSignature(base), progressSignature({ ...base }));
+});
+
+test("hasStalled: 10 minutes of silence for a progress-reporting job, 20 for one that reports none", () => {
+  assert.equal(hasStalled(STALL_LIMIT_MS - 1, 0, true), false);
+  assert.equal(hasStalled(STALL_LIMIT_MS, 0, true), true);
+  assert.equal(hasStalled(STALL_LIMIT_MS, 0, false), false);
+  assert.equal(hasStalled(NO_PROGRESS_LIMIT_MS, 0, false), true);
+});
+
+test("runFixMatch keeps polling past 20 minutes while the job's progress keeps moving, and gives up once it stalls", async () => {
+  const realFetch = globalThis.fetch;
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  // Each 3s poll "takes" three seconds of the fake clock; no real waiting.
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  let polls = 0;
+  let stallAfter = Infinity;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (url.endsWith("/api/admin/fix-match")) return json({ ok: true, jobId: "00000000-0000-0000-0000-000000000000" }, 202);
+    polls++;
+    // 25 minutes of polling (500 × 3s) with a moving attempt counter, then done.
+    if (polls > 500) return json({ status: "done", result: { ok: true } });
+    const attempt = polls < stallAfter ? polls : stallAfter;
+    return json({ status: "running", progress: { phase: "confirming", remoteApplied: true, attempt, attempts: 600, readFailures: 0 } });
+  }) as typeof fetch;
+  try {
+    const body = { server: "jellyfin" as const, mediaType: "TV" as const, correctTmdbId: 5, tmdbId: 4 };
+    assert.deepEqual(await runFixMatch(body), { ok: true }, "a 25-minute job with moving progress completes");
+    polls = 0; stallAfter = 10; clock = 2_000_000;
+    await assert.rejects(runFixMatch(body), (e: unknown) => e instanceof FixMatchClientError && e.code === "timedOut");
+  } finally {
+    globalThis.fetch = realFetch; Date.now = realNow; globalThis.setTimeout = realSetTimeout;
+  }
+});
+
+test("a QUEUED job is never a stall: 30 minutes in line still completes, and the UI is told its position", async () => {
+  const realFetch = globalThis.fetch, realNow = Date.now, realSetTimeout = globalThis.setTimeout;
+  let clock = 5_000_000;
+  Date.now = () => clock;
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => { clock += ms ?? 0; return realSetTimeout(fn, 0); }) as typeof setTimeout;
+  let polls = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
+    if (String(input).endsWith("/api/admin/fix-match")) return json({ ok: true, jobId: "00000000-0000-0000-0000-000000000000" }, 202);
+    polls++;
+    return polls <= 600 ? json({ status: "queued", queueAhead: 2 }) : json({ status: "done", result: { ok: true } });
+  }) as typeof fetch;
+  const seen: Array<{ phase: string; queueAhead?: number }> = [];
+  try {
+    const out = await runFixMatch({ server: "plex", mediaType: "MOVIE", correctTmdbId: 5, tmdbId: 4 }, { onProgress: (p) => seen.push({ phase: p.phase, queueAhead: p.queueAhead }) });
+    assert.deepEqual(out, { ok: true });
+    assert.deepEqual(seen[0], { phase: "queued", queueAhead: 2 });
+  } finally {
+    globalThis.fetch = realFetch; Date.now = realNow; globalThis.setTimeout = realSetTimeout;
+  }
+});

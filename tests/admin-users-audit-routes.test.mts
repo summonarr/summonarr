@@ -199,10 +199,15 @@ function auditMatch(r: AuditRow, where: Record<string, unknown> | undefined): bo
       continue;
     }
     if (k === "ipAddress" || k === "userAgent" || k === "details") {
-      const f = v as { not?: unknown };
       const val = (r as unknown as Record<string, unknown>)[k];
+      if (v === null || typeof v !== "object") { if (val !== v) return false; continue; }
+      const f = v as { not?: unknown; contains?: string };
       if ("not" in f) { if (val === f.not) return false; continue; }
-      if (val !== v) return false;
+      if (f.contains !== undefined) { if (typeof val !== "string" || !val.includes(f.contains)) return false; continue; }
+      return false;
+    }
+    if (k === "id") {
+      if (r.id !== v) return false;
       continue;
     }
     throw new Error(`unhandled AuditLog where key: ${k}`);
@@ -258,6 +263,19 @@ shadowPrismaModel(prisma, "auditLog", {
 });
 
 shadowPrismaModel(prisma, "setting", { findUnique: async () => null, findMany: async () => [] });
+
+// Media-server identities by email — user-create refuses a delegate an address
+// one of these carries (play-history attribution falls back to an email match).
+let serverUserEmails: string[] = [];
+shadowPrismaModel(prisma, "mediaServerUser", {
+  findFirst: async (args: { where: { email: { equals: string; mode?: string } } }) => {
+    rec("mediaServerUser.findFirst", args);
+    const want = args.where.email.equals;
+    const insensitive = args.where.email.mode === "insensitive";
+    const hit = serverUserEmails.find((e) => (insensitive ? e.toLowerCase() === want.toLowerCase() : e === want));
+    return hit ? { id: `msu-${hit}` } : null;
+  },
+});
 
 const users = await import("../src/app/api/admin/users/route.ts");
 const auditLog = await import("../src/app/api/admin/audit-log/route.ts");
@@ -317,6 +335,7 @@ async function readAll(res: Response): Promise<string> {
 
 beforeEach(() => {
   ops = [];
+  serverUserEmails = [];
   appUsers = [];
   auditRows = [];
   auditSeq = 0;
@@ -346,9 +365,53 @@ test("users: a plain USER is 403 and reaches no query", async () => {
 test("users: a MANAGE_USERS holder who is NOT an admin can list and create", async () => {
   // The bit is deliberately MANAGE_USERS, not withAdmin, so the same capability
   // that gates the [id] PATCH/DELETE also gates listing and creating.
-  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
   assert.equal((await listUsers(t)).status, 200);
   assert.equal((await createUser(t, { email: "new@example.com", password: "password12345" })).status, 201);
+});
+
+// ── a delegate can't plant an account on a media-server identity's email ─────
+//
+// Watch-history attribution falls back to an EMAIL match for an identity with no
+// provider-bound account (a Plex friend who never signed in here). A delegate
+// creating `friend@…` with a password of their choosing got the friend's
+// identity bound to it on the next 5s poll — then signed in and read the
+// friend's watch history.
+
+test("users: a MANAGE_USERS delegate can't create an account under a media-server user's email (any case)", async () => {
+  serverUserEmails = ["Friend@Example.com"];
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
+  const res = await createUser(t, { email: "friend@example.com", password: "password12345" });
+  assert.equal(res.status, 403);
+  assert.equal(opsOf("user.create").length, 0);
+  // An address no media server reports is still fine.
+  assert.equal((await createUser(t, { email: "someone-new@example.com", password: "password12345" })).status, 201);
+});
+
+test("users: an ADMIN may still create an account under a media-server user's email", async () => {
+  serverUserEmails = ["friend@example.com"];
+  const t = await mintSession({ role: "ADMIN" });
+  assert.equal((await createUser(t, { email: "friend@example.com", password: "password12345" })).status, 201);
+});
+
+// ── reserved domains (guardrail 34e) ─────────────────────────────────────────
+//
+// A local account holding `jellyfin-<id>@jellyfin.local` squats that Jellyfin
+// user's address (they can never be provisioned), and before 34e Jellyfin
+// sign-in BOUND to whatever row held it — so a delegate could plant one and
+// inherit the Jellyfin user's next sign-in. Refused for everyone, ADMIN included.
+
+test("users: no caller — not even an ADMIN — can create an account in a reserved domain", async () => {
+  const admin = await mintSession({ role: "ADMIN" });
+  const delegate = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
+  for (const t of [admin, delegate]) {
+    for (const email of ["jellyfin-victim@jellyfin.local", "discord_9@Discord.Local", "deleted-x@deleted.invalid"]) {
+      const res = await createUser(t, { email, password: "password12345" });
+      assert.equal(res.status, 400, email);
+      assert.equal((await res.json()).error, "That email address is reserved and can't be used for an account.");
+    }
+  }
+  assert.equal(opsOf("user.create").length, 0);
 });
 
 // ── the self-escalation guard ────────────────────────────────────────────────
@@ -369,10 +432,24 @@ test("users: a full ADMIN CAN create an ADMIN account", async () => {
   assert.equal(res.status, 201);
 });
 
-test("users: a MANAGE_USERS holder can still create USER and ISSUE_ADMIN accounts", async () => {
-  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
+test("users: a MANAGE_USERS holder can create USER accounts, and ISSUE_ADMIN only if it holds MANAGE_ISSUES", async () => {
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
   assert.equal((await createUser(t, { email: "u1@example.com", password: "password12345", role: "USER" })).status, 201);
-  assert.equal((await createUser(t, { email: "u2@example.com", password: "password12345", role: "ISSUE_ADMIN" })).status, 201);
+  // ISSUE_ADMIN seeds MANAGE_ISSUES, which this delegate does not hold: grant only what you hold.
+  ops = [];
+  const denied = await createUser(t, { email: "u2@example.com", password: "password12345", role: "ISSUE_ADMIN" });
+  assert.equal(denied.status, 403);
+  assert.equal(opsOf("user.create").length, 0);
+  const t2 = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS | Permission.MANAGE_ISSUES | Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV });
+  assert.equal((await createUser(t2, { email: "u3@example.com", password: "password12345", role: "ISSUE_ADMIN" })).status, 201);
+});
+
+test("users: a delegate lacking the baseline REQUEST bits cannot seed them into a new account (grant only what you hold)", async () => {
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
+  ops = [];
+  const res = await createUser(t, { email: "nb@example.com", password: "password12345", role: "USER" });
+  assert.equal(res.status, 403);
+  assert.equal(opsOf("user.create").length, 0);
 });
 
 test("users: an unknown role is rejected before any privilege check", async () => {
@@ -566,6 +643,11 @@ test("users: a successful create is audited", async () => {
   await drainAfter();
   const created = opsOf("auditLog.create").find((o) => (o.args as { data: { action: string } }).data.action === "USER_CREATE");
   assert.ok(created, "USER_CREATE audit row missing");
+  const raw = (created.args as { data: { details: string; target: string } }).data;
+  const details = JSON.parse(raw.details);
+  assert.equal(`user:${details.targetUserId}`, raw.target, "the new account is named by its id");
+  assert.ok(!("targetEmail" in details), "never by its email");
+  assert.ok(!raw.details.includes("audited@example.com"));
 });
 
 test("users: a create audit never records the password", async () => {
@@ -752,6 +834,21 @@ test("scrub: clears details on auth events but PRESERVES a USER_DELETE record", 
   await scrubAudit(t);
   assert.equal(auditRows.find((r) => r.id === "login")!.details, null);
   assert.equal(auditRows.find((r) => r.id === "del")!.details, '{"target":"bob"}');
+});
+
+test("scrub: aged admin-action rows lose the TARGET user's name/email from their details — the rest of the record stays", async () => {
+  const t = await mintSession();
+  const old = new Date(Date.now() - 200 * 86_400_000);
+  auditRows = [
+    audit({ id: "role", createdAt: old, action: "USER_ROLE_CHANGE", details: JSON.stringify({ targetUser: "Bob", targetEmail: "bob@example.com", before: { role: "USER" }, after: { role: "ADMIN" } }) }),
+    audit({ id: "fresh", createdAt: new Date(), action: "USER_CREATE", details: JSON.stringify({ targetUser: "Eve", targetEmail: "eve@example.com" }) }),
+    audit({ id: "odd", createdAt: old, action: "SETTINGS_CHANGE", details: 'not json but mentions "targetUser"' }),
+  ];
+  const body = await (await scrubAudit(t)).json();
+  assert.equal(body.adminDetailsScrubbed, 1);
+  assert.deepEqual(JSON.parse(auditRows.find((r) => r.id === "role")!.details!), { before: { role: "USER" }, after: { role: "ADMIN" } });
+  assert.match(auditRows.find((r) => r.id === "fresh")!.details!, /eve@example\.com/, "inside the retention window: untouched");
+  assert.equal(auditRows.find((r) => r.id === "odd")!.details, 'not json but mentions "targetUser"', "unparseable details are left alone, never guessed at");
 });
 
 test("scrub: reports the counts and the cutoff it used", async () => {

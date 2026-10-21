@@ -567,6 +567,11 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
   const media = () => d.mediaType && `(${String(d.mediaType).toLowerCase()})`;
   const reason = () => d.reason && `— ${String(d.reason).slice(0, 80)}`;
   const via = () => d.provider && t("adminManage.audit.summary.via", { provider: String(d.provider) });
+  // Newer user-admin rows name the account by id (+ display name when it has
+  // one) and never carry an email; older rows still have targetUser/targetEmail
+  // until the retention scrub removes them.
+  const targetUser = d.targetUser ?? d.targetUserId;
+  const requester = d.requestedBy ?? d.requesterId;
   switch (action) {
     case "REQUEST_APPROVE":
     case "REQUEST_DECLINE":
@@ -581,11 +586,14 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
           note(),
         ].filter(Boolean).join(" · ") || null;
       }
+      // Since 2026-10-20 the requester is `requesterId` (+ `requestedBy` only
+      // when the account has a display name); older rows carry `requestedBy`
+      // alone, a name or an email until a scrub removes it.
       return [
         d.title && `"${d.title}"`,
         media(),
         d.year && `[${d.year}]`,
-        d.requestedBy && t("adminManage.audit.summary.requestedBy", { user: String(d.requestedBy) }),
+        requester && t("adminManage.audit.summary.requestedBy", { user: String(requester) }),
       ].filter(Boolean).join(" ") || null;
     case "BATCH_REQUEST_DECLINE":
       return [
@@ -596,17 +604,17 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
     case "REQUEST_ON_BEHALF":
       return [
         d.created != null && t("adminManage.audit.summary.requestsCreated", { count: num(d.created) }),
-        d.targetUser && t("adminManage.audit.summary.forUser", { user: String(d.targetUser) }),
+        targetUser && t("adminManage.audit.summary.forUser", { user: String(targetUser) }),
       ].filter(Boolean).join(" ") || null;
     case "USER_ROLE_CHANGE":
     case "USER_PERMISSIONS_CHANGE":
       return [
-        d.targetUser && t("adminManage.audit.summary.user", { user: String(d.targetUser) }),
+        targetUser && t("adminManage.audit.summary.user", { user: String(targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
       ].filter(Boolean).join(" ") || null;
     case "USER_CREATE":
       return [
-        d.targetUser && t("adminManage.audit.summary.created", { user: String(d.targetUser) }),
+        targetUser && t("adminManage.audit.summary.created", { user: String(targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
         d.role && `· ${d.role}`,
       ].filter(Boolean).join(" ") || null;
@@ -617,13 +625,13 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
       ].filter(Boolean).join(" ") || null;
     case "USER_DEACTIVATE":
       return [
-        d.targetUser ? t("adminManage.audit.summary.disabled", { user: String(d.targetUser) }) : null,
+        targetUser ? t("adminManage.audit.summary.disabled", { user: String(targetUser) }) : null,
         d.targetEmail && `(${d.targetEmail})`,
         d.kind === "self-delete" && t("adminManage.audit.summary.closedByUser"),
       ].filter(Boolean).join(" ") || null;
     case "USER_REACTIVATE":
       return [
-        d.targetUser && t("adminManage.audit.summary.reenabled", { user: String(d.targetUser) }),
+        targetUser && t("adminManage.audit.summary.reenabled", { user: String(targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
       ].filter(Boolean).join(" ") || null;
     case "USER_PURGE": {
@@ -808,10 +816,11 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
         via(),
       ].filter(Boolean).join(" ") || null;
     case "SESSION_REVOKE":
+      // An admin's single-session revoke names the account AND the device (its
+      // target is the account since 2026-10-20; older rows had `session:<sid>`).
       return [
-        d.targetUser
-          ? t("adminManage.audit.summary.user", { user: String(d.targetUser) })
-          : d.deviceLabel && t("adminManage.audit.summary.device", { device: String(d.deviceLabel) }),
+        targetUser && t("adminManage.audit.summary.user", { user: String(targetUser) }),
+        d.deviceLabel && t("adminManage.audit.summary.device", { device: String(d.deviceLabel) }),
         d.revokedAll && t("adminManage.audit.summary.allSessions"),
         d.adminAction && t("adminManage.audit.summary.byAdmin"),
         d.revokedByOwner && t("adminManage.audit.summary.byOwner"),
@@ -824,7 +833,7 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
           t("adminManage.audit.summary.otherSessionsSignedOut", { count: d.otherSessionsRevoked }),
       ].filter(Boolean).join(" · ") || null;
     case "MFA_RESET":
-      return d.targetUser ? t("adminManage.audit.summary.user", { user: String(d.targetUser) }) : null;
+      return targetUser ? t("adminManage.audit.summary.user", { user: String(targetUser) }) : null;
     default:
       return null;
   }

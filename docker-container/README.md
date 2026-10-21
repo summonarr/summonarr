@@ -21,7 +21,7 @@ Prefer building from source? See the root [`docker-compose.yml`](../docker-compo
 13. [Upgrading](#upgrading)
 14. [Common commands](#common-commands)
 
-> **Production deployments should sit behind a TLS-terminating reverse proxy** (Nginx, Caddy, Traefik, …). Configure the proxy to forward `Host`, `X-Forwarded-For` / `X-Real-IP`, and `X-Forwarded-Proto`; then set `AUTH_URL=https://your.domain` and `TRUST_PROXY=true` in `.env`. Specific proxy configs are out of scope for this README — consult your proxy's documentation.
+> **Production deployments should sit behind a TLS-terminating reverse proxy** (Nginx, Caddy, Traefik, …). Configure the proxy to forward `Host`, `X-Forwarded-For` / `X-Real-IP`, and `X-Forwarded-Proto`; then set `AUTH_URL=https://your.domain` and `TRUST_PROXY=true` in `.env`. With `TRUST_PROXY=true` the app port must be reachable **only through the proxy**, and the proxy must **overwrite** `X-Forwarded-For` — see [Reach the app only through the reverse proxy](#reach-the-app-only-through-the-reverse-proxy-trust_proxytrue). Specific proxy configs are out of scope for this README — consult your proxy's documentation.
 >
 > **Running without a reverse proxy** (`TRUST_PROXY` unset or `false`) puts the app in **local-only mode**, which is appropriate *only* behind network controls or on a genuinely private host — a LAN-only machine, a loopback-bound port, or one firewalled off from the internet. That mode is gated by the client-supplied `Host` header alone, which is spoofable and therefore not a security boundary, so production requires the explicit `SUMMONARR_ALLOW_LOCAL_ONLY=true` acknowledgement and refuses to start without it.
 
@@ -124,12 +124,12 @@ The app refuses to boot in production if any of these are missing or invalid.
 | Variable               | Constraints                                | Purpose                                                                                                                                                                                  |
 | ---------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TMDB_READ_TOKEN`      | v4 bearer token                            | Required TMDB credential. Sent as a header, so the key never leaks into upstream access logs.                                                                                           |
-| `NEXTAUTH_SECRET`      | **≥ 32 chars**                             | Signs JWT session tokens. `openssl rand -base64 32`.                                                                                                                                     |
+| `NEXTAUTH_SECRET`      | **≥ 32 chars**                             | Signs JWT session tokens. `openssl rand -base64 32`. To rotate it without signing everyone out, see `NEXTAUTH_SECRET_PREVIOUS` under [Rotating `NEXTAUTH_SECRET`](#rotating-nextauth_secret).                     |
 | `AUTH_URL`             | Absolute URL incl. scheme                  | Public URL of the app. Pins the app's own base URL (used for redirects, the OIDC callback, trusted-origin/CSRF checks, and cookie-`Secure` detection) and blocks Host-header injection behind a proxy. Use `https://…` in production so session cookies get the `Secure` + `__Host-` treatment. |
 | `CRON_SECRET`          | **≥ 32 chars**                             | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment.                                                                        |
 | `POSTGRES_PASSWORD`    | any; `openssl rand -base64 32` recommended | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically.                                                                     |
 | `TOKEN_ENCRYPTION_KEY` | **exactly 64 hex chars** (32 bytes)        | AES-256-GCM key for encrypting Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts at rest. `openssl rand -hex 32`.                       |
-| `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`. Forwarded client-IP headers (`X-Forwarded-For` / `X-Real-IP`) are read **only** when this is exactly `"true"`. |
+| `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`. Forwarded client-IP headers (`X-Forwarded-For` / `X-Real-IP`) are read **only** when this is exactly `"true"`. With `true`, publish the app port to the proxy only (`"127.0.0.1:3001:3000"`) and have the proxy overwrite `X-Forwarded-For` — see [Reach the app only through the reverse proxy](#reach-the-app-only-through-the-reverse-proxy-trust_proxytrue); the app logs this reminder at every boot. |
 | `SUMMONARR_ALLOW_LOCAL_ONLY` | `"true"` to enable; default off      | **Required whenever `TRUST_PROXY` is not `"true"`** — production refuses to boot in local-only mode without it. Local-only mode is gated solely by the client-supplied, spoofable `Host` header, so it is safe only on a genuinely private host (LAN-only, loopback-bound, or firewalled). Set it to acknowledge that your network provides the access control. It cannot unlock a public `AUTH_URL`. |
 | `SUMMONARR_DEFAULT_LOCALE` | `en` (default), `es`, `fr`, `de`, `pt` (Brazilian), `it` or `zh` (Simplified) | Default interface language for browsers whose language isn't supported, and for emails, push notifications and Discord messages to users who have never picked a language. A region tag (`pt-BR`, `zh-CN`) is accepted and read on its language part. Each user can still choose their own language from the account menu. |
 
@@ -173,6 +173,12 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `TRASH_SYNC_INTERVAL`        | `86400` | TRaSH-Guides quality profile refresh.                              |
 | `PLEX_WATCHLIST_SYNC_INTERVAL` | `1800` | Plex watchlist auto-request (a no-op unless *Watchlist auto-request* is enabled in Features). |
 | `TRAKT_SYNC_INTERVAL` | `1800` | Per-user Trakt: watchlist auto-request and watch history for *For You* (a no-op until a Trakt client ID and secret are saved in Settings). |
+| `UPSTREAM_WATCH_SYNC_INTERVAL` | `86400` | Plex/Jellyfin's own watch records for the *Never Watched* report (a no-op while Never Watched and Library cleanup are both off). |
+| `ARR_WATCH_INTERVAL` | `900` | Radarr/Sonarr monitor: low disk space, failed downloads and downloads newly needing attention, sent to your notification channels (skipped while no Radarr/Sonarr is configured). |
+| `ARR_SNAPSHOT_INTERVAL` | `300` | How often the admin Radarr/Sonarr pages are re-read in the background so they open on recent data. Each page keeps its own pace by priority (queue and health every 5 minutes, Missing, history, calendar and titles every 10, Arr System every 15); only pages an admin opened in the last day are re-read. |
+| `WARM_RECOMMENDATIONS_INTERVAL` | `43200` | *For You* recommendations rebuild. |
+| `WARM_LIBRARY_INTERVAL` | `86400` | Library metadata and suggestion pre-warm. |
+| `CRON_RETRY_INTERVAL` | `300` | Wait before retrying a cron job that failed. |
 
 ### Advanced / rarely needed
 
@@ -180,7 +186,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.34.0` (no `v` — the published tags are bare semver).                                                                                                   |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.35.0` (no `v` — the published tags are bare semver).                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -210,7 +216,9 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
 
      proxy_set_header Host              $host;
      proxy_set_header X-Real-IP         $remote_addr;
-     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+     # Overwrite, never pass a client-supplied value through — see
+     # "Reach the app only through the reverse proxy" below.
+     proxy_set_header X-Forwarded-For   $remote_addr;
      proxy_set_header X-Forwarded-Proto $scheme;
    }
    ```
@@ -289,6 +297,24 @@ To add it by hand instead: in Radarr/Sonarr go to **Settings → Connect → + �
 
 Code-level defenses (CSRF origin checks, SSRF protection via per-request DNS re-resolution, DB-checked session revocation, secrets encrypted at rest, per-IP/-user rate limiting) ship built in. The items below are **deployment-side** hardening that only you can do. None are required for the app to run, but each closes a real exposure on an internet-facing instance.
 
+### Reach the app only through the reverse proxy (`TRUST_PROXY=true`)
+
+With `TRUST_PROXY=true`, Summonarr takes each request's client IP from `X-Forwarded-For` (the `TRUSTED_PROXY_HOPS`-th entry from the right). Per-IP rate limits, audit and device rows, and the machine-session IP allowlist all key on that address. The header is only as honest as the path to the port: **anyone who can reach the app port without going through the proxy writes it themselves**, and gets a fresh rate-limit budget per forged address.
+
+The shipped `docker-compose.yml` publishes `"3001:3000"` on **every** interface. That default is left alone so an existing LAN deployment keeps working, so on an internet-facing host change it yourself:
+
+1. **Publish the port to the proxy only.** When the proxy runs on the same host, bind it to loopback:
+
+   ```yaml
+   ports:
+     - "127.0.0.1:3001:3000"
+   ```
+
+   When the proxy runs in another container, drop `ports:` entirely and put both containers on one Docker network (the proxy then reaches `summonarr:3000`). Either way, check from another machine that `http://<host-ip>:3001` no longer answers.
+2. **Have the proxy overwrite `X-Forwarded-For`** with the address that connected to it, so a client-supplied value never reaches the app whatever `TRUSTED_PROXY_HOPS` says. In nginx that is `proxy_set_header X-Forwarded-For $remote_addr;` (not `$proxy_add_x_forwarded_for`), plus `proxy_set_header X-Real-IP $remote_addr;`. Caddy (v2.5+) and Traefik already discard a client-sent `X-Forwarded-For` by default; keep their trusted-proxy lists empty unless another proxy sits in front of them. With chained proxies (e.g. Cloudflare → nginx), only the internet-facing one overwrites; the ones behind it append, and `TRUSTED_PROXY_HOPS` is the number of proxies.
+
+The app logs a reminder of both points at every boot while `TRUST_PROXY=true`.
+
 ### Keep webhook tokens out of proxy logs
 
 Radarr/Sonarr webhook UIs have no header field, so the secret rides in the query string (`?token=…`). That value can land in reverse-proxy access logs, WAF logs, and `Referer` headers. The compare is timing-safe and the secret is per-instance, but **treat any logged token as compromised**.
@@ -327,6 +353,19 @@ On an internet-facing deployment (`TRUST_PROXY=true`) the pre-auth restore is th
 - If you enable it, **always** set `machineSessionAllowedIps` to the automation host(s) — an empty allowlist accepts any caller IP. (The app now rejects enabling machine sessions with an empty allowlist, but set it deliberately.)
 - Prefer the file mount `/run/secrets/cron_secret` so the secret never appears in `docker inspect`.
 - **Rotate `CRON_SECRET` immediately if it leaks** (compose files, CI logs, backups).
+
+### Rotating `NEXTAUTH_SECRET`
+
+Changing `NEXTAUTH_SECRET` on its own signs every user out. For a **planned** rotation, keep the old value as `NEXTAUTH_SECRET_PREVIOUS` (≥ 32 chars) and restart:
+
+```bash
+NEXTAUTH_SECRET_PREVIOUS=<the current value>
+NEXTAUTH_SECRET=<a new value from: openssl rand -base64 32>
+```
+
+The previous secret only verifies; nothing new is signed with it. Browser sessions move to the new secret on their next request. **iOS sessions are never re-issued**, so a device signed in before the rotation keeps working only while `NEXTAUTH_SECRET_PREVIOUS` is set — removing it later signs those devices out (they sign in again). The app refuses to boot with a previous secret shorter than 32 characters or equal to `CRON_SECRET` / `TOKEN_ENCRYPTION_KEY`.
+
+**If `NEXTAUTH_SECRET` leaked, do not set `NEXTAUTH_SECRET_PREVIOUS`** — it would keep accepting tokens forged with the leaked value. Change `NEXTAUTH_SECRET` alone and accept the global sign-out.
 
 ### APNs relay trust (iOS push)
 
@@ -382,7 +421,7 @@ Optional **4K instances** use a parallel set of fields (`radarr4kUrl`, `sonarr4k
 Summonarr ships a native OIDC client (`openid-client`) — Authorization Code flow with mandatory PKCE (`S256`), `client_secret_post` token auth, and scopes `openid profile email`. The IdP **must** support discovery (`.well-known/openid-configuration`).
 
 1. Register a new confidential application with your IdP. **Callback / redirect URI:** `${AUTH_URL}/api/auth/oidc/callback` (e.g. `https://requests.example.com/api/auth/oidc/callback`; for a sub-path deploy include the prefix, `https://example.com/request/api/auth/oidc/callback`).
-2. Ensure the IdP releases `email` and `name`/`preferred_username` **in the ID token** and asserts `email_verified=true` — Summonarr reads claims from the ID token (no userinfo call) and **refuses sign-in if the email is unverified or missing**.
+2. Ensure the IdP releases `email` and `name`/`preferred_username` **in the ID token** and asserts `email_verified=true` — Summonarr reads these claims from the ID token and **refuses to create or link an account if the email is unverified or missing**. An unverified address is never copied into a user's notification email.
 3. Copy the issuer, client ID, and client secret into your `.env`:
 
    ```dotenv
@@ -393,6 +432,12 @@ Summonarr ships a native OIDC client (`openid-client`) — Authorization Code fl
    ```
 4. `docker compose up -d --force-recreate summonarr`. OIDC discovery is cached at boot, so env or IdP-metadata changes require this restart. The "Sign in with …" button then appears automatically.
 
+**Who may sign in** — Admin → Settings → Authentication → *Single sign-on (OIDC) allowlist*. Off by default (anyone the IdP authenticates gets in). You can require membership in one of a list of groups (the claim name is configurable, default `groups`; it is read from the ID token, else from userinfo — tick *Request the groups scope* for IdPs such as Authelia that only release it when asked), require an IdP-verified email in one of a list of domains, and/or allow **existing users only** (no account is ever created on an OIDC sign-in). The groups and domain rules apply to every OIDC sign-in, existing accounts included, on the web and in the iOS app; each refusal is written to the audit log as `AUTH_LOGIN_FAILED` with its reason.
+
+> **Disabling someone at the IdP does not sign them out of Summonarr.** Summonarr checks the IdP only at sign-in: a session it already issued stays valid (iOS app sessions never expire), and the allowlist only refuses their *next* sign-in. To cut someone off, also deactivate them in **Admin → Users** — that ends every session they have.
+
+> **Changing `OIDC_ISSUER`.** An OIDC account is bound to the issuer it signed in under (an IdP's user id is only unique within that IdP), so after pointing `OIDC_ISSUER` somewhere else, existing OIDC users are refused until an admin deals with it. If the new issuer is the *same* identity provider under a new URL (same user ids), clear the stored issuer so each account adopts the new one on its next sign-in: `UPDATE "Account" SET issuer = NULL WHERE provider = 'oidc';` — never do this when moving to a different IdP.
+
 > **First admin & OIDC.** The first OIDC sign-in is **not** auto-promoted to ADMIN — bootstrap your admin via local registration first, and keep that local account as a break-glass login (the recovery script can't reset OIDC users). To let an OAuth/OIDC user become the first admin instead, set `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN=true`. A self-hosted IdP on a private LAN IP is supported; link-local (`169.254.x`) issuers are blocked by the SSRF policy.
 
 ### Notifications (Discord, Email, Web Push)
@@ -401,7 +446,7 @@ All three are **optional**, configured in **Admin → Settings** (not via enviro
 
 > **What a feature flag actually disables.** Flags fall into three classes — `page` (a user-facing page or nav item), `integration` (an upstream service: Radarr/Sonarr/Discord/Plex/Jellyfin/push), and `admin`. Today a flag reliably hides the **page / UI surface** it names, but it does **not** uniformly gate the underlying mirror APIs or every integration code path: disabling a `page` flag removes the page and its nav entry while the corresponding `/api/*` endpoint may still respond, and an `integration` flag does not gate every notification/login/interaction path that touches that service. Treat flags as a UI/visibility control, not a hard security or access boundary — to fully cut off a surface, also remove its configuration (clear the relevant `Setting` keys) or block the route at your reverse proxy.
 
-- **Discord** — uses a **Discord bot** (not a webhook URL). Set the bot token, and optionally a client ID + public key (for slash commands / interaction verification), a guild ID, and channel IDs. New requests/issues post to the configured admin channel (with Approve/Decline buttons on requests); per-user approved/declined/available notifications go to a notify channel or DM. Role-sync on account link is also supported.
+- **Discord** — uses a **Discord bot** (not a webhook URL). Set the bot token, and optionally a client ID + public key (for slash commands / interaction verification), a guild ID, and channel IDs. Slash commands and buttons need the **guild ID**: the bot answers only interactions from that server (never from DMs or another server it was added to), refuses every one until it is set, and registers its commands to that server only, clearing any global set. New requests/issues post to the configured admin channel (with Approve/Decline buttons on requests); per-user approved/declined/available notifications go to a notify channel or DM. Role-sync on account link is also supported.
 - **Email** — two backends selectable via `emailBackend`: **SMTP** (set `smtpHost`, optional `smtpPort` [default 587 STARTTLS; 465 = implicit TLS], `smtpUser`/`smtpPassword`, `smtpFrom`) or **Resend** (`resendApiKey`, `resendFrom`). Admin notifications send whenever email is configured; user-facing emails require toggling `enableUserEmails`.
 - **Web Push** — VAPID keypairs are **auto-generated** and stored on first use; no admin action and no env var is required. iOS push goes through the app publisher's APNs relay, which can't be self-hosted; notification text is end-to-end encrypted (see [APNs relay trust](#apns-relay-trust-ios-push)).
 
@@ -465,7 +510,7 @@ If no row matches the email, the script exits with code `2` and **no changes are
 - The `summonarr` container is **running and healthy** (check with `docker ps`).
 - You're on a Summonarr image **≥ `0.11.1`** (the script was added in that release). Pin with `SUMMONARR_VERSION=0.11.1` in `.env`, or run `:latest`.
 - You can run `docker exec` against the container — usually means root or membership in the `docker` group.
-- The new password is **at least 8 characters**. The script refuses anything shorter with exit code `1`.
+- The new password is **at least 12 characters** (the same minimum the app enforces). The script refuses anything shorter with exit code `1`.
 
 ### Step 1 — Confirm the email you'll reset
 
@@ -557,7 +602,7 @@ If you've changed `POSTGRES_USER` or `POSTGRES_DB` in your `.env` away from the 
 
 **`No user found with email ...`** — The email isn't in the `User` table, or it has a different case than you typed (the script normalises both sides to lowercase, so case shouldn't matter — double-check spelling). Re-run Step 1 to list every account.
 
-**`Password must be at least 8 characters.`** — Exactly that. Use ≥ 8.
+**`Password must be at least 12 characters.`** — Exactly that. Use ≥ 12.
 
 **`Cannot parse DATABASE_URL`** (only seen when overriding) — If you bypassed the `PG*` flags and passed your own `DATABASE_URL`, it doesn't match `postgres://user:pass@host:port/db`. Either fix the URL or switch back to the four `PG*` flags.
 
@@ -582,6 +627,8 @@ docker compose logs -f summonarr   # watch prisma db push apply any schema chang
 
 > **Upgrading a LAN/localhost deployment (`TRUST_PROXY` unset or `false`)?** Add `SUMMONARR_ALLOW_LOCAL_ONLY=true` to `.env` *before* `docker compose up -d`. Production now refuses to start in local-only mode without that explicit opt-in — see [`TRUST_PROXY` / `SUMMONARR_ALLOW_LOCAL_ONLY`](#environment-variables). The boot log names the exact variable if you hit it. Deployments already running `TRUST_PROXY=true` behind a reverse proxy are unaffected.
 
+> **Sign-in identity binding (since the 2026-10-17 auth hardening).** A Jellyfin account is now bound to the Jellyfin server it was first seen on, and signing in to it through a *different* configured Jellyfin server is refused; an OIDC account is bound to its issuer. Existing accounts are migrated automatically (at boot, or on their next sign-in) — nothing to do. If the boot log reports accounts that "carry a jellyfin-<id>@jellyfin.local address but were not bound", those rows also have a password, a Plex id or an OIDC login, and that Jellyfin user's sign-in is refused until you sort out which account is theirs.
+
 Schema changes are applied on every container start via `prisma db push` (no migrations directory, no manual step). Destructive schema changes (dropped columns, narrowed types) will **fail fast at boot** instead of silently clobbering data — apply those by hand with explicit intent when they come up.
 
 Before upgrading across a minor version, skim the commit history for `feat`/`perf` entries under the `sync`, `plex`, `jellyfin`, or `arr` scopes — those are the changes most likely to affect external-service wiring.
@@ -589,7 +636,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=0.34.0
+SUMMONARR_VERSION=0.35.0
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

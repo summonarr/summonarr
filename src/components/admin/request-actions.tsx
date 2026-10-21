@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, X, Ban, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings, Download } from "@/components/icons";
+import { Loader2, Check, X, Ban, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings, Download, Activity } from "@/components/icons";
 import { ReleaseSearchDialog } from "./release-search-dialog";
+import { RequestArrStatusPanel } from "./request-arr-status";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -15,12 +16,14 @@ interface RequestActionsProps {
   mediaType: string;
   /** Instance slug this request targets ("" = default, "4k", or a named slug) — picks which instance's profiles to list. */
   arrInstance: string;
+  /** That instance's display name — the "Why?" panel names the instance it checked. */
+  arrInstanceName?: string | null;
   existingAdminNote?: string | null;
   /** When set, approve/decline apply to all of these PENDING request IDs via the batch endpoint. */
   groupPendingIds?: string[];
 }
 
-export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, existingAdminNote, groupPendingIds }: RequestActionsProps) {
+export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, arrInstanceName, existingAdminNote, groupPendingIds }: RequestActionsProps) {
   const router = useRouter();
   const t = useT();
   const [loading, setLoading] = useState<"APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE" | null>(null);
@@ -41,6 +44,16 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   // Interactive search ("Pick release") on the request's own instance.
   const [showReleases, setShowReleases] = useState(false);
+  // "Why?" — the inline Radarr/Sonarr status panel, loaded on click only.
+  const [showStatus, setShowStatus] = useState(false);
+  const statusPanelId = useId();
+  // The panel reads Radarr/Sonarr when it MOUNTS, so it must never re-mount
+  // without a click. Leaving the APPROVED branch (a sync marking the row
+  // AVAILABLE, a decline elsewhere) unmounts it; close it then, or its return
+  // would read again on its own. The delete confirm closes it the same way.
+  useEffect(() => {
+    if (status !== "APPROVED") setShowStatus(false);
+  }, [status]);
   const [arrError, setArrError] = useState<string | null>(null);
   const [retryOk, setRetryOk] = useState(false);
   const [showDeclineNote, setShowDeclineNote] = useState(false);
@@ -350,8 +363,21 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
     }
 
     return (
-      <div className="flex flex-col items-end gap-1">
+      // Full width below sm while the status panel is open, so it can use the row.
+      <div className={`flex flex-col items-end gap-1 ${showStatus ? "w-full sm:w-auto" : ""}`}>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowStatus((v) => !v)}
+            aria-expanded={showStatus}
+            aria-controls={showStatus ? statusPanelId : undefined}
+            title={t("adminQueue.arrStatus.buttonTitle")}
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
+          >
+            <Activity className="w-3 h-3" />
+            {t("adminQueue.arrStatus.button")}
+          </Button>
           <Button
             size="sm"
             variant="outline"
@@ -385,7 +411,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           <Button
             size="sm"
             variant="outline"
-            onClick={() => setShowDeleteConfirm(true)}
+            onClick={() => { setShowStatus(false); setShowDeleteConfirm(true); }}
             disabled={loading !== null}
             className="h-7 px-3 text-xs border-red-500/50 text-red-400 hover:bg-red-500/10 hover:text-red-400 gap-1"
           >
@@ -393,6 +419,23 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             {t("adminQueue.actions.delete")}
           </Button>
         </div>
+        {showStatus && (
+          <RequestArrStatusPanel
+            // A new representative request starts from no verdict: the old
+            // one's buttons would act on the new request.
+            key={requestId}
+            id={statusPanelId}
+            requestId={requestId}
+            mediaType={mediaType}
+            arrInstance={arrInstance}
+            arrInstanceName={arrInstanceName}
+            busy={loading !== null}
+            onSearch={triggerSearch}
+            onPickRelease={() => { setArrError(null); setShowReleases(true); }}
+            onRepush={retryPush}
+            onClose={() => setShowStatus(false)}
+          />
+        )}
         {retryOk && (
           <span role="status" aria-live="polite" className="flex items-center gap-1 text-[11px] text-green-400">
             <Check className="w-3 h-3" />{t("adminQueue.actions.done")}

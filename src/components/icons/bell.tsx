@@ -12,6 +12,7 @@ export function Bell({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <path d="M10.268 21a2 2 0 0 0 3.464 0" />

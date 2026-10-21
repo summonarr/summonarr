@@ -21,6 +21,29 @@ const SW_READY_TIMEOUT_MS = 10_000;
 // library would also work, but guardrail 9 rules that out.)
 const PUSH_CHANGED_EVENT = "summonarr:push-changed";
 
+// The server can drop this browser's registration without the browser knowing:
+// a password change or "sign out everywhere" deletes every push registration on
+// the account, since a session hijacker may have added their own (guardrail 6g).
+// The bell reads the BROWSER's subscription, so without this the owner's own
+// browser would keep showing "on" while nothing was delivered. Re-send it once
+// per page load; the server upserts by endpoint, so a still-registered browser
+// changes nothing. Failures are ignored: push may be switched off, the site may
+// be in maintenance, or the endpoint may belong to another account here.
+let resyncedThisPageLoad = false;
+function resyncSubscription(sub: PushSubscription): void {
+  if (resyncedThisPageLoad) return;
+  resyncedThisPageLoad = true;
+  const json = sub.toJSON();
+  void fetch(withBasePath("/api/push/subscribe"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys }),
+  }).catch(() => { });
+}
+
+/** The server's own (translated, safe) reason the VAPID key could not be served. */
+class ServerReasonError extends Error {}
+
 /** Reject a promise that may never settle. `serviceWorker.ready` is one. */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -59,7 +82,10 @@ export function PushNotifications() {
     navigator.serviceWorker
       .register(withBasePath("/sw.js"), { scope: withBasePath("/") })
       .then((reg) => reg.pushManager.getSubscription())
-      .then((sub) => setState(sub ? "subscribed" : "unsubscribed"))
+      .then((sub) => {
+        if (sub) resyncSubscription(sub);
+        setState(sub ? "subscribed" : "unsubscribed");
+      })
       .catch(() => setState("unsubscribed"));
 
     const onChanged = () => {
@@ -81,9 +107,13 @@ export function PushNotifications() {
   useEffect(() => {
     if (state === "naming") {
       // Wait one tick so the input exists before we focus it.
-      setTimeout(() => inputRef.current?.focus(), 0);
+      const timer = setTimeout(() => inputRef.current?.focus(), 0);
+      return () => clearTimeout(timer);
     }
   }, [state]);
+
+  const testResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (testResetRef.current) clearTimeout(testResetRef.current); }, []);
 
   async function subscribe(label: string) {
     setBusy(true);
@@ -98,7 +128,7 @@ export function PushNotifications() {
           .json()
           .then((b: { error?: string }) => b?.error)
           .catch(() => undefined);
-        throw new Error(reason || t("shared.push.vapidFailed"));
+        throw new ServerReasonError(reason || t("shared.push.vapidFailed"));
       }
       const { publicKey } = await res.json() as { publicKey: string };
 
@@ -132,7 +162,7 @@ export function PushNotifications() {
 
       setState("subscribed");
       window.dispatchEvent(new Event(PUSH_CHANGED_EVENT));
-    } catch {
+    } catch (err) {
       // Same reasoning as above: if anything threw after the browser
       // subscribed, undo that subscription. Unsubscribing one that is already
       // gone is harmless.
@@ -142,7 +172,7 @@ export function PushNotifications() {
         .then((s) => s?.unsubscribe())
         .catch(() => { });
       const denied = Notification.permission === "denied";
-      if (!denied) setError(t("shared.push.enableFailed"));
+      if (!denied) setError(err instanceof ServerReasonError ? err.message : t("shared.push.enableFailed"));
       setState(denied ? "denied" : "unsubscribed");
     } finally {
       setBusy(false);
@@ -170,7 +200,8 @@ export function PushNotifications() {
       console.error("[push test] fetch error:", err);
       setTestState("error");
     } finally {
-      setTimeout(() => setTestState("idle"), 3000);
+      if (testResetRef.current) clearTimeout(testResetRef.current);
+      testResetRef.current = setTimeout(() => setTestState("idle"), 3000);
     }
   }
 
@@ -182,11 +213,18 @@ export function PushNotifications() {
       const reg = await withTimeout(navigator.serviceWorker.ready, SW_READY_TIMEOUT_MS);
       const sub = await reg.pushManager.getSubscription();
       if (sub) {
-        await fetch(withBasePath("/api/push/subscribe"), {
+        const delRes = await fetch(withBasePath("/api/push/subscribe"), {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ endpoint: sub.endpoint }),
         });
+        // A failed DELETE leaves the server still pushing to this endpoint;
+        // dropping the browser subscription anyway would show "off" while the
+        // server disagrees. 404 means the server already forgot it.
+        if (!delRes.ok && delRes.status !== 404) {
+          setError(t("shared.push.disableFailed"));
+          return;
+        }
         await sub.unsubscribe();
       }
       setState("unsubscribed");

@@ -20,6 +20,7 @@ import {
   verifyOidcStateCookie,
 } from "../src/lib/oidc.ts";
 import { signPlexFlowCookie } from "../src/lib/plex-flow-state.ts";
+import { signPurposeJwt } from "../src/lib/signing-keys.ts";
 
 const SECRET = "unit-test-oidc-state-secret-0123456789abcdef";
 process.env.NEXTAUTH_SECRET = SECRET;
@@ -35,12 +36,20 @@ function decodePayload(token: string): Record<string, unknown> {
   return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
 }
 
-function signRaw(claims: Record<string, unknown>, expiresIn = "5m"): Promise<string> {
-  return new SignJWT(claims)
-    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-    .setIssuedAt()
-    .setExpirationTime(expiresIn)
-    .sign(new TextEncoder().encode(SECRET));
+function decodeHeader(token: string): Record<string, unknown> {
+  return JSON.parse(Buffer.from(token.split(".")[0], "base64url").toString("utf8"));
+}
+
+// A validly-signed flow token with arbitrary claims: the real "oidc-flow"
+// subkey, typ and audience (read off a real token), so the shape checks are
+// what gets exercised — not the signature (guardrail 6h).
+async function signRaw(claims: Record<string, unknown>): Promise<string> {
+  const sample = await signOidcStateCookie(STATE);
+  return signPurposeJwt("oidc-flow", claims, {
+    typ: decodeHeader(sample).typ as string,
+    audience: decodePayload(sample).aud as string,
+    ttlSeconds: 300,
+  });
 }
 
 test("OIDC_STATE_COOKIE is the exact cookie name both routes agree on", () => {
@@ -99,9 +108,15 @@ test("returnTo survives the roundtrip verbatim (post-login destination)", async 
   assert.deepEqual(verified, withReturn);
 });
 
-test("the state JWT carries only the flow fields plus iat/exp", async () => {
-  const bare = decodePayload(await signOidcStateCookie(STATE));
+test("the state JWT carries only the flow fields plus iat/exp/aud, under its own typ and kid (guardrail 6h)", async () => {
+  const token = await signOidcStateCookie(STATE);
+  const header = decodeHeader(token);
+  assert.equal(header.typ, "summonarr-oidc-flow+jwt");
+  assert.equal(typeof header.kid, "string");
+  const bare = decodePayload(token);
+  assert.equal(bare.aud, "summonarr:oidc-flow");
   assert.deepEqual(Object.keys(bare).sort(), [
+    "aud",
     "codeVerifier",
     "exp",
     "iat",
@@ -119,6 +134,7 @@ test("the state JWT carries only the flow fields plus iat/exp", async () => {
   );
   assert.equal(withReturn.returnTo, "/movies");
   assert.deepEqual(Object.keys(withReturn).sort(), [
+    "aud",
     "codeVerifier",
     "exp",
     "iat",
@@ -133,6 +149,28 @@ test("cookie lifetime is pinned to 5 minutes (exp - iat)", async () => {
   const payload = decodePayload(await signOidcStateCookie(STATE));
   assert.equal(typeof payload.iat, "number");
   assert.equal(payload.exp, (payload.iat as number) + 300);
+});
+
+test("the right key with the wrong typ or audience is refused — the flow checks both on verify", async () => {
+  const sample = await signOidcStateCookie(STATE);
+  const typ = decodeHeader(sample).typ as string;
+  const audience = decodePayload(sample).aud as string;
+  assert.ok(await verifyOidcStateCookie(await signPurposeJwt("oidc-flow", { ...STATE }, { typ, audience, ttlSeconds: 300 })));
+  assert.equal(await verifyOidcStateCookie(await signPurposeJwt("oidc-flow", { ...STATE }, { typ: "JWT", audience, ttlSeconds: 300 })), null);
+  assert.equal(
+    await verifyOidcStateCookie(await signPurposeJwt("oidc-flow", { ...STATE }, { typ, audience: "summonarr:plex-flow", ttlSeconds: 300 })),
+    null,
+  );
+});
+
+test("a state token HMAC'd with the RAW NEXTAUTH_SECRET (the pre-6h format) is refused", async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const legacy = await new SignJWT({ ...STATE })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuedAt(now)
+    .setExpirationTime(now + 300)
+    .sign(new TextEncoder().encode(SECRET));
+  assert.equal(await verifyOidcStateCookie(legacy), null);
 });
 
 test("expired state cookie verifies to null (stale flow cannot complete)", async () => {
@@ -211,8 +249,8 @@ test("non-string returnTo is dropped to undefined, not rejected", async () => {
 });
 
 test("a Plex flow cookie does not verify as OIDC state (cross-flow confusion)", async () => {
-  // Both flow cookies are HS256 JWTs under the same NEXTAUTH_SECRET; the
-  // shape check is what keeps a Plex PIN-flow token out of the OIDC callback.
+  // Each flow has its own subkey, typ and audience (guardrail 6h), so the
+  // signature alone refuses it; the shape check is the second line.
   const plexToken = await signPlexFlowCookie({ pinId: 987654321, clientId: "summonarr-web" });
   assert.equal(await verifyOidcStateCookie(plexToken), null);
 });

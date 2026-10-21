@@ -15,11 +15,13 @@ import { getTranslator } from "@/lib/i18n/server";
 import { LocaleSync } from "@/components/i18n/locale-sync";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
+import { readArrWatchNavBadges } from "@/lib/arr-watch-data";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
 import { RatingsVisibilityProvider } from "@/components/media/ratings-visibility";
 import { DetailTitleProvider } from "@/components/layout/detail-title";
 import { NotificationStoreProvider } from "@/components/notifications/notification-store";
+import { NavBadgesProvider } from "@/components/layout/admin-nav-groups";
 
 // One settings read per request, shared by generateMetadata and the layout
 // body. Next only de-duplicates `fetch()` calls between those two, not Prisma
@@ -67,15 +69,20 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let maintenanceMessage = "";
   let featureFlags: FeatureFlags | undefined;
   let hiddenRatingSources: string[] = [];
+  let navBadges: Awaited<ReturnType<typeof readArrWatchNavBadges>>;
   try {
     // The discordId lookup runs in parallel with the settings/flags reads
     // instead of after them, saving a full DB round-trip per page. The cost:
     // sites with no Discord invite do one small extra lookup they don't need.
-    const [rows, flags, user] = await Promise.all([
+    const [rows, flags, user, badges] = await Promise.all([
       readLayoutSettings(),
       getFeatureFlags(),
       prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true, locale: true } }),
+      // The Download Queue's "needs attention" count (the Radarr/Sonarr
+      // monitor's last run) — one row read, admins only; never throws.
+      isAdmin ? readArrWatchNavBadges() : Promise.resolve(undefined),
     ]);
+    navBadges = badges;
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     hiddenRatingSources = parseHiddenRatingSources(cfg.ratingsHiddenSources);
     motdBody            = cfg.motdEnabled === "true" ? (cfg.motdBody ?? "") : "";
@@ -110,6 +117,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         mobile badge are both mounted at every viewport and used to fetch
         independently. Must wrap Header and MobileNav, not just {children}. */}
     <NotificationStoreProvider>
+    {/* One badge poll for both nav surfaces: this layout renders the first
+        value, but it does not re-render on client navigation, so the provider
+        re-reads the admin badge (GET /api/admin/arr-watch) while the app is open. */}
+    <NavBadgesProvider initial={navBadges} enabled={isAdmin}>
     <div
       className="flex h-screen overflow-hidden"
       style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
@@ -142,6 +153,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       </div>
       {motdBody && <MotdModal title={motdTitle} body={motdBody} />}
     </div>
+    </NavBadgesProvider>
     </NotificationStoreProvider>
     </DetailTitleProvider>
     </RatingsVisibilityProvider>

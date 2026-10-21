@@ -77,13 +77,13 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 
 // ── recording fetch: every wire attempt is logged; only a scripted impl succeeds ─
 const fetchCalls: URL[] = [];
-let fetchImpl: (url: URL) => Response | Promise<Response> = () => {
+let fetchImpl: (url: URL, init?: RequestInit) => Response | Promise<Response> = () => {
   throw new Error("unexpected fetch — this test's flow must be satisfied from stubs/caches");
 };
-globalThis.fetch = (async (input: RequestInfo | URL) => {
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
-  return fetchImpl(url);
+  return fetchImpl(url, init);
 }) as typeof fetch;
 
 // A JSON Response the scripted fetch impls return.
@@ -402,6 +402,17 @@ async function postRelease(token: string | null, id: string, body: unknown): Pro
 async function getReleases(token: string | null, id: string, query = ""): Promise<Response> {
   const req = issuesReq(token, { method: "GET", path: `/${id}/releases`, query });
   return inScope(() => getReleaseRoute(req, idCtx(id)));
+}
+// One grabbable Radarr release for the grab tests. The grab POSTs the opaque
+// handle this issue's own search issued (release-handles.ts), never the raw
+// indexer guid — so each grab test searches first.
+const RELEASE_ROW = {
+  guid: "release-guid-123", title: "The.Matrix.1999.1080p", size: 1, indexerId: 7, indexer: "NZBGeek",
+  quality: { quality: { id: 7, name: "Bluray-1080p" }, revision: { version: 1 } },
+  qualityWeight: 1, protocol: "usenet", age: 1, rejected: false, rejections: [], downloadAllowed: true,
+};
+async function searchHandle(token: string, id: string, query = "?instance=4k"): Promise<string> {
+  return ((await (await getReleases(token, id, query)).json()) as Array<{ guid: string }>)[0].guid;
 }
 // `body` omitted ⇒ a genuinely BODY-LESS POST (the legacy caller shape), not `{}`.
 async function postClaim(token: string | null, id: string, body?: unknown): Promise<Response> {
@@ -844,14 +855,22 @@ test("releases POST (happy grab): the resolved instance slug flows into IssueGra
   // Configure the legacy 4K Radarr instance and script its two grab calls.
   settings.set("radarr4kUrl", "http://radarr-4k.example.com:7878");
   settings.set("radarr4kApiKey", "4k-api-key");
-  fetchImpl = (url: URL) => {
+  const grabBodies: Array<Record<string, unknown>> = [];
+  fetchImpl = (url: URL, init?: RequestInit) => {
     if (url.pathname.startsWith("/api/v3/movie")) return jsonResponse([{ id: 42, tmdbId: 603 }]);
-    if (url.pathname === "/api/v3/release") return jsonResponse({ ok: true });
+    if (url.pathname === "/api/v3/release") {
+      if (url.searchParams.has("movieId")) return jsonResponse([RELEASE_ROW]);
+      grabBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse({ ok: true });
+    }
     throw new Error(`unexpected grab fetch: ${url.href}`);
   };
   const admin = await mintSession({ role: "ADMIN" });
 
-  const res = await postRelease(admin.token, "issue-r3", { guid: "release-guid-123", indexerId: 7, instance: "4k" });
+  // The body's indexerId (99) deliberately DISAGREES with the searched release's
+  // (RELEASE_ROW, 7): the grab and its audit must take the handle's, never the
+  // browser's (guardrail 5e — a browser value only NAMES what the instance reported).
+  const res = await postRelease(admin.token, "issue-r3", { guid: await searchHandle(admin.token, "issue-r3"), indexerId: 99, instance: "4k" });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true });
 
@@ -873,7 +892,11 @@ test("releases POST (happy grab): the resolved instance slug flows into IssueGra
   assert.equal(audits[1].trigger, "grab");
   assert.ok(typeof audits[1].grabId === "string" && (audits[1].grabId as string).startsWith("grab-"), "the grab audit carries the IssueGrab id");
   assert.equal(audits[1].instance, "4k");
-  assert.equal(audits[1].indexerId, 7);
+  assert.equal(audits[1].indexerId, 7, "the audited indexer comes from the handle, not the body's 99");
+  assert.equal(grabBodies.length, 1, "exactly one grab reached Radarr");
+  assert.equal(grabBodies[0].indexerId, 7, "the grabbed indexer comes from the handle, not the body's 99");
+  assert.equal(grabBodies[0].guid, RELEASE_ROW.guid, "the arr is sent its own guid, resolved from the handle");
+  assert.equal(audits[1].release, "The.Matrix.1999.1080p", "the release NAME is audited, never the guid");
   assert.equal(audits[1].before, undefined, "the flip is not recorded twice");
 
   // The OPEN→IN_PROGRESS flip is broadcast like every sibling transition (refetch,
@@ -889,14 +912,14 @@ test("releases POST: an already-IN_PROGRESS issue is not re-announced, and a gra
   settings.set("radarr4kApiKey", "4k-api-key");
   fetchImpl = (url: URL) => {
     if (url.pathname.startsWith("/api/v3/movie")) return jsonResponse([{ id: 42, tmdbId: 603 }]);
-    if (url.pathname === "/api/v3/release") return jsonResponse({ ok: true });
+    if (url.pathname === "/api/v3/release") return url.searchParams.has("movieId") ? jsonResponse([RELEASE_ROW]) : jsonResponse({ ok: true });
     throw new Error(`unexpected grab fetch: ${url.href}`);
   };
   const admin = await mintSession({ role: "ADMIN" });
 
   // Unchanged status ⇒ no broadcast (the CAS still runs, but nothing to tell anyone).
   issueRow = { id: "issue-r4", status: "IN_PROGRESS", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
-  const same = await postRelease(admin.token, "issue-r4", { guid: "release-guid-123", indexerId: 7, instance: "4k" });
+  const same = await postRelease(admin.token, "issue-r4", { guid: await searchHandle(admin.token, "issue-r4"), indexerId: 7, instance: "4k" });
   assert.equal(same.status, 200);
   assert.equal(opsOf("issue.updateMany").length, 1, "the CAS still runs");
   assert.equal(sseEvents.length, 0, "an unchanged IN_PROGRESS status is not re-broadcast");
@@ -909,11 +932,11 @@ test("releases POST: an already-IN_PROGRESS issue is not re-announced, and a gra
   sseEvents.length = 0;
   fetchImpl = (url: URL) => {
     if (url.pathname.startsWith("/api/v3/movie")) return jsonResponse([{ id: 42, tmdbId: 603 }]);
-    if (url.pathname === "/api/v3/release") return new Response("boom", { status: 500 });
+    if (url.pathname === "/api/v3/release") return url.searchParams.has("movieId") ? jsonResponse([RELEASE_ROW]) : new Response("boom", { status: 500 });
     throw new Error(`unexpected grab fetch: ${url.href}`);
   };
   issueRow = { id: "issue-r5", status: "OPEN", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
-  const failed = await postRelease(admin.token, "issue-r5", { guid: "release-guid-123", indexerId: 7, instance: "4k" });
+  const failed = await postRelease(admin.token, "issue-r5", { guid: await searchHandle(admin.token, "issue-r5"), indexerId: 7, instance: "4k" });
   assert.equal(failed.status, 502);
   // The client gets the translated generic; the upstream detail ("Arr server
   // error (500) — check the arr service logs") goes to console.error only.
@@ -966,11 +989,13 @@ test("releases GET returns ONLY the ArrRelease field list — an upstream downlo
   assert.equal(body.length, 1, "a downloadAllowed=false release is still filtered out");
   assert.deepEqual(
     Object.keys(body[0]).sort(),
-    ["age", "downloadAllowed", "guid", "indexer", "indexerId", "leechers", "protocol", "qualityWeight", "quality", "rejected", "rejections", "seeders", "size", "title"].sort(),
+    ["age", "customFormatScore", "customFormats", "downloadAllowed", "guid", "indexer", "indexerId", "languages", "leechers", "protocol", "qualityWeight", "quality", "rejected", "rejections", "releaseWeight", "seeders", "size", "title"].sort(),
     "exactly the ArrRelease field list",
   );
   assert.deepEqual(body[0].quality, { quality: { id: 19, name: "Remux-2160p" }, revision: { version: 1 } }, "nested quality is projected too");
-  assert.equal(body[0].guid, "g1");
+  assert.deepEqual(body[0].languages, ["English"], "languages are projected as NAMES only");
+  assert.match(String(body[0].guid), /^[0-9a-f]{32}$/, "an opaque handle");
+  assert.ok(!text.includes('"g1"'), "the raw guid never reaches the delegate");
 });
 
 test("releases GET/POST: an UNCONFIGURED DEFAULT instance is a translated 422 before any wire, not an English 502; an upstream failure is the translated generic", async () => {
@@ -1340,6 +1365,34 @@ test("claim: an ABSENT expectedClaimedBy keeps the ORIGINAL contract — a body-
   const emptyBody = await postClaim(admin.token, "issue-claim-6", {});
   assert.equal(emptyBody.status, 200);
   assert.equal((await emptyBody.json() as { claimedBy: string }).claimedBy, admin.userId);
+});
+
+test("claim: a literal JSON `null` (or primitive) body toggles exactly like an empty body — no precondition, no 500", async () => {
+  // The distinguishing case is an issue ALREADY claimed by someone else: a body
+  // of `null` must NOT be read as `{ expectedClaimedBy: null }` ("I saw it
+  // unclaimed"), which would 409 this legitimate take-over; and it must not
+  // reach the `in` operator raw (a TypeError → 500).
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  for (const [i, body] of ([null, 5, "x"] as unknown[]).entries()) {
+    ops.length = 0;
+    issueRow = {
+      id: `issue-claim-null-${i}`, status: "OPEN", reportedBy: "reporter-n", title: "Tenet",
+      claimedBy: "admin-other", claimedUser: { name: "Ada", email: "ada@example.com" },
+    };
+    const res = await postClaim(admin.token, `issue-claim-null-${i}`, body);
+    assert.equal(res.status, 200, `body ${JSON.stringify(body)} must behave like an absent body`);
+    assert.equal((await res.json() as { claimedBy: string }).claimedBy, admin.userId, "the take-over happened");
+    assert.equal(opsOf("issue.updateMany").length, 1);
+  }
+  // And a self-held claim is released by a `null` body, as by an empty one.
+  ops.length = 0;
+  issueRow = {
+    id: "issue-claim-null-self", status: "OPEN", reportedBy: "reporter-n", title: "Tenet",
+    claimedBy: admin.userId, claimedUser: { name: "Me", email: "me@example.com" },
+  };
+  const released = await postClaim(admin.token, "issue-claim-null-self", null);
+  assert.equal(released.status, 200);
+  assert.equal((await released.json() as { claimedBy: string | null }).claimedBy, null);
 });
 
 test("claim: a present-but-non-string, non-null expectedClaimedBy → 400 before any read or write", async () => {

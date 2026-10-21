@@ -617,6 +617,10 @@ async function storeTraktConnection(
   // Checked inside the transaction so the upsert below can never overwrite the
   // credential of the account that already holds it.
   const connected = await prisma.$transaction(async (tx) => {
+    // Serialize connects of the SAME Trakt account: under READ COMMITTED two
+    // users could both read "no owner" and the second upsert's update branch
+    // would write its tokens onto the first user's Account row.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(4611, hashtext(${profile.uuid}))`;
     const owner = await tx.account.findUnique({
       where: { provider_providerAccountId: { provider: "trakt", providerAccountId: profile.uuid } },
       select: { userId: true },

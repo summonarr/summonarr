@@ -15,17 +15,18 @@
 //   parsed-but-invalid bearer NEVER falls back to a valid cookie; when both
 //   are valid the bearer identity wins), the DB-checked revocation contract
 //   (guardrail 29 — a validly-signed JWT whose AuthSession row is gone reads
-//   401), the route's OWN UA-fingerprint re-check for cookie sessions (the
-//   proxy skips public paths, so this route enforces the device binding
-//   itself; bearer sessions skip it by design), the serialized public shape
+//   401), the route's OWN transport-binding refusal (guardrail 6h — the proxy
+//   skips public paths, so this route refuses a cookie-bound token as a
+//   bearer and a bearer-bound one as a cookie itself), the absence of any
+//   UA-fingerprint check (guardrail 6h), the serialized public shape
 //   (sessionId deliberately omitted), the no-store privacy headers on every
 //   response, and the refreshed-JWT Set-Cookie threaded ONLY on the cookie
 //   transport (native clients can't read Set-Cookie — guardrail 6b).
 //
 // Division of labour: tests/api-version.test.mts owns the constants/parser,
 // tests/mobile-auth.test.mts owns parseBearerToken, tests/session-refresh*.mts
-// own verifyAndRefreshSession internals, tests/ua-fingerprint.test.mts owns
-// the matcher. This file pins the ROUTE wiring of those pieces.
+// own verifyAndRefreshSession internals, tests/session-transport.test.mts owns
+// the binding rules. This file pins the ROUTE wiring of those pieces.
 //
 // No DB and no network: globalThis.prisma is pre-seeded BEFORE the module
 // graph loads with in-memory AuthSession/User stubs behind a lockable proxy
@@ -68,7 +69,15 @@ const stubs = {
       sessionRows.has(args.where.sessionId)
         ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId }
         : null,
-    update: async () => ({}), // lastSeenAt fire-and-forget touch
+    // lastSeenAt fire-and-forget touch, or the privilege-change rotation's
+    // sessionId rename (inside $transaction, which hands back these stubs).
+    update: async (args: { where: { sessionId: string }; data: { sessionId?: string } }) => {
+      if (args.data.sessionId) {
+        sessionRows.delete(args.where.sessionId);
+        sessionRows.add(args.data.sessionId);
+      }
+      return {};
+    },
   },
   user: {
     findUnique: async (args: { where: { id: string } }) => {
@@ -77,8 +86,8 @@ const stubs = {
     },
     update: async () => ({}),
   },
-  // Rotation never fires here (claims always mirror the DB row), but a
-  // functional stub keeps an accidental trigger loud instead of hanging.
+  // Only the bearer-rotation pin triggers the rotation; the rest of the file's
+  // claims mirror the DB row.
   $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(stubs),
 };
 
@@ -116,7 +125,12 @@ type Req = InstanceType<typeof NextRequest>;
 const COOKIE = getSessionCookieName(); // "summonarr-session" under the http AUTH_URL
 
 let seq = 0;
-async function mintSession(opts: { role?: string; uaFingerprint?: string; machineAllowedIps?: string[] } = {}): Promise<{
+async function mintSession(opts: {
+  role?: string;
+  uaFingerprint?: string;
+  machineAllowedIps?: string[];
+  transport?: "cookie" | "bearer"; // omitted ⇒ a pre-claim token (either transport)
+} = {}): Promise<{
   userId: string;
   sessionId: string;
   token: string;
@@ -138,6 +152,7 @@ async function mintSession(opts: { role?: string; uaFingerprint?: string; machin
       sessionId, expiresAt,
       ...(opts.uaFingerprint ? { uaFingerprint: opts.uaFingerprint } : {}),
       ...(opts.machineAllowedIps ? { machineAllowedIps: opts.machineAllowedIps } : {}),
+      ...(opts.transport ? { transport: opts.transport } : {}),
     },
     { expiresInSeconds: 7_200 },
   );
@@ -281,25 +296,27 @@ test("me: a revoked session (AuthSession row deleted) → 401 even though the JW
   assert.deepEqual(await bodyOf(revoked), { session: null });
 });
 
-const CHROME_WIN_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const FIREFOX_MAC_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:120.0) Gecko/20100101 Firefox/120.0";
 
-test("me: cookie sessions re-check the UA fingerprint (this route is public — the proxy never does it here); bearer skips it", async () => {
+test("me: no UA fingerprint check (guardrail 6h) — a fingerprinted cookie resolves from another browser family", async () => {
   const bound = await mintSession({ uaFingerprint: "chrome:windows:desktop" });
+  const other = await getMe(meReq({ ...asCookie(bound.token), "user-agent": FIREFOX_MAC_UA }));
+  assert.equal(other.status, 200);
+});
 
-  const mismatch = await getMe(meReq({ ...asCookie(bound.token), "user-agent": FIREFOX_MAC_UA }));
-  assert.equal(mismatch.status, 401, "a replayed cookie from another browser family must 401");
-  assert.deepEqual(await bodyOf(mismatch), { session: null });
-
-  const match = await getMe(meReq({ ...asCookie(bound.token), "user-agent": CHROME_WIN_UA }));
-  assert.equal(match.status, 200, "the matching browser family must still resolve the session");
-
-  // Bearer sessions deliberately drop UA-binding (guardrail 6b: the JWT lives
-  // in app-secure storage, not an ambiently-replayed cookie).
-  const bearer = await getMe(meReq({ ...asBearer(bound.token), "user-agent": FIREFOX_MAC_UA }));
-  assert.equal(bearer.status, 200, "the same fingerprinted token over bearer must skip the UA check");
+test("me: a token on the wrong transport is no session (guardrail 6h) — this route is public, so it must refuse it itself", async () => {
+  const browser = await mintSession({ transport: "cookie" });
+  const native = await mintSession({ transport: "bearer" });
+  for (const [res, label] of [
+    [await getMe(meReq(asBearer(browser.token))), "a browser cookie replayed as a bearer"],
+    [await getMe(meReq(asCookie(native.token))), "a native token planted as a cookie"],
+  ] as const) {
+    assert.equal(res.status, 401, label);
+    assert.deepEqual(await bodyOf(res), { session: null }, label);
+  }
+  assert.equal((await getMe(meReq(asCookie(browser.token)))).status, 200);
+  assert.equal((await getMe(meReq(asBearer(native.token)))).status, 200);
 });
 
 test("me: the refreshed session JWT is threaded back as Set-Cookie ONLY on the cookie transport (guardrail 6b)", async () => {
@@ -356,4 +373,19 @@ test("an ordinary session carries no allowlist and is unaffected by the check", 
   const res = await getMe(meReq({ ...asBearer(token), "x-forwarded-for": "203.0.113.9" }));
   assert.equal(res.status, 200);
   assert.equal((await res.json()).session.user.id, userId);
+});
+
+// A bearer (native) client is never handed a replacement token (guardrail 6b),
+// so /api/auth/me must not rotate its session after a role change — the row
+// rename made the app's very next request a 401.
+test("/api/auth/me: a role change does NOT rotate a bearer session — the app's token still works afterwards", async () => {
+  const { userId, sessionId, token } = await mintSession({ role: "USER" });
+  const u = usersById.get(userId);
+  assert.ok(u);
+  u.role = "ISSUE_ADMIN";
+  const first = await getMe(meReq(asBearer(token)));
+  assert.equal(first.status, 200);
+  assert.equal(((await bodyOf(first)).session as { user: { role: string } }).user.role, "ISSUE_ADMIN");
+  assert.ok(sessionRows.has(sessionId), "the native session's row must not be renamed");
+  assert.equal((await getMe(meReq(asBearer(token)))).status, 200);
 });

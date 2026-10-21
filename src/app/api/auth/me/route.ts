@@ -5,7 +5,6 @@ import {
   serializeSessionCookie,
 } from "@/lib/session-cookie";
 import { parseBearerToken } from "@/lib/mobile-auth";
-import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { verifyAndRefreshSession } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
 
@@ -65,16 +64,15 @@ export async function GET(req: NextRequest) {
   if (!token) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
-  const result = await verifyAndRefreshSession(token);
+  // Rotate only for a cookie client (this route returns its replacement as
+  // Set-Cookie); a bearer client is never given a new token (guardrail 6b). A
+  // token bound to the other transport is refused (guardrail 6h) — this is a
+  // public path, so the proxy's verify is not the only one that must say so.
+  const result = await verifyAndRefreshSession(token, {
+    transport: bearer ? "bearer" : "cookie",
+    allowRotation: !bearer,
+  });
   if (!result) {
-    return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
-  }
-  // UA-fingerprint replay check for cookie sessions. /api/auth/me is a public path
-  // (isPublicPath in proxy.ts), so the proxy never runs the fingerprint check here —
-  // enforce the cookie→device binding ourselves, matching the withAuth wrappers.
-  // Bearer (native) sessions skip it: the JWT lives in app-secure storage, not an
-  // ambiently-replayed cookie.
-  if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
   // A machine session carries the IP allowlist that was in force when it was
@@ -82,8 +80,8 @@ export async function GET(req: NextRequest) {
   // (authActive and the withAuth/withAdmin wrappers). Check it here too, or a
   // leaked machine token used from a disallowed address could still read the
   // impersonated identity (id, role, permissions) from this route.
-  // Unlike the fingerprint check above, this applies to bearer sessions as well.
-  // No allowlist ⇒ true, so ordinary user sessions are unaffected.
+  // It applies to both transports. No allowlist ⇒ true, so ordinary user
+  // sessions are unaffected.
   if (!machineIpAllowed(result.claims, req.headers)) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }

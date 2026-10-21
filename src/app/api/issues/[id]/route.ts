@@ -10,6 +10,7 @@ import {
   searchSeasonInSonarr,
   searchEpisodeInSonarr,
   resolveTvdbIdFromTmdbId,
+  arrErrorMessage,
 } from "@/lib/arr";
 import { notifyUserIssueResolved } from "@/lib/discord-notify";
 import { notifyUserIssueResolvedPush } from "@/lib/push";
@@ -19,9 +20,16 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { recordIssueGrab } from "@/lib/issue-grab";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 
 const VALID_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
+// Every Refetch queues an automatic search across every indexer and records an
+// IssueGrab row (kept, never pruned), and a MANAGE_ISSUES delegate can reach it —
+// bounded per caller like the sibling Replace release / Replace file routes.
+const REFETCH_LIMIT_PER_MIN = 10;
 
 export const PATCH = withIssueAdmin(async (
   req,
@@ -64,22 +72,68 @@ export const PATCH = withIssueAdmin(async (
     if (!isValidInstanceSlug(instance)) {
       return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
     }
+    if (!checkRateLimit(`issue-refetch:${session.user.id}`, REFETCH_LIMIT_PER_MIN, 60_000)) {
+      return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    }
+    // A failed search — and, as before, a failed status write after it — answers
+    // with the issue and an `arrError` (the wire shape the iOS app decodes).
+    const refetchFailed = (err: unknown) => {
+      console.error("[arr] Issue refetch failed:", arrErrorMessage(err));
+      return NextResponse.json({ ...issue, arrError: t("apiUser.issues.arrFailed") });
+    };
+    let tvdbId: number | null = issue.tvdbId;
     try {
       if (issue.mediaType === "MOVIE") {
         await searchMovieInRadarr(issue.tmdbId, instance);
       } else {
         // Resolve authoritatively from tmdbId when the stored tvdbId is absent
         // (client-supplied tvdbId is no longer trusted, so older/null rows resolve here).
-        const tvdbId = issue.tvdbId ?? (await resolveTvdbIdFromTmdbId(issue.tmdbId, instance));
+        tvdbId = issue.tvdbId ?? (await resolveTvdbIdFromTmdbId(issue.tmdbId, instance));
         if (!tvdbId) throw new Error("Could not resolve a TVDB ID for this series — cannot search in Sonarr");
         if (issue.scope === "EPISODE" && issue.seasonNumber != null && issue.episodeNumber != null) {
           await searchEpisodeInSonarr(tvdbId, issue.seasonNumber, issue.episodeNumber, instance);
         } else if (issue.scope === "SEASON" && issue.seasonNumber != null) {
           await searchSeasonInSonarr(tvdbId, issue.seasonNumber, instance);
         } else {
+          // Deliberately SeriesSearch: a refetch is an upgrade search of the
+          // issue's own scope (the arr only replaces a file on disk with an
+          // upgrade), the series-wide twin of the SeasonSearch/EpisodeSearch
+          // above. The Missing plan would queue nothing whenever every episode
+          // is on disk — exactly when the issue is about the files themselves.
           await searchSeriesInSonarr(tvdbId, instance);
         }
       }
+    } catch (err) {
+      return refetchFailed(err);
+    }
+
+    // The arr has queued exactly one search, on `instance`. Record it as an
+    // instance-scoped IssueGrab — as Replace release and Replace file do — so the
+    // Download webhooks tell this admin when the refetched copy lands (they match
+    // by title, instance and the issue's scope, never by release, so a search
+    // matches like a grab). Kept OUTSIDE the try blocks that decide the answer:
+    // the search was accepted, so a failure here (usually P2003 — the issue was
+    // deleted meanwhile) must not read as the refetch failing, or the admin would
+    // queue a second search. It supersedes this admin's earlier pending grabs of
+    // the issue on this instance (one import, one announcement — recordIssueGrab).
+    try {
+      await recordIssueGrab({
+        issueId: id,
+        triggeredById: session.user.id,
+        tmdbId: issue.tmdbId,
+        tvdbId,
+        mediaType: issue.mediaType,
+        title: issue.title,
+        scope: issue.scope,
+        seasonNumber: issue.seasonNumber,
+        episodeNumber: issue.episodeNumber,
+        arrInstance: instance,
+      });
+    } catch (err) {
+      console.warn("[issues] Refetch search queued but recording the grab failed (issue deleted meanwhile?):", err);
+    }
+
+    try {
       // CAS on status: don't clobber a RESOLVED issue if another admin closed it
       // while the search was in flight. updateMany returns count=0 in that case
       // so we just return the current (RESOLVED) issue without changing status.
@@ -101,8 +155,7 @@ export const PATCH = withIssueAdmin(async (
       }
       return NextResponse.json({ ...(updated ?? issue), arrError: null });
     } catch (err) {
-      console.error("[arr] Issue refetch failed:", err);
-      return NextResponse.json({ ...issue, arrError: t("apiUser.issues.arrFailed") });
+      return refetchFailed(err);
     }
   }
 

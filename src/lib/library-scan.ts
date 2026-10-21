@@ -63,7 +63,12 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, v
     // (this only tunes timing, so best-effort is fine).
     if (variant !== undefined) existing.variant = variant;
 
-    if (tmdbId !== undefined && existing.tmdbId !== undefined && existing.tmdbId !== tmdbId) {
+    if (tmdbId === undefined) {
+      // A hint-less call means "check the whole queue"; it must widen a pending
+      // single-title hint, or the scan waits on one title while this caller's
+      // download is still in the queue.
+      existing.tmdbId = undefined;
+    } else if (existing.tmdbId !== undefined && existing.tmdbId !== tmdbId) {
       // Two different titles merged into one scan window — fall back to checking the whole queue
       existing.tmdbId = undefined;
     } else if (tmdbId !== undefined && existing.tmdbId === undefined) {

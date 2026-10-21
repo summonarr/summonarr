@@ -9,10 +9,14 @@ import { Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
 import { OpenInArrLink, arrInstanceLabel } from "./open-in-arr";
+import { ManageTitleButton } from "./arr-title/title-manager";
+import { manageTabFor } from "@/lib/arr-manage-links";
 import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
+import { createRefreshGate } from "@/lib/refresh-gate";
 import type { WatchGradeSummary } from "@/lib/watch-grade";
 import { WatchGradeChip } from "./watch-grade";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
@@ -78,6 +82,12 @@ interface AdminRequestListProps {
   instanceNames?: Record<string, string>;
   /** ADMIN viewer: show "Open in Radarr/Sonarr" (the route behind it is ADMIN-only). */
   canOpenArr?: boolean;
+  /**
+   * Which integrations are switched on. A movie's Open in / Manage icons need
+   * Radarr's, a show's Sonarr's: the routes behind them 404 while the
+   * integration is off (arrGate). Absent = both on.
+   */
+  arrServices?: { radarr: boolean; sonarr: boolean };
 }
 
 function formatUserLabel(r: Requester, t: Translator) {
@@ -106,9 +116,11 @@ function formatUserLabel(r: Requester, t: Translator) {
   return r.userName ?? r.userEmail;
 }
 
+const BATCH_ID_CAP = 100; // /api/requests/batch rejects more ids than this per call
+
 // Admin request queue: groups requests by title, drives per-group + batch
 // approve/decline, and paginates. Live-refreshes on request:* SSE events.
-export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false }: AdminRequestListProps) {
+export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false, arrServices }: AdminRequestListProps) {
   const router = useRouter();
   const mounted = useHasMounted();
   const t = useT();
@@ -117,21 +129,45 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   const instanceLabel = (slug: string) =>
     instanceNames?.[slug] ?? (slug === "4k" ? "4K" : slug);
 
+  // While a row's title manager is open the list's refresh WAITS: a refresh
+  // can drop the row — its status left the ?status= filter, a new request
+  // pushed it to the next page — and the dialog with it, unsaved edits and
+  // all, or re-prop it mid-edit. The deferred refresh runs once the last
+  // manager closes (the Download Queue pauses its poll the same way).
+  const [refreshGate] = useState(createRefreshGate);
+  const unmountedRef = useRef(false);
+  function refreshList() {
+    if (refreshGate.request()) router.refresh();
+  }
+
   // Debounced ~500ms so a burst of request:* events (bulk approve, a sync run)
   // coalesces into one refresh — mirrors activity-live-refresher.tsx.
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function scheduleRefresh() {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      refreshList();
+    }, 500);
+  }
   useLiveEvents((event) => {
     if (event.type === "request:new" || event.type === "request:updated" || event.type === "request:deleted") {
-      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = setTimeout(() => {
-        refreshTimerRef.current = null;
-        router.refresh();
-      }, 500);
+      scheduleRefresh();
     }
   });
-  useEffect(() => () => {
-    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    };
   }, []);
+  // ManageTitleButton's onActiveChange. Its close arrives from an effect
+  // cleanup, also when the list itself is unmounting: nothing is scheduled then.
+  function onManagerActive(open: boolean) {
+    if (open) return refreshGate.opened();
+    if (refreshGate.closed() && !unmountedRef.current) scheduleRefresh();
+  }
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchNote, setBatchNote] = useState("");
   const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
@@ -211,25 +247,35 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
     setBatchLoading(true);
     setBatchError(null);
     try {
-      const res = await fetch(withBasePath("/api/requests/batch"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: Array.from(selected), status, adminNote: adminNote || undefined }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setBatchError(data?.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
-        return;
+      // The route takes at most BATCH_ID_CAP ids per call. A bigger selection
+      // (select-all across a long queue) is sent in sequential chunks; the first
+      // refusal stops the run and leaves the unsent + failed ids selected.
+      const allIds = Array.from(selected);
+      const stillPending: string[] = [];
+      let arrError: string | undefined;
+      for (let i = 0; i < allIds.length; i += BATCH_ID_CAP) {
+        const chunk = allIds.slice(i, i + BATCH_ID_CAP);
+        const res = await fetch(withBasePath("/api/requests/batch"), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: chunk, status, adminNote: adminNote || undefined }),
+        });
+        if (!res.ok) {
+          const data = (await res.json().catch(() => null)) as { error?: string } | null;
+          setBatchError(rateLimitMessage(res, t) ?? data?.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
+          setSelected(new Set([...stillPending, ...allIds.slice(i)]));
+          refreshList();
+          return;
+        }
+        // A 200 can still carry rows whose Radarr/Sonarr push failed and were rolled
+        // back to PENDING. Keep exactly those selected, so the bar (and the reason in
+        // it) stays up and they can be retried or declined without re-picking them.
+        const data = (await res.json().catch(() => null)) as { arrError?: string; failed?: { id?: unknown }[] } | null;
+        for (const f of data?.failed ?? []) if (typeof f.id === "string") stillPending.push(f.id);
+        arrError = arrError ?? data?.arrError;
       }
-      // A 200 can still carry rows whose Radarr/Sonarr push failed and were rolled
-      // back to PENDING. Keep exactly those selected, so the bar (and the reason in
-      // it) stays up and they can be retried or declined without re-picking them.
-      const data = (await res.json().catch(() => null)) as { arrError?: string; failed?: { id?: unknown }[] } | null;
-      const stillPending = (data?.failed ?? [])
-        .map((f) => f.id)
-        .filter((id): id is string => typeof id === "string");
       setSelected(new Set(stillPending));
-      if (data?.arrError) setBatchError(data.arrError);
+      if (arrError) setBatchError(arrError);
       setShowBatchNote(null);
       setBatchNote("");
       setConfirmingApprove(false);
@@ -241,7 +287,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
         clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = null;
       }
-      router.refresh();
+      refreshList();
     } catch {
       setBatchError(t("shared.thread.networkError"));
     } finally {
@@ -499,18 +545,24 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
           const representativeInstance =
             group.requesters.find((r) => r.status === group.aggregateStatus)?.arrInstance ??
             primaryRequester.arrInstance;
+          // Open in / Manage for THIS row's service only while its integration is on.
+          const showArrLinks =
+            canOpenArr && (arrServices?.[group.mediaType === "MOVIE" ? "radarr" : "sonarr"] ?? true);
           const groupInstances = [...new Set(group.requesters.map((r) => r.arrInstance))].filter(
             (slug) => slug !== "",
           );
           const mixedInstances =
             new Set(group.requesters.map((r) => r.arrInstance)).size > 1;
+          const arrService = group.mediaType === "MOVIE" ? "radarr" : "sonarr";
+          // Every instance a request of this title names, the default ("") included, once each.
+          const groupArrInstances = [...new Set(group.requesters.map((r) => r.arrInstance))];
           const groupAllPendingSelected =
             pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
 
           return (
             <div
               key={group.groupKey}
-              className="flex flex-wrap sm:flex-nowrap items-start"
+              className="flex flex-wrap xl:flex-nowrap items-start"
               style={{
                 gap: 14,
                 padding: 14,
@@ -590,21 +642,37 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     }}
                   />
                 </Link>
-                {canOpenArr && (
+                {/* One Open-in per instance the group's requests sit on — an HD
+                    and a 4K request for one title are two instances, and the
+                    icons must name both (guardrail 32), never only a representative. */}
+                {showArrLinks && groupArrInstances.map((slug) => (
                   <OpenInArrLink
-                    service={group.mediaType === "MOVIE" ? "radarr" : "sonarr"}
-                    instance={representativeInstance}
+                    key={`open:${slug}`}
+                    service={arrService}
+                    instance={slug}
                     target={{ tmdbId: group.tmdbId }}
-                    label={t("adminManage.openIn", {
-                      name: arrInstanceLabel(
-                        group.mediaType === "MOVIE" ? "radarr" : "sonarr",
-                        instanceLabel(representativeInstance),
-                        representativeInstance,
-                      ),
-                    })}
+                    label={t("adminManage.openIn", { name: arrInstanceLabel(arrService, instanceLabel(slug), slug) })}
                     iconOnly
                   />
-                )}
+                ))}
+                {/* Only once it was pushed there: a pending title isn't on the instance yet. */}
+                {showArrLinks && groupArrInstances.map((slug) => {
+                  const onInstance = group.requesters.filter((r) => r.arrInstance === slug);
+                  const available = onInstance.some((r) => r.status === "AVAILABLE");
+                  if (!available && !onInstance.some((r) => r.status === "APPROVED")) return null;
+                  return (
+                    <ManageTitleButton
+                      key={`manage:${slug}`}
+                      service={arrService}
+                      instance={slug}
+                      target={{ tmdbId: group.tmdbId }}
+                      instanceLabel={arrInstanceLabel(arrService, instanceLabel(slug), slug)}
+                      variant="icon"
+                      initialTab={manageTabFor(available ? "requestAvailable" : "requestApproved", arrService)}
+                      onActiveChange={onManagerActive}
+                    />
+                  );
+                })}
                 </div>
 
                 <p
@@ -802,14 +870,17 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 </Chip>
               </div>
 
-              {/* Below sm the actions take their own row: their approve/decline
-                  panels are 208–224px wide and would crush the title column. */}
-              <div className="flex justify-end basis-full sm:basis-auto sm:shrink-0">
+              {/* Below xl the actions take their own row. An APPROVED row's bar
+                  (Why? · Search · Pick release · Re-push · Delete, ~490px) and the
+                  208–224px approve/decline and Why? panels left the title column
+                  36px wide at a 1024px viewport — the title disappeared. */}
+              <div className="flex justify-end basis-full xl:basis-auto xl:shrink-0">
                 <RequestActions
                   requestId={representativeId}
                   currentStatus={group.aggregateStatus}
                   mediaType={group.mediaType}
                   arrInstance={representativeInstance}
+                  arrInstanceName={instanceLabel(representativeInstance)}
                   existingAdminNote={representativeAdminNote}
                   groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
                 />

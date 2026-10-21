@@ -1,7 +1,8 @@
 // Next calls register() once at server startup. Everything inside is gated on
 // the Node.js runtime, so it is safe to use Node APIs and server-only modules.
-import { evaluateLocalOnlyStartup } from "@/lib/local-only";
+import { evaluateLocalOnlyStartup, trustedProxyStartupWarnings } from "@/lib/local-only";
 import { parseAuthUrl } from "@/lib/auth-url";
+import { previousSecretProblem, secretReuseError } from "@/lib/boot-secrets";
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
@@ -92,16 +93,15 @@ export async function register() {
       process.exit(1);
     }
     if (proxyDecision.message) console.warn(proxyDecision.message);
-    if (
-      proxyDecision.mode === "trusted-proxy" &&
-      authUrl?.protocol === "http:" &&
-      process.env.NODE_ENV === "production"
-    ) {
-      console.warn(
-        "[startup] TRUST_PROXY=true but AUTH_URL uses http:// — ensure the reverse proxy strips " +
-        "X-Forwarded-For from untrusted clients; if the app is directly internet-exposed, " +
-        "IP-based rate limiting can be bypassed via header spoofing."
-      );
+    // TRUST_PROXY=true trusts X-Forwarded-For, which is only safe when the port
+    // is reachable through the proxy alone and the proxy overwrites the header.
+    // The rules live in trustedProxyStartupWarnings; this is only the wiring.
+    for (const warning of trustedProxyStartupWarnings({
+      nodeEnv: process.env.NODE_ENV,
+      trustProxy: process.env.TRUST_PROXY,
+      authProtocol: authUrl?.protocol ?? "",
+    })) {
+      console.warn(warning);
     }
 
     if (!process.env.CRON_SECRET || process.env.CRON_SECRET.trim().length < 32) {
@@ -113,6 +113,33 @@ export async function register() {
       if (process.env.NODE_ENV === "production") {
         process.exit(1);
       }
+    }
+
+    // The three secrets must be independent values (guardrail 6g) — a reused
+    // value lets the most exposed one (the cron bearer) forge sessions or
+    // decrypt stored credentials. Same production-only exit as the length checks.
+    const reuse = secretReuseError({
+      nextAuthSecret: process.env.NEXTAUTH_SECRET,
+      nextAuthSecretPrevious: process.env.NEXTAUTH_SECRET_PREVIOUS,
+      cronSecret: process.env.CRON_SECRET,
+      tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
+    });
+    if (reuse) {
+      console.error(reuse);
+      if (process.env.NODE_ENV === "production") process.exit(1);
+    }
+
+    // The verify-only rotation key (guardrail 6h): too short is fatal in
+    // production like NEXTAUTH_SECRET itself; equal to it is only a warning.
+    const previous = previousSecretProblem({
+      nextAuthSecret: process.env.NEXTAUTH_SECRET,
+      nextAuthSecretPrevious: process.env.NEXTAUTH_SECRET_PREVIOUS,
+    });
+    if (previous?.fatal) {
+      console.error(previous.message);
+      if (process.env.NODE_ENV === "production") process.exit(1);
+    } else if (previous) {
+      console.warn(previous.message);
     }
 
     if (!process.env.TMDB_READ_TOKEN) {
@@ -273,6 +300,26 @@ export async function register() {
     await import("@/lib/account-lifecycle")
       .then(({ markLegacyPurgedAccounts }) => markLegacyPurgedAccounts())
       .catch((err) => console.error("[account-lifecycle] startup error:", err));
+
+    // Jellyfin identity binding (guardrail 34e): bind rows that still identify
+    // as Jellyfin only by their jellyfin-<id>@jellyfin.local address (once
+    // ever — sign-in no longer falls back to the address), then give every
+    // bound row with no server binding the instance its id was first seen on.
+    // Awaited so the first sign-ins after an upgrade already see the bindings;
+    // a few indexed queries, and a no-op once both steps have run.
+    await import("@/lib/jellyfin-identity")
+      .then(({ backfillJellyfinIdentities }) => backfillJellyfinIdentities())
+      .catch((err) => console.error("[jellyfin-identity] startup error:", err));
+
+    // iOS push rows registered before the endpoint handle became a hash still
+    // carry the raw APNs device token in plaintext (`apns:<token>`) beside the
+    // encrypted copy (apns-endpoint.ts). Rewrite them once per boot — a no-op
+    // once none are left. Awaited so it finishes before the first register;
+    // the route handles a leftover legacy row anyway, so a failure here only
+    // delays the cleanup to the next boot or the device's next launch.
+    await import("@/lib/apns-endpoint")
+      .then(({ migrateLegacyApnsEndpoints }) => migrateLegacyApnsEndpoints())
+      .catch((err) => console.error("[push] APNs endpoint migration error:", err));
 
     // Plex SSO identity-binding self-heal: backfill User.plexUserId from plex.tv
     // so existing Plex users (created before sign-in switched from email-based to

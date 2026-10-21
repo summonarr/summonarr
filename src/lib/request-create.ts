@@ -15,7 +15,7 @@ import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPer
 import { getArrInstancesWithConfigured } from "@/lib/arr-instance-registry";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
-import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, type ResolvedQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { isBlacklisted } from "@/lib/blacklist";
 import { exceedsCap } from "@/lib/content-rating";
@@ -293,7 +293,7 @@ export async function createMediaRequest(
     enforceQuota = resolvedQuota.limit > 0;
     if (enforceQuota) {
       const preCount = await prisma.mediaRequest.count({
-        where: { requestedBy: session.user.id, mediaType, createdAt: { gte: resolvedQuota.since }, status: { notIn: ["DECLINED"] } },
+        where: quotaUsageWhere(session.user.id, mediaType, resolvedQuota.since),
       });
       if (preCount >= resolvedQuota.limit) {
         return fail(429, t("apiUser.create.quota", { limit: resolvedQuota.limit, window: translateQuotaWindow(t, resolvedQuota.windowLabel) }), "quota");
@@ -413,7 +413,7 @@ export async function createMediaRequest(
       // Re-check quota inside the transaction to prevent races on concurrent requests
       if (enforceQuota && resolvedQuota) {
         const count = await tx.mediaRequest.count({
-          where: { requestedBy: session.user.id, mediaType, createdAt: { gte: resolvedQuota.since }, status: { notIn: ["DECLINED"] } },
+          where: quotaUsageWhere(session.user.id, mediaType, resolvedQuota.since),
         });
         if (count >= resolvedQuota.limit) {
           throw new Error("QUOTA_EXCEEDED");
@@ -467,8 +467,13 @@ export async function createMediaRequest(
       //
       // No approvedAt: the copy made no decision of its own. The watch grade
       // counts it through the approval of the request it copied (per title).
+      //
+      // A row stamped `cleanedUpAt` is a REMOVAL, not a greenlight (guardrail
+      // 14b): an admin deliberately took the title off this instance. Copying it
+      // would create an APPROVED row the sync re-pushes, re-downloading what was
+      // deleted with no admin decision — so it goes to review like any request.
       const greenlit = await tx.mediaRequest.findFirst({
-        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
+        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null },
         select: { status: true },
       });
       if (greenlit) {

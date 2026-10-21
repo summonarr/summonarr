@@ -5,6 +5,7 @@ import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
+import { assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -66,7 +67,7 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { id: true, role: true, name: true, email: true },
+    select: { id: true, role: true, name: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
   if (targetRequiresAdmin(target.role, session.user.permissions)) {
@@ -80,18 +81,29 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   // Strict `=== true`: a stray truthy value (e.g. the string "false") must not
   // sign the user out of every device.
   if (body.all === true) {
-    await revokeAllUserSessions(id);
+    try {
+      await revokeAllUserSessions(id, (tx) =>
+        assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN)),
+      );
+    } catch (err) {
+      if (err instanceof TargetBecameAdminError) {
+        return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
+      }
+      throw err;
+    }
 
     void logAudit({
       userId:    session.user.id,
       userName:  session.user.name ?? session.user.email ?? "unknown",
       action:    "SESSION_REVOKE",
       target:    `user:${id}`,
+      // The account by id (+ display name when it has one), never by email
+      // (audit-scrub.ts).
       details:   {
-        targetUser:  target.name ?? target.email,
-        targetEmail: target.email,
-        revokedAll:  true,
-        adminAction: true,
+        targetUserId: id,
+        ...(target.name ? { targetUser: target.name } : {}),
+        revokedAll:   true,
+        adminAction:  true,
       },
       ...auditContext(req, session),
     });
@@ -108,16 +120,29 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     }
 
-    await revokeSessionById(body.sessionId);
+    try {
+      await revokeSessionById(body.sessionId, (tx) =>
+        assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN)),
+      );
+    } catch (err) {
+      if (err instanceof TargetBecameAdminError) {
+        return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
+      }
+      throw err;
+    }
 
     void logAudit({
       userId:    session.user.id,
       userName:  session.user.name ?? session.user.email ?? "unknown",
       action:    "SESSION_REVOKE",
-      target:    `session:${body.sessionId}`,
+      // Under the ACCOUNT's target with the session in details, like revoke-all:
+      // a `session:<sid>` target named the person only inside its details, which
+      // the purge's `user:<id>` scrub never reached.
+      target:    `user:${id}`,
       details:   {
-        targetUser:   target.name ?? target.email,
-        targetEmail:  target.email,
+        targetUserId: id,
+        ...(target.name ? { targetUser: target.name } : {}),
+        sessionId:    body.sessionId,
         deviceLabel:  record.deviceLabel,
         adminAction:  true,
       },

@@ -93,7 +93,7 @@ const { HeadersAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapt
 // module-graph load (static imports would hoist above them).
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
-const { shadowPrismaModel } = await import("./_helpers.mts");
+const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { generateRequestToken } = await import("../src/lib/request-token.ts");
@@ -231,10 +231,50 @@ shadowPrismaModel(prisma, "mediaRequest", {
   findFirst: async () => ownRequest,
   count: async () => 0,
 });
+
+// The bulk create transaction (only the on-behalf quota pins reach it). The
+// quota count answers per counted user: `quotaUsed[userId]` for a where that
+// counts that user (requestedBy, or the OR with filedBy), so a test can fill one
+// user's quota and leave the other's empty.
+const quotaUsed: Record<string, number> = {};
+const quotaWheres: unknown[] = [];
+const createdRows: Array<Record<string, unknown>> = [];
+const bulkTx = {
+  mediaRequest: {
+    deleteMany: async () => ({ count: 0 }),
+    count: async (args: { where: { requestedBy?: string; OR?: Array<{ requestedBy?: string; filedBy?: string }> } }) => {
+      quotaWheres.push(args.where);
+      const who = args.where.requestedBy ?? args.where.OR?.find((c) => c.requestedBy)?.requestedBy ?? "";
+      return quotaUsed[who] ?? 0;
+    },
+    findMany: async (args: { where?: { status?: unknown } }) => {
+      if (args.where?.status) return []; // the greenlit-peer probe
+      return createdRows.map((r, i) => ({ id: `new-${i}`, tmdbId: r.tmdbId, mediaType: r.mediaType, status: r.status }));
+    },
+    createMany: async (args: { data: Array<Record<string, unknown>> }) => {
+      createdRows.push(...args.data);
+      return { count: args.data.length };
+    },
+  },
+};
+shadowPrismaClientMethod(prisma, "$transaction", async (fn: unknown) =>
+  typeof fn === "function" ? (fn as (tx: typeof bulkTx) => Promise<unknown>)(bulkTx) : Promise.all(fn as Promise<unknown>[]));
+// TMDB details cache: only the rating-cap pin seeds a row (a fully-upgraded
+// details payload, so getMovieDetails returns it without any upstream call).
+const tmdbCacheRows = new Map<string, string>();
+shadowPrismaModel(prisma, "tmdbCache", {
+  findUnique: async (args: { where: { key: string } }) => {
+    const data = tmdbCacheRows.get(args.where.key);
+    return data === undefined ? null : { key: args.where.key, data, expiresAt: new Date(Date.now() + 86_400_000) };
+  },
+  upsert: async () => ({}),
+  deleteMany: async () => ({ count: 0 }),
+});
 shadowPrismaModel(prisma, "radarrAvailableItem", { findMany: async () => [] });
 shadowPrismaModel(prisma, "sonarrAvailableItem", { findMany: async () => [] });
 shadowPrismaModel(prisma, "blacklistItem", { findMany: async () => [] });
 shadowPrismaModel(prisma, "deletionVote", {
+  deleteMany: async () => ({ count: 0 }),
   create: async (args: { data: unknown }) => {
     createdVotes.push(args.data);
     return { id: "vote-1", createdAt: new Date(), ...(args.data as object) };
@@ -318,6 +358,10 @@ beforeEach(() => {
   ownRequest = null;
   createdVotes.length = 0;
   afterTasks.length = 0;
+  tmdbCacheRows.clear();
+  for (const k of Object.keys(quotaUsed)) delete quotaUsed[k];
+  quotaWheres.length = 0;
+  createdRows.length = 0;
   invalidateBlacklistCache(); // 30s module-global cache must not leak across tests
   invalidateFeatureFlagCache();
 });
@@ -555,4 +599,81 @@ test("bulk still refuses a caller with NO request grant", async () => {
     ),
   );
   assert.equal(res.status, 403, "no request bit at all is still refused at the door");
+});
+
+// ── on-behalf: the FILER's own content-rating cap applies too ───────────────
+//
+// The on-behalf subset rule compares permission BITS only; a content-rating cap
+// isn't a bit. A delegate capped at PG-13 could name an uncapped user and file
+// R-rated titles (with AUTO_APPROVE on both, straight to Radarr). The stricter
+// of the two caps now wins.
+test("bulk on-behalf: a capped filer can't file above their OWN rating cap by naming an uncapped user", async () => {
+  tmdbCacheRows.set("movie:603:details", JSON.stringify({
+    id: 603, mediaType: "movie", title: "The Matrix", certification: "R",
+    imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    digitalReleaseDate: null, physicalReleaseDate: null,
+  }));
+  const filer = makeUser("capped-delegate", {
+    permissions: REQUESTER | Permission.REQUEST_ON_BEHALF,
+    maxContentRating: "PG-13",
+  });
+  const token = await mintSession(filer);
+  usersById.set("uncapped", makeUser("uncapped", { permissions: REQUESTER }));
+  const out = await bulkOnBehalf(token, "uncapped");
+  assert.equal(out.status, 200);
+  assert.deepEqual(out.body.results.map((r) => r.result), ["rating-blocked"]);
+  assert.equal(out.body.created, 0);
+});
+
+test("bulk on-behalf: the TARGET's cap still applies when the filer is an uncapped admin", async () => {
+  tmdbCacheRows.set("movie:603:details", JSON.stringify({
+    id: 603, mediaType: "movie", title: "The Matrix", certification: "R",
+    imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    digitalReleaseDate: null, physicalReleaseDate: null,
+  }));
+  const token = await mintSession(makeUser("admin", { role: "ADMIN", permissions: Permission.ADMIN }));
+  usersById.set("capped-kid", makeUser("capped-kid", { permissions: REQUESTER, maxContentRating: "PG" }));
+  const out = await bulkOnBehalf(token, "capped-kid");
+  assert.equal(out.status, 200);
+  assert.deepEqual(out.body.results.map((r) => r.result), ["rating-blocked"]);
+});
+
+// ── on-behalf: the FILER's own quota is charged too ─────────────────────────
+//
+// Quota used to be evaluated against the target only, so a REQUEST_ON_BEHALF
+// holder's own quota was never charged: they could file a full quota for every
+// user they could name. Rows now carry filedBy, and quotaUsageWhere counts what
+// a user filed for others beside what was filed for them (guardrail 6g).
+function seedPg13Movie(): void {
+  tmdbCacheRows.set("movie:603:details", JSON.stringify({
+    id: 603, mediaType: "movie", title: "The Matrix", certification: "PG-13", posterPath: "/m.jpg",
+    releaseDate: "1999-03-31", imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    digitalReleaseDate: null, physicalReleaseDate: null,
+  }));
+}
+
+test("bulk on-behalf: a filer whose OWN quota is spent is refused, even for an unlimited target", async () => {
+  seedPg13Movie();
+  const filer = makeUser("quota-delegate", { permissions: REQUESTER | Permission.REQUEST_ON_BEHALF, movieQuotaLimit: 2, movieQuotaDays: 7 });
+  const token = await mintSession(filer);
+  usersById.set("roomy-target", makeUser("roomy-target", { permissions: REQUESTER }));
+  quotaUsed["quota-delegate"] = 2;
+  const out = await bulkOnBehalf(token, "roomy-target");
+  assert.equal(out.status, 429);
+  assert.match((out.body as unknown as { error: string }).error, /your own movie quota of 2/);
+  assert.equal(createdRows.length, 0);
+  // The filer's count is quotaUsageWhere: what they requested OR filed.
+  assert.ok(quotaWheres.some((w) => JSON.stringify(w).includes('"filedBy":"quota-delegate"')));
+});
+
+test("bulk on-behalf: rows record who filed them, and the filer's quota is counted when it has room", async () => {
+  seedPg13Movie();
+  const filer = makeUser("roomy-delegate", { permissions: REQUESTER | Permission.REQUEST_ON_BEHALF, movieQuotaLimit: 5, movieQuotaDays: 7 });
+  const token = await mintSession(filer);
+  usersById.set("target-2", makeUser("target-2", { permissions: REQUESTER }));
+  const out = await bulkOnBehalf(token, "target-2");
+  assert.equal(out.status, 201);
+  assert.equal(createdRows.length, 1);
+  assert.equal(createdRows[0].requestedBy, "target-2");
+  assert.equal(createdRows[0].filedBy, "roomy-delegate");
 });

@@ -5,7 +5,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
-import { purgeUserDataInTx, NotDeactivatedError, isPurgedRow } from "@/lib/account-lifecycle";
+import { purgeUserDataInTx, NotDeactivatedError, isPurgedRow, assertTargetNotAdminInTx, TargetBecameAdminError } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/admin/users/[id]/purge — IRREVERSIBLY scrub a disabled account's
@@ -66,9 +66,15 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   const now = new Date();
   try {
     await prisma.$transaction(async (tx) => {
+      // Role re-read under lock 42 (a promotion after the read above must not let a
+      // delegate scrub an admin).
+      await assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN));
       await purgeUserDataInTx(tx, id, now);
     });
   } catch (err) {
+    if (err instanceof TargetBecameAdminError) {
+      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminPurge") }, { status: 403 });
+    }
     if (err instanceof NotDeactivatedError) {
       // Re-activated between our read and the tx.
       return NextResponse.json(

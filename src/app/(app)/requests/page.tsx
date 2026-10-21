@@ -37,12 +37,15 @@ const STATUS_LABEL_KEY: Record<string, string> = {
 export default async function RequestsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string; status?: string; sort?: string; q?: string }>;
+  searchParams: Promise<{ page?: string; status?: string; sort?: string; q?: string | string[] }>;
 }) {
   const session = await requireAppSession();
   const t = await getTranslator();
 
-  const { page: pageParam, status: statusParam, sort: sortParam, q: qParam } = await searchParams;
+  const { page: pageParam, status: statusParam, sort: sortParam, q: qRaw } = await searchParams;
+  // A repeated query key (?q=a&q=b) arrives as an array at runtime, and `.trim()`
+  // on it would 500 the whole page (the same guard /votes carries).
+  const qParam = Array.isArray(qRaw) ? qRaw[0] : qRaw;
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
   const skip = (page - 1) * PAGE_SIZE;
 

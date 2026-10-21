@@ -53,6 +53,10 @@ services:
     tmpfs:
       - /tmp:size=128m,mode=1777
     ports:
+      # Every interface, so a LAN setup works as-is. Behind a reverse proxy
+      # (TRUST_PROXY=true) publish to the proxy only — "127.0.0.1:3001:3000" —
+      # or nothing reaching this port around the proxy is stopped from forging
+      # X-Forwarded-For. See README.md, "Reach the app only through the reverse proxy".
       - "3001:3000"
     environment:
       PORT: "3000"
@@ -71,6 +75,13 @@ services:
       TRASH_SYNC_INTERVAL: "${TRASH_SYNC_INTERVAL:-86400}"
       PLEX_WATCHLIST_SYNC_INTERVAL: "${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}"
       TRAKT_SYNC_INTERVAL: "${TRAKT_SYNC_INTERVAL:-1800}"
+      UPSTREAM_WATCH_SYNC_INTERVAL: "${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}"
+      ARR_WATCH_INTERVAL: "${ARR_WATCH_INTERVAL:-900}"
+      ARR_SNAPSHOT_INTERVAL: "${ARR_SNAPSHOT_INTERVAL:-300}"
+      WARM_RECOMMENDATIONS_INTERVAL: "${WARM_RECOMMENDATIONS_INTERVAL:-43200}"
+      WARM_LIBRARY_INTERVAL: "${WARM_LIBRARY_INTERVAL:-86400}"
+      PURGE_SESSIONS_INTERVAL: "${PURGE_SESSIONS_INTERVAL:-86400}"
+      CRON_RETRY_INTERVAL: "${CRON_RETRY_INTERVAL:-300}"
     env_file:
       - .env
     depends_on:

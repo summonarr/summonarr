@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.34.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.35.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -35,6 +35,7 @@ Then open <http://localhost:3001>. The first user to register is auto-promoted t
 - Encrypted, password-protected database backups (export/import via the admin UI)
 - Radarr and Sonarr webhooks for instant request fulfillment (Plex activity via a real-time SSE stream, Jellyfin via a 5-second poller — no Plex/Jellyfin webhook needed)
 - Optional Discord (bot), SMTP/Resend email, and ratings providers (OMDb, MDBList, Trakt) — all configured in-app
+- Radarr and Sonarr managed from inside Summonarr: Download Queue (with import, blocklist and grab actions), Missing and cutoff-unmet lists with searches, an Arr Calendar, Download History and Blocklist, Arr System (tasks, indexers, clients, storage), a per-title manager on every movie and show, one-click webhook setup, and a monitor that alerts on low disk, failed downloads and stuck imports
 - Admin debug endpoint (`/api/admin/debug/arr-state`) for inspecting the Radarr/Sonarr pipeline end-to-end
 
 ## Architecture at a glance
@@ -169,6 +170,53 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.35.0
+
+**Added**
+
+- **Manage Radarr/Sonarr from Summonarr**: a title manager on the movie and TV pages ("Manage in Radarr/Sonarr": monitoring, quality profile, root folder and move, tags, season and episode monitoring, files with rename and delete, history with mark-failed, searches and refresh), plus new admin pages: **Arr Calendar**, **Download History** with a **Blocklist** tab, and **Arr System** (scheduled tasks, recent commands, library-wide searches, indexer and download-client switches and tests, root folders, unmapped folders and disks). Admins can also add and remove titles.
+- Admin Radarr/Sonarr pages open instantly with the last answer they got ("Showing what was read 5m ago — refreshing…") and then load live. A background job keeps them fresh (`ARR_SNAPSHOT_INTERVAL`, default 300 seconds).
+- Buttons that start a Radarr/Sonarr command follow the command itself instead of a timer.
+- **Why?** on approved requests: a plain-language status from the request's own Radarr/Sonarr instance (queued, downloading, stuck, missing and so on). Request managers can see it too; it never shows paths, indexers or download clients.
+- **Replace file** on an issue: delete the file the issue is about, then blocklist its release or search for a new one.
+- **Radarr/Sonarr monitor**: low disk space, failed downloads and newly stuck downloads are sent to the notification channels. Set the disk threshold under Settings → Notifications (`ARR_WATCH_INTERVAL`, default 900 seconds).
+- **Never Watched** (Admin → Never Watched): every title, and every unwatched season of a watched show, that nobody has played, biggest first. It also uses the media servers' own watch records (refreshed daily, `UPSTREAM_WATCH_SYNC_INTERVAL`). Library cleanup's watch rules now use the same verdict.
+- **Library match check** (Admin → Library): every Plex/Jellyfin item is checked against the Radarr/Sonarr folder it sits in, flagging wrong matches, items with no TMDB id and year mismatches. **Fix** rematches just that one item.
+- Fix match runs in the background with a job tray, queues extra jobs instead of refusing them, shows what a title is matched to now, and on Plex rematches every copy of the title.
+- Library cleanup gets more filters (held back by, media server, instance, size, deletable only) and sorting. The view is kept in the URL.
+- Missing: tick rows and **Search selected** (up to 100 at a time).
+- **OIDC allowlist** (Settings → Authentication): limit OIDC sign-in by group, by verified email domain, or to existing users only. Off by default.
+- Account owners are emailed when the iOS app signs in to their account, when too many wrong passwords lock their sign-in, and when their Discord account is linked.
+- Summonarr asks search engines not to index it (robots.txt, `X-Robots-Tag` and noindex).
+
+**Changed**
+
+- **Security**: this release closes the findings of a full authentication audit. Highlights:
+  - Session tokens only work on the transport they were issued for (browser cookie or app bearer token). Each kind of signed token uses its own key, and `NEXTAUTH_SECRET_PREVIOUS` lets you rotate `NEXTAUTH_SECRET` without signing everyone out.
+  - The User-Agent check is gone, so a browser update no longer signs you out.
+  - Admin "Connect Plex" no longer exposes the Plex owner token to anyone who polls the PIN.
+  - A Jellyfin account is tied to the server it was first seen on, and an OIDC account to its issuer. Changing `OIDC_ISSUER` stops existing OIDC accounts from signing in.
+  - When a Jellyfin user is removed or disabled on every configured server, their Summonarr sessions end (admins excepted).
+  - Password hashes are stronger and upgrade on the next sign-in. On an account with two-factor, changing the password needs a second factor too (the iOS app points you to the website for that).
+  - Password change and sign-out-everywhere also remove push registrations and pending Discord codes, then email you what is still connected. Linking Discord, connecting Trakt and changing the notification email need your password again.
+  - Linking a media-server identity to an account is admin-only. Changing someone's role no longer signs them out of their other devices.
+  - The Discord bot only answers in the configured server.
+  - Restoring a backup signs everyone out. Boot refuses `NEXTAUTH_SECRET`, `CRON_SECRET` and `TOKEN_ENCRYPTION_KEY` sharing a value.
+- With `TRUST_PROXY=true`, publish the app port to the proxy only (`"127.0.0.1:3001:3000"`); a startup warning now says so. See the deployment guide.
+- Pages load less: the browser is sent only the translations it needs (a non-admin page drops from ~94 KB to ~27 KB gzipped).
+- The Statistics page has correct peak concurrency, decade and unique-title figures, a real rewatch rate, and honest transcode reasons.
+- The database gains a few columns (User, Account, play history) and drops five redundant indexes. They are applied automatically at startup.
+- Pending Discord link and merge codes from before this upgrade stop working; generate a new one.
+
+**Fixed**
+
+- Jellyfin: movies that belong to a collection were missing from the library (2,230 of 9,134 on one server), so they read as "Plex only".
+- The Download Queue keeps its order across refreshes and shows episode counts on Sonarr packs. Issue action buttons no longer duplicate after claim/release.
+- Radarr/Sonarr 502/504 errors point at the reverse proxy. Sonarr v4's deprecated language profiles are skipped. Listings retry once on 502/503/504.
+- A Radarr/Sonarr instance that sends a huge or malformed list can no longer stall the server.
+- Operator scripts run with `docker compose exec` now find the bundled Postgres.
+- Every Activity sub-page respects the Activity feature flag.
 
 ### v0.34.0
 

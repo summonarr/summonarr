@@ -12,6 +12,7 @@ export function User({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />

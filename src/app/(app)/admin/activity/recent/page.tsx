@@ -2,6 +2,7 @@ import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { requireFeature } from "@/lib/features";
 import Link from "next/link";
 import Image from "next/image";
 import { posterUrl } from "@/lib/tmdb-types";
@@ -26,6 +27,7 @@ interface RecentItem {
 }
 
 export default async function RecentlyAddedPage() {
+  await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
   const [t, locale] = await Promise.all([getTranslator(), getLocale()]);

@@ -104,6 +104,24 @@ export function ActivityHistoryTable({
 
   const abortRef = useRef<AbortController | null>(null);
 
+  // Keep the URL's seeded filters in step with the table's own. The period
+  // selector copies the current query string, so a from/to/watched the user has
+  // since cleared would otherwise ride along and re-seed the remounted table.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    let changed = false;
+    for (const [key, value] of [["from", fromDate], ["to", toDate], ["watched", watched]] as const) {
+      if (value === "" && url.searchParams.has(key)) {
+        url.searchParams.delete(key);
+        changed = true;
+      } else if (value !== "" && url.searchParams.has(key) && url.searchParams.get(key) !== value) {
+        url.searchParams.set(key, value);
+        changed = true;
+      }
+    }
+    if (changed) window.history.replaceState(window.history.state, "", url);
+  }, [fromDate, toDate, watched]);
+
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search), 350);
     return () => clearTimeout(timer);
@@ -179,7 +197,17 @@ export function ActivityHistoryTable({
     // `limit` is part of the key (a page-size change re-pages from 1); `page`
     // and `reloadToken` deliberately are not — a delete refetches the CURRENT
     // page.
-    const filterKey = `${params.toString()}|${limit}`;
+    //
+    // The period's lower bound is NOT part of the key. `startDateIso` is read
+    // off the clock on every server render, and the page's live refresher
+    // (activity:history-updated → router.refresh) hands this table a new one
+    // each time a play finishes: keyed on it, every finished stream looked like
+    // a filter change and threw an admin paging through history back to page 1.
+    // A period change remounts the table (the page's `key`), so it never needs
+    // to be detected here; the refetch itself still runs, on the current page.
+    const keyParams = new URLSearchParams(params);
+    if (startDateIso && keyParams.get("startDate") === startDateIso) keyParams.delete("startDate");
+    const filterKey = `${keyParams.toString()}|${limit}`;
     if (
       lastFilterKeyRef.current !== null &&
       lastFilterKeyRef.current !== filterKey &&
@@ -232,7 +260,7 @@ export function ActivityHistoryTable({
       });
 
     return () => controller.abort();
-  }, [page, limit, buildFilterParams, reloadToken]);
+  }, [page, limit, buildFilterParams, reloadToken, startDateIso]);
 
   function toggleSort(field: SortField) {
     if (sortBy === field) {
@@ -679,7 +707,7 @@ export function ActivityHistoryTable({
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {fmtDuration(r.duration)}
+                          {fmtDuration(r.duration, locale)}
                         </td>
                         <td
                           style={{

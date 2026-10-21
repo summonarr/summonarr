@@ -6,7 +6,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, rolePresetExceeds, presetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
 import type { InstanceGrants, MediaServerGrants } from "@/lib/permissions";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -233,7 +233,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
         { status: 400 },
       );
     }
-    const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true, email: true } });
+    const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true } });
     if (!targetUser) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
     // A non-admin MANAGE_USERS holder must not edit an admin's permissions or grant
@@ -279,7 +279,9 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
       throw err;
     }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { targetUser: targetUser.name ?? targetUser.email, before: targetUser.permissions.toString(), after: parsed.toString() }, ...auditContext(req, session) });
+    // The target is named by id (+ display name), never by email — here and on
+    // the two grant rows below (audit-scrub.ts).
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { targetUserId: id, ...(targetUser.name ? { targetUser: targetUser.name } : {}), before: targetUser.permissions.toString(), after: parsed.toString() }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, permissions: parsed.toString() });
   }
@@ -302,7 +304,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
     }
     const grants = serializeInstanceGrants(parsedGrants);
-    const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true, email: true } });
+    const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true } });
     if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { instanceGrants: grants } });
@@ -312,7 +314,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
       throw err;
     }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "instanceGrants", targetUser: prev.name ?? prev.email, after: grants }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "instanceGrants", targetUserId: id, ...(prev.name ? { targetUser: prev.name } : {}), after: grants }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, instanceGrants: grants });
   }
@@ -346,7 +348,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
     }
     const grants = serializeMediaServerGrants(parsedGrants);
-    const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true, email: true } });
+    const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true } });
     if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } });
@@ -356,7 +358,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       }
       throw err;
     }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "mediaServerGrants", targetUser: prev.name ?? prev.email, after: grants }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "mediaServerGrants", targetUserId: id, ...(prev.name ? { targetUser: prev.name } : {}), after: grants }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, mediaServerGrants: grants });
   }
@@ -433,6 +435,17 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: t("apiAdmin.users.roleInvalid") }, { status: 400 });
   }
 
+  // Subset rule (same as the permissions branch and account creation): setting a
+  // role re-seeds the target's WHOLE bitmask from the role's preset, baseline
+  // REQUEST* bits included. So a delegate may only pick a role whose preset it
+  // holds in full — management bits (ISSUE_ADMIN needs MANAGE_ISSUES) AND the
+  // request bits. Checking management bits alone let a delegate without, say,
+  // REQUEST_TV "re-set" a user an admin had restricted to movies back to USER and
+  // hand them TV requests (a same-role PATCH is accepted and re-seeds too).
+  if (rolePresetExceeds(body.role, session.user.permissions) || presetExceeds(body.role, session.user.permissions)) {
+    return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
+  }
+
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, name: true, email: true } });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
@@ -495,7 +508,8 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
 
   // Role change already committed; a failed audit write must not 500 it (a retry
   // would re-apply and double-audit). logAudit swallows write failures by design.
-  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_ROLE_CHANGE", target: `user:${id}`, details: { targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, after: { role: body.role } }, ...auditContext(req, session) });
+  // The target is named by id (+ display name), never by email.
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_ROLE_CHANGE", target: `user:${id}`, details: { targetUserId: id, ...(target.name ? { targetUser: target.name } : {}), before: { role: target.role }, after: { role: body.role } }, ...auditContext(req, session) });
   return NextResponse.json({ id, role: body.role });
 });
 
@@ -571,6 +585,6 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   // Account already disabled; a failed audit write must not 500 it (guardrail 26
   // — logAudit swallows write failures). Everything (requests/issues/votes, the
   // identity itself) is preserved — the account is off, not erased.
-  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DEACTIVATE", target: `user:${id}`, details: { kind: "admin-disable", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(req, session) });
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DEACTIVATE", target: `user:${id}`, details: { kind: "admin-disable", targetUserId: id, ...(target.name ? { targetUser: target.name } : {}), before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(req, session) });
   return NextResponse.json({ ok: true });
 });

@@ -8,6 +8,7 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { Textarea } from "@/components/ui/textarea";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
@@ -239,7 +240,7 @@ export function ReportIssueButton({
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setErrorMsg(data.error ?? t("request.somethingWrong"));
+        setErrorMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
         setDialogState("open");
         return;
       }

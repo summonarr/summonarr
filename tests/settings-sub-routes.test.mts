@@ -65,6 +65,8 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 const fetchCalls: Array<{ url: URL; headers: Headers }> = [];
 let plexUserOk = true;
 let arrOk = true;
+// What /api/v3/system/status reports; null answers 500 (version unknown).
+let arrVersion: string | null = "4.0.20.3014";
 let plexSectionsOk = true;
 let jellyfinFoldersOk = true;
 let providerOk = true;
@@ -103,6 +105,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if (url.pathname.includes("/api/v3/qualityprofile")) {
     return arrOk ? json([{ id: 1, name: "HD" }]) : json({ error: "ARR DOWN" }, 500);
+  }
+  if (url.pathname.includes("/api/v3/system/status")) {
+    return arrVersion === null ? json({ error: "STATUS DOWN" }, 500) : json({ appName: "Sonarr", version: arrVersion });
+  }
+  if (url.pathname.includes("/api/v3/languageprofile")) {
+    return json([{ id: 1, name: "English" }]);
   }
   // Ratings providers (omdb / mdblist / trakt / ipinfo).
   return providerOk
@@ -279,6 +287,7 @@ beforeEach(() => {
   tokenCacheRows = 5;
   plexUserOk = true;
   arrOk = true;
+  arrVersion = "4.0.20.3014";
   plexSectionsOk = true;
   jellyfinFoldersOk = true;
   providerOk = true;
@@ -633,6 +642,54 @@ test("arr-options maps a connection failure to 502 without leaking the upstream 
   // started returning String(err) — which can carry the arr URL and status.
   assert.deepEqual(body, { error: "Could not connect to radarr" });
   assert.ok(errors.some((e) => e.includes("[settings/arr-options]")));
+});
+
+// Sonarr v4 still answers /api/v3/languageprofile but logs "API call made to
+// deprecated endpoint" on every Settings visit, so it is asked only when the
+// version says v3 — or can't be read, since a v3 add needs a language profile.
+const asked = (path: string) => fetchCalls.some((c) => c.url.pathname.endsWith(path));
+function configureSonarr(): void {
+  settings.set(arrSettingKey("sonarr", "", "Url"), "http://10.0.0.6:8989");
+  settings.set(arrSettingKey("sonarr", "", "ApiKey"), "sonarr-key");
+}
+
+test("arr-options never asks a Sonarr v4 for language profiles", async () => {
+  configureSonarr();
+  const t = await mintSession();
+  const res = await getArrOptions(t, "?service=sonarr");
+  assert.equal(res.status, 200);
+  assert.ok(asked("/api/v3/system/status"));
+  assert.ok(!asked("/api/v3/languageprofile"), "v4 logs a deprecation warning for this endpoint");
+  assert.equal("languageProfiles" in (await res.json()), false);
+});
+
+test("arr-options offers a Sonarr v3's language profiles", async () => {
+  configureSonarr();
+  arrVersion = "3.0.10.1567";
+  const t = await mintSession();
+  const body = await (await getArrOptions(t, "?service=sonarr")).json();
+  assert.ok(asked("/api/v3/languageprofile"));
+  assert.deepEqual(body.languageProfiles, [{ id: 1, name: "English" }]);
+});
+
+test("arr-options still asks for language profiles when the Sonarr version can't be read", async () => {
+  configureSonarr();
+  arrVersion = null;
+  const t = await mintSession();
+  const res = await getArrOptions(t, "?service=sonarr");
+  assert.equal(res.status, 200, "an unreadable version must not fail the options fetch");
+  const body = await res.json();
+  assert.ok(asked("/api/v3/languageprofile"));
+  assert.deepEqual(body.languageProfiles, [{ id: 1, name: "English" }]);
+});
+
+test("arr-options asks Radarr for neither the version nor language profiles", async () => {
+  settings.set(arrSettingKey("radarr", "", "Url"), "http://10.0.0.2:7878");
+  settings.set(arrSettingKey("radarr", "", "ApiKey"), "radarr-key");
+  const t = await mintSession();
+  assert.equal((await getArrOptions(t, "?service=radarr")).status, 200);
+  assert.ok(!asked("/api/v3/system/status"));
+  assert.ok(!asked("/api/v3/languageprofile"));
 });
 
 test("arr-options never echoes the arr API key", async () => {

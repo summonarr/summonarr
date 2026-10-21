@@ -1,4 +1,5 @@
 import { processSingleton } from "./process-singleton";
+import { warnOnChange } from "./log-dedup";
 
 if (process.env.TRUST_PROXY !== "true") {
   console.warn(
@@ -17,44 +18,175 @@ interface RateLimitEntry {
 // module into every server bundle ("chunk") that imports it. A plain
 // module-level Map would give each chunk its own counters, so a key used by two
 // routes would get twice the intended limit.
-const windows = processSingleton("rate-limit:windows", () => {
-  const map = new Map<string, RateLimitEntry>();
-  // One cleanup timer per process, created with the map. .unref() lets Node
-  // exit (tests, shutdown) without waiting for this timer.
-  setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of map) {
-      if (entry.expiresAt < now) map.delete(key);
-    }
-  }, 60_000).unref();
-  return map;
-});
+function sweptMap(name: string): Map<string, RateLimitEntry> {
+  return processSingleton(name, () => {
+    const map = new Map<string, RateLimitEntry>();
+    // One cleanup timer per process, created with the map. .unref() lets Node
+    // exit (tests, shutdown) without waiting for this timer.
+    setInterval(() => sweepExpired(map, Date.now()), 60_000).unref();
+    return map;
+  });
+}
+
+function sweepExpired(map: Map<string, RateLimitEntry>, now: number): void {
+  for (const [key, entry] of map) {
+    if (entry.expiresAt < now) map.delete(key);
+  }
+}
+
+const windows = sweptMap("rate-limit:windows");
+
+// Buckets that bound guessing ONE account's secret: a password, a second-factor
+// code, a step-up password. They live OUTSIDE the shared map, in maps that never
+// evict a bucket with live hits.
+//
+// Why: the shared map is LRU-bounded, and a bucket that is already FULL is
+// never touched again (a refused attempt records nothing), so it drifts to the
+// front of the eviction order. An attacker who spent a victim's `login-email:`
+// budget only had to mint ~100k cheap new keys (any anonymous endpoint's per-IP
+// or per-secret bucket) to evict it and get a fresh 50 guesses — repeatably.
+//
+// When a protected map is full of live buckets, a NEW key is refused (fail
+// closed) rather than evicting a live one: an availability cost, against a
+// security one (unbounded guessing) the other way round. So the protected maps
+// are split by KEY CLASS, one map per class, and a flood can only ever fill and
+// refuse its own class:
+// - `login-email:` and `jellyfin-user:` are keyed on whatever email or username
+//   was TYPED, account or not, so an anonymous caller mints one per attempt,
+//   behind only the per-IP limit (a User-Agent bucket in local-only mode). Each
+//   gets its own map: a username flood can't refuse password sign-in, and the
+//   reverse.
+// - Every other prefix is keyed on a user id that only a signed-in session or a
+//   password-proven 2FA challenge supplies. Nobody mints those anonymously, so
+//   that key space is bounded by the user table. They share one map, and a
+//   sign-in flood can't stop a signed-in user revoking a session, stepping up,
+//   enabling 2FA or changing their password.
+// A new prefix names its class here; an anonymously mintable one gets its own.
+type ProtectedClass = "login-email" | "jellyfin-user" | "user-id";
+
+const PROTECTED_PREFIXES: ReadonlyArray<readonly [prefix: string, cls: ProtectedClass]> = [
+  ["login-email:", "login-email"],
+  ["jellyfin-user:", "jellyfin-user"],
+  ["mfa-user:", "user-id"],
+  ["profile-password:", "user-id"],
+  ["profile-delete:", "user-id"],
+  ["sessions-delete:", "user-id"],
+  ["mfa-stepup:", "user-id"],
+  ["mfa-totp-enable:", "user-id"],
+  ["step-up-pw:", "user-id"],
+];
+
+interface ProtectedStore {
+  cls: ProtectedClass;
+  windows: Map<string, RateLimitEntry>;
+  // When this store's full map was last re-swept (see PROTECTED_SWEEP_INTERVAL_MS).
+  lastSweep: { at: number };
+  // What a full store refuses, for the operator warning.
+  refuses: string;
+}
+
+function protectedStore(cls: ProtectedClass, refuses: string): ProtectedStore {
+  return {
+    cls,
+    windows: sweptMap(`rate-limit:protected-windows:${cls}`),
+    lastSweep: processSingleton(`rate-limit:protected-last-sweep:${cls}`, () => ({ at: 0 })),
+    refuses,
+  };
+}
+
+const PROTECTED_STORES: Readonly<Record<ProtectedClass, ProtectedStore>> = {
+  "login-email": protectedStore(
+    "login-email",
+    "local-password sign-in attempts for accounts not already in it are refused until buckets expire. This usually means a credential-stuffing flood.",
+  ),
+  "jellyfin-user": protectedStore(
+    "jellyfin-user",
+    "Jellyfin sign-in attempts for usernames not already in it are refused until buckets expire. This usually means a credential-stuffing flood.",
+  ),
+  "user-id": protectedStore(
+    "user-id",
+    "2FA, step-up, password-change and session-revocation attempts by users not already in it are refused until buckets expire.",
+  ),
+};
 
 const MAX_KEYS = 100_000;
+// Per protected class.
+const MAX_PROTECTED_KEYS = 100_000;
+// A full protected map is re-swept at most this often, so a flood of new keys
+// against a full map costs one O(n) sweep per interval, not one per request.
+const PROTECTED_SWEEP_INTERVAL_MS = 1_000;
 
-// Sliding-window rate limiter: records a hit for `key` and returns true, or
-// returns false (recording nothing) once `limit` hits already fall within the
-// last `windowMs`. At most MAX_KEYS keys are kept; the least recently used key
-// is dropped first.
-export function checkRateLimit(key: string, limit: number, windowMs: number): boolean {
-  if (limit <= 0) return true;
-  const now = Date.now();
-  const cutoff = now - windowMs;
-  const entry = windows.get(key);
-  const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
-  if (hits.length === 0) windows.delete(key);
-  if (hits.length >= limit) return false;
+function protectedStoreFor(key: string): ProtectedStore | null {
+  for (const [prefix, cls] of PROTECTED_PREFIXES) {
+    if (key.startsWith(prefix)) return PROTECTED_STORES[cls];
+  }
+  return null;
+}
 
-  if (hits.length === 0 && windows.size >= MAX_KEYS) {
+export function isProtectedRateLimitKey(key: string): boolean {
+  return protectedStoreFor(key) !== null;
+}
+
+function mapFor(key: string): Map<string, RateLimitEntry> {
+  return protectedStoreFor(key)?.windows ?? windows;
+}
+
+// Makes room for one NEW key in `store`'s map (the shared map when null).
+// Returns false when it can't — only a protected store ever answers false.
+function makeRoom(store: ProtectedStore | null, now: number): boolean {
+  if (store) {
+    const map = store.windows;
+    if (map.size < MAX_PROTECTED_KEYS) return true;
+    if (now - store.lastSweep.at >= PROTECTED_SWEEP_INTERVAL_MS) {
+      store.lastSweep.at = now;
+      sweepExpired(map, now);
+    }
+    if (map.size < MAX_PROTECTED_KEYS) return true;
+    warnOnChange(
+      `rate-limit:protected-full:${store.cls}`,
+      "full",
+      `[rate-limit] the ${store.cls} limiter is full (${MAX_PROTECTED_KEYS} live buckets) — ${store.refuses}`,
+    );
+    return false;
+  }
+  if (windows.size >= MAX_KEYS) {
     const oldestKey = windows.keys().next().value;
     if (oldestKey !== undefined) windows.delete(oldestKey);
   }
+  return true;
+}
+
+// Sliding-window rate limiter: records a hit for `key` and returns true, or
+// returns false (recording nothing) once `limit` hits already fall within the
+// last `windowMs`. The shared map keeps at most MAX_KEYS keys, dropping the
+// least recently used first; per-account buckets (PROTECTED_PREFIXES) are never
+// dropped while live — a full class refuses new keys instead.
+export function checkRateLimit(key: string, limit: number, windowMs: number): boolean {
+  return reserveRateLimit(key, limit, windowMs) !== null;
+}
+
+// checkRateLimit that also hands back the timestamp of the hit it recorded
+// (null = refused), so a caller that later refunds can give back ITS OWN hit.
+// A limit <= 0 means unlimited: nothing is recorded and the timestamp is 0, which
+// refundHit treats as "nothing to remove".
+export function reserveRateLimit(key: string, limit: number, windowMs: number): number | null {
+  if (limit <= 0) return 0;
+  const store = protectedStoreFor(key);
+  const map = store?.windows ?? windows;
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const entry = map.get(key);
+  const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
+  if (hits.length === 0) map.delete(key);
+  if (hits.length >= limit) return null;
+
+  if (hits.length === 0 && !makeRoom(store, now)) return null;
   hits.push(now);
   // Delete then re-insert to move the key to the end of the Map's order; the
   // eviction above drops keys from the front, so this marks it recently used.
-  windows.delete(key);
-  windows.set(key, { hits, expiresAt: now + windowMs });
-  return true;
+  map.delete(key);
+  map.set(key, { hits, expiresAt: now + windowMs });
+  return now;
 }
 
 // Read-only counterpart of checkRateLimit: returns whether the key is still
@@ -64,11 +196,20 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
 // verify — see authorizeWithCredentials). Pairs with recordFailure.
 export function peekRateLimit(key: string, limit: number, windowMs: number): boolean {
   if (limit <= 0) return true;
+  const store = protectedStoreFor(key);
+  const map = store?.windows ?? windows;
   const now = Date.now();
   const cutoff = now - windowMs;
-  const entry = windows.get(key);
+  const entry = map.get(key);
   const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
-  if (hits.length === 0) windows.delete(key);
+  if (hits.length === 0) {
+    map.delete(key);
+    // A new per-account key that its full protected class could not take must
+    // not read as "room left" — the gate fails closed exactly as reserve does.
+    // (Only a protected store: makeRoom on the shared map would evict a key
+    // without inserting one.)
+    return store ? makeRoom(store, now) : true;
+  }
   return hits.length < limit;
 }
 
@@ -78,30 +219,46 @@ export function peekRateLimit(key: string, limit: number, windowMs: number): boo
 // through. Instead the caller reserves a hit with checkRateLimit (check and
 // record in one step) and refunds it here on success, so a SUCCESSFUL login
 // still doesn't use up the account's budget.
-export function refundHit(key: string): void {
-  const entry = windows.get(key);
+//
+// Pass `hitAt` (the value reserveRateLimit returned) to remove THAT hit. Without
+// it the newest hit is popped, which under concurrency can be ANOTHER caller's
+// failed attempt: a victim's successful sign-in would then erase an attacker's
+// later failure and leave its own older timestamp, which expires sooner — the
+// attacker's guess budget refills early. A hit that already aged out of the
+// window is simply not found, so nothing else is removed.
+export function refundHit(key: string, hitAt?: number): void {
+  const map = mapFor(key);
+  const entry = map.get(key);
   if (!entry || entry.hits.length === 0) return;
-  entry.hits.pop();
-  if (entry.hits.length === 0) windows.delete(key);
+  if (hitAt !== undefined) {
+    if (hitAt === 0) return;
+    const i = entry.hits.indexOf(hitAt);
+    if (i === -1) return;
+    entry.hits.splice(i, 1);
+  } else {
+    entry.hits.pop();
+  }
+  if (entry.hits.length === 0) map.delete(key);
 }
 
 // Records one hit for `key` (the "record" half of peek-then-record). Same
 // bookkeeping as checkRateLimit, but with no limit check: callers check with
 // peekRateLimit first.
 export function recordFailure(key: string, windowMs: number): void {
+  const store = protectedStoreFor(key);
+  const map = store?.windows ?? windows;
   const now = Date.now();
   const cutoff = now - windowMs;
-  const entry = windows.get(key);
+  const entry = map.get(key);
   const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
 
-  if (hits.length === 0 && windows.size >= MAX_KEYS) {
-    const oldestKey = windows.keys().next().value;
-    if (oldestKey !== undefined) windows.delete(oldestKey);
-  }
+  // A full protected class can't take a new key; the failure has nowhere to go,
+  // and the next gate (peek/reserve) for that key refuses anyway (makeRoom).
+  if (hits.length === 0 && !makeRoom(store, now)) return;
   hits.push(now);
   // Move the key to the end of the Map's order (see checkRateLimit).
-  windows.delete(key);
-  windows.set(key, { hits, expiresAt: now + windowMs });
+  map.delete(key);
+  map.set(key, { hits, expiresAt: now + windowMs });
 }
 
 import { isIP } from "node:net";

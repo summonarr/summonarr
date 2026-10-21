@@ -114,11 +114,35 @@ function ehloName(): string {
 
 const ASCII_PRINTABLE = /^[\x20-\x7E]*$/;
 
-// RFC 2047 encoded-word (Base64) for non-ASCII subjects.
+// RFC 2047 §2: an encoded-word is at most 75 characters. 45 UTF-8 bytes base64
+// to 60 characters, plus the 12-character "=?UTF-8?B?" / "?=" wrapper = 72.
+const MAX_ENCODED_WORD_BYTES = 45;
+
+// RFC 2047 encoded-word (Base64) for non-ASCII subjects. A subject whose bytes
+// fit in one word stays ONE word; a longer one (a long CJK/emoji title) is split
+// on code-point boundaries — never inside a multi-byte character — into several
+// words joined by a folding CRLF + space, instead of one multi-hundred-character
+// word that breaks the 75-character word limit and, past ~900 characters, the
+// 998-octet line limit relays enforce.
 function encodeSubject(subject: string): string {
   if (ASCII_PRINTABLE.test(subject)) return subject;
-  const b64 = Buffer.from(subject, "utf8").toString("base64");
-  return `=?UTF-8?B?${b64}?=`;
+  const words: string[] = [];
+  let chunk = "";
+  let chunkBytes = 0;
+  for (const ch of subject) {
+    const bytes = Buffer.byteLength(ch, "utf8");
+    if (chunkBytes + bytes > MAX_ENCODED_WORD_BYTES) {
+      words.push(chunk);
+      chunk = "";
+      chunkBytes = 0;
+    }
+    chunk += ch;
+    chunkBytes += bytes;
+  }
+  if (chunk) words.push(chunk);
+  return words
+    .map((w) => `=?UTF-8?B?${Buffer.from(w, "utf8").toString("base64")}?=`)
+    .join("\r\n ");
 }
 
 // RFC 5322 date. `toUTCString()` returns "Tue, 01 Jan 2024 00:00:00 GMT"; SMTP

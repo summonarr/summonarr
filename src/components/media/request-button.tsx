@@ -18,6 +18,7 @@ import {
 } from "@/components/icons";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -178,7 +179,7 @@ export function RequestButton({
       }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setErrorMsg(data.error ?? t("request.somethingWrong"));
+        setErrorMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
         setState("error");
         return;
       }

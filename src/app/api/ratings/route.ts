@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { fetchUnifiedRatings } from "@/lib/omdb-availability";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // GET /api/ratings?id=&type= — external ratings for a single title. MDBList is
@@ -27,7 +28,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
   }
 
   const numericId = Number(id);
-  if (!Number.isFinite(numericId) || numericId <= 0 || !Number.isInteger(numericId)) {
+  if (!Number.isFinite(numericId) || numericId <= 0 || !isTmdbIdInRange(numericId)) {
     return NextResponse.json({ error: t("apiUser.common.idPositive") }, { status: 400 });
   }
 

@@ -6,7 +6,7 @@ import {
   addMovieToRadarr,
   addSeriesToSonarr,
 } from "@/lib/arr";
-import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "@/lib/plex";
+import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, plexLibraryRatingKeys, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "@/lib/plex";
 import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
 import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
@@ -812,8 +812,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
           // the same small integer ratingKey is legitimate, not conflation.
           const rowsByInstance = await Promise.all(
             writable.map(async ({ slug, movieIds, tvIds }) => {
-              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, plexRatingKeys: plexLibraryRatingKeys(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, plexRatingKeys: plexLibraryRatingKeys(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
               const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug, "sync");
               const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug, "sync");
               return {

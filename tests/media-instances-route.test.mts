@@ -97,6 +97,8 @@ let plexLibrary: LibraryRow[] = [];
 let jellyfinLibrary: LibraryRow[] = [];
 let activeSessions: SessionRow[] = [];
 let serverUsers: ServerUserRow[] = [];
+type EvidenceRow = { source: string; serverInstance: string; itemKey: string };
+let upstreamEvidence: EvidenceRow[] = [];
 const auditRows: Array<Record<string, unknown>> = [];
 
 // Deliberately permissive: a `where` with no keys matches EVERY row, so a
@@ -187,6 +189,9 @@ function makeClient(txId: number | null) {
     jellyfinLibraryItem: rowDelegate("jellyfinLibraryItem", () => jellyfinLibrary, (r) => { jellyfinLibrary = r; }),
     activeSession: rowDelegate("activeSession", () => activeSessions, (r) => { activeSessions = r; }),
     mediaServerUser: rowDelegate("mediaServerUser", () => serverUsers, (r) => { serverUsers = r; }),
+    // The removed server's upstream watch-record snapshot (guardrail 14d) —
+    // pinned in tests/audit-fix-nw-upstream.test.mts.
+    upstreamWatchEvidence: rowDelegate("upstreamWatchEvidence", () => upstreamEvidence, (r) => { upstreamEvidence = r; }),
     // PlayHistory has NO legitimate caller in this route — every op is journaled
     // so the guardrail-19 test can assert the model was never addressed at all.
     playHistory: rowDelegate("playHistory", () => [] as Record<string, unknown>[], () => {}),
@@ -325,6 +330,7 @@ beforeEach(() => {
   jellyfinLibrary = [];
   activeSessions = [];
   serverUsers = [];
+  upstreamEvidence = [];
   failUpsertKey = null;
   respond = (url) => { throw new Error(`unexpected fetch ${url}`); };
 });
@@ -479,6 +485,9 @@ test("Setting cleanup covers the WHOLE per-instance field union, not just the co
       "plexRemoteServerReachable",
       "plexRemoteServerUrl",
       "plexRemoteTvPathStripPrefix",
+      // The upstream watch-record status (guardrail 14d): left behind, a server
+      // re-registered under this slug would inherit an "ok" it never earned.
+      "upstreamWatch:status:plex:remote",
     ],
     "Libraries/*PathStripPrefix must be deleted too — an orphaned row would be silently inherited by a future instance re-created under the same slug",
   );
@@ -544,8 +553,9 @@ test("ONE transaction: the registry write AND every cleanup op share a single tx
     ...opsFor("plexLibraryItem", "deleteMany"),
     ...opsFor("activeSession", "deleteMany"),
     ...opsFor("mediaServerUser", "updateMany"),
+    ...opsFor("upstreamWatchEvidence", "deleteMany"),
   ];
-  assert.equal(cleanup.length, 4, "all four cleanup ops ran");
+  assert.equal(cleanup.length, 5, "all five cleanup ops ran");
   for (const op of cleanup) {
     assert.equal(op.txId, txId, `${op.model}.${op.op} must run in the same transaction as the registry write`);
   }

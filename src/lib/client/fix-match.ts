@@ -14,12 +14,16 @@ import type { Translator } from "@/lib/i18n/translate";
 
 export type FixMatchRequest = {
   server: "plex" | "jellyfin";
-  tmdbId: number;
   mediaType: "MOVIE" | "TV";
   correctTmdbId: number;
   canonicalGuid?: string;
   serverInstance?: string;
-};
+} & (
+  | { tmdbId: number; itemKey?: undefined }
+  // Item mode: one item the library match check flagged; the server reads its
+  // current id from the stored report.
+  | { itemKey: string; tmdbId?: undefined }
+);
 
 // `warning` is the server's (translated) partial-remap note. `joined` means an
 // identical remap was already running server-side and this call attached to it
@@ -31,11 +35,16 @@ export type FixMatchOutcome = { ok: true; warning?: string; joined?: boolean };
 // wall-clock elapsed since the job started, so "Applying…" can become
 // "Jellyfin accepted the match — waiting for its refresh (3:20)".
 export type FixMatchProgressView = {
-  phase: "searching" | "applying" | "confirming";
+  phase: "queued" | "searching" | "applying" | "confirming";
   remoteApplied: boolean;
   attempt: number;
   attempts: number;
   readFailures: number;
+  // Jobs ahead of this one while it waits for a slot (phase "queued" only).
+  queueAhead?: number;
+  // Which copy of a multi-copy title the server is on (1-based); absent for one item.
+  copy?: number;
+  copies?: number;
   elapsedMs: number;
 };
 
@@ -88,15 +97,37 @@ export function fixMatchWarningMessage(outcome: FixMatchOutcome, t: Translator):
 
 type StartBody = { ok?: boolean; jobId?: string; warning?: string; error?: string; joined?: boolean };
 type StatusBody = {
-  status?: "running" | "done" | "failed";
+  status?: "queued" | "running" | "done" | "failed";
+  queueAhead?: number;
   startedAt?: number;
   progress?: Omit<FixMatchProgressView, "elapsedMs">;
   result?: FixMatchOutcome;
   error?: string;
 };
 
+/** Fired on `window` when a job has been accepted, so the job tray refreshes at once. */
+export const FIX_MATCH_STARTED_EVENT = "fix-match:started";
+
 const POLL_INTERVAL_MS = 3_000;
-const MAX_WAIT_MS = 20 * 60_000;
+// Absolute ceiling. A multi-copy Jellyfin series runs its copies one after
+// another (up to ~10 min of confirmation each), so a fixed 20-minute window gave
+// up on a job that was still making progress.
+const MAX_WAIT_MS = 4 * 60 * 60_000;
+// Give up when a RUNNING job stops reporting any change for this long: every
+// confirmation attempt, phase and copy change counts as progress. A server that
+// reports no progress at all (an older build) keeps the previous 20-minute window.
+export const STALL_LIMIT_MS = 10 * 60_000;
+export const NO_PROGRESS_LIMIT_MS = 20 * 60_000;
+
+/** A comparable fingerprint of what the job reports — anything that changes means "still alive". */
+export function progressSignature(p: StatusBody["progress"] | undefined): string {
+  return p ? [p.phase, p.remoteApplied ? 1 : 0, p.attempt, p.attempts, p.readFailures, p.copy ?? 0, p.copies ?? 0].join("|") : "";
+}
+
+/** True when a running job has shown no change for longer than its limit. */
+export function hasStalled(now: number, lastChangeAt: number, reportsProgress: boolean): boolean {
+  return now - lastChangeAt >= (reportsProgress ? STALL_LIMIT_MS : NO_PROGRESS_LIMIT_MS);
+}
 const MAX_CONSECUTIVE_POLL_FAILURES = 10;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -125,10 +156,14 @@ export async function runFixMatch(
 
   // Only a caller that PICKED a candidate can have had its pick ignored.
   const joined = Boolean(started.joined && body.canonicalGuid);
+  // Tell the job tray there is something new to show without waiting for its poll.
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(FIX_MATCH_STARTED_EVENT));
 
   const statusUrl = withBasePath(`/api/admin/fix-match/status?id=${encodeURIComponent(started.jobId)}`);
   const deadline = Date.now() + MAX_WAIT_MS;
   let consecutiveFailures = 0;
+  let lastSignature = "";
+  let lastChangeAt = Date.now();
   while (Date.now() < deadline) {
     await sleep(POLL_INTERVAL_MS);
     // The caller navigated away (component unmount): stop the 3s poll loop —
@@ -161,12 +196,29 @@ export async function runFixMatch(
       return joined ? { ...result, joined: true } : result;
     }
     if (job.status === "failed") throw new FixMatchClientError("failed", { message: job.error ?? "" });
+    // Waiting for a slot is not a stall, however long the jobs ahead take.
+    if (job.status === "queued") {
+      lastChangeAt = Date.now();
+      opts.onProgress?.({
+        phase: "queued", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0,
+        queueAhead: job.queueAhead ?? 0, elapsedMs: Date.now() - startedLocally,
+      });
+      continue;
+    }
+    const signature = progressSignature(job.progress);
+    if (signature !== lastSignature) {
+      lastSignature = signature;
+      lastChangeAt = Date.now();
+    } else if (hasStalled(Date.now(), lastChangeAt, job.progress !== undefined)) {
+      throw new FixMatchClientError("timedOut");
+    }
     opts.onProgress?.({
       phase: job.progress?.phase ?? "applying",
       remoteApplied: job.progress?.remoteApplied ?? false,
       attempt: job.progress?.attempt ?? 0,
       attempts: job.progress?.attempts ?? 0,
       readFailures: job.progress?.readFailures ?? 0,
+      ...(job.progress?.copies ? { copy: job.progress.copy, copies: job.progress.copies } : {}),
       // startedLocally, never job.startedAt: the latter is the SERVER clock,
       // and mixing clocks renders a wrong elapsed timer under any skew.
       elapsedMs: Date.now() - startedLocally,

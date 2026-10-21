@@ -110,6 +110,7 @@ const {
   notifyUserRequestAvailableEmail,
   sendTestEmail,
   sendNotificationEmailVerification,
+  notifyUserSecurityEventEmail,
 } = await import("../src/lib/email.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -594,6 +595,52 @@ test("verification email: respects the master toggle, falls back to AUTH_URL, re
     /No site URL is configured/,
   );
   assert.equal(fetchCalls.length, 0);
+});
+
+test("verification email: the AUTH_URL fallback carries BASE_PATH so the confirm link resolves on a subpath deployment", async () => {
+  const prevAuth = process.env.AUTH_URL;
+  const prevBase = process.env.BASE_PATH;
+  try {
+    configureResend({ siteUrl: undefined });
+    process.env.AUTH_URL = "https://auth.example.com/";
+    process.env.BASE_PATH = "/request/";
+    await sendNotificationEmailVerification("x@example.com", "tok9");
+    assert.ok(
+      sentEmails()[0].html.includes("https://auth.example.com/request/api/profile/notification-email/confirm?token=tok9"),
+    );
+  } finally {
+    if (prevAuth === undefined) delete process.env.AUTH_URL; else process.env.AUTH_URL = prevAuth;
+    if (prevBase === undefined) delete process.env.BASE_PATH; else process.env.BASE_PATH = prevBase;
+  }
+});
+
+test("security notice: the heading is escaped exactly once (no &amp;amp;)", async () => {
+  configureResend();
+  await notifyUserSecurityEventEmail({
+    toEmail: "u@example.com",
+    subject: "s",
+    heading: "Security & sign-in <alert>",
+    message: "m",
+  });
+  const html = sentEmails()[0].html;
+  assert.ok(html.includes("Security &amp; sign-in &lt;alert&gt;"), "heading is HTML-escaped once");
+  assert.equal(html.includes("&amp;amp;"), false, "heading must not be double-escaped");
+  assert.equal(html.includes("&amp;lt;"), false);
+});
+
+test("security notice: the ACCOUNT advice points at an administrator and the profile, the default keeps the two-factor advice", async () => {
+  // After a password change or a sign-out-everywhere the recipient may not be
+  // able to sign in at all, so "change your password and review two-factor" is
+  // the wrong advice there (guardrail 6g).
+  configureResend({ siteUrl: "https://media.example.com" });
+  await notifyUserSecurityEventEmail({ toEmail: "u@example.com", subject: "s", heading: "h", message: "m", advice: "account", ctaPath: "/profile" });
+  await notifyUserSecurityEventEmail({ toEmail: "u@example.com", subject: "s", heading: "h", message: "m" });
+  const [account, mfa] = sentEmails().map((e) => e.html);
+  assert.ok(account.includes("contact your Summonarr administrator"));
+  assert.ok(account.includes("https://media.example.com/profile\""), "the button goes to the profile");
+  assert.equal(account.includes("two-factor settings"), false);
+  assert.ok(mfa.includes("two-factor settings"));
+  assert.ok(mfa.includes("/profile#two-factor"));
 });
 
 // ── SMTP path: pre-socket gates ─────────────────────────────────────────────

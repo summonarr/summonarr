@@ -1,5 +1,8 @@
 import { safeFetchAdminConfigured } from "./safe-fetch";
 import { warnOnChange } from "./log-dedup";
+import { NO_REASON_REPORTED } from "./transcode-reasons";
+import { parseJellyfinPlayedItem, type JellyfinPlayedItem } from "./upstream-watch";
+import type { ServerMatchEntry } from "./library-match";
 
 export interface JellyfinUser {
   id: string;
@@ -17,6 +20,18 @@ const FETCH_TIMEOUT_MS = 30_000;
 // Authorization header and its legacy twin: old servers keep finding the form
 // they honor, 10.12+ finds the only one it still reads.
 const JELLYFIN_IDENTITY = 'MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0"';
+
+// Sent on every /Items query that can list a Movie or a Series (guardrail 37d).
+// An API key has no user, and for a user-less query Jellyfin groups movies and
+// shows into their collections whatever the server's "group into collections"
+// settings say (Folder.CollapseBoxSetItems: those settings are only consulted
+// when there IS a user). Each member of a TMDB collection is then replaced by
+// its BoxSet — ExcludeItemTypes=BoxSet does not stop it, the grouping runs
+// after the type filter. Seen live on Jellyfin 12.2: 2,230 of 9,134 movies
+// were missing from the library sync, Practical Magic 2 among them. Only an
+// explicit false always wins; a filter like MinDateLastSaved or SearchTerm
+// does not turn the grouping off.
+export const JELLYFIN_NO_COLLECTION_GROUPING = "CollapseBoxSetItems=false";
 
 export async function authenticateWithJellyfin(
   baseUrl: string,
@@ -129,6 +144,7 @@ interface JellyfinItem {
   OfficialRating?:  string;
   CommunityRating?: number;
   DateCreated?:     string;
+  Type?:            string;
 }
 
 interface JellyfinItemsResponse {
@@ -162,7 +178,7 @@ export async function hasJellyfinItemByTmdbId(
   mediaType: "movie" | "tv",
 ): Promise<boolean> {
   const itemType = mediaType === "movie" ? "Movie" : "Series";
-  const url = `${baseUrl.replace(/\/$/, "")}/Items?IncludeItemTypes=${itemType}&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=${PROBE_RECENT_LIMIT}&EnableImages=false`;
+  const url = `${baseUrl.replace(/\/$/, "")}/Items?IncludeItemTypes=${itemType}&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=${PROBE_RECENT_LIMIT}&EnableImages=false`;
   try {
     const res = await safeFetchAdminConfigured(url, {
       headers: jellyfinHeaders(apiKey),
@@ -370,10 +386,17 @@ async function fetchJellyfinPages<T>(
 async function fetchJellyfinPagesSequential<T>(
   baseQuery: string,
   apiKey: string,
-  processItems: (items: T[]) => void,
+  // Return `true` to stop after this page (the plexFetchAllPages convention) —
+  // the upstream-watch walk stops on its AbortSignal (guardrail 41). Every other
+  // caller returns void and pages to the end exactly as before.
+  processItems: (items: T[]) => void | boolean,
   pageSize = EPISODE_PAGE_SIZE,
-): Promise<void> {
+): Promise<number | null> {
   let startIndex = 0;
+  // The first page's TotalRecordCount (clamped), returned so a caller that must
+  // know the walk read everything can compare (getJellyfinUserPlayedItems).
+  // Every other caller ignores it. null = the server reported no count.
+  let reportedTotal: number | null = null;
   // Absent TotalRecordCount ⇒ walk until a short page ends the results (the
   // checks below), rather than `startIndex < null` exiting immediately. The
   // starting value is the CAP, not Infinity: an unbounded `total` leaves the
@@ -395,11 +418,13 @@ async function fetchJellyfinPagesSequential<T>(
     // hostile or buggy TotalRecordCount must not drive an unbounded walk.
     if (pageNum === 0 && page.total !== null) {
       total = Math.min(page.total, MAX_LIBRARY_ITEMS);
+      reportedTotal = total;
     }
-    processItems(page.items);
+    const stop = processItems(page.items) === true;
     startIndex += page.items.length;
     pageNum++;
 
+    if (stop) break;
     if (page.items.length === 0) { endedNaturally = true; break; }
     if (page.items.length < pageSize) { endedNaturally = true; break; }
   }
@@ -412,6 +437,7 @@ async function fetchJellyfinPagesSequential<T>(
       `[jellyfin] sequential page walk hit the ${MAX_LIBRARY_ITEMS}-item cap; results may be incomplete`,
     );
   }
+  return reportedTotal;
 }
 
 async function getJellyfinItemsByType(
@@ -430,9 +456,17 @@ async function getJellyfinItemsByType(
   // Every item id seen for a tmdb id that turned up more than once. Populated
   // only on a collision, so the single-copy case allocates nothing extra.
   const extraItemIds = new Map<number, Set<string>>();
+  // Collections the server returned in place of their members. Zero while
+  // JELLYFIN_NO_COLLECTION_GROUPING is honoured; anything else means titles
+  // are missing from this listing (guardrail 37d).
+  let collections = 0;
 
   const processItems = (batch: JellyfinItem[]) => {
     for (const item of batch) {
+      if (item.Type === "BoxSet") {
+        collections++;
+        continue;
+      }
       const tmdb = item.ProviderIds?.Tmdb ?? item.ProviderIds?.tmdb;
       if (tmdb) {
         const n = parseInt(tmdb, 10);
@@ -482,7 +516,7 @@ async function getJellyfinItemsByType(
             // EnableImages=false + ImageTypeLimit=0: nothing here consumes
             // ImageTags/ImageBlurHashes, and Jellyfin enriches them by default
             // (enableImages defaults true) — they were the bulk of >10 MB pages.
-            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
+            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
             apiKey,
             processItems,
           )
@@ -491,7 +525,7 @@ async function getJellyfinItemsByType(
     }
   } else {
     await fetchJellyfinPages(
-      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
+      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
       apiKey,
       processItems,
     );
@@ -519,7 +553,16 @@ async function getJellyfinItemsByType(
     warnOnChange(
       `jellyfin-dupes:${itemType}:${baseUrl}`,
       String(duplicatedTmdbIds),
-      `[jellyfin] ${duplicatedTmdbIds} TMDB id(s) matched more than one ${itemType} across the scanned libraries; keeping the most recently added copy. The other copies stay resolvable for episode mapping, but only the winner's file path and ratings are stored.`,
+      `[jellyfin] ${duplicatedTmdbIds} TMDB id(s) matched more than one ${itemType} across the scanned libraries; keeping the most recently added copy. The other copies stay resolvable ${itemType === "Series" ? "for episode mapping and play history" : "for play history"}, but only the winner's file path and ratings are stored.`,
+    );
+  }
+  if (collections > 0) {
+    // A condition of the server, re-derived every run — repeat-suppressed for
+    // the same reason as the duplicates line above (guardrail 7b).
+    warnOnChange(
+      `jellyfin-collections:${itemType}:${baseUrl}`,
+      String(collections),
+      `[jellyfin] the ${itemType} listing returned ${collections} collection(s) in place of their members, so those titles are missing from the library sync. The server ignored ${JELLYFIN_NO_COLLECTION_GROUPING}.`,
     );
   }
 
@@ -530,12 +573,22 @@ export interface JellyfinTVEpisodeData {
   tmdbId: number;
   seasonNumber: number;
   episodeNumber: number;
+  // DateCreated — when the episode reached the server; dates a season for the
+  // never-watched report. The earliest across copies of a duplicated show.
+  addedAt?: Date | null;
 }
 
 interface JellyfinEpisodeItem {
   SeriesId?: string;
   ParentIndexNumber?: number;
   IndexNumber?: number;
+  DateCreated?: string;
+}
+
+function parseJellyfinDate(raw: unknown): Date | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d : null;
 }
 
 // The value for JellyfinLibraryItem.jellyfinItemIds: every id this title
@@ -582,7 +635,7 @@ export async function getJellyfinTVEpisodes(
   if (seriesMap.size === 0) return [];
 
   const episodeMap = new Map<string, JellyfinTVEpisodeData>();
-  const fields = "SeriesId,ParentIndexNumber,IndexNumber";
+  const fields = "SeriesId,ParentIndexNumber,IndexNumber,DateCreated";
 
   const processEpisodes = (batch: JellyfinEpisodeItem[]) => {
     for (const ep of batch) {
@@ -593,12 +646,17 @@ export async function getJellyfinTVEpisodes(
       if (!Number.isInteger(ep.ParentIndexNumber) || (ep.ParentIndexNumber as number) < 1) continue;
       if (!Number.isInteger(ep.IndexNumber) || (ep.IndexNumber as number) < 1) continue;
       const key = `${tmdbId}-${ep.ParentIndexNumber}-${ep.IndexNumber}`;
-      if (!episodeMap.has(key)) {
+      const addedAt = parseJellyfinDate(ep.DateCreated);
+      const prev = episodeMap.get(key);
+      if (!prev) {
         episodeMap.set(key, {
           tmdbId,
           seasonNumber: ep.ParentIndexNumber as number,
           episodeNumber: ep.IndexNumber as number,
+          addedAt,
         });
+      } else if (addedAt && (!prev.addedAt || addedAt < prev.addedAt)) {
+        prev.addedAt = addedAt;
       }
     }
   };
@@ -630,15 +688,23 @@ export async function getJellyfinEpisodesForShow(
 ): Promise<JellyfinTVEpisodeData[]> {
   const base = baseUrl.replace(/\/$/, "");
   const episodes: JellyfinTVEpisodeData[] = [];
-  const fields = "ParentIndexNumber,IndexNumber";
+  // DateCreated as in getJellyfinTVEpisodes: fix-match rebuilds the show's
+  // TVEpisodeCache rows from here, and an undated episode makes its season
+  // `unobservable` on the never-watched report (14d).
+  const fields = "ParentIndexNumber,IndexNumber,DateCreated";
   await fetchJellyfinPagesSequential(
     `${base}/Items?ParentId=${seriesId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
     apiKey,
-    (batch: Array<{ ParentIndexNumber?: number; IndexNumber?: number }>) => {
+    (batch: Array<{ ParentIndexNumber?: number; IndexNumber?: number; DateCreated?: string }>) => {
       for (const ep of batch) {
         if (!Number.isInteger(ep.ParentIndexNumber) || (ep.ParentIndexNumber as number) < 1) continue;
         if (!Number.isInteger(ep.IndexNumber) || (ep.IndexNumber as number) < 1) continue;
-        episodes.push({ tmdbId, seasonNumber: ep.ParentIndexNumber as number, episodeNumber: ep.IndexNumber as number });
+        episodes.push({
+          tmdbId,
+          seasonNumber: ep.ParentIndexNumber as number,
+          episodeNumber: ep.IndexNumber as number,
+          addedAt: parseJellyfinDate(ep.DateCreated),
+        });
       }
     },
   );
@@ -676,8 +742,8 @@ export interface JellyfinSessionData {
 }
 
 // Jellyfin TranscodeReasons are PascalCase enum tokens
-// ("AudioCodecNotSupported"). Render to the same sentence-case vocabulary
-// the Plex path derives so both servers share one chart.
+// ("AudioCodecNotSupported"). Render them sentence-case ("Audio codec not
+// supported") — the phrases transcode-reasons.ts translates for the activity UI.
 function humanizeJellyfinReasons(reasons: string[] | undefined): string | undefined {
   if (!reasons || reasons.length === 0) return undefined;
   const phrases = reasons.map((r) => {
@@ -843,9 +909,11 @@ export async function getJellyfinSessions(baseUrl: string, apiKey: string): Prom
         // the source total is the delivered bitrate. Both are "bytes on the
         // wire", so the Bandwidth stat means one thing across play methods.
         bitrate: ti?.Bitrate ?? sourceBitrateBps(np, ps),
+        // No TranscodeReasons ⇒ say so. The old fallback, "Container not
+        // supported", asserted a cause Jellyfin never reported.
         transcodeReason:
           playMethod === "Transcode"
-            ? humanizeJellyfinReasons(ti?.TranscodeReasons) ?? "Container not supported"
+            ? humanizeJellyfinReasons(ti?.TranscodeReasons) ?? NO_REASON_REPORTED
             : undefined,
       };
     });
@@ -898,6 +966,8 @@ export interface JellyfinUserInfo {
   name: string;
   email?: string;
   isAdmin: boolean;
+  // Policy.IsDisabled — the account still exists but can't sign in.
+  isDisabled: boolean;
   downloadsEnabled: boolean;
 }
 
@@ -934,12 +1004,94 @@ export async function getJellyfinAllUsers(baseUrl: string, apiKey: string): Prom
       name: u.Name,
       email,
       isAdmin: u.Policy?.IsAdministrator === true,
+      isDisabled: u.Policy?.IsDisabled === true,
       // Treat an absent Policy or absent EnableContentDownloading as enabled
       // (Jellyfin's default). Only false is explicitly disabled.
       downloadsEnabled: u.Policy?.EnableContentDownloading !== false,
     });
   }
   return users;
+}
+
+// One user's played (or started-but-unfinished) movies and episodes — READ-ONLY
+// evidence for the never-watched report (src/lib/upstream-watch.ts explains the
+// use and lists the UNVERIFIED response-shape assumptions). Sequential paging
+// (one user's list can be large and slow to build); parsed while paging.
+export interface JellyfinUserPlayedItems {
+  // Every item the parser could place.
+  items: JellyfinPlayedItem[];
+  // Items the server returned, including any the parser could NOT place — the
+  // count that makes a changed response shape visible (upstream-watch-data.ts).
+  records: number;
+}
+
+export async function getJellyfinUserPlayedItems(
+  baseUrl: string,
+  apiKey: string,
+  userId: string,
+  filter: "IsPlayed" | "IsResumable",
+  opts: { signal?: AbortSignal } = {},
+): Promise<JellyfinUserPlayedItems> {
+  if (opts.signal?.aborted) return { items: [], records: 0 };
+  const base = baseUrl.replace(/\/+$/, "");
+  // `GET /Items?userId=` is the SAME handler as the [Obsolete] (10.9+)
+  // `/Users/{userId}/Items`, on every release, read from Jellyfin's source
+  // (Jellyfin.Api/Controllers/ItemsController.cs): the legacy action's body is
+  // `GetItems(userId, …)`, forwarding every parameter (10.10+ adds indexNumber,
+  // master audio/subtitleLanguages, passed as null/[] — none of which we send)
+  // — v10.8.13 L679, v10.9.11 L711, v10.10.7 L714, v10.11.11 L716, master L811.
+  // GetItems has bound userId FROM THE QUERY since 10.7 (v10.8.13 L155, v10.11.11
+  // L163), and 10.6's ServiceStack served both paths from one request DTO. With
+  // an API key (role Administrator) RequestHelpers.GetUserId returns the given
+  // id, so the Filters, the paging and the UserData are that user's either way.
+  const query =
+    // The IsPlayed/IsResumable filter already stops collection grouping; the
+    // flag is sent anyway, so a missed movie here can't read as never watched.
+    `${base}/Items?userId=${encodeURIComponent(userId)}&Recursive=true&IncludeItemTypes=Movie,Episode&${JELLYFIN_NO_COLLECTION_GROUPING}&Filters=${filter}` +
+    "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending";
+  const walk = async (): Promise<{ out: JellyfinUserPlayedItems; total: number | null }> => {
+    const out: JellyfinUserPlayedItems = { items: [], records: 0 };
+    const total = await fetchJellyfinPagesSequential<unknown>(query, apiKey, (batch) => {
+      out.records += batch.length;
+      for (const raw of batch) {
+        const item = parseJellyfinPlayedItem(raw);
+        if (item) out.items.push(item);
+      }
+      // Stop paging on abort (guardrail 41); the caller discards the result.
+      return opts.signal?.aborted === true;
+    });
+    return { out, total };
+  };
+  const complete = (w: { out: JellyfinUserPlayedItems; total: number | null }) =>
+    opts.signal?.aborted === true || w.total === null || w.out.records >= w.total;
+
+  // The list is paged by OFFSET over a filter that can SHRINK mid-walk (a
+  // resumable item finished, an item marked unplayed, a library scan replacing
+  // one): every later item shifts down one and the item at the next page
+  // boundary is never read, while the walk still ends on a short page and
+  // reads healthy. For the never-watched report that one missing record can be
+  // a title's only evidence (14d), so a walk that read fewer than page 0
+  // promised is read again — a growth (records > total) is harmless, the
+  // caller merges by item key.
+  const first = await walk();
+  if (complete(first)) return first.out;
+  const second = await walk();
+  if (complete(second)) return second.out;
+  // Short twice with a MOVED count: the list is changing under the read.
+  // Throwing fails this server's refresh, which keeps the previous snapshot and
+  // holds watch-rule candidates back (`upstreamUnchecked`) — fail-safe.
+  if (second.total !== first.total) {
+    throw new Error(`Jellyfin ${filter} list changed while it was read`);
+  }
+  // Short twice by the SAME count: a server that counts more than it serves
+  // (items hidden from the user, say), not a live change. Throwing would fail
+  // every refresh forever; read it as served and say so once (guardrail 7b).
+  warnOnChange(
+    `jellyfin-played-shortfall:${base}:${userId}:${filter}`,
+    `${second.out.records}/${second.total}`,
+    `[jellyfin] ${filter} list for user ${userId} reports ${second.total} item(s) but serves ${second.out.records}; read as served`,
+  );
+  return second.out;
 }
 
 export async function setJellyfinDownloadPolicy(
@@ -988,6 +1140,54 @@ export async function getJellyfinUserCount(baseUrl: string, apiKey: string): Pro
   const body = (await res.json()) as unknown[] | { Items?: unknown[] };
   if (Array.isArray(body)) return body.length;
   return Array.isArray(body.Items) ? body.Items.length : 0;
+}
+
+/**
+ * Every Movie or Series of the selected libraries as the library match check
+ * judges it — each copy and each item with no TMDB id, which the sync's
+ * one-row-per-TMDB-id map drops. A Series' path is its folder.
+ */
+export async function listJellyfinMatchEntries(
+  baseUrl: string,
+  apiKey: string,
+  serverInstance: string,
+  mediaType: "MOVIE" | "TV",
+  libraryIds?: Set<string>,
+): Promise<ServerMatchEntry[]> {
+  const base = baseUrl.replace(/\/$/, "");
+  const itemType = mediaType === "MOVIE" ? "Movie" : "Series";
+  const query = (parent: string) =>
+    `${base}/Items?${parent}IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,ProductionYear&EnableImages=false&ImageTypeLimit=0&SortBy=SortName,Id&SortOrder=Ascending`;
+  const seen = new Set<string>();
+  const out: ServerMatchEntry[] = [];
+  const intId = (v: string | undefined) => (v && /^\d+$/.test(v) ? Number(v) : null);
+  const processItems = (batch: JellyfinItem[]) => {
+    for (const item of batch) {
+      // The same item can sit under two selected libraries' parents.
+      if (item.Type === "BoxSet" || !item.Id || seen.has(item.Id)) continue;
+      seen.add(item.Id);
+      const ids = item.ProviderIds ?? {};
+      const tmdb = intId(ids.Tmdb ?? ids.tmdb);
+      out.push({
+        server: "jellyfin",
+        serverInstance,
+        mediaType,
+        itemKey: item.Id,
+        title: item.Name ?? null,
+        year: item.ProductionYear ?? null,
+        path: item.Path ?? null,
+        tmdbIds: tmdb !== null ? [tmdb] : [],
+        imdbId: ids.Imdb ?? ids.imdb ?? null,
+        tvdbId: intId(ids.Tvdb ?? ids.tvdb),
+      });
+    }
+  };
+  if (libraryIds?.size) {
+    for (const parentId of libraryIds) await fetchJellyfinPages(query(`ParentId=${encodeURIComponent(parentId)}&`), apiKey, processItems);
+  } else {
+    await fetchJellyfinPages(query(""), apiKey, processItems);
+  }
+  return out;
 }
 
 export async function getJellyfinTmdbIds(

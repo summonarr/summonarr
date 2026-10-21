@@ -33,14 +33,17 @@ function walk(dir: string, out: string[] = []): string[] {
 
 test("every literal apiUser.* key used in src/ exists in the English catalog", () => {
   const missing: string[] = [];
+  let checked = 0;
   for (const file of walk(join(ROOT, "src"))) {
     const src = readFileSync(file, "utf8");
     for (const m of src.matchAll(/["'](apiUser\.[a-zA-Z0-9_.]+)["']/g)) {
+      checked++;
       const key = m[1];
       const plural = Object.keys(en).some((k) => k.startsWith(`${key}_`));
       if (!(key in en) && !plural) missing.push(`${file.slice(ROOT.length)}: ${key}`);
     }
   }
+  assert.ok(checked > 10, `the scan matched only ${checked} apiUser keys — the walk or regex is broken`);
   assert.deepEqual(missing, []);
 });
 

@@ -9,15 +9,19 @@
 // exclusions"). Deletion itself is a separate, admin-confirmed, two-step action
 // (dry run, then execute with the echoed count) in /api/admin/cleanup/delete.
 //
-// The watch-based rules read play history, which only exists from the moment
-// tracking began. A title added before that could have been watched every week
-// for years and still show no plays, so a title is only ever judged over the
-// window history actually OBSERVED it: from the later of its addedAt and the
-// first recorded play anywhere (`observedSince`). With tracking off, or no
-// history at all, the watch-based rules never match — an empty table is not
-// evidence that nobody watches anything.
+// The watch-based rules read the never-watched VERDICT (never-watched.ts,
+// guardrail 14d) — one definition shared with the never-watched report and the
+// delete route's re-judgement, never a private copy. It judges a title only over
+// the window play history demonstrably OBSERVED it — every server holding it
+// recorded and with history, from the later of its arrival and the last of
+// those servers' recording start — and counts every piece of evidence that it
+// was played (any user, any server, by tmdb id, item key, show key, or the media
+// server's own records). With tracking off, a holder untracked, or nothing
+// recorded, the watch-based rules never match: an empty table is not evidence
+// that nobody watches anything.
 
 import type { Translator } from "./i18n/translate";
+import { idleAnchor, isNeverWatchedState, type NwEvidence, type NwVerdict } from "./never-watched";
 
 export type CleanupMediaType = "MOVIE" | "TV";
 
@@ -30,7 +34,10 @@ export type CleanupExclusion =
   | "watchlisted"
   | "playingNow"
   | "airing"
-  | "protected";
+  | "protected"
+  // A holding server's own watch records weren't checked (successfully and
+  // recently), so a play Summonarr never saw can't be ruled out.
+  | "upstreamUnchecked";
 
 export const CLEANUP_RULE_LABELS: Record<CleanupRule, string> = {
   unwatched: "Unwatched",
@@ -46,6 +53,7 @@ export const CLEANUP_EXCLUSION_LABELS: Record<CleanupExclusion, string> = {
   playingNow: "Playing now",
   airing: "Still airing",
   protected: "Protected",
+  upstreamUnchecked: "Server history not checked",
 };
 
 export interface CleanupSettings {
@@ -59,6 +67,9 @@ export interface CleanupSettings {
   minAgeDays: number;
   recentRequestDays: number;
   excludeAiring: boolean;
+  // Hold back watch-rule candidates until every holding server's own watch
+  // records have been checked (the upstreamUnchecked exclusion).
+  requireUpstreamCheck: boolean;
 }
 
 export const CLEANUP_SETTING_DEFAULTS: CleanupSettings = {
@@ -71,6 +82,7 @@ export const CLEANUP_SETTING_DEFAULTS: CleanupSettings = {
   minAgeDays: 30,
   recentRequestDays: 30,
   excludeAiring: true,
+  requireUpstreamCheck: true,
 };
 
 // One Setting row per field, like the watch-grade settings.
@@ -84,6 +96,7 @@ export const CLEANUP_SETTING_KEYS: Record<keyof CleanupSettings, string> = {
   minAgeDays: "cleanupMinAgeDays",
   recentRequestDays: "cleanupRecentRequestDays",
   excludeAiring: "cleanupExcludeAiring",
+  requireUpstreamCheck: "cleanupRequireUpstreamCheck",
 };
 
 type NumericField = "unwatchedDays" | "neverWatchedDays" | "votesMin" | "minAgeDays" | "recentRequestDays";
@@ -97,7 +110,7 @@ export const CLEANUP_NUMERIC_BOUNDS: Record<NumericField, { min: number; max: nu
   recentRequestDays: { min: 0, max: 3650 },
 };
 
-const BOOLEAN_FIELDS: readonly BooleanField[] = ["unwatchedEnabled", "neverWatchedEnabled", "votesEnabled", "excludeAiring"];
+const BOOLEAN_FIELDS: readonly BooleanField[] = ["unwatchedEnabled", "neverWatchedEnabled", "votesEnabled", "excludeAiring", "requireUpstreamCheck"];
 const NUMERIC_FIELDS = Object.keys(CLEANUP_NUMERIC_BOUNDS) as NumericField[];
 
 // Read side: a missing or malformed row falls back to its default, field by field.
@@ -159,8 +172,14 @@ export interface CleanupTitleFacts {
   mediaType: CleanupMediaType;
   // Earliest addedAt across every server holding it; null when no server reported one.
   addedAt: Date | null;
+  // Hard evidence (display): plays and the latest dated one.
   playCount: number;
   lastPlayedAt: Date | null;
+  // The never-watched verdict and the evidence behind it — what the watch rules judge.
+  watch: NwVerdict;
+  evidence: NwEvidence;
+  // Holding servers whose own watch records weren't checked (successfully, recently).
+  upstreamUnchecked: readonly string[];
   votes: number;
   requests: readonly CleanupRequestFact[];
   watchlisted: boolean;
@@ -172,10 +191,6 @@ export interface CleanupTitleFacts {
 
 export interface CleanupContext {
   now: Date;
-  // Whether play history tracking is on. Off ⇒ the watch-based rules never match.
-  playHistoryTracked: boolean;
-  // The earliest recorded play anywhere; null when there is no history at all.
-  historyStart: Date | null;
 }
 
 export interface CleanupVerdict {
@@ -188,12 +203,6 @@ export interface CleanupVerdict {
 
 const DAY_MS = 86_400_000;
 
-function maxDate(...dates: Array<Date | null>): Date | null {
-  let best: Date | null = null;
-  for (const d of dates) if (d && (!best || d > best)) best = d;
-  return best;
-}
-
 export function evaluateCleanupTitle(
   t: CleanupTitleFacts,
   settings: CleanupSettings,
@@ -203,18 +212,19 @@ export function evaluateCleanupTitle(
   const olderThan = (d: Date | null, days: number) => d !== null && now - d.getTime() >= days * DAY_MS;
   const newerThan = (d: Date | null, days: number) => d !== null && now - d.getTime() < days * DAY_MS;
 
-  const watchRulesUsable = ctx.playHistoryTracked && ctx.historyStart !== null;
-  // A title whose age is unknown has no observable window — the watch rules can't prove anything about it.
-  const observedSince = watchRulesUsable && t.addedAt ? maxDate(t.addedAt, ctx.historyStart) : null;
+  // An unobservable title has no window — the watch rules can't prove anything about it.
+  const observedSince = t.watch.state === "unobservable" ? null : t.watch.windowStart;
 
   const matched: CleanupRule[] = [];
-  if (settings.unwatchedEnabled && observedSince) {
-    // The last thing that happened to this title: its last play, or (never
-    // played) the start of the window history watched it over.
-    if (olderThan(maxDate(t.lastPlayedAt, observedSince), settings.unwatchedDays)) matched.push("unwatched");
+  if (settings.unwatchedEnabled) {
+    // The last thing that happened to this title: its last play (soft plays
+    // included), or — never played — the start of the window history watched it
+    // over. Null when it can't be measured (unobservable, or an undated play).
+    const anchor = idleAnchor(t.watch, t.evidence);
+    if (olderThan(anchor, settings.unwatchedDays)) matched.push("unwatched");
   }
-  if (settings.neverWatchedEnabled && observedSince && t.playCount === 0) {
-    if (olderThan(observedSince, settings.neverWatchedDays)) matched.push("neverWatched");
+  if (settings.neverWatchedEnabled && isNeverWatchedState(t.watch.state)) {
+    if (olderThan(t.watch.windowStart, settings.neverWatchedDays)) matched.push("neverWatched");
   }
   if (settings.votesEnabled && t.votes >= settings.votesMin) matched.push("votes");
 
@@ -231,6 +241,11 @@ export function evaluateCleanupTitle(
   if (t.playingNow) excludedBy.push("playingNow");
   if (settings.excludeAiring && t.mediaType === "TV" && t.airing === true) excludedBy.push("airing");
   if (t.protected) excludedBy.push("protected");
+  // Only a WATCH rule rests on "no plays"; the votes rule is the users' own call
+  // and needs no upstream check.
+  if (settings.requireUpstreamCheck && t.upstreamUnchecked.length > 0 && !matched.includes("votes")) {
+    excludedBy.push("upstreamUnchecked");
+  }
 
   return { matched, excludedBy, candidate: matched.length > 0 && excludedBy.length === 0, observedSince };
 }
@@ -254,4 +269,61 @@ export function sonarrStatusIsAiring(status: unknown): boolean | null {
 
 export function cleanupKey(tmdbId: number, mediaType: string): string {
   return `${mediaType}:${tmdbId}`;
+}
+
+// The most titles one cleanup delete takes — dry run and execute alike. ONE
+// definition: the route refuses a longer list (parseCleanupItems), and both
+// pages that build a selection for it (Library cleanup, Never watched) stop
+// adding at it, so "Delete selected" never offers a request that can only 400.
+export const CLEANUP_MAX_ITEMS = 500;
+
+// The delete route's body `items`: 1–CLEANUP_MAX_ITEMS `{ tmdbId, mediaType }`,
+// duplicates dropped. `null` for anything else (the route answers 400).
+export function parseCleanupItems(raw: unknown): Array<{ tmdbId: number; mediaType: CleanupMediaType }> | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > CLEANUP_MAX_ITEMS) return null;
+  const seen = new Set<string>();
+  const out: Array<{ tmdbId: number; mediaType: CleanupMediaType }> = [];
+  for (const it of raw) {
+    if (!it || typeof it !== "object") return null;
+    const { tmdbId, mediaType } = it as { tmdbId?: unknown; mediaType?: unknown };
+    if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) return null;
+    if (mediaType !== "MOVIE" && mediaType !== "TV") return null;
+    const key = cleanupKey(tmdbId, mediaType);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ tmdbId, mediaType });
+  }
+  return out;
+}
+
+// A page's selection, kept within CLEANUP_MAX_ITEMS. `toggleCleanupSelection`
+// ticks or unticks one key (a tick past the cap is ignored);
+// `cleanupSelectAllOn` is what the select-all box shows — every key ticked, or
+// the selection full with some of them in it (so the next click clears instead
+// of doing nothing); `toggleAllCleanupSelection` clears those keys when it is
+// on and otherwise adds them in order, up to the cap.
+export function toggleCleanupSelection(prev: ReadonlySet<string>, key: string, max = CLEANUP_MAX_ITEMS): Set<string> {
+  const next = new Set(prev);
+  if (next.has(key)) next.delete(key);
+  else if (next.size < max) next.add(key);
+  return next;
+}
+
+export function cleanupSelectAllOn(selected: ReadonlySet<string>, keys: readonly string[], max = CLEANUP_MAX_ITEMS): boolean {
+  if (keys.length === 0) return false;
+  if (keys.every((k) => selected.has(k))) return true;
+  return selected.size >= max && keys.some((k) => selected.has(k));
+}
+
+export function toggleAllCleanupSelection(prev: ReadonlySet<string>, keys: readonly string[], max = CLEANUP_MAX_ITEMS): Set<string> {
+  const next = new Set(prev);
+  if (cleanupSelectAllOn(prev, keys, max)) {
+    for (const k of keys) next.delete(k);
+    return next;
+  }
+  for (const k of keys) {
+    if (next.size >= max) break;
+    next.add(k);
+  }
+  return next;
 }

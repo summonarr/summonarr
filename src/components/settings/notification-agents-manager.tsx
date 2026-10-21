@@ -60,6 +60,10 @@ const EVENT_LABEL_KEYS: Record<(typeof NOTIFY_EVENT_KEYS)[number], string> = {
   "arr.grab_completed": "settings.form.agents.event.arr.grab_completed",
   "arr.health": "settings.form.agents.event.arr.health",
   "arr.health_restored": "settings.form.agents.event.arr.health_restored",
+  "arr.disk_low": "settings.form.agents.event.arr.disk_low",
+  "arr.disk_ok": "settings.form.agents.event.arr.disk_ok",
+  "arr.download_failed": "settings.form.agents.event.arr.download_failed",
+  "arr.queue_attention": "settings.form.agents.event.arr.queue_attention",
 };
 
 const DEFAULT_PRIORITY: Record<AgentKind, string> = { webhook: "", ntfy: "3", gotify: "5" };

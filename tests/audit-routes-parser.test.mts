@@ -364,6 +364,112 @@ test("PIN: the real CLI still distinguishes ADMIN guards from any-auth guards", 
   assert.match(output, /missing an ADMIN-capable guard/);
 });
 
+// ── discord/ is audited; requireAuth is authentication only ───────────────
+
+test("PIN: the real CLI fails an unguarded route under discord/", () => {
+  // discord/ used to be allowlisted wholesale ("Discord-signed or requireAuth
+  // per-route"), so a new route there shipped with no gate at all. Every
+  // /api/discord/* route is a session route; only /api/interactions is
+  // Discord-signed, and it keeps its own entry.
+  const { status, output } = auditFixture({
+    "discord/backdoor": [
+      "export async function POST(request: NextRequest) {",
+      "  return NextResponse.json({ ok: true });",
+      "}",
+    ].join("\n"),
+  });
+  assert.equal(status, 1, output);
+  assert.match(output, /\/api\/discord\/backdoor/);
+  assert.match(output, /no recognized auth guard/);
+});
+
+test("a session-guarded discord/ route passes, and interactions stays allowlisted", () => {
+  // Positive control for the pin above, plus the one Discord-signed route.
+  const { status, output } = auditFixture({
+    "discord/status": "export const GET = withAuth(async (req, ctx, session) => {\n  return NextResponse.json({});\n});\n",
+    interactions: "export async function POST(request: NextRequest) {\n  return NextResponse.json({});\n}\n",
+  });
+  assert.equal(status, 0, output);
+  assert.equal(isAllowlisted("discord/generate-link"), false);
+  assert.equal(isAllowlisted("interactions"), true);
+});
+
+test("PIN: the real CLI fails an admin route guarded only by requireAuth", () => {
+  // requireAuth() with no role admits any signed-in user. Counting it as an
+  // ADMIN guard let an /api/admin route guarded as any-authenticated-user pass.
+  const { status, output } = auditFixture({
+    "admin/gadgets": [
+      "export async function GET(request: NextRequest) {",
+      "  const gate = await requireAuth();",
+      "  if (gate instanceof NextResponse) return gate;",
+      "  return NextResponse.json({ ok: true });",
+      "}",
+    ].join("\n"),
+  });
+  assert.equal(status, 1, output);
+  assert.match(output, /missing an ADMIN-capable guard/);
+});
+
+test("a requireAuth-only route outside /api/admin still passes (authentication is all it needs)", () => {
+  const { status, output } = auditFixture({
+    events: [
+      "export async function GET(request: NextRequest) {",
+      "  const gate = await requireAuth();",
+      "  if (gate instanceof NextResponse) return gate;",
+      "  return new Response('ok');",
+      "}",
+    ].join("\n"),
+  });
+  assert.equal(status, 0, output);
+});
+
+const THUMB = "admin/fix-match/thumb";
+
+test("PIN: the hand-audited fix-match/thumb passes only with requireAuth AND its hasPermission check", () => {
+  const guarded = auditFixture({
+    [THUMB]: [
+      "export async function GET(request: NextRequest) {",
+      "  const gate = await requireAuth();",
+      "  if (gate instanceof NextResponse) return gate;",
+      "  if (!hasPermission(gate.user.permissions, Permission.MANAGE_ISSUES)) {",
+      '    return new NextResponse("Forbidden", { status: 403 });',
+      "  }",
+      "  return new NextResponse(null);",
+      "}",
+    ].join("\n"),
+  });
+  assert.equal(guarded.status, 0, guarded.output);
+
+  // The exception is for the pair, not for the route: dropping the capability
+  // check leaves it guarded as any-authenticated-user, which must fail.
+  const noCheck = auditFixture({
+    [THUMB]: [
+      "export async function GET(request: NextRequest) {",
+      "  const gate = await requireAuth();",
+      "  if (gate instanceof NextResponse) return gate;",
+      "  return new NextResponse(null);",
+      "}",
+    ].join("\n"),
+  });
+  assert.equal(noCheck.status, 1, noCheck.output);
+  assert.match(noCheck.output, /must call both requireAuth and hasPermission/);
+
+  // A bit check over a session nothing DB-checked (auth() is JWT-only) fails too.
+  const noAuth = auditFixture({
+    [THUMB]: [
+      "export async function GET(request: NextRequest) {",
+      "  const session = await auth();",
+      "  if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_ISSUES)) {",
+      '    return new NextResponse("Forbidden", { status: 403 });',
+      "  }",
+      "  return new NextResponse(null);",
+      "}",
+    ].join("\n"),
+  });
+  assert.equal(noAuth.status, 1, noAuth.output);
+  assert.match(noAuth.output, /must call both requireAuth and hasPermission/);
+});
+
 // ── Allowlist boundary ──────────────────────────────────────────────────────
 
 test("isAllowlisted stops at a path separator", () => {

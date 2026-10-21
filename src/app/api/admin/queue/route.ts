@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
 import { loadDownloadQueue } from "@/lib/arr-queue-data";
 
 // Admin → Download Queue (ADMIN). Every configured Radarr and Sonarr instance's
@@ -8,7 +9,8 @@ import { loadDownloadQueue } from "@/lib/arr-queue-data";
 // flag (warning/error status, blocked or failed import, client unavailable)
 // come first with `attention: true`. An instance whose queue could not be read
 // is named in `errors`; its downloads are absent, not finished. Nothing is
-// cached or written.
-export const GET = withAdmin(async () => {
+// written; the last answer is kept for display only (`?cached=1`,
+// src/lib/arr-snapshot.ts) — every action re-reads live.
+export const GET = withAdmin(snapshotted(async () => {
   return NextResponse.json(await loadDownloadQueue());
-});
+}));

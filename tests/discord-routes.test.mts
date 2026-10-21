@@ -25,14 +25,15 @@
 //      a per-(user,target) bucket so an attacker iterating victim ids can't
 //      share their own bucket, PLUS a global per-user cap, because the per-target
 //      bucket alone lets one account DM hundreds of distinct snowflakes.
-//   3. confirm-merge COMPARES BYTES, NOT UTF-16 LENGTH. A 12-character multibyte
-//      submission passes a `.length` check against the 12-char stored code while
-//      producing a 24-byte Buffer, and timingSafeEqual then throws RangeError out
-//      of an un-try'd expression — turning "Incorrect code" into a 500 that still
-//      burns a rate-limit slot. It also consumes the code only AFTER the merge
-//      succeeds (a transient failure must not burn it), and uses deleteMany
-//      rather than delete so a concurrent double-submit can't turn a SUCCEEDED
-//      link into a 409 via P2025.
+//   3. confirm-merge NEVER 500s ON AN ODD SUBMISSION. A 12-character multibyte
+//      submission once passed a `.length` check against the 12-char stored code
+//      while producing a 24-byte Buffer, and timingSafeEqual threw RangeError —
+//      "Incorrect code" became a 500 that still burned a rate-limit slot. The row
+//      now holds an HMAC of the code (discord-merge-code.ts), so any input is a
+//      plain mismatch. The code is consumed INSIDE the merge transaction
+//      (claimCode): a transient merge failure must not burn it, and a concurrent
+//      double-submit must merge once — the loser's conditional deleteMany finds
+//      nothing — while both callers still see the link succeed.
 //   4. unlink READS THE ID BEFORE CLEARING IT and revokes roles only after the
 //      write commits (guardrail 27). Reading after would leave the user holding
 //      every role Summonarr granted, admin included, with no way to lose it.
@@ -44,6 +45,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import dns from "node:dns/promises";
+import { createHash } from "node:crypto";
 
 (globalThis as { AsyncLocalStorage?: unknown }).AsyncLocalStorage = AsyncLocalStorage;
 
@@ -99,9 +101,12 @@ const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
+const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
+const { hashPassword } = await import("../src/lib/password-hash.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { discordMergeCodeMac } = await import("../src/lib/discord-merge-code.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -113,11 +118,19 @@ const opsOf = (name: string) => ops.filter((o) => o.op === name);
 type AppUser = Record<string, unknown> & { id: string; email: string; discordId: string | null; role: string };
 let appUsers: AppUser[] = [];
 const sessionRows = new Set<string>();
+// AuthSession.createdAt per session — the SSO step-up (guardrail 6g) reads it.
+const sessionCreatedAt = new Map<string, Date>();
 let userUpdateThrows = false;
 
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) =>
-    sessionRows.has(args.where.sessionId) ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId } : null,
+    sessionRows.has(args.where.sessionId)
+      ? {
+          id: `row-${args.where.sessionId}`,
+          sessionId: args.where.sessionId,
+          createdAt: sessionCreatedAt.get(args.where.sessionId) ?? new Date(),
+        }
+      : null,
   update: async () => ({}),
 });
 
@@ -193,13 +206,32 @@ shadowPrismaModel(prisma, "discordLinkToken", {
   },
 });
 
+// `code` is the stored column: the HMAC of the DM'd code (discord-merge-code.ts).
 type MergeCode = { userId: string; discordId: string; code: string; expiresAt: Date };
 let mergeCodes: MergeCode[] = [];
 let mergeThrows = false;
+// True while a $transaction callback runs: the consuming delete must happen in
+// the merge transaction (so a rollback restores the code).
+let inTx = false;
+// Parks confirm-merge's read until `mergeReadGate.want` requests have arrived,
+// so two submits are both past the read before either claims the code.
+let mergeReadGate: { want: number; arrived: number; open: Promise<void>; release: () => void } | null = null;
+function gateMergeReads(want: number): void {
+  let release = () => {};
+  const open = new Promise<void>((r) => { release = r; });
+  mergeReadGate = { want, arrived: 0, open, release };
+}
 shadowPrismaModel(prisma, "discordMergeCode", {
   findUnique: async (args: { where: { userId: string } }) => {
     rec("discordMergeCode.findUnique", args.where);
-    return mergeCodes.find((c) => c.userId === args.where.userId) ?? null;
+    const hit = mergeCodes.find((c) => c.userId === args.where.userId);
+    const copy = hit ? { ...hit } : null;
+    if (mergeReadGate) {
+      const g = mergeReadGate;
+      if (++g.arrived >= g.want) g.release();
+      await g.open;
+    }
+    return copy;
   },
   upsert: async (args: { where: { userId: string }; create: MergeCode; update: Partial<MergeCode> }) => {
     rec("discordMergeCode.upsert", { where: args.where, update: args.update });
@@ -209,10 +241,12 @@ shadowPrismaModel(prisma, "discordMergeCode", {
     return mergeCodes.find((c) => c.userId === args.where.userId)!;
   },
   delete: async (args: unknown) => { rec("discordMergeCode.delete", args); return {}; },
-  deleteMany: async (args: { where: { userId?: string } }) => {
-    rec("discordMergeCode.deleteMany", args.where);
+  deleteMany: async (args: { where: Partial<MergeCode> }) => {
+    rec("discordMergeCode.deleteMany", { ...args.where, inTx });
     const before = mergeCodes.length;
-    mergeCodes = mergeCodes.filter((c) => c.userId !== args.where.userId);
+    const matches = (c: MergeCode) =>
+      (Object.keys(args.where) as Array<keyof MergeCode>).every((k) => c[k] === args.where[k]);
+    mergeCodes = mergeCodes.filter((c) => !matches(c));
     return { count: before - mergeCodes.length };
   },
 });
@@ -245,7 +279,12 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   rec("$transaction");
   if (mergeThrows) throw new Error("simulated merge failure");
   if (Array.isArray(arg)) return Promise.all(arg);
-  return (arg as (tx: unknown) => Promise<unknown>)(prisma);
+  inTx = true;
+  try {
+    return await (arg as (tx: unknown) => Promise<unknown>)(prisma);
+  } finally {
+    inTx = false;
+  }
 });
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => []);
@@ -285,7 +324,16 @@ function inScope<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 let seq = 0;
-async function mintSession(opts: { role?: string; permissions?: bigint; discordId?: string | null } = {}): Promise<{ userId: string; token: string }> {
+// Default: an SSO-shaped account (no passwordHash) signed in just now, so the
+// step-up (guardrail 6g) passes on recency and the older tests are unchanged.
+async function mintSession(opts: {
+  role?: string;
+  permissions?: bigint;
+  discordId?: string | null;
+  passwordHash?: string | null;
+  sessionAgeMs?: number;
+  native?: boolean;
+} = {}): Promise<{ userId: string; token: string }> {
   seq++;
   const userId = `member-${seq}`;
   const sessionId = `sess-${seq}`;
@@ -295,12 +343,17 @@ async function mintSession(opts: { role?: string; permissions?: bigint; discordI
     id: userId, name: `Member ${seq}`, email: `member-${seq}@example.com`, role,
     permissions: BigInt(permissions), mediaServer: null, sessionsRevokedAt: null,
     passwordChangedAt: null, deactivatedAt: null, notificationEmail: null,
-    discordId: opts.discordId ?? null,
+    discordId: opts.discordId ?? null, passwordHash: opts.passwordHash ?? null,
   });
   sessionRows.add(sessionId);
+  sessionCreatedAt.set(sessionId, new Date(Date.now() - (opts.sessionAgeMs ?? 0)));
   const iat = Math.floor(Date.now() / 1000);
   const token = await signSessionJwt(
-    { id: userId, role, permissions, provider: "credentials", sessionId, expiresAt: iat + 86_400 },
+    {
+      id: userId, role, permissions, provider: "credentials", sessionId,
+      // A native (iOS) session carries the never-reached deadline (guardrail 6c).
+      expiresAt: opts.native ? NEVER_EXPIRES_AT_SEC : iat + 86_400,
+    },
     { expiresInSeconds: 7_200, iat },
   );
   return { userId, token };
@@ -368,6 +421,8 @@ beforeEach(async () => {
   registerOk = true;
   roleCallsOk = true;
   mergeThrows = false;
+  inTx = false;
+  mergeReadGate = null;
   userUpdateThrows = false;
 });
 
@@ -398,6 +453,71 @@ test("the user-facing routes admit a plain USER", async () => {
   assert.equal((await doUnlink(token)).status, 200);
 });
 
+// ── step-up before linking (guardrail 6g) ───────────────────────────────────
+//
+// A redeemed link lets that Discord account act as this user and survives a
+// password change. So a hijacked session must not be able to mint a code (or
+// send a merge code) for the hijacker's own Discord account without proving
+// it's the owner: the password, or for an SSO account a fresh sign-in.
+
+test("step-up: generate-link asks a PASSWORD account for its password, refuses a wrong one, mints on the right one", async () => {
+  const { token } = await mintSession({ passwordHash: await hashPassword("correct-horse-battery") });
+  const ask = await doGenerate(token);
+  assert.equal(ask.status, 401);
+  assert.equal((await ask.json()).error, "password-required");
+  const wrong = await doGenerate(token, { confirmPassword: "nope-nope-nope" });
+  assert.equal(wrong.status, 401);
+  assert.equal((await wrong.json()).error, "invalid-password");
+  assert.equal(opsOf("discordLinkToken.upsert").length, 0, "nothing minted without the step-up");
+  const failed = opsOf("auditLog.create").map((o) => (o.args as { data: { action: string; details: string } }).data)
+    .filter((d) => d.action === "AUTH_LOGIN_FAILED");
+  assert.equal(failed.length, 1, "a wrong step-up password is audited");
+  assert.match(failed[0].details, /step_up_password/);
+  const ok = await doGenerate(token, { confirmPassword: "correct-horse-battery" });
+  assert.equal(ok.status, 200);
+  assert.equal(opsOf("discordLinkToken.upsert").length, 1);
+});
+
+test("step-up: generate-link refuses an SSO account whose sign-in is older than 5 minutes", async () => {
+  const { token } = await mintSession({ sessionAgeMs: 6 * 60_000 });
+  const res = await doGenerate(token);
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, "session-too-old");
+  assert.equal(opsOf("discordLinkToken.upsert").length, 0);
+});
+
+test("step-up: a minted link code is audited", async () => {
+  const { token } = await mintSession();
+  assert.equal((await doGenerate(token)).status, 200);
+  const rows = opsOf("auditLog.create").map((o) => (o.args as { data: { target: string; details: string } }).data);
+  assert.ok(rows.some((d) => d.target.startsWith("discord-link:") && d.details.includes("discord-link-code")));
+});
+
+test("step-up: initiate-merge needs it from a WEB session — even one replayed as a bearer token — but not from a NATIVE one", async () => {
+  const web = await mintSession({ sessionAgeMs: 6 * 60_000 });
+  const viaCookie = await doInitiate(web.token, { discordId: VALID_SNOWFLAKE });
+  assert.equal(viaCookie.status, 401);
+  assert.equal((await viaCookie.json()).error, "session-too-old");
+  // The SAME browser token presented as `Authorization: Bearer` (a stolen cookie
+  // swapped to the native transport) is still a web session.
+  const viaBearer = await inScope(() => initiateMerge.POST(new NextRequest("http://localhost:3000/api/discord/initiate-merge", {
+    method: "POST",
+    headers: { authorization: `Bearer ${web.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ discordId: VALID_SNOWFLAKE }),
+  }), undefined));
+  assert.equal(viaBearer.status, 401);
+  assert.equal(opsOf("discordMergeCode.upsert").length, 0);
+  // A native (iOS) session — the never-expiring deadline only an app sign-in is
+  // minted — skips it: the shipped app has no prompt here (guardrail 25).
+  const app = await mintSession({ sessionAgeMs: 6 * 60_000, native: true });
+  await inScope(() => initiateMerge.POST(new NextRequest("http://localhost:3000/api/discord/initiate-merge", {
+    method: "POST",
+    headers: { authorization: `Bearer ${app.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ discordId: VALID_SNOWFLAKE }),
+  }), undefined));
+  assert.equal(opsOf("discordMergeCode.upsert").length, 1, "the native session reaches the merge code");
+});
+
 // ── 1: generate-link fails CLOSED on a malformed snowflake ───────────────────
 
 test("generate-link with NO body mints an unbound token — the web UI flow", async () => {
@@ -408,6 +528,21 @@ test("generate-link with NO body mints an unbound token — the web UI flow", as
   assert.match(body.token, /^[0-9A-F]{32}$/, "128 bits of entropy, uppercase hex");
   const stored = (opsOf("discordLinkToken.upsert")[0].args as { update: { discordId: string | null } }).update;
   assert.equal(stored.discordId, null, "omitting the field keeps the null binding");
+});
+
+test("PIN: generate-link stores only the SHA-256 of the code it hands back, never the code", async () => {
+  // The row is a live credential for 10 minutes and lands in every backup; /link
+  // hashes what it is handed, so a value read from either is not redeemable.
+  const { token } = await mintSession();
+  const res = await doGenerate(token);
+  assert.equal(res.status, 200);
+  const code = (await res.json()).token as string;
+  const sha = createHash("sha256").update(code, "utf8").digest("hex");
+  const stored = (opsOf("discordLinkToken.upsert")[0].args as { update: { token: string } }).update;
+  assert.equal(stored.token, sha, "the update path stores the hash");
+  assert.equal(linkTokens.length, 1);
+  assert.equal(linkTokens[0].token, sha, "the create path stores the hash");
+  assert.ok(!JSON.stringify(ops).includes(code), "the plaintext code reaches no DB write");
 });
 
 test("generate-link with a VALID snowflake binds the token to it", async () => {
@@ -600,12 +735,26 @@ test("initiate-merge DMs the code and stores it with a ten-minute TTL", async ()
   await doInitiate(token, { discordId: VALID_SNOWFLAKE });
   const dm = fetchCalls.find((c) => /\/channels\/[^/]+\/messages$/.test(c.url.pathname));
   assert.ok(dm, "no DM was sent");
+  assert.match(String(dm.body), /\b[0-9A-F]{12}\b/, "the DM carries a 12-hex-char code (~48 bits)");
   const stored = mergeCodes[0];
   assert.ok(stored, "no code was stored");
-  assert.match(stored.code, /^[0-9A-F]{12}$/, "12 hex chars (~48 bits)");
-  assert.ok(dm.body?.includes(stored.code), "the DM must carry the stored code");
   const ttl = stored.expiresAt.getTime() - Date.now();
   assert.ok(ttl > 8 * 60_000 && ttl <= 10 * 60_000);
+});
+
+test("PIN: initiate-merge stores only the HMAC of the code it DMs, never the code", async () => {
+  // 48 bits is few enough that a plain hash read from the DB or a backup could
+  // be brute-forced inside the window; the HMAC key is a NEXTAUTH_SECRET subkey
+  // neither holds.
+  const { token, userId } = await mintSession();
+  await doInitiate(token, { discordId: VALID_SNOWFLAKE });
+  const dm = fetchCalls.find((c) => /\/channels\/[^/]+\/messages$/.test(c.url.pathname));
+  const code = String(dm?.body).match(/\b([0-9A-F]{12})\b/)?.[1];
+  assert.ok(code, "the DM must carry the code");
+  const stored = (opsOf("discordMergeCode.upsert")[0].args as { update: { code: string } }).update.code;
+  assert.equal(stored, discordMergeCodeMac(userId, VALID_SNOWFLAKE, code), "the update path stores the MAC");
+  assert.equal(mergeCodes[0].code, stored, "the create path stores the MAC");
+  assert.ok(!JSON.stringify(ops).includes(code), "the plaintext code reaches no DB write");
 });
 
 test("a failed DM DELETES the pending code — a code nobody received must not be redeemable", async () => {
@@ -668,8 +817,12 @@ test("the per-target bucket is scoped per (user, target) — a second user is un
 
 // ── 3: confirm-merge — byte compare, code lifecycle ──────────────────────────
 
+// Stores what initiate-merge stores: the HMAC of `code`, never the code.
 function seedCode(userId: string, code = "ABCDEF123456", ttlMs = 10 * 60_000): void {
-  mergeCodes.push({ userId, discordId: VALID_SNOWFLAKE, code, expiresAt: new Date(Date.now() + ttlMs) });
+  mergeCodes.push({
+    userId, discordId: VALID_SNOWFLAKE, code: discordMergeCodeMac(userId, VALID_SNOWFLAKE, code),
+    expiresAt: new Date(Date.now() + ttlMs),
+  });
 }
 
 test("confirm-merge with no pending code is a 400", async () => {
@@ -766,6 +919,73 @@ test("the success path consumes the code with deleteMany, not delete", async () 
   await doConfirm(token, { code: "ABCDEF123456" });
   assert.ok(opsOf("discordMergeCode.deleteMany").length > 0);
   assert.equal(opsOf("discordMergeCode.delete").length, 0);
+});
+
+test("PIN: a row stored before codes were hashed reads as EXPIRED and is deleted — its plaintext never redeems", async () => {
+  // The documented upgrade behaviour: one resend. Comparing the plaintext would
+  // keep a path where a stored value is the credential.
+  const { token, userId } = await mintSession();
+  mergeCodes.push({ userId, discordId: VALID_SNOWFLAKE, code: "ABCDEF123456", expiresAt: new Date(Date.now() + 60_000) });
+  const res = await doConfirm(token, { code: "ABCDEF123456" });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /expired/i);
+  assert.equal(mergeCodes.length, 0, "the legacy row is cleared so a new code can be sent");
+  assert.equal(opsOf("$transaction").length, 0, "nothing is merged");
+});
+
+test("PIN: the stored MAC itself is not a redeemable code, and the MAC binds the user and the Discord id", async () => {
+  const { token, userId } = await mintSession();
+  seedCode(userId);
+  const asTyped = await doConfirm(token, { code: mergeCodes[0].code });
+  assert.equal(asTyped.status, 400);
+  assert.equal((await asTyped.json()).error, "Incorrect code.");
+  // The same code, but the row now names a different Discord account.
+  mergeCodes[0].discordId = "876543210987654321";
+  const moved = await doConfirm(token, { code: "ABCDEF123456" });
+  assert.equal(moved.status, 400);
+  assert.equal((await moved.json()).error, "Incorrect code.");
+  assert.equal(opsOf("$transaction").length, 0);
+});
+
+test("PIN: the code is consumed INSIDE the merge transaction, by the exact row that was verified", async () => {
+  const { token, userId } = await mintSession();
+  seedCode(userId);
+  const stored = mergeCodes[0].code;
+  assert.equal((await doConfirm(token, { code: "ABCDEF123456" })).status, 200);
+  const deletes = opsOf("discordMergeCode.deleteMany").map((o) => o.args);
+  assert.deepEqual(deletes, [{ userId, discordId: VALID_SNOWFLAKE, code: stored, inTx: true }]);
+});
+
+test("PIN: a concurrent double-submit merges ONCE, and both callers are told the link succeeded", async () => {
+  const { token, userId } = await mintSession();
+  seedCode(userId);
+  gateMergeReads(2); // both requests are past the read before either claims
+  const [a, b] = await Promise.all([
+    doConfirm(token, { code: "ABCDEF123456" }),
+    doConfirm(token, { code: "ABCDEF123456" }),
+  ]);
+  assert.deepEqual([a.status, b.status], [200, 200]);
+  const links = opsOf("user.update").filter((o) => (o.args as { data?: { discordId?: string } }).data?.discordId === VALID_SNOWFLAKE);
+  assert.equal(links.length, 1, "the loser's claim finds nothing, so it never links");
+  assert.equal(mergeCodes.length, 0);
+});
+
+test("a code RE-SENT between the check and the claim is not consumed by the old one", async () => {
+  // The claim names the verified row; a fresh initiate-merge replaced it, so the
+  // claim takes nothing and the newer code stays redeemable.
+  const { token, userId } = await mintSession();
+  seedCode(userId);
+  gateMergeReads(2); // only one request comes, so the read stays parked until released
+  const pending = doConfirm(token, { code: "ABCDEF123456" });
+  for (let i = 0; i < 50 && mergeReadGate?.arrived !== 1; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(mergeReadGate?.arrived, 1, "the confirm must have read the old code");
+  // Replace the code the way initiate-merge's upsert does, then let it continue.
+  mergeCodes[0].code = discordMergeCodeMac(userId, VALID_SNOWFLAKE, "111111111111");
+  mergeReadGate?.release();
+  const res = await pending;
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /request a code/i);
+  assert.equal(mergeCodes.length, 1, "the newer code survives");
 });
 
 test("confirm-merge is rate-limited, and hitting the limit WIPES the pending code", async () => {

@@ -54,5 +54,7 @@
   "shared.bell.loadFailed": "Impossibile caricare le notifiche.",
   "shared.bell.loading": "Caricamento delle notifiche…",
   "shared.common.clearSearch": "Cancella ricerca",
-  "shared.thread.placeholderShortcut": "Scrivi un messaggio… ({shortcut} per inviare)"
+  "shared.thread.placeholderShortcut": "Scrivi un messaggio… ({shortcut} per inviare)",
+  "shared.rateLimited.generic": "Troppe richieste. Riprova tra poco.",
+  "shared.rateLimited.seconds": "Troppe richieste. Riprova tra {seconds} s."
 }

@@ -85,9 +85,11 @@ function stripRef(ref: string): string {
 function resolveSchema(
   schema: SchemaObject | undefined,
   schemas: Record<string, SchemaObject>,
+  depth = 0,
 ): SchemaObject | undefined {
   if (!schema) return undefined;
-  if (schema.$ref) return resolveSchema(schemas[stripRef(schema.$ref)], schemas);
+  // Bounded: a $ref chain that loops back on itself must not recurse forever.
+  if (schema.$ref) return depth > 20 ? undefined : resolveSchema(schemas[stripRef(schema.$ref)], schemas, depth + 1);
   return schema;
 }
 
@@ -106,12 +108,21 @@ function typeLabel(schema: SchemaObject | undefined): string {
 function exampleValue(
   schema: SchemaObject | undefined,
   schemas: Record<string, SchemaObject>,
+  // $refs currently being expanded on this path: a self-referencing schema
+  // (a tree node whose child is itself) ends at null instead of overflowing.
+  active: ReadonlySet<string> = new Set(),
 ): unknown {
+  let seen = active;
+  if (schema?.$ref) {
+    const name = stripRef(schema.$ref);
+    if (active.has(name)) return null;
+    seen = new Set(active).add(name);
+  }
   const s = resolveSchema(schema, schemas);
   if (!s) return null;
   if (s.enum) return s.enum[0];
   if (s.allOf) {
-    return Object.assign({}, ...s.allOf.map((part) => exampleValue(part, schemas)));
+    return Object.assign({}, ...s.allOf.map((part) => exampleValue(part, schemas, seen)));
   }
   switch (s.type) {
     case "string":
@@ -122,11 +133,11 @@ function exampleValue(
     case "boolean":
       return true;
     case "array":
-      return [exampleValue(s.items, schemas)];
+      return [exampleValue(s.items, schemas, seen)];
     case "object": {
       const out: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(s.properties ?? {})) {
-        out[key] = exampleValue(value, schemas);
+        out[key] = exampleValue(value, schemas, seen);
       }
       return out;
     }

@@ -5,7 +5,7 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
-import { dropRecoveryCodesIfNoFactorInTx } from "@/lib/mfa/mfa-store";
+import { dropRecoveryCodesIfNoFactorInTx, getMfaState } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -22,9 +22,13 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (maint) return maint;
   const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024, {});
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaReauthStepUp(session, parsed.password, t);
+  const user = await mfaReauthStepUp(session, parsed.password, t, req);
   if (user instanceof NextResponse) return user;
-  const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
+  // Nothing to remove ⇒ 404 BEFORE the second factor: a recovery code used as
+  // proof is consumed, and must not be spent on a no-op.
+  const state = await getMfaState(user.id);
+  if (!state.totpEnabled && !state.totpPending) return NextResponse.json({ error: t("apiAuth.mfa.noTotp") }, { status: 404 });
+  const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor, state);
   if (proof instanceof NextResponse) return proof;
   const before = proof.state;
 

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { getTranscodeOffenders } from "@/lib/play-history";
+import { parseActivityDays } from "@/lib/activity-days";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,7 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, _sessi
   const params = request.nextUrl.searchParams;
   // Clamp identically to /api/play-history/stats so an unbounded/negative
   // window can't scan or invert the whole table.
-  const days = Math.min(Math.max(parseInt(params.get("days") ?? "30", 10) || 30, 1), 3650);
+  const days = parseActivityDays(params.get("days"));
   // Whitelist BEFORE these reach getTranscodeOffenders: the cache key is built
   // from the raw strings while the SQL filter honours only these values, so an
   // unrecognised one ran both uncached aggregate scans under a key nothing would

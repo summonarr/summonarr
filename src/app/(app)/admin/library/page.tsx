@@ -9,6 +9,16 @@ import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button
 import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
 import { inferGroupMounts } from "@/lib/bad-matches";
 import { LibraryDiffClient, type DiffItem, type ClientBadMatch } from "@/components/admin/library-diff-client";
+import { LibraryMatchCheck, type ClientMatchReport } from "@/components/admin/library-match-check";
+import { readLibraryMatchReport } from "@/lib/library-match-data";
+import { folderKey, ownFolder } from "@/lib/library-match";
+import {
+  diffCollator,
+  diffSourceFor,
+  makeBadMatchComparator,
+  makeDiffComparator,
+  type OtherSidePathEntry,
+} from "@/lib/library-diff";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { Library } from "@/components/icons";
@@ -377,9 +387,9 @@ export default async function LibraryDiffPage({
   // overview is omitted here on purpose: it is the heaviest column and is only
   // rendered for the difference sets, so pulling it for up to 50k rows per render
   // is wasted. fetchOverviews backfills it for just the displayed rows below.
-  const [plexItems, jellyfinItems, prefixRows] = await Promise.all([
-    prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
-    prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
+  const [plexItems, jellyfinItems, prefixRows, matchReport] = await Promise.all([
+    prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true }, orderBy: [{ serverInstance: "asc" }, { mediaType: "asc" }, { tmdbId: "asc" }], take: LIBRARY_ITEM_CAP }),
+    prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true }, orderBy: [{ serverInstance: "asc" }, { mediaType: "asc" }, { tmdbId: "asc" }], take: LIBRARY_ITEM_CAP }),
     // The four connection keys ride along on the existing query so the Re-sync
     // button can be told which servers exist rather than POSTing to both and
     // reading a not-configured 400 as a failure. Not derived from
@@ -389,7 +399,18 @@ export default async function LibraryDiffPage({
       "plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
       "plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey",
     ] } } }),
+    readLibraryMatchReport(),
   ]);
+  // The match check judges each server against Radarr/Sonarr, so unlike the
+  // diff below it means something on a one-server deployment too. Paths stay
+  // on the server: the rows show folder names only.
+  const clientMatchReport: ClientMatchReport | null = matchReport && {
+    checkedAt: matchReport.checkedAt,
+    sources: matchReport.sources,
+    counts: matchReport.counts,
+    truncated: matchReport.truncated,
+    flags: matchReport.flags.map(({ path: _path, ...flag }) => flag),
+  };
   const libraryCapped = plexItems.length >= LIBRARY_ITEM_CAP || jellyfinItems.length >= LIBRARY_ITEM_CAP;
 
   const plexConfigured    = plexItems.length > 0;
@@ -536,12 +557,17 @@ export default async function LibraryDiffPage({
   // a "" mount, and every such row would otherwise pile onto one blank entry and
   // pair two unrelated titles.
   const plexPathMap = new Map<string, PlexPathEntry>();
+  // Each row's own join key, so a "only on X" row can be looked up on the other side.
+  const rowKey = (r: { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string }) => `${r.tmdbId}:${r.mediaType}:${r.serverInstance}`;
+  const plexKeyByRow = new Map<string, string>();
+  const jellyfinKeyByRow = new Map<string, string>();
   for (const item of defaultInstanceLast(plexItems)) {
     if (!item.filePath) continue;
     const rel = stripMountPoint(item.filePath, plexMountPoints.get(mountKey(item)) ?? "");
     if (!rel) continue;
     const plexPrefix = plexStripFor(item.serverInstance, item.mediaType);
     const matchKey = toMatchKey(normaliseRelPath(rel, plexPrefix), item.mediaType);
+    if (matchKey) plexKeyByRow.set(rowKey(item), matchKey);
     if (matchKey) plexPathMap.set(matchKey, { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, ratingKey: item.plexRatingKey, title: item.title, year: item.year });
   }
 
@@ -552,6 +578,7 @@ export default async function LibraryDiffPage({
     if (!rel) continue;
     const jellyfinPrefix = jellyfinStripFor(item.serverInstance, item.mediaType);
     const matchKey = toMatchKey(normaliseRelPath(rel, jellyfinPrefix), item.mediaType);
+    if (matchKey) jellyfinKeyByRow.set(rowKey(item), matchKey);
     if (matchKey) jellyfinPathMap.set(matchKey, { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, itemId: item.jellyfinItemId, title: item.title, year: item.year });
   }
 
@@ -630,14 +657,6 @@ export default async function LibraryDiffPage({
     };
   });
 
-  const titleSort = (a: LibraryItem, b: LibraryItem) => {
-    if (a.title && !b.title) return -1;
-    if (!a.title && b.title) return 1;
-    return (a.title ?? "").localeCompare(b.title ?? "");
-  };
-  onlyPlex.sort(titleSort);
-  onlyJellyfin.sort(titleSort);
-
   const movieArrTmdbIds = new Set(movieArrMap.values());
   const tvArrTmdbIds    = new Set(tvArrMap.values());
 
@@ -648,6 +667,11 @@ export default async function LibraryDiffPage({
 
   const toClientItem = (
     items: LibraryItem[],
+    // Which server these rows are on, and the OTHER server's rows by join key —
+    // the pair that explains why a title is on this server only.
+    keyByRow: Map<string, string>,
+    otherByPath: ReadonlyMap<string, OtherSidePathEntry>,
+    otherUnmatched: ReadonlySet<string>,
     // Per-instance mounts, not one shared string — an item from a second server
     // must be stripped with ITS root or the card renders a raw absolute path.
     mountPoints: Map<string, string>,
@@ -669,10 +693,16 @@ export default async function LibraryDiffPage({
         ? (tvArrPathByTmdbId.get(item.tmdbId) ?? null)
         : null;
 
+      const matchKey = keyByRow.get(rowKey(item)) ?? null;
+      const folder = item.mediaType === "TV"
+        ? (matchKey ? folderKey(matchKey) : null)
+        : (() => { const f = ownFolder(item.filePath); return f ? folderKey(f) : null; })();
+
       return {
         tmdbId:         item.tmdbId,
         mediaType:      item.mediaType,
         serverInstance: item.serverInstance,
+        diffSource:     diffSourceFor(matchKey, folder, item.mediaType, otherByPath, otherUnmatched),
         title:          item.title,
         posterPath:     item.posterPath,
         releaseYear:    item.releaseYear,
@@ -687,10 +717,27 @@ export default async function LibraryDiffPage({
       };
     });
 
-  const clientOnlyPlex     = toClientItem(onlyPlex,     plexMountPoints,     (i) => i.mediaType === "MOVIE" ? movieArrByName : tvArrByName, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
-  const clientOnlyJellyfin = toClientItem(onlyJellyfin, jellyfinMountPoints, (i) => i.mediaType === "MOVIE" ? movieArrByName : tvArrByName, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
+  // Folders each server lists WITHOUT a TMDB id: the sync drops those, so the
+  // title reads as "only on the other server" although the file is right there.
+  const unmatchedFolders = (server: "plex" | "jellyfin") => new Set(
+    (matchReport?.flags ?? [])
+      .filter((f) => f.server === server && f.kind === "noTmdbId" && f.folder)
+      .map((f) => `${f.mediaType}:${folderKey(f.folder as string)}`),
+  );
+  const toOther = (m: Map<string, PlexPathEntry | JellyfinPathEntry>): Map<string, OtherSidePathEntry> =>
+    new Map([...m].map(([k, v]) => [k, { tmdbId: v.tmdbId, mediaType: v.mediaType, serverInstance: v.serverInstance, title: v.title }]));
+  const plexOther = toOther(plexPathMap);
+  const jellyfinOther = toOther(jellyfinPathMap);
 
-  const clientBadMatches: ClientBadMatch[] = badMatches.map((m) => ({
+  const clientOnlyPlex     = toClientItem(onlyPlex,     plexKeyByRow, jellyfinOther, unmatchedFolders("jellyfin"), plexMountPoints,     (i) => i.mediaType === "MOVIE" ? movieArrByName : tvArrByName, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
+  const clientOnlyJellyfin = toClientItem(onlyJellyfin, jellyfinKeyByRow, plexOther, unmatchedFolders("plex"), jellyfinMountPoints, (i) => i.mediaType === "MOVIE" ? movieArrByName : tvArrByName, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
+
+  const collator = diffCollator(locale);
+  const diffCompare = makeDiffComparator(collator);
+  clientOnlyPlex.sort(diffCompare);
+  clientOnlyJellyfin.sort(diffCompare);
+
+  const clientBadMatches: ClientBadMatch[] = badMatches.sort(makeBadMatchComparator(collator)).map((m) => ({
     relativePath:   m.relativePath,
     plex:           { tmdbId: m.plex.tmdbId, mediaType: m.plex.mediaType, serverInstance: m.plex.serverInstance, title: m.plex.title, posterPath: m.plex.posterPath, releaseYear: m.plex.releaseYear },
     plexRatingKey:  m.plexRatingKey,
@@ -838,6 +885,12 @@ export default async function LibraryDiffPage({
           />
         </>
       )}
+
+      {/* Below the diff on purpose: the difference lists are what an admin opens
+          this page for, and the match check is a longer, collapsible audit. */}
+      <div style={{ marginTop: 24 }}>
+        <LibraryMatchCheck report={clientMatchReport} mediaType={activeType} />
+      </div>
     </div>
   );
 }

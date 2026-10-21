@@ -12,6 +12,7 @@ export function ClipboardList({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />

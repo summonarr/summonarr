@@ -1,4 +1,12 @@
 import { safeFetchTrusted, safeFetchAdminConfigured } from "./safe-fetch";
+import {
+  NO_REASON_REPORTED,
+  PLEX_AUDIO_TRANSCODED,
+  PLEX_SUBTITLE_BURN_IN,
+  PLEX_VIDEO_TRANSCODED,
+} from "./transcode-reasons";
+import { countsAsPlexWatchRecord, parsePlexHistoryItem, type PlexHistoryEntry } from "./upstream-watch";
+import type { ServerMatchEntry } from "./library-match";
 
 const PLEX_TV_HOSTS = ["plex.tv"];
 
@@ -90,6 +98,8 @@ interface PlexMetadataItem {
   summary?: string;
   contentRating?: string;
   addedAt?: number;
+  // A show's folder(s) on disk; read only by the library match check.
+  Location?: Array<{ path?: string }>;
 }
 
 function plexServerHeaders(token: string): Record<string, string> {
@@ -191,7 +201,14 @@ async function plexFetchAllPages<T>(
     // false after one page and silently truncates any library larger than a page
     // when a Plex build omits totalSize. Infinity defers termination to the
     // empty-page break below, the correct terminator on that path.
-    if (start === 0) total = container.totalSize ?? Infinity;
+    //
+    // Refreshed on EVERY page that reports it, not fixed from page 0: the
+    // watch history is read viewedAt-desc, so a view recorded mid-walk is
+    // prepended, shifts every older record one offset down, and a total frozen
+    // at page 0 ended the walk before the shifted tail — the OLDEST records,
+    // the same ones every run on a busy server. A page that omits it keeps the
+    // last known count; MAX_PAGES still bounds an ever-growing one.
+    if (container.totalSize != null) total = container.totalSize;
     const stop = processItems(items) === true;
     start += items.length;
     if (stop || items.length === 0) break;
@@ -291,6 +308,52 @@ export interface PlexLibraryItemData {
   overview:      string | null;
   contentRating: string | null;
   addedAt:       Date | null;
+  // The ratingKeys of every OTHER Plex item that carries this tmdb id on the
+  // server (a second section, a split duplicate) — the copies whose row lost to
+  // `ratingKey`. Written to PlexLibraryItem.plexRatingKeys via
+  // plexLibraryRatingKeys(); guardrail 37c. Absent = none.
+  duplicateRatingKeys?: string[];
+}
+
+// The value for PlexLibraryItem.plexRatingKeys: every ratingKey this title
+// occupies, the stored `ratingKey` first. Reads OR this against plexRatingKey
+// (rows written before the column existed are `[]`), so the winner appearing in
+// both is deliberate — the array is a complete answer once a full sync has
+// rewritten the row. Twin of jellyfin.ts libraryItemIds (guardrail 37c).
+export function plexLibraryRatingKeys(data: Pick<PlexLibraryItemData, "ratingKey" | "duplicateRatingKeys">): string[] {
+  const keys = data.ratingKey ? [data.ratingKey] : [];
+  const seen = new Set(keys);
+  for (const k of data.duplicateRatingKeys ?? []) {
+    if (seen.has(k)) continue;
+    seen.add(k);
+    keys.push(k);
+  }
+  return keys;
+}
+
+// A copy of `existing` that also answers to every key in `keys` — the bulk form
+// of withDuplicateRatingKeys. Callers folding many copies of one title collect
+// the losers' keys and call this ONCE: folding pair by pair rebuilt the
+// winner's growing list per copy, cubic in copies of one tmdb id, so a Plex
+// server listing a few thousand items with one tmdb guid froze the event loop
+// for minutes in an unattended sync. Never mutates, for the reason below.
+export function foldDuplicateRatingKeys(existing: PlexLibraryItemData, keys: Iterable<string>): PlexLibraryItemData {
+  const have = new Set(existing.duplicateRatingKeys ?? []);
+  const extra: string[] = [];
+  for (const k of keys) {
+    if (k === existing.ratingKey || have.has(k)) continue;
+    have.add(k);
+    extra.push(k);
+  }
+  if (extra.length === 0) return existing;
+  return { ...existing, duplicateRatingKeys: [...(existing.duplicateRatingKeys ?? []), ...extra].sort() };
+}
+
+// A copy of `existing` that also answers to `other`'s ratingKeys. Never mutates:
+// one entry object is shared by every tmdb id a conflated Plex item claims, so
+// an in-place push would hand the duplicate key to titles it isn't a copy of.
+export function withDuplicateRatingKeys(existing: PlexLibraryItemData, other: PlexLibraryItemData): PlexLibraryItemData {
+  return foldDuplicateRatingKeys(existing, plexLibraryRatingKeys(other));
 }
 
 export async function getPlexSectionTmdbIds(
@@ -329,6 +392,10 @@ export async function getPlexSectionTmdbIds(
     : `/library/sections/${sectionKey}/all`;
   const baseUrl = `${serverUrl}${path}?type=${plexType}&includeGuids=1`;
   const items = new Map<number, PlexLibraryItemData>();
+  // Every ratingKey seen for a tmdb id that collided in this section, folded
+  // into the surviving entry once after the walk (foldDuplicateRatingKeys) —
+  // the Jellyfin twin's extraItemIds.
+  const collidedKeys = new Map<number, Set<string>>();
   await plexFetchAllPages<PlexMetadataItem>(baseUrl, token, (batch) => {
     for (const item of batch) {
       if (item.type === "collection") continue;
@@ -352,7 +419,20 @@ export async function getPlexSectionTmdbIds(
       if (sectionType === "show" && ratingKeyToTmdbOut && item.ratingKey) {
         ratingKeyToTmdbOut.set(item.ratingKey, ids);
       }
-      for (const id of ids) items.set(id, entry);
+      for (const id of ids) {
+        // Last write still wins inside a section (page order, as before), but
+        // the copy it replaces stays addressable through its ratingKey.
+        const prev = items.get(id);
+        items.set(id, entry);
+        if (!prev) continue;
+        let keys = collidedKeys.get(id);
+        if (!keys) {
+          keys = new Set<string>();
+          collidedKeys.set(id, keys);
+          if (prev.ratingKey) keys.add(prev.ratingKey);
+        }
+        if (entry.ratingKey) keys.add(entry.ratingKey);
+      }
     }
     // recentOnly early stop: every item on this page is KNOWN older than the
     // window (an unknown addedAt keeps paging — age can't be assumed).
@@ -364,6 +444,10 @@ export async function getPlexSectionTmdbIds(
       return true;
     }
   });
+  for (const [id, keys] of collidedKeys) {
+    const winner = items.get(id);
+    if (winner) items.set(id, foldDuplicateRatingKeys(winner, keys));
+  }
 
   if (sectionType === "show" && !skipShowFilePaths) {
     // TV show items from /all don't include episode file paths; fetch one episode leaf per show to get a real path
@@ -421,16 +505,84 @@ export async function getPlexTmdbIds(
     matching.map((s) => getPlexSectionTmdbIds(serverUrl, token, s.key, sectionType, recentOnly, ratingKeyToTmdbOut, legacyOut, skipShowFilePaths, recentSinceEpochSec))
   );
   const combined = new Map<number, PlexLibraryItemData>();
+  const otherCopyKeys = new Map<number, string[]>();
   for (const map of results) {
     for (const [id, data] of map) {
       if (combined.has(id)) {
-        // A TMDB ID appearing in multiple sections (e.g. duplicated libraries) keeps the first-seen entry
+        // A TMDB ID appearing in multiple sections (e.g. duplicated libraries)
+        // keeps the first-seen entry, and records the other copy's ratingKey so
+        // plays and server history filed under it still resolve (guardrail 37c).
+        // Folded once below, not per section (see foldDuplicateRatingKeys).
+        let keys = otherCopyKeys.get(id);
+        if (!keys) {
+          keys = [];
+          otherCopyKeys.set(id, keys);
+        }
+        for (const k of plexLibraryRatingKeys(data)) keys.push(k);
       } else {
         combined.set(id, data);
       }
     }
   }
+  for (const [id, keys] of otherCopyKeys) {
+    combined.set(id, foldDuplicateRatingKeys(combined.get(id)!, keys));
+  }
   return combined;
+}
+
+function guidValue(item: PlexMetadataItem, scheme: "imdb" | "tvdb"): string | null {
+  const modern = item.Guid?.find((g) => g.id.startsWith(`${scheme}://`))?.id.slice(scheme.length + 3);
+  if (modern) return modern;
+  const legacy = scheme === "imdb" ? /imdb:\/\/(tt\d+)/.exec(item.guid ?? "") : /thetvdb:\/\/(\d+)/.exec(item.guid ?? "");
+  return legacy?.[1] ?? null;
+}
+
+/**
+ * Every item of the selected sections as the library match check judges it —
+ * each copy and each unmatched item, not the one-row-per-TMDB-id map the sync
+ * builds. A show's path is its folder (`Location`); one the server doesn't
+ * report is left null, and that show is simply not judged.
+ */
+export async function listPlexMatchEntries(
+  serverUrl: string,
+  token: string,
+  serverInstance: string,
+  mediaType: "MOVIE" | "TV",
+  selectedKeys?: Set<string>,
+): Promise<ServerMatchEntry[]> {
+  const sectionType = mediaType === "MOVIE" ? "movie" : "show";
+  const sections = (await getPlexLibrarySections(serverUrl, token))
+    .filter((s) => s.type === sectionType && (!selectedKeys?.size || selectedKeys.has(s.key)));
+  const out: ServerMatchEntry[] = [];
+  for (const section of sections) {
+    await plexFetchAllPages<PlexMetadataItem>(
+      `${serverUrl}/library/sections/${section.key}/all?type=${mediaType === "MOVIE" ? 1 : 2}&includeGuids=1`,
+      token,
+      (batch) => {
+        for (const item of batch) {
+          if (item.type === "collection" || !item.ratingKey) continue;
+          const tmdbIds = extractAllTmdbIds(item);
+          const tvdb = guidValue(item, "tvdb");
+          out.push({
+            server: "plex",
+            serverInstance,
+            mediaType,
+            itemKey: item.ratingKey,
+            title: item.title ?? null,
+            year: item.year ?? null,
+            path: mediaType === "MOVIE"
+              ? (item.Media?.[0]?.Part?.[0]?.file ?? null)
+              : (item.Location?.find((l) => l.path)?.path ?? null),
+            tmdbIds,
+            imdbId: guidValue(item, "imdb"),
+            tvdbId: tvdb !== null && /^\d+$/.test(tvdb) ? Number(tvdb) : null,
+            legacyPlaced: tmdbIds.length === 0 && extractLegacyExternalId(item) !== null,
+          });
+        }
+      },
+    );
+  }
+  return out;
 }
 
 interface PlexShowMeta extends PlexMetadataItem {
@@ -445,12 +597,16 @@ interface PlexEpisodeMeta {
   // branch reads from /all at type=1. Consumed only when the caller asked for
   // episode file paths (episodeFilePathsOut).
   Media?: Array<{ Part?: Array<{ file?: string }> }>;
+  addedAt?: number; // epoch seconds
 }
 
 export interface PlexTVEpisodeData {
   tmdbId: number;
   seasonNumber: number;
   episodeNumber: number;
+  // When the episode reached the server — dates a season for the never-watched
+  // report. The earliest across sections when a show sits in several.
+  addedAt?: Date | null;
 }
 
 export async function getPlexTVEpisodes(
@@ -515,8 +671,9 @@ export async function getPlexTVEpisodes(
           }
           if (!Number.isInteger(ep.parentIndex) || ep.parentIndex < 1) continue;
           if (!Number.isInteger(ep.index) || ep.index < 1) continue;
+          const addedAt = typeof ep.addedAt === "number" && ep.addedAt > 0 ? new Date(ep.addedAt * 1000) : null;
           for (const tmdbId of tmdbIds) {
-            episodes.push({ tmdbId, seasonNumber: ep.parentIndex, episodeNumber: ep.index });
+            episodes.push({ tmdbId, seasonNumber: ep.parentIndex, episodeNumber: ep.index, addedAt });
           }
         }
       },
@@ -528,7 +685,9 @@ export async function getPlexTVEpisodes(
   const episodeMap = new Map<string, PlexTVEpisodeData>();
   for (const ep of sectionResults.flat()) {
     const key = `${ep.tmdbId}-${ep.seasonNumber}-${ep.episodeNumber}`;
-    if (!episodeMap.has(key)) episodeMap.set(key, ep);
+    const prev = episodeMap.get(key);
+    if (!prev) episodeMap.set(key, ep);
+    else if (ep.addedAt && (!prev.addedAt || ep.addedAt < prev.addedAt)) episodeMap.set(key, { ...prev, addedAt: ep.addedAt });
   }
   return Array.from(episodeMap.values());
 }
@@ -547,11 +706,77 @@ export async function getPlexEpisodesForShow(
       for (const ep of batch) {
         if (!Number.isInteger(ep.parentIndex) || ep.parentIndex < 1) continue;
         if (!Number.isInteger(ep.index) || ep.index < 1) continue;
-        episodes.push({ tmdbId, seasonNumber: ep.parentIndex, episodeNumber: ep.index });
+        // Mapped exactly as getPlexTVEpisodes does: fix-match rebuilds a show's
+        // TVEpisodeCache rows from this helper, and one undated episode makes
+        // its season `unobservable` on the never-watched report (14d).
+        const addedAt = typeof ep.addedAt === "number" && ep.addedAt > 0 ? new Date(ep.addedAt * 1000) : null;
+        episodes.push({ tmdbId, seasonNumber: ep.parentIndex, episodeNumber: ep.index, addedAt });
       }
     },
   );
   return episodes;
+}
+
+// The server's own all-account watch history — READ-ONLY evidence for the
+// never-watched report (src/lib/upstream-watch.ts explains the use and lists the
+// UNVERIFIED response-shape assumptions). Newest first, so a walk stopped at
+// `maxItems` keeps the most recent views. Parsed while paging, so the raw
+// records never accumulate in memory.
+//
+// The cap counts WATCH RECORDS (countsAsPlexWatchRecord), not raw records: a
+// music-heavy history would otherwise hit it on track plays and drop the
+// oldest VIDEO views — the pre-install ones the snapshot exists for. Raw
+// records get their own ceiling, kept below plexFetchAllPages' silent 2M one so
+// that a walk stopped by it is still reported `truncated`.
+export const PLEX_WATCH_HISTORY_MAX_ITEMS = 500_000;
+export const PLEX_WATCH_HISTORY_MAX_RAW = 1_500_000;
+
+export interface PlexWatchHistory {
+  // Every record the parser could place (movies and episodes with a key).
+  entries: PlexHistoryEntry[];
+  // Watch records the server returned — music/photo/extras excluded, records the
+  // parser could NOT place included. More records than placeable entries (above
+  // all, records > 0 with nothing matching the library) is how a changed
+  // response shape shows up instead of reading as "nobody watched anything".
+  records: number;
+  // The walk stopped at a cap with older history still unread (a record past
+  // the cap was seen); the caller must not read the result as complete.
+  truncated: boolean;
+}
+
+export async function getPlexWatchHistory(
+  serverUrl: string,
+  token: string,
+  opts: { signal?: AbortSignal; maxItems?: number; maxRaw?: number } = {},
+): Promise<PlexWatchHistory> {
+  const maxItems = opts.maxItems ?? PLEX_WATCH_HISTORY_MAX_ITEMS;
+  const maxRaw = opts.maxRaw ?? PLEX_WATCH_HISTORY_MAX_RAW;
+  const out: PlexWatchHistory = { entries: [], records: 0, truncated: false };
+  if (opts.signal?.aborted) return out;
+  let seen = 0;
+  await plexFetchAllPages<unknown>(
+    `${serverUrl.replace(/\/+$/, "")}/status/sessions/history/all?sort=viewedAt:desc`,
+    token,
+    (batch) => {
+      for (const raw of batch) {
+        const counts = countsAsPlexWatchRecord(raw);
+        // Truncated only when a record PAST a cap exists — a history of exactly
+        // maxItems records is complete.
+        if (seen >= maxRaw || (counts && out.records >= maxItems)) {
+          out.truncated = true;
+          break;
+        }
+        seen++;
+        if (counts) out.records++;
+        const entry = parsePlexHistoryItem(raw);
+        if (entry) out.entries.push(entry);
+      }
+      // Stop paging on abort (guardrail 41 — the caller discards the result) or
+      // at a cap. Overshoot is bounded to the page already in flight.
+      return opts.signal?.aborted === true || out.truncated;
+    },
+  );
+  return out;
 }
 
 export interface PlexSessionData {
@@ -705,16 +930,18 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       playMethod = "DirectStream";
     }
 
-    // Plex's /status/sessions has no single "reason" field — derive it from the
-    // per-stream decisions. Worded to match the humanized Jellyfin
-    // TranscodeReasons vocabulary so both servers share one chart.
+    // Plex's /status/sessions reports WHICH streams it transcoded, never why. A
+    // video transcode is as often a remote client's quality limit as an
+    // unsupported codec, so the label says only what Plex said; it used to claim
+    // "Video codec not supported" for every one, and the Statistics page turned
+    // that into advice. play-history.ts rewrites those older rows the same way.
     let transcodeReason: string | undefined;
     if (playMethod === "Transcode") {
       const reasons: string[] = [];
-      if (ts?.videoDecision === "transcode") reasons.push("Video codec not supported");
-      if (ts?.audioDecision === "transcode") reasons.push("Audio codec not supported");
-      if (subtitleStream?.decision === "burn") reasons.push("Subtitle burn-in");
-      if (reasons.length === 0) reasons.push("Container not supported");
+      if (ts?.videoDecision === "transcode") reasons.push(PLEX_VIDEO_TRANSCODED);
+      if (ts?.audioDecision === "transcode") reasons.push(PLEX_AUDIO_TRANSCODED);
+      if (subtitleStream?.decision === "burn") reasons.push(PLEX_SUBTITLE_BURN_IN);
+      if (reasons.length === 0) reasons.push(NO_REASON_REPORTED);
       transcodeReason = reasons.join(", ");
     }
 

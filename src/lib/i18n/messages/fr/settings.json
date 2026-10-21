@@ -106,6 +106,8 @@
   "settings.featureDesc.admin_apiDocs": "Afficher la référence OpenAPI /admin/api-docs et son lien de navigation.",
   "settings.featureLabel.admin_cleanup": "Page Nettoyage de la bibliothèque",
   "settings.featureDesc.admin_cleanup": "Afficher la page /admin/cleanup : les titres que personne ne regarde, classés selon des règles configurables, qu'un administrateur peut supprimer de Radarr/Sonarr après une simulation. Rien n'est jamais supprimé automatiquement. Désactivé par défaut.",
+  "settings.featureLabel.admin_neverWatched": "Page Jamais regardé",
+  "settings.featureDesc.admin_neverWatched": "Afficher la page /admin/never-watched : chaque film, série et saison que personne n'a regardé dans l'historique enregistré de ce serveur, classés selon l'espace occupé et recoupés avec l'historique de visionnage propre à chaque serveur multimédia. En lecture seule ; la suppression passe par le nettoyage de la bibliothèque.",
   "settings.featureLabel.trashGuidesEnabled": "TRaSH Guides",
   "settings.featureDesc.trashGuidesEnabled": "Activer la page d'administration TRaSH Guides et la synchronisation nocturne.",
   "settings.features.toggle": "Basculer {label}",
@@ -391,8 +393,11 @@
   "settings.featureLabel.integration_webhooks": "Canaux webhook, ntfy et Gotify",
   "settings.featureDesc.integration_webhooks": "Envoyer les événements de demandes et de problèmes aux canaux webhook, ntfy et Gotify configurés dans Paramètres → Notifications.",
   "settings.nav.notificationAgents": "Webhooks et ntfy",
+  "settings.nav.arrAlerts": "Alertes Radarr/Sonarr",
   "settings.section.notificationAgents.title": "Canaux webhook, ntfy et Gotify",
   "settings.section.notificationAgents.description": "Transférez les événements de demandes, de problèmes et de téléchargements vers vos propres services. Chaque canal choisit les événements qu'il reçoit ; les envois échoués sont retentés trois fois.",
+  "settings.section.arrAlerts.title": "Alertes Radarr/Sonarr",
+  "settings.section.arrAlerts.description": "Summonarr vérifie périodiquement chaque instance Radarr et Sonarr et signale aux canaux ci-dessus abonnés à ces événements un espace disque faible, un téléchargement échoué ou un téléchargement qui vient de nécessiter votre attention. Le lien File de téléchargement du menu d'administration indique combien de téléchargements requièrent votre attention.",
   "settings.nav.plexWatchlist": "Liste de suivi Plex",
   "settings.section.plexWatchlist.title": "Liste de suivi Plex",
   "settings.section.plexWatchlist.description": "Comment la demande automatique lit les listes de suivi Plex. La connexion Plex de l'utilisateur est toujours utilisée quand elle existe ; ces options ajoutent le compte du propriétaire de votre serveur Plex comme seconde voie.",
@@ -416,5 +421,11 @@
   "settings.media.tokenPlaceholder.plex": "Collez le jeton administrateur de ce serveur",
   "settings.media.tokenPlaceholder.jellyfin": "Collez une clé API de ce serveur",
   "settings.cron.job.trakt.name": "Synchronisation Trakt",
-  "settings.cron.job.trakt.description": "Demande les nouveaux titres des listes de suivi Trakt des utilisateurs connectés et importe leur historique Trakt pour Pour vous (nécessite un Client Secret Trakt)"
+  "settings.cron.job.trakt.description": "Demande les nouveaux titres des listes de suivi Trakt des utilisateurs connectés et importe leur historique Trakt pour Pour vous (nécessite un Client Secret Trakt)",
+  "settings.cron.job.upstreamWatch.name": "Historique de visionnage des serveurs",
+  "settings.cron.job.upstreamWatch.description": "Lit l'historique de visionnage propre à chaque serveur Plex et Jellyfin, pour qu'un titre regardé avant l'installation de Summonarr (ou pendant une interruption) ne soit jamais signalé comme non regardé",
+  "settings.cron.job.arrWatch.name": "Surveillance Radarr/Sonarr",
+  "settings.cron.job.arrWatch.description": "Vérifie chaque instance Radarr et Sonarr (espace disque faible, téléchargements échoués, téléchargements qui requièrent une attention) et alerte les canaux de notification abonnés",
+  "settings.cron.job.arrSnapshots.name": "Actualisation des pages Radarr/Sonarr",
+  "settings.cron.job.arrSnapshots.description": "Relit les pages Radarr/Sonarr ouvertes par un administrateur au cours de la dernière journée, selon leur priorité (file et état toutes les 5 minutes ; Manquants, historique, calendrier et titres toutes les 10 ; Système Arr toutes les 15), pour qu'elles s'ouvrent sur des données récentes"
 }

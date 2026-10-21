@@ -88,6 +88,17 @@ test("arrErrorMessage: >=500 maps to server-error (500 is the boundary)", () => 
   assert.equal(arrErrorMessage(new ArrResponseError(499, "x")), "Arr request failed (499)");
 });
 
+test("arrErrorMessage: 502/504 point at the proxy, never at the arr's own logs", () => {
+  // Radarr/Sonarr never send 502 or 504 — a reverse proxy in front of them
+  // does, and the arr's log has no trace of the request.
+  for (const status of [502, 504]) {
+    const msg = arrErrorMessage(new ArrResponseError(status, "gateway"));
+    assert.match(msg, new RegExp(`\\(${status}\\)`));
+    assert.match(msg, /proxy/);
+    assert.doesNotMatch(msg, /arr service logs/);
+  }
+});
+
 test("arrErrorMessage: other statuses fall through to the generic bucket", () => {
   assert.equal(arrErrorMessage(new ArrResponseError(400, "validation")), "Arr request failed (400)");
   assert.equal(arrErrorMessage(new ArrResponseError(409, "conflict")), "Arr request failed (409)");
@@ -232,7 +243,7 @@ test("the Sonarr download check holds EVERY id to a positive-integer contract, u
   );
 });
 
-test("guardrail 5: the 50 MB cap and 30s timeout are pinned and wired into arrFetch", () => {
+test("guardrail 5: the 50 MB cap and 30s default timeout are pinned and wired into arrFetch", () => {
   // The constants are module-private and arrFetch does real network I/O, so a
   // runtime assertion isn't possible here. Pin the source text instead: this
   // fails the suite if anyone lowers the cap (the old 10 MB cap silently
@@ -241,7 +252,16 @@ test("guardrail 5: the 50 MB cap and 30s timeout are pinned and wired into arrFe
   assert.match(source, /const ARR_FETCH_MAX_BYTES = 50 \* 1024 \* 1024;/);
   assert.match(source, /const ARR_FETCH_TIMEOUT_MS = 30_000;/);
   assert.match(source, /maxResponseBytes: ARR_FETCH_MAX_BYTES/);
-  assert.match(source, /timeoutMs: ARR_FETCH_TIMEOUT_MS/);
+  // The 30s default stays wired; a caller may only pass its own (the
+  // interactive release search, pinned at 120s below), never drop the timeout.
+  assert.match(source, /timeoutMs: options\.timeoutMs \?\? ARR_FETCH_TIMEOUT_MS/);
+  assert.match(source, /export const RELEASE_SEARCH_TIMEOUT_MS = 120_000;/);
+  assert.match(source, /\/api\/v3\/release\?\$\{query\}`, \{ timeoutMs: RELEASE_SEARCH_TIMEOUT_MS \}/);
+  // EVERY interactive release read waits that long — the request "Pick release"
+  // and the issue Replace too (their background job was pointless at 30s).
+  const releaseReads = [...source.matchAll(/arrFetch<ArrRelease\[\]>\(([^)]*)\)/g)].map((m) => m[1]);
+  assert.ok(releaseReads.length >= 3, "the three /api/v3/release reads are found");
+  for (const call of releaseReads) assert.match(call, /timeoutMs: RELEASE_SEARCH_TIMEOUT_MS/, call);
 });
 
 test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback actually fires", () => {

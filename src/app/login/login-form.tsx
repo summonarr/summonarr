@@ -11,6 +11,7 @@ import { useSummonarrSession } from "@/components/auth/summonarr-session-provide
 import { withBasePath } from "@/lib/base-path";
 import { safeInternalPath } from "@/lib/safe-url";
 import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type RequestOptionsJSON } from "@/lib/client/webauthn";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -33,6 +34,9 @@ const LOGIN_ERROR_CODE_KEYS: Record<string, string> = {
   oidc_idp_error: "auth.login.error.oidc.oidc_idp_error",
   oidc_user_rejected: "auth.login.error.oidc.oidc_user_rejected",
   oidc_rebind_required: "auth.login.error.oidc.oidc_rebind_required",
+  oidc_email_unverified: "auth.login.error.oidc.oidc_email_unverified",
+  oidc_issuer_mismatch: "auth.login.error.oidc.oidc_issuer_mismatch",
+  oidc_not_allowed: "auth.login.error.oidc.oidc_not_allowed",
   oidc_setup_required: "auth.login.error.oidc.oidc_setup_required",
   account_disabled: "auth.login.error.oidc.account_disabled",
   oidc_session_error: "auth.login.error.oidc.oidc_session_error",
@@ -80,7 +84,7 @@ function parseMfaChallenge(body: unknown): MfaChallenge | null {
 async function signInWithFetch(
   provider: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect",
   payload: Record<string, unknown>,
-): Promise<{ ok: boolean; error?: string; offline?: boolean; disabled?: boolean; mfa?: MfaChallenge }> {
+): Promise<{ ok: boolean; error?: string; offline?: boolean; disabled?: boolean; mfa?: MfaChallenge; rateLimited?: Response }> {
   let res: Response;
   try {
     res = await fetch(withBasePath(`/api/auth/sign-in/${provider}`), {
@@ -96,6 +100,7 @@ async function signInWithFetch(
     // is wrong when their WiFi dropped sends them to retype it forever.
     return { ok: false, offline: true };
   }
+  if (res.status === 429) return { ok: false, rateLimited: res };
   if (!res.ok) {
     // No default text here: callers substitute their own (translated) message.
     let error: string | undefined;
@@ -349,6 +354,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
       setError(
         res.offline
           ? t("auth.login.error.network")
+          : res.rateLimited
+            ? (rateLimitMessage(res.rateLimited, t) ?? t("auth.login.error.signInFailed"))
           : res.disabled
             ? (res.error ?? t("auth.login.error.signInFailed"))
             : provider === "credentials"
@@ -415,6 +422,15 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
           if (data.authenticated) { authenticated = true; break; }
         } else if (poll.status === 410) {
           break;
+        } else if (poll.status === 400 || poll.status === 429 || poll.status === 503) {
+          // Non-transient: retrying every second until the deadline only burns
+          // the rate-limit budget. Stop and show the server's translated error.
+          const body: { error?: string } | null = await poll.json().catch(() => null);
+          if (qcRunRef.current !== myRun) return;
+          setError(body?.error || t("auth.login.error.quickConnectFailed"));
+          setLoading(false);
+          setQcCode(null);
+          return;
         } else {
           // Fast non-OK response (401/500/…) — pause so the loop can't hot-spin.
           await new Promise((r) => setTimeout(r, 1000));
@@ -448,6 +464,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
       setError(
         result.offline
           ? t("auth.login.error.network")
+          : result.rateLimited
+            ? (rateLimitMessage(result.rateLimited, t) ?? t("auth.login.error.signInFailed"))
           : result.disabled
             ? (result.error ?? t("auth.login.error.signInFailed"))
             : t("auth.login.error.quickConnectFailed")

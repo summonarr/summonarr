@@ -43,7 +43,8 @@ Before reporting, check whether the issue is already mitigated. We'd rather hear
 
 **Boot guards (production refuses to start without these):**
 
-- `NEXTAUTH_SECRET` — minimum 32 characters
+- `NEXTAUTH_SECRET` — minimum 32 characters; each signing purpose (sessions, sign-in flow state, request tokens, …) uses its own HKDF subkey of it, never the raw value
+- `NEXTAUTH_SECRET_PREVIOUS` (optional, verify-only, for a planned rotation) — minimum 32 characters and never equal to `CRON_SECRET` / `TOKEN_ENCRYPTION_KEY`
 - `AUTH_URL` — fixes the public origin so the CSRF `Origin`/`Referer` check can't be tricked by a forged `Host` header
 - `TRUST_PROXY=true` — required for **internet-facing** deployments: when `AUTH_URL` is a public host, production refuses to boot without it (the local-only Host guard is spoofable and can't protect a public instance)
 - `SUMMONARR_ALLOW_LOCAL_ONLY=true` — required to run **local-only mode** (no trusted proxy) in production. Local-only mode is gated only by the client-supplied `Host` header, so it is **not** an internet-facing access control: production fails closed unless the operator explicitly asserts the host is private (LAN-only, loopback-bound, or firewalled). It cannot unlock a public `AUTH_URL`. Development is unaffected.
@@ -75,7 +76,7 @@ A misconfigured deployment fails closed at startup, not silently at runtime.
 
 **Backup encryption:** AES-256-GCM with PBKDF2-SHA256 / 600,000 iterations (NIST SP 800-132 recommends ≥210k). The password lives in the operator's environment, not the database — a compromised admin account can trigger a backup but cannot decrypt one.
 
-**Per-device sessions:** Each session is tracked in `AuthSession` with a UA fingerprint and per-device revocation. Role demotions propagate within 10 seconds for `ADMIN`/`ISSUE_ADMIN`. A browser session lasts exactly its admin-configured duration (desktop / mobile / remember-me; each capped at 90 days) with no inactivity timeout; a native-app (iOS) bearer session has no time-based expiry and ends only when revoked — per-device or everywhere from the Sessions page, or by a password change / account deactivation.
+**Per-device sessions:** Each session is tracked in `AuthSession` with per-device revocation, and its token is bound to the transport it was issued for: a browser's cookie is refused as an `Authorization: Bearer` token and an app's bearer token is refused as a cookie. The User-Agent only labels the device; it is never an authorization input (the client chooses it). Role demotions propagate within 10 seconds for `ADMIN`/`ISSUE_ADMIN`. A browser session lasts exactly its admin-configured duration (desktop / mobile / remember-me; each capped at 90 days) with no inactivity timeout; a native-app (iOS) bearer session has no time-based expiry and ends only when revoked — per-device or everywhere from the Sessions page, or by a password change / account deactivation.
 
 **Audit log:** Sensitive `Setting` keys (Radarr/Sonarr/Plex/Jellyfin/Discord tokens, SMTP password) are redacted to `[redacted]` before being written to the audit log.
 

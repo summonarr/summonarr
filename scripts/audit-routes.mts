@@ -51,7 +51,6 @@ const API_ROOT = join(process.cwd(), "src", "app", "api");
 const ALLOWLIST: Array<{ prefix: string; reason: string }> = [
   { prefix: "auth/", reason: "login/register/setup-status/plex-pin — public or first-run gated" },
   { prefix: "setup/", reason: "first-run import — gated on userCount===0 / advisory lock" },
-  { prefix: "discord/", reason: "Discord-signed or requireAuth per-route; mixed, hand-audited" },
   { prefix: "interactions", reason: "Discord Ed25519 signature verification" },
   { prefix: "health", reason: "public liveness probe" },
 ];
@@ -64,8 +63,10 @@ const ALLOWLIST: Array<{ prefix: string; reason: string }> = [
  * needs a reason — adding here is a security decision.
  */
 const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
-  // fix-match/thumb and /api/events both call requireAuth inline, so the token
-  // grep already passes them — they need no exception entry.
+  // /api/events calls requireAuth inline, which proves authentication — all a
+  // non-admin route needs — so it needs no entry. fix-match/thumb is an
+  // /api/admin route, where requireAuth alone is NOT enough; it is listed in
+  // INLINE_GUARDED_ADMIN_ROUTES below.
   {
     route: "/api/config/compat",
     reason: "intentionally public, coarse API-version descriptor (no secrets/DB) — native clients gate BEFORE sign-in; pre-auth via isPublicPath in proxy.ts",
@@ -104,18 +105,39 @@ const PERMISSION_GUARDED_ADMIN_ROUTES: Array<{ route: string; reason: string }> 
   { route: "/api/admin/server-users/diagnose", reason: "read-only Jellyfin /Users diagnosis delegated via withPermission(Permission.MANAGE_USERS) — same surface as /api/admin/server-users; emails are masked in the response" },
 ];
 
+/**
+ * /api/admin/* routes that cannot use a wrapper (guardrail 6a: they return an
+ * image or a stream) and so call `requireAuth()` inline, then make their own
+ * capability check. requireAuth only proves "signed in", so it is not an admin
+ * guard on its own: a route listed here must reach BOTH requireAuth and the
+ * check named in `check`, and an unlisted admin route guarded only by
+ * requireAuth fails. Adding here is a security decision.
+ */
+const INLINE_GUARDED_ADMIN_ROUTES: Array<{ route: string; check: string; reason: string }> = [
+  {
+    route: "/api/admin/fix-match/thumb",
+    check: "hasPermission",
+    reason: "returns an image, so it can't use withIssueAdmin; requireAuth (DB-checked) then hasPermission(MANAGE_ISSUES) — the same bit withIssueAdmin gates its sibling fix-match routes on, so clearing it revokes thumbnail access too",
+  },
+];
+
 /** Tokens that prove an ADMIN-capable guard is present. */
-const ADMIN_TOKENS = ["withAdmin", "withIssueAdmin", "requireAuth", "isCronAuthorized", "getCronActor"];
+// `requireAuth` is deliberately NOT here: without a role option it admits any
+// signed-in user, so an /api/admin route guarded by it alone is guarded as
+// any-authenticated-user. Inline-auth admin routes go in
+// INLINE_GUARDED_ADMIN_ROUTES, which also demands their capability check.
+const ADMIN_TOKENS = ["withAdmin", "withIssueAdmin", "isCronAuthorized", "getCronActor"];
 /** Tokens that prove SOME auth guard is present (superset of ADMIN_TOKENS). */
 // `withPermission` wraps withAuth and gates on a capability bit — it proves
 // authentication but not a specific role, so it stays out of ADMIN_TOKENS
 // (/api/admin/* routes still need a role wrapper or the proxy backstop).
+// `requireAuth` proves authentication, which is all a non-admin route needs.
 //
 // `timingSafeEqual` is deliberately NOT here: it's the webhook-token compare and
 // is already required in the `isWebhook` branch below. Accepting it as a generic
 // guard would let a future non-webhook route that imports it for an unrelated
 // string compare pass with no session guard at all.
-const ANY_AUTH_TOKENS = [...ADMIN_TOKENS, "withAuth", "withPermission"];
+const ANY_AUTH_TOKENS = [...ADMIN_TOKENS, "withAuth", "withPermission", "requireAuth"];
 
 /** The handler names Next.js recognizes as HTTP method exports on a route file. */
 const HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
@@ -424,11 +446,18 @@ function main(): void {
       } else if (isAdmin) {
         const permissionGuarded = PERMISSION_GUARDED_ADMIN_ROUTES.some((e) => e.route === route);
         const adminTokens = permissionGuarded ? [...ADMIN_TOKENS, "withPermission"] : ADMIN_TOKENS;
-        if (!reachesToken(handler, adminTokens, byName)) {
+        const inline = INLINE_GUARDED_ADMIN_ROUTES.find((e) => e.route === route);
+        const inlineGuarded =
+          inline !== undefined &&
+          reachesToken(handler, ["requireAuth"], byName) &&
+          reachesToken(handler, [inline.check], byName);
+        if (!inlineGuarded && !reachesToken(handler, adminTokens, byName)) {
           failures.push({
             route,
             file,
-            reason: `${handler.name}: admin handler missing an ADMIN-capable guard (withAdmin/withIssueAdmin/requireAuth)`,
+            reason: inline
+              ? `${handler.name}: inline-guarded admin handler must call both requireAuth and ${inline.check}`
+              : `${handler.name}: admin handler missing an ADMIN-capable guard (withAdmin/withIssueAdmin; requireAuth alone is authentication only)`,
           });
         }
       } else if (!reachesToken(handler, ANY_AUTH_TOKENS, byName)) {

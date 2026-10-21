@@ -79,6 +79,10 @@ export const BACKUP_TABLES = [
   "TitleSuggestion",
   "BlacklistItem",
   "CleanupProtection",
+  // Snapshot of each media server's own watch records (never-watched report).
+  // Derived — the next upstream-watch refresh rebuilds it — but listed because
+  // BACKUP_TABLES must cover every model.
+  "UpstreamWatchEvidence",
 ] as const;
 
 export const BACKUP_ENUMS = [

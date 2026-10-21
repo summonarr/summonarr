@@ -1,6 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { requireFeature } from "@/lib/features";
 import { getMediaPlayStats } from "@/lib/play-history";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import {
@@ -53,12 +54,14 @@ export default async function MediaActivityPage({
   params: Promise<{ tmdbId: string }>;
   searchParams: Promise<{ type?: string }>;
 }) {
+  await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { tmdbId: tmdbIdStr } = await params;
   const tmdbId = parseInt(tmdbIdStr, 10);
-  if (!Number.isFinite(tmdbId)) notFound();
+  // tmdbId is an INT4 column: anything past it would throw in Postgres (500).
+  if (!Number.isInteger(tmdbId) || tmdbId < 1 || tmdbId > 2147483647) notFound();
 
   // TMDB ids are namespaced per type, so a movie and a show can share one id.
   // When the linking surface passes ?type=, scope the stats to that media type.

@@ -4,6 +4,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
 import type { TmdbMedia, MediaType } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const MAX_BATCH = 200;
@@ -37,7 +38,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   for (const raw of rawItems) {
     if (!raw || typeof raw !== "object") continue;
     const { id, type, releaseDate } = raw as { id?: unknown; type?: unknown; releaseDate?: unknown };
-    if (typeof id !== "number" || !Number.isInteger(id) || id <= 0) continue;
+    if (typeof id !== "number" || !isTmdbIdInRange(id)) continue;
     if (type !== "movie" && type !== "tv") continue;
     const key = `${type}:${id}`;
     if (seen.has(key)) continue;

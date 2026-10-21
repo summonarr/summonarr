@@ -1079,7 +1079,7 @@ test("issue-reply push to the reporter: notifyOnIssue where-shape, 100-char body
   // Recipient query: the user's own subs, gated on their notifyOnIssue pref in
   // the where itself (no include — no role filtering for the reporter).
   assert.deepEqual(subQueries[0], {
-    where: { userId: "u-rep", user: { notifyOnIssue: true } },
+    where: { userId: "u-rep", user: { notifyOnIssue: true, deactivatedAt: null } }, // guardrail 33
     include: { user: { select: { locale: true } } }, // the reporter's language
   });
   assert.equal(relayCalls.length, 1);

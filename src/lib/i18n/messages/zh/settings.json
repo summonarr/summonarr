@@ -106,6 +106,8 @@
   "settings.featureDesc.admin_apiDocs": "显示 /admin/api-docs OpenAPI 参考及导航链接。",
   "settings.featureLabel.admin_cleanup": "媒体库清理页面",
   "settings.featureDesc.admin_cleanup": "显示 /admin/cleanup 页面：按可配置规则排序的无人观看的作品，管理员可在试运行后从 Radarr/Sonarr 中删除。不会自动删除任何内容。默认关闭。",
+  "settings.featureLabel.admin_neverWatched": "从未观看页面",
+  "settings.featureDesc.admin_neverWatched": "显示 /admin/never-watched 页面：此服务器记录的历史中无人观看过的每部电影、每部剧集和每一季，按占用空间排序，并与每台媒体服务器自身的观看记录进行核对。只读；删除需通过媒体库清理进行。",
   "settings.featureLabel.trashGuidesEnabled": "TRaSH Guides",
   "settings.featureDesc.trashGuidesEnabled": "启用 TRaSH Guides 管理页面和每晚同步。",
   "settings.features.toggle": "切换{label}",
@@ -391,8 +393,11 @@
   "settings.featureLabel.integration_webhooks": "Webhook、ntfy 和 Gotify 通道",
   "settings.featureDesc.integration_webhooks": "将请求和问题事件发送到在“设置 → 通知”中配置的 Webhook、ntfy 和 Gotify 通道。",
   "settings.nav.notificationAgents": "Webhook 与 ntfy",
+  "settings.nav.arrAlerts": "Radarr/Sonarr 提醒",
   "settings.section.notificationAgents.title": "Webhook、ntfy 和 Gotify 通道",
   "settings.section.notificationAgents.description": "将请求、问题和下载事件转发到您自己的服务。每个通道可选择接收的事件；发送失败会重试三次。",
+  "settings.section.arrAlerts.title": "Radarr/Sonarr 提醒",
+  "settings.section.arrAlerts.description": "Summonarr 会定期检查每个 Radarr 和 Sonarr 实例，并将磁盘空间不足、下载失败或新出现需要处理的下载，发送到上方订阅了这些事件的通道。管理菜单中的“下载队列”链接会显示有多少下载需要处理。",
   "settings.nav.plexWatchlist": "Plex 待看清单",
   "settings.section.plexWatchlist.title": "Plex 待看清单",
   "settings.section.plexWatchlist.description": "待看清单自动请求如何读取 Plex 待看清单。只要用户自己用 Plex 登录过，就始终使用其本人的登录；这些开关将你的 Plex 服务器所有者账户添加为第二种方式。",
@@ -416,5 +421,11 @@
   "settings.media.tokenPlaceholder.plex": "粘贴此服务器的管理员令牌",
   "settings.media.tokenPlaceholder.jellyfin": "粘贴此服务器的 API 密钥",
   "settings.cron.job.trakt.name": "Trakt 同步",
-  "settings.cron.job.trakt.description": "从已连接用户的 Trakt 待看清单中请求新作品，并导入其 Trakt 观看记录用于“为你推荐”（需要 Trakt Client Secret）"
+  "settings.cron.job.trakt.description": "从已连接用户的 Trakt 待看清单中请求新作品，并导入其 Trakt 观看记录用于“为你推荐”（需要 Trakt Client Secret）",
+  "settings.cron.job.upstreamWatch.name": "服务器观看记录",
+  "settings.cron.job.upstreamWatch.description": "读取每台 Plex 和 Jellyfin 服务器自身的观看记录，确保在安装 Summonarr 之前（或其停止运行期间）看过的作品不会被报告为未观看",
+  "settings.cron.job.arrWatch.name": "Radarr/Sonarr 监控",
+  "settings.cron.job.arrWatch.description": "检查每个 Radarr 和 Sonarr 实例是否存在磁盘空间不足、下载失败以及需要处理的下载，并提醒订阅了这些事件的通知通道",
+  "settings.cron.job.arrSnapshots.name": "Radarr/Sonarr 页面刷新",
+  "settings.cron.job.arrSnapshots.description": "按优先级重新读取管理员在过去一天内打开过的 Radarr/Sonarr 页面（队列和健康状况每 5 分钟；缺失、历史、日历和标题每 10 分钟；Arr 系统每 15 分钟），让页面打开时即显示最新数据"
 }

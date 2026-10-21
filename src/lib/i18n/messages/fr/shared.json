@@ -54,5 +54,7 @@
   "shared.bell.loadFailed": "Impossible de charger les notifications.",
   "shared.bell.loading": "Chargement des notifications…",
   "shared.common.clearSearch": "Effacer la recherche",
-  "shared.thread.placeholderShortcut": "Écrivez un message… ({shortcut} pour envoyer)"
+  "shared.thread.placeholderShortcut": "Écrivez un message… ({shortcut} pour envoyer)",
+  "shared.rateLimited.generic": "Trop de requêtes. Réessayez dans un instant.",
+  "shared.rateLimited.seconds": "Trop de requêtes. Réessayez dans {seconds} s."
 }

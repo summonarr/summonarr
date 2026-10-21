@@ -8,12 +8,13 @@
 // may live in only one area — the test fails on a duplicate. Adding an area
 // means adding its import to EVERY locale below.
 //
-// Statically imported (not lazily) because the active catalog is shipped to
-// the client in the root layout anyway, and the catalogs are small.
+// Statically imported (not lazily): the server translates from every area, and
+// the root layout ships the client-visible subset (see clientCatalog).
 
 import type { Locale } from "./locales";
 import type { Messages } from "./translate";
 import enAdminActivity from "./messages/en/adminActivity.json";
+import enAdminArr from "./messages/en/adminArr.json";
 import enAdminManage from "./messages/en/adminManage.json";
 import enAdminQueue from "./messages/en/adminQueue.json";
 import enApiAdmin from "./messages/en/apiAdmin.json";
@@ -37,6 +38,7 @@ import enSettingsForms from "./messages/en/settingsForms.json";
 import enShared from "./messages/en/shared.json";
 import enTrash from "./messages/en/trash.json";
 import esAdminActivity from "./messages/es/adminActivity.json";
+import esAdminArr from "./messages/es/adminArr.json";
 import esAdminManage from "./messages/es/adminManage.json";
 import esAdminQueue from "./messages/es/adminQueue.json";
 import esApiAdmin from "./messages/es/apiAdmin.json";
@@ -60,6 +62,7 @@ import esSettingsForms from "./messages/es/settingsForms.json";
 import esShared from "./messages/es/shared.json";
 import esTrash from "./messages/es/trash.json";
 import frAdminActivity from "./messages/fr/adminActivity.json";
+import frAdminArr from "./messages/fr/adminArr.json";
 import frAdminManage from "./messages/fr/adminManage.json";
 import frAdminQueue from "./messages/fr/adminQueue.json";
 import frApiAdmin from "./messages/fr/apiAdmin.json";
@@ -83,6 +86,7 @@ import frSettingsForms from "./messages/fr/settingsForms.json";
 import frShared from "./messages/fr/shared.json";
 import frTrash from "./messages/fr/trash.json";
 import deAdminActivity from "./messages/de/adminActivity.json";
+import deAdminArr from "./messages/de/adminArr.json";
 import deAdminManage from "./messages/de/adminManage.json";
 import deAdminQueue from "./messages/de/adminQueue.json";
 import deApiAdmin from "./messages/de/apiAdmin.json";
@@ -106,6 +110,7 @@ import deSettingsForms from "./messages/de/settingsForms.json";
 import deShared from "./messages/de/shared.json";
 import deTrash from "./messages/de/trash.json";
 import ptAdminActivity from "./messages/pt/adminActivity.json";
+import ptAdminArr from "./messages/pt/adminArr.json";
 import ptAdminManage from "./messages/pt/adminManage.json";
 import ptAdminQueue from "./messages/pt/adminQueue.json";
 import ptApiAdmin from "./messages/pt/apiAdmin.json";
@@ -129,6 +134,7 @@ import ptSettingsForms from "./messages/pt/settingsForms.json";
 import ptShared from "./messages/pt/shared.json";
 import ptTrash from "./messages/pt/trash.json";
 import itAdminActivity from "./messages/it/adminActivity.json";
+import itAdminArr from "./messages/it/adminArr.json";
 import itAdminManage from "./messages/it/adminManage.json";
 import itAdminQueue from "./messages/it/adminQueue.json";
 import itApiAdmin from "./messages/it/apiAdmin.json";
@@ -152,6 +158,7 @@ import itSettingsForms from "./messages/it/settingsForms.json";
 import itShared from "./messages/it/shared.json";
 import itTrash from "./messages/it/trash.json";
 import zhAdminActivity from "./messages/zh/adminActivity.json";
+import zhAdminArr from "./messages/zh/adminArr.json";
 import zhAdminManage from "./messages/zh/adminManage.json";
 import zhAdminQueue from "./messages/zh/adminQueue.json";
 import zhApiAdmin from "./messages/zh/apiAdmin.json";
@@ -175,14 +182,73 @@ import zhSettingsForms from "./messages/zh/settingsForms.json";
 import zhShared from "./messages/zh/shared.json";
 import zhTrash from "./messages/zh/trash.json";
 
-export const CATALOGS: Record<Locale, Messages> = {
-  en: { ...enAdminActivity, ...enAdminManage, ...enAdminQueue, ...enApiAdmin, ...enApiAuth, ...enApiUser, ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enNotify, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enSettings, ...enSettingsForms, ...enShared, ...enTrash },
-  es: { ...esAdminActivity, ...esAdminManage, ...esAdminQueue, ...esApiAdmin, ...esApiAuth, ...esApiUser, ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esNotify, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esSettings, ...esSettingsForms, ...esShared, ...esTrash },
-  fr: { ...frAdminActivity, ...frAdminManage, ...frAdminQueue, ...frApiAdmin, ...frApiAuth, ...frApiUser, ...frAppearance, ...frAuth, ...frBrowse, ...frDetail, ...frHome, ...frMedia, ...frNav, ...frNotify, ...frPersonal, ...frProfile, ...frRequest, ...frRequests, ...frSearch, ...frSettings, ...frSettingsForms, ...frShared, ...frTrash },
-  de: { ...deAdminActivity, ...deAdminManage, ...deAdminQueue, ...deApiAdmin, ...deApiAuth, ...deApiUser, ...deAppearance, ...deAuth, ...deBrowse, ...deDetail, ...deHome, ...deMedia, ...deNav, ...deNotify, ...dePersonal, ...deProfile, ...deRequest, ...deRequests, ...deSearch, ...deSettings, ...deSettingsForms, ...deShared, ...deTrash },
-  pt: { ...ptAdminActivity, ...ptAdminManage, ...ptAdminQueue, ...ptApiAdmin, ...ptApiAuth, ...ptApiUser, ...ptAppearance, ...ptAuth, ...ptBrowse, ...ptDetail, ...ptHome, ...ptMedia, ...ptNav, ...ptNotify, ...ptPersonal, ...ptProfile, ...ptRequest, ...ptRequests, ...ptSearch, ...ptSettings, ...ptSettingsForms, ...ptShared, ...ptTrash },
-  it: { ...itAdminActivity, ...itAdminManage, ...itAdminQueue, ...itApiAdmin, ...itApiAuth, ...itApiUser, ...itAppearance, ...itAuth, ...itBrowse, ...itDetail, ...itHome, ...itMedia, ...itNav, ...itNotify, ...itPersonal, ...itProfile, ...itRequest, ...itRequests, ...itSearch, ...itSettings, ...itSettingsForms, ...itShared, ...itTrash },
-  zh: { ...zhAdminActivity, ...zhAdminManage, ...zhAdminQueue, ...zhApiAdmin, ...zhApiAuth, ...zhApiUser, ...zhAppearance, ...zhAuth, ...zhBrowse, ...zhDetail, ...zhHome, ...zhMedia, ...zhNav, ...zhNotify, ...zhPersonal, ...zhProfile, ...zhRequest, ...zhRequests, ...zhSearch, ...zhSettings, ...zhSettingsForms, ...zhShared, ...zhTrash },
+// Every area of every locale, keyed by area name, so a caller can compose a
+// catalog from the areas it needs. CATALOGS below is the union (server use).
+const AREAS: Record<Locale, Record<string, Messages>> = {
+  en: { adminActivity: enAdminActivity, adminArr: enAdminArr, adminManage: enAdminManage, adminQueue: enAdminQueue, apiAdmin: enApiAdmin, apiAuth: enApiAuth, apiUser: enApiUser, appearance: enAppearance, auth: enAuth, browse: enBrowse, detail: enDetail, home: enHome, media: enMedia, nav: enNav, notify: enNotify, personal: enPersonal, profile: enProfile, request: enRequest, requests: enRequests, search: enSearch, settings: enSettings, settingsForms: enSettingsForms, shared: enShared, trash: enTrash },
+  es: { adminActivity: esAdminActivity, adminArr: esAdminArr, adminManage: esAdminManage, adminQueue: esAdminQueue, apiAdmin: esApiAdmin, apiAuth: esApiAuth, apiUser: esApiUser, appearance: esAppearance, auth: esAuth, browse: esBrowse, detail: esDetail, home: esHome, media: esMedia, nav: esNav, notify: esNotify, personal: esPersonal, profile: esProfile, request: esRequest, requests: esRequests, search: esSearch, settings: esSettings, settingsForms: esSettingsForms, shared: esShared, trash: esTrash },
+  fr: { adminActivity: frAdminActivity, adminArr: frAdminArr, adminManage: frAdminManage, adminQueue: frAdminQueue, apiAdmin: frApiAdmin, apiAuth: frApiAuth, apiUser: frApiUser, appearance: frAppearance, auth: frAuth, browse: frBrowse, detail: frDetail, home: frHome, media: frMedia, nav: frNav, notify: frNotify, personal: frPersonal, profile: frProfile, request: frRequest, requests: frRequests, search: frSearch, settings: frSettings, settingsForms: frSettingsForms, shared: frShared, trash: frTrash },
+  de: { adminActivity: deAdminActivity, adminArr: deAdminArr, adminManage: deAdminManage, adminQueue: deAdminQueue, apiAdmin: deApiAdmin, apiAuth: deApiAuth, apiUser: deApiUser, appearance: deAppearance, auth: deAuth, browse: deBrowse, detail: deDetail, home: deHome, media: deMedia, nav: deNav, notify: deNotify, personal: dePersonal, profile: deProfile, request: deRequest, requests: deRequests, search: deSearch, settings: deSettings, settingsForms: deSettingsForms, shared: deShared, trash: deTrash },
+  pt: { adminActivity: ptAdminActivity, adminArr: ptAdminArr, adminManage: ptAdminManage, adminQueue: ptAdminQueue, apiAdmin: ptApiAdmin, apiAuth: ptApiAuth, apiUser: ptApiUser, appearance: ptAppearance, auth: ptAuth, browse: ptBrowse, detail: ptDetail, home: ptHome, media: ptMedia, nav: ptNav, notify: ptNotify, personal: ptPersonal, profile: ptProfile, request: ptRequest, requests: ptRequests, search: ptSearch, settings: ptSettings, settingsForms: ptSettingsForms, shared: ptShared, trash: ptTrash },
+  it: { adminActivity: itAdminActivity, adminArr: itAdminArr, adminManage: itAdminManage, adminQueue: itAdminQueue, apiAdmin: itApiAdmin, apiAuth: itApiAuth, apiUser: itApiUser, appearance: itAppearance, auth: itAuth, browse: itBrowse, detail: itDetail, home: itHome, media: itMedia, nav: itNav, notify: itNotify, personal: itPersonal, profile: itProfile, request: itRequest, requests: itRequests, search: itSearch, settings: itSettings, settingsForms: itSettingsForms, shared: itShared, trash: itTrash },
+  zh: { adminActivity: zhAdminActivity, adminArr: zhAdminArr, adminManage: zhAdminManage, adminQueue: zhAdminQueue, apiAdmin: zhApiAdmin, apiAuth: zhApiAuth, apiUser: zhApiUser, appearance: zhAppearance, auth: zhAuth, browse: zhBrowse, detail: zhDetail, home: zhHome, media: zhMedia, nav: zhNav, notify: zhNotify, personal: zhPersonal, profile: zhProfile, request: zhRequest, requests: zhRequests, search: zhSearch, settings: zhSettings, settingsForms: zhSettingsForms, shared: zhShared, trash: zhTrash },
 };
+
+function merge(areas: Record<string, Messages>, pick?: (area: string) => boolean): Messages {
+  const out: Record<string, string> = {};
+  for (const [name, messages] of Object.entries(areas)) {
+    if (!pick || pick(name)) Object.assign(out, messages);
+  }
+  return out;
+}
+
+export const CATALOGS: Record<Locale, Messages> = Object.fromEntries(
+  (Object.keys(AREAS) as Locale[]).map((l) => [l, merge(AREAS[l])]),
+) as Record<Locale, Messages>;
+
+// What the BROWSER needs is a subset of what the server needs. The root layout
+// serialises the active catalog into every full page load, so shipping all 24
+// areas cost ~100 KB gzipped on every document, the login page included.
+//
+//   SERVER_ONLY_AREAS — read only by route handlers and server libs. No client
+//     module can reach a key in these (tests/i18n-client-catalog.test.mts walks
+//     the client import graph to prove it), so they are never sent.
+//   ADMIN_ONLY_AREAS — read only by admin-gated client UI (the admin pages, the
+//     ADMIN-only /settings page, and the admin chips on the detail pages). Sent
+//     only to a session that passes the same gate as the admin layout.
+//
+// Everything else ships to everyone. Server-side translation is unaffected: it
+// reads CATALOGS, which still holds every area.
+export const SERVER_ONLY_AREAS: readonly string[] = ["apiAdmin", "apiAuth", "apiUser"];
+export const ADMIN_ONLY_AREAS: readonly string[] = [
+  "adminArr",
+  "adminManage",
+  "adminQueue",
+  "settings",
+  "settingsForms",
+  "trash",
+];
+
+const CLIENT_CACHE = new Map<string, Messages>();
+
+/** The catalog to hand to the client provider. Memoised per (locale, admin) so
+ *  the provider's useMemo sees a stable object across renders. */
+export function clientCatalog(locale: Locale, includeAdmin: boolean): Messages {
+  const cacheKey = `${locale}:${includeAdmin ? "admin" : "user"}`;
+  let cached = CLIENT_CACHE.get(cacheKey);
+  if (!cached) {
+    cached = merge(
+      AREAS[locale],
+      (area) => !SERVER_ONLY_AREAS.includes(area) && (includeAdmin || !ADMIN_ONLY_AREAS.includes(area)),
+    );
+    CLIENT_CACHE.set(cacheKey, cached);
+  }
+  return cached;
+}
+
+/** Area names that exist for a locale — for tests pinning the two lists above. */
+export function catalogAreas(locale: Locale): string[] {
+  return Object.keys(AREAS[locale]);
+}
 
 export const FALLBACK_MESSAGES: Messages = CATALOGS.en;

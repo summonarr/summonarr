@@ -19,6 +19,7 @@ import {
   getVisibleAdminItems,
   filterNavByFeatures,
   navItemLabel,
+  navItemHref,
   isNavItemActive,
   type NavItem,
 } from "@/lib/nav-items";
@@ -27,6 +28,7 @@ import type { FeatureFlags } from "@/lib/features";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import { withBasePath } from "@/lib/base-path";
+import { AdminNavGroupList, NavCountBadge, type NavBadges } from "@/components/layout/admin-nav-groups";
 import {
   Drawer,
   DrawerPortal,
@@ -40,12 +42,14 @@ interface MobileNavDrawerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   featureFlags?: FeatureFlags;
+  navBadges?: NavBadges;
 }
 
 export function MobileNavDrawer({
   open,
   onOpenChange,
   featureFlags,
+  navBadges,
 }: MobileNavDrawerProps) {
   const t = useT();
   const pathname = usePathname();
@@ -114,14 +118,21 @@ export function MobileNavDrawer({
             {adminItems.length > 0 && (
               <>
                 <SectionHeader>{t("nav.section.admin")}</SectionHeader>
-                {adminItems.map((item) => (
-                  <NavLink
-                    key={item.href}
-                    item={item}
-                    active={isActive(item)}
-                    onClick={() => onOpenChange(false)}
-                  />
-                ))}
+                <AdminNavGroupList
+                  variant="drawer"
+                  items={adminItems}
+                  isActive={isActive}
+                  badges={navBadges}
+                  renderItem={(item) => (
+                    <NavLink
+                      key={item.href}
+                      item={item}
+                      active={isActive(item)}
+                      badge={navBadges?.[item.href]}
+                      onClick={() => onOpenChange(false)}
+                    />
+                  )}
+                />
               </>
             )}
 
@@ -251,17 +262,19 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
 function NavLink({
   item,
   active,
+  badge,
   onClick,
 }: {
   item: NavItem;
   active: boolean;
+  badge?: number;
   onClick: () => void;
 }) {
   const Icon = item.icon as IconComponent;
   const t = useT();
   return (
     <Link
-      href={item.href}
+      href={navItemHref(item, badge)}
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       className="ds-hover-tint flex items-center gap-3 font-medium transition-colors relative"
@@ -297,6 +310,7 @@ function NavLink({
         }}
       />
       {navItemLabel(item, t)}
+      <NavCountBadge count={badge} href={item.href} />
     </Link>
   );
 }

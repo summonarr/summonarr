@@ -111,19 +111,20 @@ const TRUSTED_ORIGIN = "http://localhost:3000";
 // Kept as a local fixture so a schema-contract change breaks these tests loudly.
 const EXPECTED: Record<string, string[]> = {
   User: ["id", "name", "email", "passwordHash", "role", "permissions", "mediaServer", "discordId", "autoApprove", "quotaExempt", "deactivatedAt", "purgedAt"],
-  PlexLibraryItem: ["tmdbId", "mediaType", "serverInstance", "filePath", "plexRatingKey", "title", "year", "overview"],
+  PlexLibraryItem: ["tmdbId", "mediaType", "serverInstance", "filePath", "plexRatingKey", "plexRatingKeys", "title", "year", "overview"],
   JellyfinLibraryItem: ["tmdbId", "mediaType", "serverInstance", "filePath", "jellyfinItemId", "jellyfinItemIds", "title", "year", "overview"],
-  TVEpisodeCache: ["source", "tmdbId", "seasonNumber", "episodeNumber"],
-  TVEpisodeCacheStaging: ["runId", "source", "tmdbId", "seasonNumber", "episodeNumber"],
-  PlayHistory: ["id", "source", "serverInstance", "tmdbId", "mediaType", "title", "year", "posterPath", "startedAt", "watched"],
+  TVEpisodeCache: ["source", "tmdbId", "seasonNumber", "episodeNumber", "addedAt"],
+  TVEpisodeCacheStaging: ["runId", "source", "tmdbId", "seasonNumber", "episodeNumber", "addedAt"],
+  PlayHistory: ["id", "source", "serverInstance", "tmdbId", "mediaType", "title", "year", "posterPath", "startedAt", "watched", "sourceShowId"],
   MediaRequest: ["id", "tmdbId", "mediaType", "arrInstance", "title", "posterPath", "status", "requestedBy"],
   TmdbCache: ["key", "data", "expiresAt"],
-  ActiveSession: ["id", "source", "serverInstance", "tmdbId", "title"],
+  ActiveSession: ["id", "source", "serverInstance", "tmdbId", "title", "sourceShowId"],
   MediaServerUser: ["id", "source", "serverInstance", "sourceUserId", "username"],
   RadarrWantedItem: ["tmdbId", "arrInstance"],
   SonarrWantedItem: ["tmdbId", "arrInstance"],
   RadarrAvailableItem: ["tmdbId", "arrInstance"],
   SonarrAvailableItem: ["tmdbId", "arrInstance"],
+  UpstreamWatchEvidence: ["source", "serverInstance", "itemKey", "seasonNumber", "mediaType", "playCount", "lastPlayedAt", "fetchedAt"],
 };
 
 function rowsFor(tables: Record<string, string[]>): SchemaRow[] {
@@ -324,4 +325,39 @@ test("authorized but the live schema has drifted → 200 { allOk:false } with th
   assert.deepEqual(body.tables.PlexLibraryItem.missing, ["overview"], "the exact missing column is reported");
   assert.equal(body.tables.User.ok, true, "an unaffected table stays ok");
   assert.deepEqual(body.tables.User.missing, []);
+});
+
+// ═══ columns this release range added (a skipped db push must not read allOk) ═══
+
+async function driftBody(drifted: Record<string, string[]>) {
+  const admin = await mintToken("ADMIN");
+  schemaRows = rowsFor(drifted);
+  const res = await GET(req({ ...bearer(admin.token), ...sameOrigin }), undefined);
+  assert.equal(res.status, 200);
+  return (await res.json()) as { allOk: boolean; tables: Record<string, { ok: boolean; missing: string[] }> };
+}
+
+test("drift: PlexLibraryItem without plexRatingKeys (guardrail 37c) reports allOk:false and names it", async () => {
+  const body = await driftBody({ ...EXPECTED, PlexLibraryItem: EXPECTED.PlexLibraryItem.filter((c) => c !== "plexRatingKeys") });
+  assert.equal(body.allOk, false, "both Plex writers and every ratingKey reader use the column — a skipped push must show");
+  assert.deepEqual(body.tables.PlexLibraryItem.missing, ["plexRatingKeys"]);
+});
+
+test("drift: PlayHistory without sourceShowId, and TVEpisodeCache without addedAt, are each reported", async () => {
+  const body = await driftBody({
+    ...EXPECTED,
+    PlayHistory: EXPECTED.PlayHistory.filter((c) => c !== "sourceShowId"),
+    TVEpisodeCache: EXPECTED.TVEpisodeCache.filter((c) => c !== "addedAt"),
+  });
+  assert.equal(body.allOk, false);
+  assert.deepEqual(body.tables.PlayHistory.missing, ["sourceShowId"]);
+  assert.deepEqual(body.tables.TVEpisodeCache.missing, ["addedAt"]);
+});
+
+test("drift: a missing UpstreamWatchEvidence TABLE reports every one of its columns missing", async () => {
+  const { UpstreamWatchEvidence: _absent, ...rest } = EXPECTED;
+  const body = await driftBody(rest);
+  assert.equal(body.allOk, false);
+  assert.equal(body.tables.UpstreamWatchEvidence.ok, false, "an absent table is not silently skipped");
+  assert.deepEqual(body.tables.UpstreamWatchEvidence.missing, EXPECTED.UpstreamWatchEvidence);
 });

@@ -246,7 +246,7 @@ interface RawEpisode {
 }
 
 function extractTrailerKey(videos?: RawVideos): string | null {
-  if (!videos?.results.length) return null;
+  if (!videos?.results?.length) return null;
   const trailers = videos.results.filter((v) => v.site === "YouTube" && v.type === "Trailer");
   const teasers  = videos.results.filter((v) => v.site === "YouTube" && v.type === "Teaser");
   const official = trailers.find((v) => v.official) ?? trailers[0] ?? teasers.find((v) => v.official) ?? teasers[0];

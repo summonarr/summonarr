@@ -3,11 +3,11 @@
 // admin's attention. Zero imports, zero I/O; the data half is arr-queue-data.ts.
 //
 //   • Sonarr reports one queue record PER EPISODE, so a season pack is N records
-//     sharing one downloadId. They fold into one row carrying every record id —
-//     a removal must send all of them in ONE bulk call, or the first DELETE
-//     removes the download and blocklists it and the rest 404 (or blocklist the
-//     same release again). Size/progress are the download's, not a sum: every
-//     episode record repeats the whole release's size.
+//     sharing one downloadId. They fold into one row carrying every record id;
+//     a removal sends ONE of them in ONE bulk call (`removalIds`) — any record
+//     resolves the whole download, and Sonarr v3 blocklists once per id sent.
+//     Size/progress are the download's, not a sum: every episode record
+//     repeats the whole release's size.
 //   • A row needs attention when Radarr/Sonarr say so — a tracked-download
 //     status of warning/error, an import that is blocked or failed, or a queue
 //     status of failed/warning/client-unavailable. Nothing here guesses from
@@ -27,10 +27,6 @@ export type QueuePhase =
   | "clientUnavailable"
   | "unknown";
 
-export const QUEUE_PHASES: readonly QueuePhase[] = [
-  "downloading", "queued", "paused", "delay", "importPending", "importing", "importBlocked", "failed", "clientUnavailable", "unknown",
-];
-
 export type QualityTag = "proper" | "repack" | "real";
 
 export interface QueueEpisode {
@@ -41,7 +37,7 @@ export interface QueueEpisode {
 export interface QueueItem {
   service: QueueService;
   instance: string;
-  /** Every queue record id this row covers (one per episode for a Sonarr pack). Removal sends them all. */
+  /** Every queue record id this row covers (one per episode for a Sonarr pack). Removal sends one per download (`removalIds`). */
   ids: number[];
   downloadId: string | null;
   /** The release name. */
@@ -92,11 +88,17 @@ export interface QueueItem {
 
 // Bounds on what one row carries to the browser. A pathological import can
 // report hundreds of status lines; the page needs the first few.
-const MAX_MESSAGES = 6;
+export const MAX_MESSAGES = 6;
 const MAX_MESSAGE_LEN = 300;
 const MAX_TEXT = 500;
-const MAX_LABELS = 20;
+export const MAX_LABELS = 20;
 const MAX_LABEL_LEN = 100;
+// A record's lists come from the arr, capped only by arrFetch's 50 MB, and the
+// fold runs synchronously (the arr-watch cron, the queue page, the Why?
+// status). So each list is deduped through a Set, kept to its cap, and READ at
+// most this many times its cap (guardrail 5i). arr-system.ts's constant,
+// repeated: this module has no imports, and arr-system imports it.
+export const PROJECTION_SCAN_FACTOR = 10;
 
 const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
 const nonNegInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null);
@@ -134,6 +136,8 @@ export type QueueRecord = {
   seasonNumber?: unknown;
   quality?: { quality?: { name?: unknown } | null; revision?: { version?: unknown; real?: unknown; isRepack?: unknown } | null } | null;
   languages?: unknown;
+  /** Sonarr v3's shape: ONE language object, no `languages` array. */
+  language?: unknown;
   customFormats?: unknown;
   customFormatScore?: unknown;
   outputPath?: unknown;
@@ -202,33 +206,59 @@ export function needsAttention(r: Pick<QueueRecord, "status" | "trackedDownloadS
   return status === "failed" || status === "warning" || status === "downloadclientunavailable";
 }
 
+// The first MAX_MESSAGES distinct messages, in order. Collection stops at the
+// cap, and each list (statusMessages, and every entry's messages) is read at
+// most PROJECTION_SCAN_FACTOR × the cap deep.
 function messagesOf(r: QueueRecord): string[] {
   const out: string[] = [];
+  const seen = new Set<string>();
+  const scan = MAX_MESSAGES * PROJECTION_SCAN_FACTOR;
   const push = (m: unknown) => {
-    const s = typeof m === "string" ? m.trim() : "";
-    if (s && !out.includes(s.slice(0, MAX_MESSAGE_LEN))) out.push(s.slice(0, MAX_MESSAGE_LEN));
+    const s = typeof m === "string" ? m.trim().slice(0, MAX_MESSAGE_LEN) : "";
+    if (s && !seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
   };
   push(r.errorMessage);
   if (Array.isArray(r.statusMessages)) {
-    for (const sm of r.statusMessages as Array<{ title?: unknown; messages?: unknown } | null>) {
+    const list = r.statusMessages as Array<{ title?: unknown; messages?: unknown } | null>;
+    for (let i = 0, n = Math.min(list.length, scan); i < n && out.length < MAX_MESSAGES; i++) {
+      const sm = list[i];
       if (!sm || typeof sm !== "object") continue;
-      if (Array.isArray(sm.messages) && sm.messages.length > 0) for (const m of sm.messages) push(m);
-      else push(sm.title);
+      const messages = sm.messages;
+      if (Array.isArray(messages) && messages.length > 0) {
+        for (let j = 0, k = Math.min(messages.length, scan); j < k && out.length < MAX_MESSAGES; j++) push(messages[j]);
+      } else push(sm.title);
     }
   }
-  return out.slice(0, MAX_MESSAGES);
+  return out;
 }
 
 /** The `name`s of a list of {id, name} objects (languages, custom formats) — deduplicated, bounded. */
 function namesOf(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
+  const list = v as Array<{ name?: unknown } | null>;
   const out: string[] = [];
-  for (const x of v as Array<{ name?: unknown } | null>) {
-    const n = typeof x?.name === "string" ? x.name.trim().slice(0, MAX_LABEL_LEN) : "";
-    if (n && !out.includes(n)) out.push(n);
-    if (out.length >= MAX_LABELS) break;
+  const seen = new Set<string>();
+  for (let i = 0, n = Math.min(list.length, MAX_LABELS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_LABELS; i++) {
+    const x = list[i];
+    const name = typeof x?.name === "string" ? x.name.trim().slice(0, MAX_LABEL_LEN) : "";
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      out.push(name);
+    }
   }
   return out;
+}
+
+// A record's languages: its `languages` list, or Sonarr v3's ONE `language`
+// object (QueueResource has no list there). arr-parse.ts's languageNamesOf,
+// repeated: this module has no imports.
+function languageNamesOf(r: { languages?: unknown; language?: unknown }): string[] {
+  const list = namesOf(r.languages);
+  const single = r.language;
+  return list.length > 0 || !single || typeof single !== "object" || Array.isArray(single) ? list : namesOf([single]);
 }
 
 function qualityTagsOf(revision: unknown): QualityTag[] {
@@ -273,7 +303,7 @@ function toItem(service: QueueService, instance: string, r: QueueRecord, id: num
     episodes,
     quality: textOrNull(r.quality?.quality?.name, 100),
     qualityTags: qualityTagsOf(r.quality?.revision),
-    languages: namesOf(r.languages),
+    languages: languageNamesOf(r),
     customFormats: namesOf(r.customFormats),
     customFormatScore: scoreOf(r.customFormatScore),
     size,
@@ -296,11 +326,18 @@ function toItem(service: QueueService, instance: string, r: QueueRecord, id: num
   };
 }
 
+const episodeKey = (e: QueueEpisode): string => `${e.seasonNumber}:${e.episodeNumber}`;
+
 // Folding a later episode record into the row its download already started.
-function mergeInto(row: QueueItem, next: QueueItem): void {
+// `episodeKeys` is the row's episodes as a Set: the folded list has no cap (one
+// entry per record), so a scan of it per record was quadratic.
+function mergeInto(row: QueueItem, next: QueueItem, episodeKeys: Set<string>): void {
   row.ids.push(...next.ids);
   for (const e of next.episodes) {
-    if (!row.episodes.some((x) => x.seasonNumber === e.seasonNumber && x.episodeNumber === e.episodeNumber)) row.episodes.push(e);
+    const key = episodeKey(e);
+    if (episodeKeys.has(key)) continue;
+    episodeKeys.add(key);
+    row.episodes.push(e);
   }
   for (const m of next.messages) if (row.messages.length < MAX_MESSAGES && !row.messages.includes(m)) row.messages.push(m);
   row.attention ||= next.attention;
@@ -331,20 +368,26 @@ function mergeInto(row: QueueItem, next: QueueItem): void {
  */
 export function foldQueueRecords(service: QueueService, instance: string, records: readonly unknown[]): QueueItem[] {
   const rows: QueueItem[] = [];
-  const byDownload = new Map<string, QueueItem>();
+  const byDownload = new Map<string, { row: QueueItem; episodeKeys: Set<string> }>();
+  // The queue is read page by page while it changes (the arr's default order is
+  // time left, which moves with progress), so a record can land on two pages.
+  // One record is one record: a repeat would be a second row with the same key,
+  // and a Sonarr pack would list its id twice.
+  const seenIds = new Set<number>();
   for (const raw of records) {
     if (!raw || typeof raw !== "object") continue;
     const r = raw as QueueRecord;
     const id = posInt(r.id);
-    if (id === null) continue;
+    if (id === null || seenIds.has(id)) continue;
+    seenIds.add(id);
     const item = toItem(service, instance, r, id);
     const key = service === "sonarr" && item.downloadId ? `${item.downloadId}:${item.arrMediaId ?? ""}` : null;
     const existing = key ? byDownload.get(key) : undefined;
     if (existing) {
-      mergeInto(existing, item);
+      mergeInto(existing.row, item, existing.episodeKeys);
       continue;
     }
-    if (key) byDownload.set(key, item);
+    if (key) byDownload.set(key, { row: item, episodeKeys: new Set(item.episodes.map(episodeKey)) });
     rows.push(item);
   }
   for (const row of rows) row.episodes.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
@@ -356,15 +399,14 @@ const PHASE_ORDER: Record<QueuePhase, number> = {
   downloading: 5, paused: 6, queued: 7, delay: 8, unknown: 9,
 };
 
-/** Rows needing attention first, then by pipeline stage, then the soonest to finish. */
+/** Rows needing attention first, then by pipeline stage, then by title (stable across polls). */
 export function sortQueueItems(items: QueueItem[]): QueueItem[] {
   return items.sort((a, b) => {
     if (a.attention !== b.attention) return a.attention ? -1 : 1;
     if (a.phase !== b.phase) return PHASE_ORDER[a.phase] - PHASE_ORDER[b.phase];
-    const ta = a.timeLeftSeconds ?? Number.POSITIVE_INFINITY;
-    const tb = b.timeLeftSeconds ?? Number.POSITIVE_INFINITY;
-    if (ta !== tb) return ta - tb;
-    return a.mediaTitle.localeCompare(b.mediaTitle);
+    // Never order by time left: it changes on every poll, so rows swapped
+    // places under the admin on each auto-refresh.
+    return a.mediaTitle.localeCompare(b.mediaTitle) || (a.ids[0] ?? 0) - (b.ids[0] ?? 0);
   });
 }
 
@@ -415,6 +457,62 @@ export function queueRemoveQuery(action: QueueRemoveAction, method: QueueRemoveM
     skipRedownload: String(skipRedownload),
     changeCategory: String(method === "changeCategory"),
   }).toString();
+}
+
+/**
+ * The record ids a removal sends: ONE per download. A folded Sonarr pack
+ * carries one record id per episode, but any one of them resolves the whole
+ * tracked download on v3 and v4 (MarkAsFailed, RemoveItem and StopTracking
+ * act per download). Sonarr v3's bulk remove loops over the ids with no
+ * dedupe and stops tracking only after the loop, so N ids blocklisted the
+ * release N times and asked the client to remove it N times (Deluge errors on
+ * the repeat); v4 dedupes by downloadId anyway. A pending row has one id.
+ */
+export function removalIds(row: Pick<QueueItem, "ids">): number[] {
+  return row.ids.slice(0, 1);
+}
+
+/**
+ * Whether a "Blocklist" (skipRedownload=true) on this instance can promise "no
+ * new search". Sonarr v3 reads only removeFromClient and blocklist
+ * (skipRedownload and changeCategory are ignored), so a blocklist there always
+ * runs its redownload-failed search when that setting is on: `"searches"`.
+ * Sonarr v4+ and Radarr (not gated — unverified against its source) honour it:
+ * `"skipped"`. A Sonarr whose version is not known — the health read still
+ * running, failed, no version reported, or unparseable — is `"unknown"`: the
+ * dialog must neither promise "no new search" nor call the instance v3.
+ */
+export type BlocklistRedownload = "skipped" | "searches" | "unknown";
+
+export function blocklistRedownload(service: QueueService, version: string | null | undefined): BlocklistRedownload {
+  if (service !== "sonarr") return "skipped";
+  const major = typeof version === "string" ? /^\s*(\d+)\./.exec(version) : null;
+  if (major === null) return "unknown";
+  return Number(major[1]) >= 4 ? "skipped" : "searches";
+}
+
+export type RecheckError = { service: QueueService; instance: string; kind?: unknown };
+
+/**
+ * What a Re-check downloads answer means for the page: how many instances
+ * were asked, which refused, and whether every one did — the route answers
+ * 202 even then, so a 2xx alone is not success.
+ */
+export function recheckOutcome(answer: { instances?: unknown; errors?: unknown } | null | undefined): {
+  asked: number;
+  failed: RecheckError[];
+  allFailed: boolean;
+} {
+  const instances = typeof answer?.instances === "number" && Number.isSafeInteger(answer.instances) && answer.instances > 0 ? answer.instances : 0;
+  const failed: RecheckError[] = [];
+  if (Array.isArray(answer?.errors)) {
+    for (const e of answer.errors as Array<{ service?: unknown; instance?: unknown; kind?: unknown } | null>) {
+      if (!e || (e.service !== "radarr" && e.service !== "sonarr") || typeof e.instance !== "string") continue;
+      failed.push({ service: e.service, instance: e.instance, kind: e.kind });
+    }
+  }
+  const asked = Math.max(0, instances - failed.length);
+  return { asked, failed, allFailed: failed.length > 0 && asked === 0 };
 }
 
 // ── importing a blocked download ("Manual Import") ─────────────────────────
@@ -469,6 +567,8 @@ export type ManualImportRow = {
   size?: unknown;
   quality?: unknown;
   languages?: unknown;
+  /** Sonarr v3's shape: ONE language object, no `languages` array. */
+  language?: unknown;
   releaseGroup?: unknown;
   indexerFlags?: unknown;
   releaseType?: unknown;
@@ -499,6 +599,23 @@ function isMapped(service: QueueService, row: ManualImportRow): boolean {
   return posInt(row.series?.id) !== null && eps.length > 0 && eps.every((e) => e.id !== null);
 }
 
+// Sonarr v3's manualimport rows carry ONE `language` object and no
+// `languages` array (v4 and Radarr carry the array). v3's ManualImportFile
+// reads only `language`, and a command without it stores the file as
+// Language Unknown, so the singular object is carried back as the arr gave it.
+function singleLanguage(row: ManualImportRow): Record<string, unknown> | null {
+  if (Array.isArray(row.languages)) return null;
+  const l = row.language;
+  return l && typeof l === "object" && !Array.isArray(l) ? (l as Record<string, unknown>) : null;
+}
+
+/** The language field(s) a command/reprocess item carries back: the arr's own, in its own shape. */
+function languageFields(row: ManualImportRow): { languages: unknown[] } | { language: Record<string, unknown> } {
+  if (Array.isArray(row.languages)) return { languages: row.languages };
+  const single = singleLanguage(row);
+  return single ? { language: single } : { languages: [] };
+}
+
 function validPath(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 && v.length <= MAX_PATH ? v : null;
 }
@@ -519,9 +636,14 @@ export function importCandidates(service: QueueService, raw: unknown): ImportCan
     } else if (service === "sonarr" && r.series && typeof r.series.title === "string" && r.series.title) {
       target = r.series.title;
     }
-    const languages = Array.isArray(r.languages)
-      ? (r.languages as Array<{ name?: unknown } | null>).map((l) => (typeof l?.name === "string" ? l.name : "")).filter(Boolean).slice(0, 10)
-      : [];
+    const single = singleLanguage(r);
+    // A v3 row's one language is shown; its id is not offered for correction
+    // (v3 has no /api/v3/language catalog to correct it against).
+    const languageList = Array.isArray(r.languages) ? r.languages : single ? [single] : [];
+    const languages = (languageList as Array<{ name?: unknown } | null>)
+      .map((l) => (typeof l?.name === "string" ? l.name : ""))
+      .filter(Boolean)
+      .slice(0, 10);
     const rejections = Array.isArray(r.rejections)
       ? (r.rejections as Array<{ reason?: unknown } | null>)
           .map((x) => (typeof x?.reason === "string" ? x.reason.slice(0, MAX_MESSAGE_LEN) : ""))
@@ -707,6 +829,10 @@ export function applyImportOverride(service: QueueService, row: ManualImportRow,
     out.quality = { quality, revision: { version: 1, real: 0, isRepack: false } };
   }
   if (override.languageIds !== undefined) {
+    // Sonarr v3 reads only its single `language`: a `languages` array written
+    // here would be ignored and the file stored as Language Unknown. Refused
+    // (400, nothing sent) rather than silently dropped.
+    if (singleLanguage(row)) throw new ImportOverrideError("languages");
     out.languages = override.languageIds.map((id) => {
       const l = catalog.languages.get(id);
       if (!l) throw new ImportOverrideError("languages");
@@ -757,7 +883,7 @@ const commonFields = (path: string, r: ManualImportRow, downloadId: string) => (
   path,
   folderName: typeof r.folderName === "string" ? r.folderName : undefined,
   quality: r.quality,
-  languages: Array.isArray(r.languages) ? r.languages : [],
+  ...languageFields(r),
   releaseGroup: typeof r.releaseGroup === "string" ? r.releaseGroup : undefined,
   indexerFlags: typeof r.indexerFlags === "number" ? r.indexerFlags : 0,
   downloadId,

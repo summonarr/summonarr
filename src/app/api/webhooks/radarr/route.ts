@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
+import { CLAIMABLE_GRAB_ISSUE } from "@/lib/issue-grab";
 import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
@@ -178,7 +180,7 @@ export async function POST(req: NextRequest) {
     // queue id/progress. ISO value lets the marker be pruned later.
     const stableTmdbId = payload.movie?.tmdbId;
     let shouldNotify = true;
-    if (Number.isInteger(stableTmdbId) && (stableTmdbId as number) > 0) {
+    if (isTmdbIdInRange(stableTmdbId as number)) {
       const manualKey = `manualInteractionNotified:radarr:${arrInstance}:${stableTmdbId}`;
       const claim = await prisma.setting.createMany({
         data: [{ key: manualKey, value: new Date().toISOString() }],
@@ -220,18 +222,29 @@ export async function POST(req: NextRequest) {
   // created. Evict the cache rows now, under the same advisory lock the sync
   // writer takes. MediaRequest.status and notifiedAvailable stay untouched —
   // the orchestrator's CAS remains the sole authority (guardrail 14).
+  //
+  // A file delete leaves the movie IN Radarr, without a file — exactly what the
+  // sync records as wanted (`!hasFile`). So it moves the row to wanted rather
+  // than dropping it: with neither row the synced cache says this instance
+  // doesn't hold the movie, and the detail page offers "Add to" and the Issues
+  // row loses its Manage icon until the next sync — right after an issue's
+  // Replace file, when the admin is following the replacement.
   if (payload.eventType === "MovieDelete" || payload.eventType === "MovieFileDelete") {
     const delTmdbId = payload.movie?.tmdbId;
     // A file deleted FOR AN UPGRADE is transient — the replacement import is
     // already underway; evicting availability would just flicker the badge.
     const isUpgrade = payload.eventType === "MovieFileDelete" && payload.deleteReason === "upgrade";
-    if (Number.isInteger(delTmdbId) && (delTmdbId as number) > 0 && !isUpgrade) {
+    if (isTmdbIdInRange(delTmdbId as number) && !isUpgrade) {
       await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
         if (payload.eventType === "MovieDelete") {
           await tx.radarrWantedItem.deleteMany({ where: { tmdbId: delTmdbId as number, arrInstance } });
         }
         await tx.radarrAvailableItem.deleteMany({ where: { tmdbId: delTmdbId as number, arrInstance } });
+        if (payload.eventType === "MovieFileDelete") {
+          // skipDuplicates: a row already there is no error, so nothing aborts this tx (guardrail 23).
+          await tx.radarrWantedItem.createMany({ data: [{ tmdbId: delTmdbId as number, arrInstance }], skipDuplicates: true });
+        }
       }, { timeout: 30_000 });
     }
     syncCompleted = true;
@@ -244,7 +257,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { tmdbId } = payload.movie;
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  if (!isTmdbIdInRange(tmdbId)) {
     console.warn("[webhook/radarr] 400 invalid tmdbId");
     syncCompleted = true;  // Bad payload from Radarr; retry won't help.
     return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
@@ -286,6 +299,13 @@ export async function POST(req: NextRequest) {
       data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
     });
     await tx.radarrWantedItem.deleteMany({ where: { tmdbId, arrInstance } });
+    // Radarr CONFIRMED the file (never on the unverifiable null path — a forged
+    // payload would otherwise make re-requests of the title read "already
+    // available"): the movie is available on this instance now, not absent from
+    // both caches until the next sync.
+    if (downloaded === true) {
+      await tx.radarrAvailableItem.createMany({ data: [{ tmdbId, arrInstance }], skipDuplicates: true });
+    }
   }, { timeout: 30_000 });
 
   if (updated.count > 0) {
@@ -335,9 +355,11 @@ export async function POST(req: NextRequest) {
   });
 
   // arrInstance-scoped: one instance's Download must not claim (and notify off)
-  // a grab that was fired at a sibling instance.
+  // a grab that was fired at a sibling instance. A RESOLVED issue's grab is never
+  // claimed: a replacement that found nothing would otherwise be announced by an
+  // unrelated import months later (CLAIMABLE_GRAB_ISSUE).
   const pendingGrabs = await prisma.issueGrab.findMany({
-    where: { tmdbId, mediaType: "MOVIE", arrInstance, notifiedAt: null },
+    where: { tmdbId, mediaType: "MOVIE", arrInstance, notifiedAt: null, issue: CLAIMABLE_GRAB_ISSUE },
   });
   if (pendingGrabs.length > 0) {
     const now = new Date();

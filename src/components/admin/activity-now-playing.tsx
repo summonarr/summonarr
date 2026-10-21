@@ -649,6 +649,16 @@ export function ActivityNowPlaying({
   // One entry per Plex server. An SSE event only updates the entry whose
   // `instance` slug matches, so one server's news never overwrites another's.
   const [reachability, setReachability] = useState(plexReachability);
+  // The prop is the server's latest read (a router.refresh() brings a new one);
+  // follow it when its CONTENT changes, so a refresh isn't ignored. Keyed on the
+  // serialized value, not the array identity, so a re-render with an equal
+  // array doesn't wipe a newer SSE update.
+  const reachabilityKey = JSON.stringify(plexReachability);
+  const [seenReachabilityKey, setSeenReachabilityKey] = useState(reachabilityKey);
+  if (seenReachabilityKey !== reachabilityKey) {
+    setSeenReachabilityKey(reachabilityKey);
+    setReachability(plexReachability);
+  }
 
   useLiveEvents((event) => {
     if (event.type === "connected") setConnected(true);

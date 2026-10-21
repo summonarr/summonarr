@@ -8,6 +8,7 @@ import { validateCleanupSettingsPatch } from "@/lib/library-cleanup";
 import { CLEANUP_FEATURE_KEY, loadCleanupSettings } from "@/lib/library-cleanup-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 
 // Library cleanup rules (ADMIN). GET returns the rules in force; PATCH takes a
 // partial object keyed by field name (unwatchedEnabled, unwatchedDays, …) and
@@ -40,6 +41,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       prisma.setting.upsert({ where: { key: r.key }, create: { key: r.key, value: r.value }, update: { value: r.value } }),
     ),
   );
+  invalidateNeverWatchedReport();
   // Committed with no enclosing transaction left ⇒ the swallowing variant (guardrail 26).
   void logAudit({
     userId: session.user.id,

@@ -169,6 +169,21 @@ test("fetchFriendWatchlist: a private watchlist is a status, not a throw", async
   assert.deepEqual(await mod.fetchFriendWatchlist("admin-tok", "f", { maxItems: 500 }), { status: "private" });
 });
 
+test("fetchFriendWatchlist stops when plex.tv hands back an empty page or a cursor that did not move", async () => {
+  // Stuck cursor: every page claims a next page with the SAME cursor.
+  respond = () => json({ data: { userV2: { watchlist: { nodes: [{ id: "x", title: "X", type: "movie" }], pageInfo: { hasNextPage: true, endCursor: "same" } } } } });
+  const stuck = await mod.fetchFriendWatchlist("t", "f", { maxItems: 500 });
+  assert.equal(stuck.status, "ok");
+  assert.ok(calls.length <= 3, `walk must stop on a repeated cursor (made ${calls.length} calls)`);
+  // Empty page that still claims a next page: would otherwise never advance maxItems.
+  calls.length = 0;
+  let n = 0;
+  respond = () => json({ data: { userV2: { watchlist: { nodes: [], pageInfo: { hasNextPage: ++n < 50, endCursor: `c${n}` } } } } });
+  const empty = await mod.fetchFriendWatchlist("t", "f", { maxItems: 500 });
+  assert.equal(empty.status, "ok");
+  assert.ok(calls.length <= 2, `walk must stop on an empty page (made ${calls.length} calls)`);
+});
+
 test("fetchFriendWatchlist stops at maxItems and on an aborted signal (returns, never throws)", async () => {
   let n = 0;
   respond = () => {

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { isLocalHost } from "@/lib/local-only";
 import {
+  markSessionResponseUncacheable,
   parseSessionCookie,
   replaceSessionCookie,
   serializeSessionCookie,
@@ -13,7 +14,6 @@ import {
   hasNativeClientHeader,
   NATIVE_CLIENT_HEADER,
 } from "@/lib/mobile-auth";
-import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import {
   API_VERSION,
   parseNativeClient,
@@ -92,6 +92,9 @@ function isPublicPath(pathname: string): boolean {
     // them unreachable everywhere they were meant to be read. Kept here rather
     // than in the matcher so the Host gate and CSP still apply.
     pathname.startsWith("/.well-known/") ||
+    // Crawlers fetch robots.txt anonymously; a login redirect would hide the
+    // "stay out" rule from exactly the clients it is for.
+    pathname === "/robots.txt" ||
     pathname.startsWith("/login") ||
     pathname.startsWith("/register") ||
     pathname.startsWith("/setup") ||
@@ -161,15 +164,14 @@ export async function proxy(request: NextRequest) {
   // and tag requests with X-Summonarr-Client instead of the browser cookie.
   // Both are custom headers a cross-origin page can't attach to a credentialed
   // request (CORS preflight blocks them), so either one means this request is
-  // not a cookie-riding CSRF vector AND the UA-fingerprint cookie-binding does
-  // not apply. See src/lib/mobile-auth.ts.
+  // not a cookie-riding CSRF vector. See src/lib/mobile-auth.ts.
   const bearerToken = parseBearerToken(request.headers.get("authorization"));
   const isNativeClient = hasNativeClientHeader(
     request.headers.get(NATIVE_CLIENT_HEADER),
   );
   // Parsed form of the same header (platform/build/api) for the version gate
-  // below. Presence (isNativeClient) drives the CSRF/fingerprint skips; the
-  // parsed build drives the 426 force-upgrade gate.
+  // below. Presence (isNativeClient) drives the CSRF skip; the parsed build
+  // drives the 426 force-upgrade gate.
   const nativeClient = parseNativeClient(
     request.headers.get(NATIVE_CLIENT_HEADER),
   );
@@ -248,8 +250,19 @@ export async function proxy(request: NextRequest) {
   // forged cookie can never ride a CSRF-exempt bearer request.
   const sessionToken =
     bearerToken ?? parseSessionCookie(request.headers.get("cookie"));
+  // The transport is where the token came from, and a token bound to the other
+  // one is refused (guardrail 6h): a stolen browser cookie can't be replayed as
+  // a bearer to dodge the cookie-only defences (the CSRF Origin check, rotation
+  // on a privilege change), and a native token can't be planted in a browser as
+  // a cookie. Rotation only on the cookie transport: this pass hands
+  // a cookie client its replacement via Set-Cookie, but a bearer client is
+  // never given a new token (guardrail 6b), so rotating its session would sign
+  // the app out.
   const refreshResult = sessionToken
-    ? await verifyAndRefreshSession(sessionToken)
+    ? await verifyAndRefreshSession(sessionToken, {
+        transport: bearerToken ? "bearer" : "cookie",
+        allowRotation: !bearerToken,
+      })
     : null;
   const isLoggedIn = !!refreshResult;
   const role = refreshResult?.claims.role;
@@ -264,33 +277,10 @@ export async function proxy(request: NextRequest) {
       return clearedCookieResponse(buildLoginRedirect(request));
     }
 
-    // UA fingerprint check. Skipped for machine sessions (CRON_SECRET-bound) and
-    // for bearer sessions: a native client holds its JWT in app-secure storage
-    // and presents it explicitly, so the device-class binding that hardens an
-    // ambiently-replayed browser cookie doesn't apply. Browser cookie sessions
-    // get the full check. The machine:/no-fingerprint skips live inside
-    // matchesStoredFingerprint (shared with api-auth/auth/cron-auth) so the
-    // skip rules have exactly one definition; only the bearer skip is local.
-    if (
-      !bearerToken &&
-      !matchesStoredFingerprint(
-        refreshResult.claims.uaFingerprint,
-        request.headers.get("user-agent"),
-      )
-    ) {
-      // Same fork as the !isLoggedIn branch above: through fetch() a 302
-      // resolves as 200-with-HTML (and a followed POST is downgraded to GET,
-      // silently dropping the write), so API callers need a machine-readable
-      // 401. Both arms clear the session cookies.
-      if (pathname.startsWith("/api/")) {
-        const res = NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-        for (const cookie of serializeClearedSessionCookies()) {
-          res.headers.append("Set-Cookie", cookie);
-        }
-        return res;
-      }
-      return clearedCookieResponse(buildLoginRedirect(request));
-    }
+    // No User-Agent fingerprint check here any more (guardrail 6h). The client
+    // writes that header, so an attacker replaying a stolen cookie just sent the
+    // victim's browser family along with it; all the comparison ever did was
+    // sign real users out when a browser changed its UA.
 
     // Defense-in-depth backstop for the admin API surface — fails closed only if a
     // per-route withAdmin/withIssueAdmin/withPermission guard is ever missing, and
@@ -434,6 +424,12 @@ export async function proxy(request: NextRequest) {
   // produced one (a sessionId rotation or a dbCheckedAt bump). Cookie sessions
   // only: a bearer client can't read Set-Cookie, so it keeps presenting the
   // token it was given at sign-in (guardrails 6b/6c).
+  //
+  // A response carrying a session token must never be stored: a shared cache
+  // replaying it would hand this session to the next visitor. Next leaves a
+  // Cache-Control the proxy set alone (send-payload.js only fills one in when
+  // none exists), so this also covers page renders, which next.config.ts's
+  // /api/* header rule doesn't reach.
   if (refreshResult?.refreshed && !bearerToken) {
     response.headers.append(
       "Set-Cookie",
@@ -441,6 +437,7 @@ export async function proxy(request: NextRequest) {
         maxAgeSeconds: refreshResult.refreshed.expiresInSeconds,
       }),
     );
+    markSessionResponseUncacheable(response.headers);
   }
   return response;
 }

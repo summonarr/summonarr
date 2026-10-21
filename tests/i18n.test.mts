@@ -102,15 +102,18 @@ test("every literal t() key used in src/ exists in en.json", () => {
   // translated at render time from a key stored beside them.
   const call = /(?:\bt\(\s*|\bi18nKey:\s*)["']([a-zA-Z0-9_.-]+)["']/g;
   const missing: string[] = [];
+  let checked = 0;
   for (const file of walk(join(ROOT, "src"))) {
     const src = readFileSync(file, "utf8");
     if (!/\buse(T|Translator)\b|getTranslator|i18nKey/.test(src)) continue;
     for (const m of src.matchAll(call)) {
+      checked++;
       const key = m[1];
       const plural = Object.keys(en).some((k) => k.startsWith(`${key}_`));
       if (!(key in en) && !plural) missing.push(`${file.slice(ROOT.length)}: ${key}`);
     }
   }
+  assert.ok(checked > 100, `the scan matched only ${checked} t() keys — the walk or regex is broken, not the catalog`);
   assert.deepEqual(missing, []);
 });
 

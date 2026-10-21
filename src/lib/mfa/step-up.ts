@@ -13,10 +13,11 @@ import { tooManyRequests } from "@/lib/http";
 // OIDC users authenticate at their provider, which owns MFA there, and a local
 // password-less account has nothing for a second factor to sit behind.
 
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
-import { verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { verifyStepUpPassword } from "@/lib/step-up-auth";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
@@ -52,6 +53,7 @@ export async function mfaReauthStepUp(
   session: SummonarrSession,
   password: unknown,
   t: Translator,
+  req: NextRequest,
 ): Promise<StepUpUser | NextResponse> {
   if (!checkRateLimit(`mfa-stepup:${session.user.id}`, 10, 15 * 60 * 1000)) {
     return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
@@ -70,7 +72,16 @@ export async function mfaReauthStepUp(
   if (password.length > MAX_PASSWORD_LENGTH) {
     return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
-  if (!(await verifyPassword(password, user.passwordHash))) {
+  const verdict = await verifyStepUpPassword({
+    userId: user.id,
+    userName: user.name ?? user.email,
+    passwordHash: user.passwordHash,
+    password,
+    context: "mfa-change",
+    req,
+  });
+  if (verdict === "rate-limited") return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
+  if (verdict === "invalid") {
     return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
   return { id: user.id, name: user.name, email: user.email };
@@ -130,26 +141,36 @@ function stepUpMethods(state: MfaState): string[] {
   return methods;
 }
 
-// Call AFTER mfaReauthStepUp succeeded. Returns the proof, or the response to
-// send. `state` may be passed in when the route already read it.
+// The "a fresh second factor is required" answer. Also sent by an enrollment
+// route whose in-transaction re-read finds the account gained a factor after
+// its step-up judged it factor-less (totp/setup). `requiredMessage` replaces the
+// `error` text only — the rest of the shape is the same wire contract on every
+// route.
+export function secondFactorRequiredResponse(t: Translator, state: MfaState, requiredMessage?: string): NextResponse {
+  return NextResponse.json(
+    { error: requiredMessage ?? t("apiAuth.mfa.secondFactorRequired"), secondFactorRequired: true, methods: stepUpMethods(state) },
+    { status: 400 },
+  );
+}
+
+// Call AFTER mfaReauthStepUp succeeded (or the route's own password step-up).
+// Returns the proof, or the response to send. `state` may be passed in when the
+// route already read it. `requiredMessage` replaces the `error` text of the
+// missing-proof 400.
 export async function mfaSecondFactorStepUp(
   req: Request,
   session: SummonarrSession,
   user: StepUpUser,
   raw: unknown,
   state?: MfaState,
+  opts: { requiredMessage?: string } = {},
 ): Promise<SecondFactorProof | NextResponse> {
   const t = translatorForRequest(req);
   const current = state ?? (await getMfaState(user.id));
   if (!current.enabled) return { proved: false, state: current };
 
   const parsed = parseStepUpFactor(raw);
-  if (!parsed) {
-    return NextResponse.json(
-      { error: t("apiAuth.mfa.secondFactorRequired"), secondFactorRequired: true, methods: stepUpMethods(current) },
-      { status: 400 },
-    );
-  }
+  if (!parsed) return secondFactorRequiredResponse(t, current, opts.requiredMessage);
 
   let webauthnChallenge: string | undefined;
   let reservedJti: string | null = null;
@@ -185,7 +206,10 @@ export async function mfaSecondFactorStepUp(
     throw err;
   }
   if (reservedJti) {
-    // A step-up challenge is single-use either way: a failed assertion burns it.
+    // Single-use on success. A failed assertion does NOT burn the challenge: it
+    // counts one failure against it (releaseToken), like a wrong answer on a
+    // sign-in challenge, and the challenge dies after MAX_TOKEN_FAILURES or its
+    // five-minute expiry, whichever comes first.
     if (verdict.ok) commitToken(reservedJti);
     else releaseToken(reservedJti, { failed: true });
   }

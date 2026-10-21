@@ -444,6 +444,21 @@ test("PATCH: the Plex watchlist server-source switches accept only \"true\"/\"fa
   }
 });
 
+test("PATCH: switching a play-history tracking flag ON stamps when it came on (guardrail 14d); re-saving ON does not", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("playHistoryPlexEnabled", "false");
+  settings.set("playHistoryJellyfinEnabled", "true");
+  const res = await PATCH(
+    patchReq(JSON.stringify({ playHistoryPlexEnabled: "true", playHistoryJellyfinEnabled: "true" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  const stamp = upsertFor("playHistoryPlexTrackedSince");
+  assert.equal(stamp.length, 1, "off → on must record when recording resumed — a play while it was off was never seen");
+  assert.ok(Number.isFinite(new Date(stamp[0].create.value).getTime()), "the stamp is an ISO date");
+  assert.equal(upsertFor("playHistoryJellyfinTrackedSince").length, 0, "already on → no new stamp (it would shrink the window for nothing)");
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // PATCH — rate limit + per-key write cooldown
 // ════════════════════════════════════════════════════════════════════════════
@@ -537,6 +552,51 @@ test("PATCH: writing a Radarr URL + key REACHES the connection test; a failure r
   assert.deepEqual(rolledBack, ["radarr4kApiKey", "radarr4kUrl"], "a failed test rolls back the keys it just wrote");
   assert.equal(settings.has("radarr4kApiKey"), false);
   assert.equal(settings.has("radarr4kUrl"), false);
+});
+
+// A tracking switch flipped ON in the same request as a failing connection test
+// writes a "tracked since" stamp in the same transaction; the rollback must put
+// that stamp back too (restore the prior one, or delete it when there was none),
+// or the never-watched window would claim coverage from a flip that was undone.
+// Both PATCHes reuse the same keys: the first rollback releases their cooldown.
+test("PATCH: a connection-test rollback also restores or deletes the tracking stamp written with the switch", async () => {
+  const admin = await mintSession("ADMIN");
+  const body = JSON.stringify({ sonarr4kUrl: "http://10.0.0.5:8989", sonarr4kApiKey: "k", playHistoryEnabled: "true" });
+
+  // No stamp before: the rollback deletes the one this request wrote.
+  settings.set("playHistoryEnabled", "false");
+  const first = await PATCH(patchReq(body, admin.header), undefined);
+  assert.equal(first.status, 422);
+  assert.equal(upsertFor("playHistoryTrackedSince").length, 1, "precondition: the flip wrote a stamp");
+  assert.equal(settings.has("playHistoryTrackedSince"), false, "a stamp with no prior value is deleted on rollback");
+  assert.ok(deleteManyCalls.some((c) => c.where.key === "playHistoryTrackedSince"));
+  assert.equal(settings.get("playHistoryEnabled"), "false", "the switch itself is restored");
+
+  // A prior stamp: the rollback restores exactly that value.
+  upsertCalls.length = 0;
+  deleteManyCalls.length = 0;
+  settings.set("playHistoryEnabled", "false");
+  settings.set("playHistoryTrackedSince", "2020-01-01T00:00:00.000Z");
+  const second = await PATCH(patchReq(body, admin.header), undefined);
+  assert.equal(second.status, 422);
+  assert.equal(settings.get("playHistoryTrackedSince"), "2020-01-01T00:00:00.000Z", "the prior stamp is restored, not dropped");
+  assert.equal(settings.get("playHistoryEnabled"), "false");
+});
+
+test("PATCH: a stamp rewritten by a concurrent write during the connection test is NOT rolled back", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("playHistoryEnabled", "false");
+  respond = (url) => {
+    // A second writer lands while the probe is in flight.
+    settings.set("playHistoryTrackedSince", "2099-01-01T00:00:00.000Z");
+    throw new Error(`unreachable ${url}`);
+  };
+  const res = await PATCH(
+    patchReq(JSON.stringify({ sonarr4kUrl: "http://10.0.0.6:8989", sonarr4kApiKey: "k2", playHistoryEnabled: "true" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 422);
+  assert.equal(settings.get("playHistoryTrackedSince"), "2099-01-01T00:00:00.000Z", "a superseded stamp must survive the rollback");
 });
 
 test("PATCH: writing a Sonarr URL + key with a healthy server → 200 with the reported version, values persist", async () => {

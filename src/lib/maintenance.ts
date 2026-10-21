@@ -24,7 +24,7 @@ export async function getMaintenanceStatus(): Promise<{ enabled: boolean; messag
 // `session` is the DB-checked, bearer-first session the route's withAuth /
 // withAdmin / withIssueAdmin wrapper (or requireAuth) already resolved — pass
 // it. Every wrapper runs verifyAndRefreshSession (revocation, cutoffs, role
-// rotation, UA fingerprint), so a demoted admin holding an unexpired JWT still
+// rotation, transport binding), so a demoted admin holding an unexpired JWT still
 // cannot bypass maintenance: the admin bypass is an authz decision and sees the
 // current role either way.
 //

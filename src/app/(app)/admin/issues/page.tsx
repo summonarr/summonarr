@@ -12,8 +12,9 @@ import Image from "next/image";
 import { Film, Tv2, MessageSquare } from "@/components/icons";
 import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
-import { requireFeature } from "@/lib/features";
+import { isFeatureEnabled, requireFeature } from "@/lib/features";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { arrHoldersByTmdbId } from "@/lib/arr-manage-links";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
 import { LocalDateText } from "@/components/local-date";
 import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL_KEY, ISSUE_TYPE_LABEL_KEY } from "@/lib/status-labels";
@@ -93,20 +94,27 @@ function groupIssues<T extends {
 export default async function AdminIssuesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ filter?: string; selected?: string }>;
+  searchParams: Promise<{ filter?: string; selected?: string | string[] }>;
 }) {
   await requireFeature("feature.page.issues");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_ISSUES)) redirect("/");
   const currentUserId = session.user.id;
+  // "Replace file" deletes files, which only an ADMIN may (its route is
+  // withAdmin, a role check — mirrored here); MANAGE_ISSUES alone keeps
+  // Refetch and Replace. Read from the DB-checked authActive() session above.
+  const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
   const t = await getTranslator();
 
-  const { filter: rawFilter, selected: selectedId } = await searchParams;
+  const { filter: rawFilter, selected: selectedRaw } = await searchParams;
+  // A repeated ?selected= arrives as an array at runtime, and an array `id` is a
+  // Prisma validation error (a 500) in the findUnique fallback below.
+  const selectedId = Array.isArray(selectedRaw) ? selectedRaw[0] : selectedRaw;
   const filter: FilterValue = VALID_FILTERS.includes(rawFilter as FilterValue)
     ? (rawFilter as FilterValue)
     : "OPEN";
 
-  const [allIssues, statusCounts, radarrInstances, sonarrInstances] = await Promise.all([
+  const [allIssues, statusCounts, radarrInstances, sonarrInstances, radarrOn, sonarrOn] = await Promise.all([
     // Filter by status in SQL, not in JS. If we fetched 500 rows of every
     // status and filtered afterwards, a busy tab could show a count of "620"
     // over a list missing its older issues. Filtering here spends the whole
@@ -124,6 +132,11 @@ export default async function AdminIssuesPage({
     prisma.issue.groupBy({ by: ["status"], _count: { status: true } }),
     getSyncableArrInstances("radarr"),
     getSyncableArrInstances("sonarr"),
+    // The Manage icon opens routes that answer 404 while the integration is
+    // switched off (arrGate), and the synced cache rows it reads outlive the
+    // switch-off — so the flag, not the cache, decides whether it shows.
+    isFeatureEnabled("feature.integration.radarr").catch(() => false),
+    isFeatureEnabled("feature.integration.sonarr").catch(() => false),
   ]);
 
   // Configured-instance options for the Replace panel's instance picker.
@@ -174,6 +187,30 @@ export default async function AdminIssuesPage({
     : [[], []];
   const plexSet     = new Set(plexItems.map((i)     => `${i.tmdbId}:${i.mediaType}`));
   const jellyfinSet = new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
+
+  // ADMIN only: which configured Radarr/Sonarr instances hold each listed title,
+  // for the per-instance "Manage" icon — the synced wanted/available cache rows
+  // (arrInstancesHolding's rule, one read per table for the whole list; no live
+  // call — the manager resolves the title live when it opens).
+  const movieIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "MOVIE").map((p) => p.tmdbId))];
+  const tvIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "TV").map((p) => p.tmdbId))];
+  const holderSelect = { tmdbId: true, arrInstance: true } as const;
+  const readRadarr = isAdmin && radarrOn && movieIds.length > 0;
+  const readSonarr = isAdmin && sonarrOn && tvIds.length > 0;
+  const [radarrWanted, radarrAvailable, sonarrWanted, sonarrAvailable] = await Promise.all([
+    readRadarr ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
+    readRadarr ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
+    readSonarr ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
+    readSonarr ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
+  ]);
+  // Holders only for a switched-on service: the cached rows of a switched-off
+  // one would draw a Manage icon whose every read 404s.
+  const radarrHolders = arrHoldersByTmdbId(radarrOn ? radarrOptions : [], [...radarrWanted, ...radarrAvailable]);
+  const sonarrHolders = arrHoldersByTmdbId(sonarrOn ? sonarrOptions : [], [...sonarrWanted, ...sonarrAvailable]);
+  const manageFor = (tmdbId: number, mediaType: string) => {
+    const holders = (mediaType === "MOVIE" ? radarrHolders : sonarrHolders).get(tmdbId);
+    return isAdmin && holders ? { tmdbId, holders } : undefined;
+  };
 
   const tabs: { label: string; value: FilterValue; count: number }[] = [
     { label: t(ISSUE_STATUS_LABEL_KEY.OPEN), value: "OPEN", count: countFor("OPEN") },
@@ -264,7 +301,7 @@ export default async function AdminIssuesPage({
         <div className="flex items-center flex-wrap" style={{ gap: 8, marginTop: standalone ? 10 : 0 }}>
           {standalone && sel.issueType === "WRONG_MATCH" && (
             <IssueFixMatchButton
-              key={sel.id}
+              key={`fix-${sel.id}`}
               issueId={sel.id}
               tmdbId={sel.tmdbId}
               mediaType={sel.mediaType}
@@ -275,7 +312,7 @@ export default async function AdminIssuesPage({
             />
           )}
           <IssueClaimButton
-            key={sel.id}
+            key={`claim-${sel.id}`}
             issueId={sel.id}
             claimedBy={sel.claimedBy}
             claimerName={sel.claimedUser?.name ?? sel.claimedUser?.email ?? null}
@@ -283,7 +320,7 @@ export default async function AdminIssuesPage({
           />
           {standalone && (
             <IssueActions
-              key={sel.id}
+              key={`actions-${sel.id}`}
               issueId={sel.id}
               currentStatus={sel.status}
               mediaType={sel.mediaType}
@@ -293,6 +330,8 @@ export default async function AdminIssuesPage({
               episodeNumber={sel.episodeNumber}
               libraryConfirmed={plexSet.has(key) || jellyfinSet.has(key)}
               instances={instancesFor(sel.mediaType)}
+              isAdmin={isAdmin}
+              manage={manageFor(sel.tmdbId, sel.mediaType)}
             />
           )}
         </div>
@@ -410,10 +449,14 @@ export default async function AdminIssuesPage({
                         )}
                       </div>
 
+                      {/* grow + a real basis, not flex-1: with a 0 basis the row
+                          wrapped only once the actions ALONE overflowed it, so a
+                          ~490px action bar (Refetch · Replace file · In progress ·
+                          Resolve) left the title ~100px at a 1024px viewport. */}
                       <Link
                         href={issueHref(issue.id)}
                         scroll={false}
-                        className="flex-1 min-w-0 block rounded transition-colors"
+                        className="grow basis-40 min-w-0 block rounded transition-colors"
                         style={{ margin: -4, padding: 4 }}
                       >
                         <div
@@ -515,6 +558,8 @@ export default async function AdminIssuesPage({
                           episodeNumber={issue.episodeNumber}
                           libraryConfirmed={plexSet.has(`${issue.tmdbId}:${issue.mediaType}`) || jellyfinSet.has(`${issue.tmdbId}:${issue.mediaType}`)}
                           instances={instancesFor(issue.mediaType)}
+                          isAdmin={isAdmin}
+                          manage={manageFor(issue.tmdbId, issue.mediaType)}
                         />
                       </div>
                     </IssueCardShell>
@@ -670,7 +715,7 @@ export default async function AdminIssuesPage({
                       const key = `${selectedIssue.tmdbId}:${selectedIssue.mediaType}`;
                       return (
                         <IssueFixMatchButton
-                          key={selectedIssue.id}
+                          key={`fix-${selectedIssue.id}`}
                           issueId={selectedIssue.id}
                           tmdbId={selectedIssue.tmdbId}
                           mediaType={selectedIssue.mediaType}
@@ -682,14 +727,14 @@ export default async function AdminIssuesPage({
                       );
                     })()}
                     <IssueClaimButton
-                      key={selectedIssue.id}
+                      key={`claim-${selectedIssue.id}`}
                       issueId={selectedIssue.id}
                       claimedBy={selectedIssue.claimedBy}
                       claimerName={selectedIssue.claimedUser?.name ?? selectedIssue.claimedUser?.email ?? null}
                       currentUserId={session.user.id}
                     />
                     <IssueActions
-                      key={selectedIssue.id}
+                      key={`actions-${selectedIssue.id}`}
                       issueId={selectedIssue.id}
                       currentStatus={selectedIssue.status}
                       mediaType={selectedIssue.mediaType}
@@ -699,6 +744,8 @@ export default async function AdminIssuesPage({
                       episodeNumber={selectedIssue.episodeNumber}
                       libraryConfirmed={plexSet.has(`${selectedIssue.tmdbId}:${selectedIssue.mediaType}`) || jellyfinSet.has(`${selectedIssue.tmdbId}:${selectedIssue.mediaType}`)}
                       instances={instancesFor(selectedIssue.mediaType)}
+                      isAdmin={isAdmin}
+                      manage={manageFor(selectedIssue.tmdbId, selectedIssue.mediaType)}
                     />
                   </div>
                 </div>

@@ -12,6 +12,7 @@ export function Mail({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7" />

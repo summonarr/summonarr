@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { getPlexUser } from "@/lib/plex";
+import { savePlexAdminToken } from "@/lib/plex-admin-connect";
 import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -17,38 +17,16 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.settings.authTokenRequired") }, { status: 400 });
   }
 
-  const authToken = body.authToken;
-  // Validate the token against plex.tv BEFORE any Setting write. getPlexUser
-  // throws on a bad/expired token or an unreachable plex.tv — map that to a
-  // clean 422 (mirrors the settings PATCH route's plexError semantics) instead
-  // of an unhandled 500.
-  let plexUser: Awaited<ReturnType<typeof getPlexUser>>;
-  try {
-    plexUser = await getPlexUser(authToken);
-  } catch (err) {
-    console.error("[settings/plex] Plex token validation failed:", err);
+  // Validate the token against plex.tv BEFORE any Setting write. A bad/expired
+  // token or an unreachable plex.tv maps to a clean 422 (mirrors the settings
+  // PATCH route's plexError semantics) instead of an unhandled 500.
+  const plexUser = await savePlexAdminToken(body.authToken, "settings/plex");
+  if (!plexUser) {
     return NextResponse.json(
       { error: t("apiAdmin.settings.plexTokenInvalid") },
       { status: 422 },
     );
   }
-
-  await Promise.all([
-    prisma.setting.upsert({
-      where: { key: "plexAdminToken" },
-      update: { value: authToken },
-      create: { key: "plexAdminToken", value: authToken },
-    }),
-    prisma.setting.upsert({
-      where: { key: "plexAdminEmail" },
-      update: { value: plexUser.email },
-      create: { key: "plexAdminEmail", value: plexUser.email },
-    }),
-  ]);
-
-  // Token cache stores per-user auth decisions; must be cleared whenever the admin token changes
-  await prisma.plexTokenCache.deleteMany({});
-  console.warn("[settings] plexAdminToken changed — cleared PlexTokenCache");
 
   void logAudit({
     userId: session.user.id,

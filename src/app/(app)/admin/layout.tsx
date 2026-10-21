@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { readActiveSummonarrSession } from "@/lib/session-server";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { FixMatchTray } from "@/components/admin/fix-match-tray";
 import { adminMustEnrollMfa, MFA_ENROLL_PATH } from "@/lib/mfa/policy";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
@@ -29,5 +30,11 @@ export default async function AdminLayout({ children }: { children: React.ReactN
     redirect(MFA_ENROLL_PATH);
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      {children}
+      {/* Outcome of fix-match jobs, reachable after leaving the page that started one. */}
+      <FixMatchTray />
+    </>
+  );
 }

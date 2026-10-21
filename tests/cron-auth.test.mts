@@ -10,12 +10,15 @@
 //     `getCronActor(...) !== null`. Every cron/sync route used to re-run the
 //     DB-checked read a second time just for attribution.
 //   - isCronAuthorized's admin-session path, per transport (guardrail 6b): a
-//     COOKIE admin session must pass BOTH the same-origin check and the
-//     UA-fingerprint check (load-bearing CSRF defenses — cron/sync routes are
-//     exempt from the proxy's Origin gate), while a BEARER admin session skips
-//     both (a cross-origin page cannot attach a custom Authorization header to
-//     a credentialed request, and native clients send no Origin/Referer at
-//     all). The DB reads behind verifyAndRefreshSession run against the fake
+//     COOKIE admin session must pass the same-origin check (a load-bearing
+//     CSRF defense — cron/sync routes are exempt from the proxy's Origin
+//     gate), while a BEARER admin session skips it (a cross-origin page cannot
+//     attach a custom Authorization header to a credentialed request, and
+//     native clients send no Origin/Referer at all). That skip is sound only
+//     because a token bound to one transport is refused on the other
+//     (guardrail 6h) — an admin's cookie replayed as a bearer is no session —
+//     and there is no User-Agent fingerprint gate (guardrail 6h retired it).
+//     The DB reads behind verifyAndRefreshSession run against the fake
 //     prisma's authSession/user models below, so these tests stay offline.
 //   - batchCreateMany's chunking contract (guardrail 4): CREATE_MANY_BATCH is
 //     5000 (pinned via 12001 rows → 5000/5000/2001), chunks run sequentially
@@ -123,6 +126,7 @@ const {
   cronSkippedResponse,
   CRON_SKIPPED_HEADER,
   parseTrustedOriginEntry,
+  earliestAddedPerEpisode,
 } = await import("../src/lib/cron-auth.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { extractUaFingerprint, serializeFingerprint } = await import(
@@ -422,7 +426,11 @@ const ADMIN_UA =
 // prisma, so readActiveSummonarrSessionFromRequest's DB-checked slow path
 // resolves it. Claim permissions mirror the DB mask so no sessionId rotation
 // (which would need $transaction) is triggered.
-async function mintSession(sessionId: string, role: "ADMIN" | "USER"): Promise<string> {
+async function mintSession(
+  sessionId: string,
+  role: "ADMIN" | "USER",
+  transport?: "cookie" | "bearer", // omitted ⇒ a pre-claim token (either transport)
+): Promise<string> {
   const userId = `user-${sessionId}`;
   sessionRows.add(sessionId);
   usersById.set(userId, {
@@ -447,6 +455,7 @@ async function mintSession(sessionId: string, role: "ADMIN" | "USER"): Promise<s
       sessionId,
       uaFingerprint: serializeFingerprint(extractUaFingerprint(ADMIN_UA)),
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      ...(transport ? { transport } : {}),
     },
     { expiresInSeconds: 3600 },
   );
@@ -475,8 +484,10 @@ test("isCronAuthorized: cookie admin session WITHOUT Origin/Referer fails closed
   assert.equal(ok, false);
 });
 
-test("isCronAuthorized: cookie admin session with a mismatched UA fingerprint fails closed", async () => {
-  const jwt = await mintSession("sess-cookie-bad-ua", "ADMIN");
+test("isCronAuthorized: a cookie admin session is NOT bound to its sign-in User-Agent any more (guardrail 6h)", async () => {
+  // The client writes the User-Agent, so the fingerprint comparison stopped no
+  // replay; same-origin is the cookie transport's gate.
+  const jwt = await mintSession("sess-cookie-other-ua", "ADMIN");
   const ok = await isCronAuthorized(
     cronRequest({
       cookie: `summonarr-session=${jwt}`,
@@ -485,7 +496,31 @@ test("isCronAuthorized: cookie admin session with a mismatched UA fingerprint fa
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
     }),
   );
-  assert.equal(ok, false);
+  assert.equal(ok, true);
+});
+
+test("isCronAuthorized: an admin's COOKIE-bound session replayed as a bearer is refused — it can't dodge the same-origin gate (guardrail 6h)", async () => {
+  process.env.CRON_SECRET = CRON_SECRET;
+  const jwt = await mintSession("sess-cookie-as-bearer", "ADMIN", "cookie");
+  // The same token on its own transport (same-origin) is an admin…
+  assert.equal(
+    await isCronAuthorized(cronRequest({ cookie: `summonarr-session=${jwt}`, origin: "http://localhost:3000" })),
+    true,
+  );
+  // …but as a bearer, with no Origin at all, it is nothing: not a session, and
+  // not the CRON_SECRET either.
+  assert.equal(await isCronAuthorized(cronRequest({ authorization: `Bearer ${jwt}` })), false);
+  assert.equal(await getCronActor(cronRequest({ authorization: `Bearer ${jwt}` })), null);
+});
+
+test("isCronAuthorized: a native admin's BEARER-bound session presented as a cookie is refused (guardrail 6h)", async () => {
+  process.env.CRON_SECRET = CRON_SECRET;
+  const jwt = await mintSession("sess-bearer-as-cookie", "ADMIN", "bearer");
+  assert.equal(await isCronAuthorized(cronRequest({ authorization: `Bearer ${jwt}` })), true);
+  assert.equal(
+    await isCronAuthorized(cronRequest({ cookie: `summonarr-session=${jwt}`, origin: "http://localhost:3000" })),
+    false,
+  );
 });
 
 test("isCronAuthorized: BEARER admin session authorizes with no Origin and an arbitrary UA (guardrail 6b)", async () => {
@@ -564,21 +599,19 @@ test("getCronActor: BEARER admin session → admin actor with no Origin and an a
   assert.deepEqual(actor, { userId: "user-actor-bearer-ok", userName: "admin", trigger: "admin" });
 });
 
-test("getCronActor: the cookie gates still bite — no Origin, or a mismatched UA, → null (never a cron actor)", async () => {
+test("getCronActor: the cookie gate still bites — no Origin → null; a different User-Agent is no gate (guardrail 6h)", async () => {
   process.env.CRON_SECRET = CRON_SECRET;
   const jwt = await mintSession("actor-cookie-gated", "ADMIN");
   assert.equal(
     await getCronActor(cronRequest({ cookie: `summonarr-session=${jwt}`, "user-agent": ADMIN_UA })),
     null,
   );
-  assert.equal(
-    await getCronActor(cronRequest({
-      cookie: `summonarr-session=${jwt}`,
-      origin: "http://localhost:3000",
-      "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1",
-    })),
-    null,
-  );
+  const otherUa = await getCronActor(cronRequest({
+    cookie: `summonarr-session=${jwt}`,
+    origin: "http://localhost:3000",
+    "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1",
+  }));
+  assert.equal(otherUa?.trigger, "admin");
 });
 
 test("getCronActor: a non-admin bearer session and an absent credential → null", async () => {
@@ -906,4 +939,24 @@ test("recordCronRun: a Prisma surface with NO setting.findUnique still records t
   }
   assert.equal(lastLedgerWrite().parsed?.durationMs, 42);
   assert.deepEqual(lastLedgerHistory().map((e) => e.durationMs), [42]);
+});
+
+// Several servers of one source can hold the same episode; the staging insert
+// keeps the FIRST row it sees, so the earliest arrival has to be carried onto it
+// or a season reads as newer than it is (the never-watched report dates by it).
+test("earliestAddedPerEpisode keeps the first row's fields and the earliest addedAt", () => {
+  const early = new Date("2024-01-01T00:00:00Z");
+  const late = new Date("2024-06-01T00:00:00Z");
+  const rows = [
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 1, episodeName: "first", addedAt: late },
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 1, episodeName: "second", addedAt: early },
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 2, addedAt: null },
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 2, addedAt: late },
+  ];
+  assert.deepEqual(earliestAddedPerEpisode(rows), [
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 1, episodeName: "first", addedAt: early },
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 2, addedAt: late },
+  ]);
+  const unique = [{ tmdbId: 2, seasonNumber: 1, episodeNumber: 1 }];
+  assert.equal(earliestAddedPerEpisode(unique), unique, "no duplicates ⇒ the same array, no copy");
 });

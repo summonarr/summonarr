@@ -2,6 +2,7 @@ import { authActive } from "@/lib/auth";
 import { plexSettingKey } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { prisma } from "@/lib/prisma";
+import { indexPlexRowsByKey } from "@/lib/plex-dedupe";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, getTranscodeOffenders, appendPlayHistoryFilter, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
@@ -34,16 +35,22 @@ import {
 import { requireFeature, getFeatureFlags } from "@/lib/features";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
+import { parseActivityDays } from "@/lib/activity-days";
 
 export const dynamic = "force-dynamic";
 
 // Change versus the previous period for a KPI cell: "new" when the previous
 // period had nothing, otherwise a rounded percentage with an up/down/flat arrow.
+// `complete` = stats.prevPeriod.complete: false when play history doesn't cover
+// the previous window (tracking began, or retention purged, inside it), so a
+// delta would compare against a gap. None is shown then.
 function kpiDelta(
   t: Translator,
   current: number,
   previous: number,
+  complete: boolean,
 ): Kpi["delta"] {
+  if (!complete) return null;
   if (previous === 0 && current === 0) return null;
   if (previous === 0) return { text: t("adminActivity.kpi.new"), dir: "up" };
   const pct = Math.round(((current - previous) / previous) * 100);
@@ -122,7 +129,7 @@ export default async function ActivityPage({
     redirect(`/admin/activity/history${qs ? `?${qs}` : ""}`);
   }
 
-  const days = Math.min(Math.max(parseInt(daysParam ?? "30", 10) || 30, 1), 3650);
+  const days = parseActivityDays(daysParam);
   const source = sourceParam && ["plex", "jellyfin"].includes(sourceParam) ? sourceParam : undefined;
   const mediaType = mediaTypeParam && ["MOVIE", "TV"].includes(mediaTypeParam) ? mediaTypeParam : undefined;
 
@@ -306,9 +313,13 @@ export default async function ActivityPage({
       (s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId && !resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`],
     );
     if (stillNeedLibrary.length > 0) {
+      // Both ratingKey columns, for the same reason (guardrail 37c).
       const plexPairs = stillNeedLibrary
         .filter((s: typeof stillNeedLibrary[0]) => s.source === "plex")
-        .map((s: typeof stillNeedLibrary[0]) => ({ plexRatingKey: s.sourceItemId!, serverInstance: s.serverInstance }));
+        .flatMap((s: typeof stillNeedLibrary[0]) => [
+          { plexRatingKey: s.sourceItemId!, serverInstance: s.serverInstance },
+          { plexRatingKeys: { has: s.sourceItemId! }, serverInstance: s.serverInstance },
+        ]);
       // Both id columns (guardrail 37): a title in two Jellyfin libraries has an
       // id per copy but only one is the stored `jellyfinItemId`, so a session on
       // the other copy never resolved here. Rows predating `jellyfinItemIds` are
@@ -323,7 +334,7 @@ export default async function ActivityPage({
         plexPairs.length > 0
           ? prisma.plexLibraryItem.findMany({
               where: { OR: plexPairs },
-              select: { tmdbId: true, mediaType: true, plexRatingKey: true, serverInstance: true },
+              select: { tmdbId: true, mediaType: true, plexRatingKey: true, plexRatingKeys: true, serverInstance: true },
             })
           : [],
         jellyfinPairs.length > 0
@@ -333,8 +344,20 @@ export default async function ActivityPage({
             })
           : [],
       ]);
+      // Each key resolves to its ONE owner per instance (canonical holder, else
+      // lowest tmdbId — `indexPlexRowsByKey`), never last-write-wins: an array
+      // entry overwriting another row's canonical key made the answer follow
+      // findMany's row order, and this backfill PERSISTS it.
+      const plexByInstance = new Map<string, Array<(typeof plexItems)[number]>>();
       for (const i of plexItems) {
-        if (i.plexRatingKey) resolvedTmdb[`item:${i.serverInstance}:${i.plexRatingKey}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        const list = plexByInstance.get(i.serverInstance);
+        if (list) list.push(i);
+        else plexByInstance.set(i.serverInstance, [i]);
+      }
+      for (const [inst, rows] of plexByInstance) {
+        for (const [k, i] of indexPlexRowsByKey(rows)) {
+          resolvedTmdb[`item:${inst}:${k}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        }
       }
       for (const i of jellyfinItems) {
         // Every id the row answers to — the session's sourceItemId may be any of them.
@@ -518,6 +541,7 @@ export default async function ActivityPage({
   // prevPeriod and current-period totals come from stats (getPlayHistoryStats already computes them).
   const prevPlaysNum = stats.prevPeriod?.totalPlays ?? 0;
   const prevWatchTimeNum = stats.prevPeriod?.totalWatchTimeHours ?? 0;
+  const prevComplete = stats.prevPeriod?.complete ?? false;
 
   /* ── Derived props for the refined overview sections ──────────── */
 
@@ -529,7 +553,7 @@ export default async function ActivityPage({
     {
       label: t("adminActivity.kpi.dayPlays", { days }),
       value: stats.totalPlays.toLocaleString(locale),
-      delta: kpiDelta(t, stats.totalPlays, prevPlaysNum),
+      delta: kpiDelta(t, stats.totalPlays, prevPlaysNum, prevComplete),
       spark: stats.playsByDay.map((d) => d.count),
       sparkLabels: stats.playsByDay.map((d) => fmtDay(d.day)),
       sparkSuffix: t("adminActivity.common.playsSuffix"),
@@ -537,7 +561,7 @@ export default async function ActivityPage({
     {
       label: t("adminActivity.kpi.watchTime"),
       value: `${watchHoursNd.toLocaleString(locale)}${hoursSuffix}`,
-      delta: kpiDelta(t, watchHoursNd, Math.round(prevWatchTimeNum)),
+      delta: kpiDelta(t, watchHoursNd, Math.round(prevWatchTimeNum), prevComplete),
       spark: stats.watchTimeByDay.map((d) => d.hours),
       sparkLabels: stats.watchTimeByDay.map((d) => fmtDay(d.day)),
       sparkSuffix: hoursSuffix,
@@ -545,7 +569,7 @@ export default async function ActivityPage({
     {
       label: t("adminActivity.kpi.activeUsers"),
       value: activeUsersNd.toLocaleString(locale),
-      delta: kpiDelta(t, activeUsersNd, stats.prevPeriod?.uniqueViewers ?? 0),
+      delta: kpiDelta(t, activeUsersNd, stats.prevPeriod?.uniqueViewers ?? 0, prevComplete),
     },
     {
       label: t("adminActivity.kpi.completionRate"),

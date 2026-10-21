@@ -12,6 +12,7 @@ export function Loader2({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <path d="M21 12a9 9 0 1 1-6.219-8.56" />

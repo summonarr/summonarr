@@ -267,6 +267,7 @@ const hidden = await import("../src/app/api/hidden/route.ts");
 const watchlist = await import("../src/app/api/watchlist/route.ts");
 const requestsToken = await import("../src/app/api/requests/token/route.ts");
 const requestsUsers = await import("../src/app/api/requests/users/route.ts");
+const requestsInstances = await import("../src/app/api/requests/instances/route.ts");
 const health = await import("../src/app/api/health/route.ts");
 
 // ── synthetic request scope ──────────────────────────────────────────────────
@@ -503,6 +504,35 @@ test("hidden POST never contacts TMDB — a 'not interested' tap must not fail o
   assert.deepEqual(fetchCalls, []);
 });
 
+test("hidden POST rejects a tmdbId past INT4 with 400 instead of a Prisma 500", async () => {
+  const me = await mintSession();
+  const res = await inScope(() =>
+    hidden.POST(mk("/api/hidden", me.token, { method: "POST", body: JSON.stringify({ tmdbId: 2147483648, mediaType: "MOVIE" }) }), undefined),
+  );
+  assert.equal(res.status, 400);
+  assert.equal(opsOf("hiddenItem.create").length, 0);
+});
+
+for (const [name, mod] of [["hidden", hidden], ["watchlist", watchlist]] as const) {
+  test(`${name} DELETE rejects a tmdbId past INT4 with 400 instead of a Prisma 500`, async () => {
+    const me = await mintSession();
+    const res = await inScope(() =>
+      mod.DELETE(mk(`/api/${name}`, me.token, { method: "DELETE", query: "?tmdbId=2147483648&mediaType=MOVIE" }), undefined),
+    );
+    assert.equal(res.status, 400);
+    assert.equal(opsOf(`${name}Item.delete`).length + opsOf(`${name}Item.deleteMany`).length, 0);
+  });
+}
+
+test("watchlist POST rejects a tmdbId past INT4 with 400 before TMDB or the DB", async () => {
+  const me = await mintSession();
+  const res = await inScope(() =>
+    watchlist.POST(mk("/api/watchlist", me.token, { method: "POST", body: JSON.stringify({ tmdbId: 2147483648, mediaType: "MOVIE" }) }), undefined),
+  );
+  assert.equal(res.status, 400);
+  assert.equal(opsOf("watchlistItem.create").length, 0);
+});
+
 test("hidden POST bounds the caller-supplied title and posterPath", async () => {
   const me = await mintSession();
   await inScope(() =>
@@ -638,6 +668,7 @@ for (const [label, q] of [
   ["a zero tmdbId", "?tmdbId=0&mediaType=MOVIE"],
   ["a negative tmdbId", "?tmdbId=-2&mediaType=MOVIE"],
   ["a non-numeric tmdbId", "?tmdbId=abc&mediaType=MOVIE"],
+  ["a tmdbId one past INT4", "?tmdbId=2147483648&mediaType=MOVIE"],
   ["a missing mediaType", "?tmdbId=603"],
   ["an unknown mediaType", "?tmdbId=603&mediaType=ANIME"],
 ] as const) {
@@ -646,6 +677,19 @@ for (const [label, q] of [
     const res = await inScope(() => requestsToken.GET(mk("/api/requests/token", me.token, { method: "GET", query: q }), undefined));
     assert.equal(res.status, 400);
     assert.ok(!("token" in (await res.json())));
+  });
+}
+
+for (const [label, q] of [
+  ["a zero tmdbId", "?tmdbId=0&mediaType=MOVIE"],
+  ["a tmdbId one past INT4", "?tmdbId=2147483648&mediaType=MOVIE"],
+  ["a huge tmdbId", "?tmdbId=99999999999&mediaType=TV"],
+] as const) {
+  test(`requests/instances with ${label} is 400 before any resolve`, async () => {
+    const me = await mintSession();
+    const res = await inScope(() => requestsInstances.GET(mk("/api/requests/instances", me.token, { method: "GET", query: q }), undefined));
+    assert.equal(res.status, 400);
+    assert.ok(!("instances" in (await res.json())));
   });
 }
 

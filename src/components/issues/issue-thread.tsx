@@ -69,8 +69,13 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
     ? /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? "⌘↵" : "Ctrl+↵"
     : null;
 
+  // Every load takes a ticket; only the newest ticket may write state, so a
+  // slow earlier read can't land after (and overwrite) a newer one.
+  const loadSeqRef = useRef(0);
+
   const loadMessages = useCallback(
     (signal?: AbortSignal, { silent = false }: { silent?: boolean } = {}) => {
+      const seq = ++loadSeqRef.current;
       if (!silent) setLoadState("loading");
       return fetch(withBasePath(`/api/issues/${issueId}/messages`), { signal })
         .then((r) => {
@@ -80,11 +85,13 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
           return r.json();
         })
         .then((data: IssueMessageData[]) => {
+          if (seq !== loadSeqRef.current) return;
           setMessages(Array.isArray(data) ? data : []);
           setLoadState("ready");
         })
         .catch((err) => {
           if (err?.name === "AbortError") return;
+          if (seq !== loadSeqRef.current) return;
           // A silent refresh failure leaves the existing thread intact rather
           // than blanking a healthy view over a transient hiccup.
           if (!silent) setLoadState("error");

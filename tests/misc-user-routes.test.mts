@@ -735,6 +735,36 @@ test("ratings/batch drops malformed entries instead of failing the whole request
   assert.equal(res.status, 200);
 });
 
+test("ratings GET rejects an id past INT4 with 400 (it would be a Prisma 500)", async () => {
+  const me = await mintSession();
+  const res = await getRatings(me.token, "?id=2147483648&type=movie");
+  assert.equal(res.status, 400);
+});
+
+test("ratings/batch drops an id past INT4 instead of handing it to the ratings lookup", async () => {
+  const me = await mintSession();
+  // Record every cache read: an out-of-range id must never reach a tmdbId-keyed query.
+  const seen: string[] = [];
+  const restore: Array<() => void> = [];
+  for (const m of ["ratingsCache", "tmdbCache", "tmdbMediaCore"] as const) {
+    const model = (prisma as unknown as Record<string, Record<string, (...a: unknown[]) => unknown>>)[m];
+    for (const fn of ["findMany", "findUnique", "findFirst"]) {
+      const orig = model[fn];
+      model[fn] = (...a: unknown[]) => { seen.push(JSON.stringify(a, (_k, v) => (typeof v === "bigint" ? String(v) : v))); return orig(...a); };
+      restore.push(() => { model[fn] = orig; });
+    }
+  }
+  let res: Response;
+  try {
+    res = await postRatingsBatch(me.token, { items: [{ id: 2147483648, type: "movie" }] });
+  } finally {
+    for (const r of restore) r();
+  }
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ratings: {} });
+  assert.deepEqual(seen.filter((x) => x.includes("2147483648")), []);
+});
+
 test("ratings/batch de-duplicates repeated (id, type) pairs", async () => {
   const me = await mintSession();
   const res = await postRatingsBatch(me.token, {

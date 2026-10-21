@@ -129,6 +129,8 @@
   "profile.sessions.passwordLabel": "Confirme sua senha para revogar este dispositivo",
   "profile.sessions.passwordPlaceholder": "Sua senha",
   "profile.sessions.error.incorrectPassword": "Senha incorreta.",
+  "profile.stepUp.prompt": "Confirme sua senha para continuar",
+  "profile.stepUp.continue": "Continuar",
   "profile.sessions.error.revoke": "Falha ao revogar a sessão.",
   "profile.close.title": "Encerrar conta",
   "profile.close.description": "Encerre sua conta e bloqueie o login. Só um administrador pode restaurá-la.",

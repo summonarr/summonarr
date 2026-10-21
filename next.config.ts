@@ -15,6 +15,8 @@ const securityHeaders = [
     key: "Permissions-Policy",
     value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",
   },
+  // Keep search engines and AI crawlers from indexing any response
+  { key: "X-Robots-Tag", value: "noindex, nofollow, noarchive, nosnippet, noimageindex" },
   // Force HTTPS for 1 year (only effective when served over HTTPS)
   {
     key: "Strict-Transport-Security",

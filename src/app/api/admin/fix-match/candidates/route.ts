@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import nodePath from "node:path";
 import { prisma } from "@/lib/prisma";
 import { getPlexConfig } from "@/lib/plex-config";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 import { arrFetch } from "@/lib/arr";
+import { configuredArrCfg, enabledArrInstances } from "@/lib/arr-admin";
+import { processSingleton } from "@/lib/process-singleton";
+import { candidateCacheKey, getCachedCandidates, setCachedCandidates } from "@/lib/fix-match-candidate-cache";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
 import { settleLimit } from "@/lib/concurrency";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
@@ -61,6 +65,10 @@ export type CandidatesResponse = {
   // the caller can POST the fix back against the SAME server (a ratingKey is
   // server-local — see the fix-match POST route).
   serverInstance:      string;
+  // What the library row is matched to NOW (the wrong title), so the dialog can
+  // show "currently X → will become Y" instead of two bare ids.
+  currentTitle:        string | null;
+  currentYear:         string | null;
 };
 
 // 0-100 similarity of two titles via normalized Levenshtein edit distance.
@@ -267,6 +275,21 @@ async function resolveTargetDetails(correctTmdbId: number, mediaType: "MOVIE" | 
   };
 }
 
+// One Sonarr series list per instance, kept for a minute. Sonarr cannot filter
+// by TMDB id, so every picker open used to download the whole table; a bulk run
+// of fixes now reads it once. Display-only (the cross-check is a hint): the POST
+// never reads it.
+const SERIES_LIST_TTL_MS = 60_000;
+const seriesLists = processSingleton("fix-match-candidates:series", () => new Map<string, { at: number; rows: unknown[] }>());
+async function cachedSeriesList<T>(instance: string, load: () => Promise<T[]>): Promise<T[]> {
+  const now = Date.now();
+  const hit = seriesLists.get(instance);
+  if (hit && now - hit.at < SERIES_LIST_TTL_MS) return hit.rows as T[];
+  const rows = await load();
+  seriesLists.set(instance, { at: now, rows });
+  return rows;
+}
+
 // Live Radarr/Sonarr cross-check for the folder being re-matched — an additive
 // trust signal for both the Plex picker and the Jellyfin confirmation card.
 // Null everywhere when no arr is configured or nothing matched.
@@ -281,90 +304,94 @@ async function resolveArrConfirmation(
   // Whether the arr entry's folder path agrees with the library item's — an
   // additive diagnostic; null when no arr confirmation was possible at all.
   let arrPathAgrees: boolean | null = null;
-  const arrUrlKey  = mediaType === "MOVIE" ? "radarrUrl"    : "sonarrUrl";
-  const arrKeyKey  = mediaType === "MOVIE" ? "radarrApiKey" : "sonarrApiKey";
+  type ArrMovie = { tmdbId?: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
+  const correctRows: ArrMovie[] = [];
+  const wrongRows: ArrMovie[] = [];
 
-  const [arrUrlRow, arrKeyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: arrUrlKey } }),
-    prisma.setting.findUnique({ where: { key: arrKeyKey } }),
-  ]);
+  // EVERY enabled instance of the service, not just the default one (guardrail
+  // 32): a title that lives only in a 4K or anime instance used to get no
+  // confirmation at all. The arr cross-check is an additive trust signal, so a
+  // registry/settings failure degrades to "no confirmation", never a 500.
+  let instances: Awaited<ReturnType<typeof enabledArrInstances>> = [];
+  if (filePath) {
+    try {
+      instances = await enabledArrInstances(mediaType === "MOVIE" ? "radarr" : "sonarr");
+    } catch (err) {
+      console.error("[fix-match/candidates] arr instance lookup failed:", err instanceof Error ? err.message : err);
+    }
+  }
 
-  if (arrUrlRow?.value && arrKeyRow?.value) {
-    if (filePath) {
+  if (filePath && instances.length > 0) {
+    // The library path ITSELF, not its parent: a Jellyfin series row's Path is
+    // the series folder (Plex's is an episode file), so its parent is the
+    // library root, which equals no Sonarr series path. A path at or under the
+    // arr folder covers a movie file, an episode file and a series folder alike.
+    // Fold Windows separators first (as file-info does): without it the
+    // dirname regex strips nothing off a backslash path.
+    const libraryPath = nodePath.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/$/, ""));
+    const endpoint = mediaType === "MOVIE" ? "movie" : "series";
+
+    const pathMatches = (arrPathRaw: string | undefined): boolean => {
+      const arrPath = nodePath.posix.normalize((arrPathRaw ?? "").replace(/\\/g, "/").replace(/\/$/, ""));
+      return !!arrPath && !!libraryPath && (arrPath === libraryPath || libraryPath.startsWith(arrPath + "/"));
+    };
+
+    for (const inst of instances) {
+      let cfg;
+      try {
+        cfg = await configuredArrCfg(inst.service, inst.slug);
+      } catch {
+        continue;
+      }
       // Route Arr library lookups through arrFetch so they inherit the 30s
       // timeout, 50 MB cap (guardrail 5), X-Api-Key injection, and
-      // ArrResponseError handling instead of a bare safeFetchAdminConfigured
-      // (which defaulted to an 8s timeout + 10 MB cap and raw Response handling).
-      const arrCfg = { url: arrUrlRow.value.replace(/\/$/, ""), apiKey: arrKeyRow.value };
-      // Fold Windows separators first (as file-info does): without it the
-      // dirname regex strips nothing off a backslash path, so the filename
-      // stays on the path and every pathMatches() below reads false.
-      // The library path ITSELF, not its parent: a Jellyfin series row's Path is
-      // the series folder (Plex's is an episode file), so its parent is the
-      // library root, which equals no Sonarr series path. A path at or under the
-      // arr folder covers a movie file, an episode file and a series folder alike.
-      const libraryPath = nodePath.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/$/, ""));
-      const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
-
-      type ArrMovie = { tmdbId?: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
-
-      const pathMatches = (arrPathRaw: string | undefined): boolean => {
-        const arrPath = nodePath.posix.normalize((arrPathRaw ?? "").replace(/\\/g, "/").replace(/\/$/, ""));
-        return !!arrPath && !!libraryPath && (arrPath === libraryPath || libraryPath.startsWith(arrPath + "/"));
-      };
-
+      // ArrResponseError handling.
+      //
       // Radarr's movie list honors ?tmdbId= server-side. Sonarr's series list
-      // does NOT (its only filter is ?tvdbId=), so the two "filtered" TV
-      // probes each silently transferred the ENTIRE series table — and on
-      // Sonarr v3, whose SeriesResource carries no TmdbId at all, the
-      // client-side find never matched and the confirmation silently blanked.
-      // One unfiltered fetch feeds both TV probes; movies keep the filter.
-      let correctRows: ArrMovie[] = [];
-      let wrongRows: ArrMovie[] = [];
+      // does NOT (its only filter is ?tvdbId=), and on Sonarr v3 SeriesResource
+      // carries no TmdbId at all — TV reads the whole table once per instance,
+      // shared by both probes and kept briefly so a bulk run of pickers does not
+      // download it again for every title.
       if (mediaType === "MOVIE") {
         const [correctRes, wrongRes] = await Promise.allSettled([
-          arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}?tmdbId=${correctTmdbId}`),
-          arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}?tmdbId=${tmdbId}`),
+          arrFetch<ArrMovie[]>(cfg, `/api/v3/${endpoint}?tmdbId=${correctTmdbId}`),
+          arrFetch<ArrMovie[]>(cfg, `/api/v3/${endpoint}?tmdbId=${tmdbId}`),
         ]);
         for (const result of [correctRes, wrongRes]) {
           if (result.status === "rejected") {
             console.error("[fix-match/candidates] Arr fetch rejected:", result.reason instanceof Error ? result.reason.message : result.reason);
           }
         }
-        if (correctRes.status === "fulfilled") correctRows = correctRes.value;
-        if (wrongRes.status === "fulfilled") wrongRows = wrongRes.value;
+        if (correctRes.status === "fulfilled") correctRows.push(...correctRes.value);
+        if (wrongRes.status === "fulfilled") wrongRows.push(...wrongRes.value);
       } else {
         try {
-          const all = await arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}`);
-          correctRows = all;
-          wrongRows = all;
+          const all = await cachedSeriesList(inst.slug, () => arrFetch<ArrMovie[]>(cfg, `/api/v3/${endpoint}`));
+          correctRows.push(...all);
+          wrongRows.push(...all);
         } catch (err) {
           console.error("[fix-match/candidates] Arr fetch rejected:", err instanceof Error ? err.message : err);
         }
       }
+    }
 
-      const correctMatch = correctRows.find((m) => m.tmdbId === correctTmdbId);
-      if (correctMatch && nodePath.posix.normalize(correctMatch.path ?? "")) {
-        // Library membership confirmed. Path agreement is reported separately —
-        // gating the confirmation on it would lose the feature entirely on
-        // split-mount deployments (the arr and media-server paths legitimately
-        // differ there). The old code compared the paths and then assigned the
-        // SAME value in both branches, making the check vacuous.
-        arrConfirmedTmdbId = correctTmdbId;
-        arrPathAgrees = pathMatches(correctMatch.path);
+    const correctMatch = correctRows.find((m) => m.tmdbId === correctTmdbId);
+    if (correctMatch && nodePath.posix.normalize(correctMatch.path ?? "")) {
+      // Library membership confirmed. Path agreement is reported separately —
+      // gating the confirmation on it would lose the feature entirely on
+      // split-mount deployments (the arr and media-server paths legitimately
+      // differ there).
+      arrConfirmedTmdbId = correctTmdbId;
+      arrPathAgrees = pathMatches(correctMatch.path);
+    }
+    if (arrConfirmedTmdbId === null) {
+      const wrongMatch = wrongRows.find((m) => m.tmdbId === tmdbId && pathMatches(m.path));
+      if (wrongMatch) {
+        // The arr library maps THIS folder to the current (wrong) id — surface
+        // the disagreement (the "⚠ Radarr/Sonarr has TMDB #X" UI warning).
+        arrConfirmedTmdbId = tmdbId;
+        arrPathAgrees = true;
       }
-      if (arrConfirmedTmdbId === null) {
-        const wrongMatch = wrongRows.find((m) => m.tmdbId === tmdbId);
-        if (wrongMatch && pathMatches(wrongMatch.path)) {
-          // The arr library maps THIS folder to the current (wrong) id —
-          // surface the disagreement (the "⚠ Radarr/Sonarr has TMDB #X" UI
-          // warning was built for exactly this and was unreachable while this
-          // branch dead-stored null).
-          arrConfirmedTmdbId = tmdbId;
-          arrPathAgrees = true;
-        }
-      }
-
     }
   }
 
@@ -408,9 +435,9 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
   const arrTmdbIdParam     = searchParams.get("arrTmdbId");
   const arrTmdbIdHintRaw   = arrTmdbIdParam ? parseInt(arrTmdbIdParam, 10) : null;
 
-  const tmdbId        = Number.isInteger(tmdbIdRaw)        && tmdbIdRaw        > 0 ? tmdbIdRaw        : 0;
-  const correctTmdbId = Number.isInteger(correctTmdbIdRaw) && correctTmdbIdRaw > 0 ? correctTmdbIdRaw : 0;
-  const arrTmdbIdHint = arrTmdbIdHintRaw !== null && Number.isInteger(arrTmdbIdHintRaw) && arrTmdbIdHintRaw > 0
+  const tmdbId        = isTmdbIdInRange(tmdbIdRaw)        ? tmdbIdRaw        : 0;
+  const correctTmdbId = isTmdbIdInRange(correctTmdbIdRaw) ? correctTmdbIdRaw : 0;
+  const arrTmdbIdHint = arrTmdbIdHintRaw !== null && isTmdbIdInRange(arrTmdbIdHintRaw)
     ? arrTmdbIdHintRaw
     : null;
 
@@ -441,7 +468,7 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     const [jfItem, plexRows] = await Promise.all([
       prisma.jellyfinLibraryItem.findFirst({
         where: { tmdbId, mediaType, serverInstance },
-        select: { jellyfinItemId: true, filePath: true },
+        select: { jellyfinItemId: true, filePath: true, title: true, year: true },
       }),
       // Cross-server display hint — deliberately unscoped, mirroring (and for
       // the same reason as) the Jellyfin read in the Plex mode below.
@@ -468,13 +495,15 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
       plexFilePath: plexHint?.filePath ?? null,
       jellyfinFilePath: jfItem.filePath ?? null,
       serverInstance,
+      currentTitle: jfItem.title ?? null,
+      currentYear: jfItem.year ?? null,
     } satisfies CandidatesResponse);
   }
 
   const [item, jellyfinRows] = await Promise.all([
     prisma.plexLibraryItem.findFirst({
       where: { tmdbId, mediaType, serverInstance },
-      select: { plexRatingKey: true, filePath: true },
+      select: { plexRatingKey: true, filePath: true, title: true, year: true },
     }),
     // Deliberately NOT scoped by `serverInstance`: that slug names the PLEX
     // server this listing is for, and the two sides of a bad match are
@@ -502,6 +531,9 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
   if (!item?.plexRatingKey) {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.plexRatingKeyNotFound") }, { status: 404 });
   }
+  const cacheKey = candidateCacheKey({ serverInstance, ratingKey: item.plexRatingKey, correctTmdbId, arrHint: arrTmdbIdHint });
+  const cached = getCachedCandidates<CandidatesResponse>(cacheKey);
+  if (cached) return NextResponse.json(cached);
   // Coerce to break taint from the DB-read string before interpolating into the
   // Plex admin-token URL below (rating keys are always integers).
   const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
@@ -681,7 +713,7 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     c.suggested = c.guid === finalSuggestedGuid;
   }
 
-  return NextResponse.json({
+  const responseBody = {
     candidates,
     targetTitle,
     targetYear,
@@ -699,5 +731,9 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     plexFilePath: item.filePath ?? null,
     jellyfinFilePath: jellyfinItem?.filePath ?? null,
     serverInstance,
-  } satisfies CandidatesResponse);
+    currentTitle: item.title ?? null,
+    currentYear: item.year ?? null,
+  } satisfies CandidatesResponse;
+  setCachedCandidates(cacheKey, responseBody);
+  return NextResponse.json(responseBody);
 });

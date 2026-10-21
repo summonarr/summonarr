@@ -626,6 +626,9 @@ test("bootstrap grace: a >=60s-absent row is finalized and ledgered, a <60s-abse
     `boot-stale:${bootStale.startedAt.toISOString()}`,
     "the finalized PlayHistory row keys off the stale session",
   );
+  // Absent past the grace: no phantom tail. stoppedAt is the last observation, not "now".
+  assert.equal((rows[0].stoppedAt as Date).getTime(), bootStale.lastSeenAt.getTime(), "stoppedAt = lastSeenAt, not the sweep time");
+  assert.equal(rows[0].playDuration, 100, "playDuration is the accumulated playtime only");
   assert.equal(isPlexSessionRecentlyFinalized("plex:boot-stale"), true, "the finalized session is ledgered against poller re-creates");
   assert.equal(isPlexSessionRecentlyFinalized("plex:boot-fresh"), false, "a session absent for <60s must NOT be finalized or ledgered");
   assert.equal(deletesFor("plex:boot-fresh").length, 0, "the spared row is left alone");

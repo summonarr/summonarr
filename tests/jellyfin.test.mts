@@ -65,7 +65,7 @@
 //   - the playMethod decision table: TranscodingInfo is authoritative over
 //     PlayState.PlayMethod, absent both → undefined (never a DirectPlay
 //     default), transcodeReason only for Transcode with the humanized
-//     PascalCase reasons (deduped) and the "Container not supported" fallback.
+//     PascalCase reasons (deduped) and the "No reason reported" fallback.
 //
 //   Admin surface (terminateJellyfinSession, getJellyfinAllUsers,
 //   setJellyfinDownloadPolicy, getJellyfinUserCount):
@@ -130,6 +130,7 @@ const {
   getJellyfinMediaFolders,
   refreshJellyfinLibrary,
   getJellyfinTmdbIds,
+  listJellyfinMatchEntries,
   buildSeriesItemIdIndex,
   getJellyfinTVEpisodes,
   getJellyfinEpisodesForShow,
@@ -294,7 +295,7 @@ test("availability probe fetches recent additions of the mapped type and matches
   assert.equal(await hasJellyfinItemByTmdbId(B, "key-2", 550, "movie"), true);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Movie&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
+    `${B}/Items?IncludeItemTypes=Movie&CollapseBoxSetItems=false&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
   );
   assert.equal(sent[0].headers.get("x-mediabrowser-token"), "key-2");
 
@@ -304,7 +305,7 @@ test("availability probe fetches recent additions of the mapped type and matches
   assert.equal(await hasJellyfinItemByTmdbId(B, "key-2", 1399, "tv"), false);
   assert.equal(
     sent[1].url,
-    `${B}/Items?IncludeItemTypes=Series&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
+    `${B}/Items?IncludeItemTypes=Series&CollapseBoxSetItems=false&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
     "tv must map to the Series item type",
   );
 });
@@ -388,7 +389,7 @@ test("library query pins the exact /Items wire shape (Fields list, BoxSet exclus
   assert.equal(sent.length, 1);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Movie&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=5000`,
+    `${B}/Items?IncludeItemTypes=Movie&ExcludeItemTypes=BoxSet&CollapseBoxSetItems=false&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=5000`,
     "the library sync's exact query — a drift here silently empties the sync",
   );
   assert.deepEqual(items.get(550), {
@@ -572,6 +573,96 @@ test("library scoping: each libraryId becomes a ParentId-scoped query and the pe
   assert.deepEqual([...items.keys()].sort((x, y) => x - y), [11, 22]);
 });
 
+// ── collection grouping (guardrail 37d) ─────────────────────────────────────
+//
+// An API key has no user, and for a user-less /Items query Jellyfin replaces
+// every member of a collection with its BoxSet unless the query says
+// CollapseBoxSetItems=false — ExcludeItemTypes=BoxSet doesn't stop it. Live on
+// Jellyfin 12.2 (2026-10-13) that hid 2,230 of 9,134 movies from the sync,
+// Practical Magic (6435) and Practical Magic 2 (1302904) among them, the day
+// the sequel's arrival created their collection. This stub groups the same way.
+function groupingJellyfin(url: string, members: { Id: string; Tmdb: string }[]) {
+  const grouped = new URL(url).searchParams.get("CollapseBoxSetItems") !== "false";
+  const Items = grouped
+    ? [{ Id: "boxset-1", Type: "BoxSet", Name: "Practical Magic Collection", ProviderIds: { TmdbCollection: "1354706" } }]
+    : members.map((m) => ({ Id: m.Id, Type: "Movie", ProviderIds: { Tmdb: m.Tmdb } }));
+  return okJson({ Items, TotalRecordCount: Items.length });
+}
+const PRACTICAL_MAGIC = [{ Id: "pm1", Tmdb: "6435" }, { Id: "pm2", Tmdb: "1302904" }];
+
+test("the library sync lists a collection's members, never the collection — unscoped, per library, and on the recentOnly window", async () => {
+  const B = nextBase();
+  respond = (url) => groupingJellyfin(url, PRACTICAL_MAGIC);
+
+  for (const run of [
+    () => getJellyfinTmdbIds(B, "k", "MOVIE"),
+    () => getJellyfinTmdbIds(B, "k", "MOVIE", new Set(["libA"])),
+    () => getJellyfinTmdbIds(B, "k", "MOVIE", undefined, new Date("2026-10-13T00:00:00.000Z")),
+  ]) {
+    const items = await run();
+    assert.deepEqual([...items.keys()].sort((x, y) => x - y), [6435, 1302904]);
+  }
+  respond = (url) => groupingJellyfin(url, [{ Id: "s1", Tmdb: "1399" }]);
+  const tv = await getJellyfinTmdbIds(B, "k", "TV");
+  assert.deepEqual([...tv.keys()], [1399], "Series are grouped the same way, so TV sends it too");
+  assert.deepEqual(warns, []);
+});
+
+test("a server that groups anyway is named once, and its collections never become titles", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { Id: "boxset-1", Type: "BoxSet", Name: "Practical Magic Collection", ProviderIds: { Tmdb: "1354706" } },
+      { Id: "m1", Type: "Movie", ProviderIds: { Tmdb: "550" } },
+    ],
+    TotalRecordCount: 2,
+  });
+  const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.deepEqual([...items.keys()], [550], "a BoxSet's id is a collection id, not a movie");
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /returned 1 collection\(s\) in place of their members/);
+  await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(warns.length, 1, "an unchanged condition is not re-logged (guardrail 7b)");
+});
+
+test("the availability probe finds a title that sits in a collection", async () => {
+  const B = nextBase();
+  respond = (url) => groupingJellyfin(url, PRACTICAL_MAGIC);
+  assert.equal(await hasJellyfinItemByTmdbId(B, "k", 1302904, "movie"), true);
+});
+
+test("every Jellyfin /Items query that can list a Movie or Series sends CollapseBoxSetItems=false", async () => {
+  // Structural: the behavioural tests above cover the sync and the probe; this
+  // holds every other /Items? literal in src to the same rule — the never-watched
+  // played-items read and fix-match's confirmation search included. A query
+  // limited to Episode can't be grouped (Folder.CollapseBoxSetItems only fires
+  // for Movie/Series or an untyped query) and is exempt.
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = new URL("../src/", import.meta.url).pathname;
+  const walk = (dir: string): string[] => readdirSync(dir).flatMap((name) => {
+    if (name === "generated") return [];
+    const p = join(dir, name);
+    return statSync(p).isDirectory() ? walk(p) : /\.(ts|tsx)$/.test(name) ? [p] : [];
+  });
+  const offenders: string[] = [];
+  let seen = 0;
+  for (const file of walk(root)) {
+    for (const line of readFileSync(file, "utf8").split("\n")) {
+      if (!line.includes("/Items?") || line.trim().startsWith("//")) continue;
+      seen++;
+      const types = /IncludeItemTypes=([A-Za-z,$]+)/.exec(line)?.[1] ?? "";
+      const episodesOnly = types !== "" && types.split(",").every((t) => t === "Episode");
+      if (episodesOnly) continue;
+      if (!line.includes("JELLYFIN_NO_COLLECTION_GROUPING") && !line.includes("CollapseBoxSetItems=false")) {
+        offenders.push(`${file.replace(root, "src/")}: ${line.trim().slice(0, 140)}`);
+      }
+    }
+  }
+  assert.ok(seen >= 8, `the scan found the /Items? queries (saw ${seen})`);
+  assert.deepEqual(offenders, []);
+});
+
 // ── fetchPage retry / fast-fail (via getJellyfinTmdbIds) ────────────────────
 
 test("a 5xx page retries after the backoff (with the [jellyfin] retry warn) and the retried page's items survive", async (t: TestContext) => {
@@ -628,13 +719,13 @@ test("episodes with a provided series map: exact fields query, SeriesId→tmdbId
   const episodes = await getJellyfinTVEpisodes(B, "k", undefined, seriesMap);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
+    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(
     episodes.sort((a, b) => a.tmdbId - b.tmdbId),
     [
-      { tmdbId: 100, seasonNumber: 1, episodeNumber: 1 },
-      { tmdbId: 200, seasonNumber: 2, episodeNumber: 3 },
+      { tmdbId: 100, seasonNumber: 1, episodeNumber: 1, addedAt: null },
+      { tmdbId: 200, seasonNumber: 2, episodeNumber: 3, addedAt: null },
     ],
   );
 
@@ -671,7 +762,7 @@ test("episodes without a provided map discover the Series set first, then map ep
 
   const episodes = await getJellyfinTVEpisodes(B, "k");
   assert.ok(sent[0].url.includes("IncludeItemTypes=Series"), "series discovery runs first");
-  assert.deepEqual(episodes, [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 2 }]);
+  assert.deepEqual(episodes, [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 2, addedAt: null }]);
 });
 
 // The main regression pin for guardrail 37. A show in two libraries has two
@@ -699,9 +790,11 @@ test("a series in two libraries maps BOTH item ids, so the losing copy's episode
     if (url.includes("IncludeItemTypes=Episode")) {
       return okJson({
         Items: [
-          { SeriesId: "ser-tv",    ParentIndexNumber: 1, IndexNumber: 1 },
+          { SeriesId: "ser-tv",    ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-06-02T00:00:00.000Z" },
           { SeriesId: "ser-anime", ParentIndexNumber: 2, IndexNumber: 4 }, // the whole of S2 used to vanish here
-          { SeriesId: "ser-anime", ParentIndexNumber: 1, IndexNumber: 1 }, // same episode via the other copy → deduped
+          // Same episode via the other copy → deduped, and its EARLIER arrival is
+          // the one kept (the never-watched report dates a season by it).
+          { SeriesId: "ser-anime", ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-01-02T00:00:00.000Z" },
           { SeriesId: "ser-other", ParentIndexNumber: 9, IndexNumber: 9 }, // genuinely unknown series → still skipped
         ],
         TotalRecordCount: 4,
@@ -714,8 +807,8 @@ test("a series in two libraries maps BOTH item ids, so the losing copy's episode
   assert.deepEqual(
     episodes.sort((a, b) => a.seasonNumber - b.seasonNumber),
     [
-      { tmdbId: 1399, seasonNumber: 1, episodeNumber: 1 },
-      { tmdbId: 1399, seasonNumber: 2, episodeNumber: 4 },
+      { tmdbId: 1399, seasonNumber: 1, episodeNumber: 1, addedAt: new Date("2024-01-02T00:00:00.000Z") },
+      { tmdbId: 1399, seasonNumber: 2, episodeNumber: 4, addedAt: null },
     ],
     "both copies' episodes land on the one tmdb id, deduped, with unknown series still dropped",
   );
@@ -846,22 +939,25 @@ test("episodes-for-show scopes to ParentId=<seriesId>, stamps the caller's tmdbI
   const B = nextBase();
   respond = () => okJson({
     Items: [
-      { ParentIndexNumber: 1, IndexNumber: 1 },
+      { ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-03-01T12:00:00.0000000Z" },
       { ParentIndexNumber: 0, IndexNumber: 2 },  // specials → skipped
-      { ParentIndexNumber: 3, IndexNumber: 7 },
+      { ParentIndexNumber: 3, IndexNumber: 7 },  // undated → addedAt null
       { IndexNumber: 4 },                        // no season → skipped
     ],
     TotalRecordCount: 4,
   });
 
   const episodes = await getJellyfinEpisodesForShow(B, "k", "ser-77", 4242);
+  // DateCreated is requested and parsed (fix-match rebuilds the show's
+  // TVEpisodeCache rows from here; an undated row makes its season
+  // unobservable on the never-watched report — 14d).
   assert.equal(
     sent[0].url,
-    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
+    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(episodes, [
-    { tmdbId: 4242, seasonNumber: 1, episodeNumber: 1 },
-    { tmdbId: 4242, seasonNumber: 3, episodeNumber: 7 },
+    { tmdbId: 4242, seasonNumber: 1, episodeNumber: 1, addedAt: new Date("2024-03-01T12:00:00Z") },
+    { tmdbId: 4242, seasonNumber: 3, episodeNumber: 7, addedAt: null },
   ]);
 });
 
@@ -957,7 +1053,7 @@ test("sessions playMethod table: TranscodingInfo is authoritative, absent info n
   assert.equal(byId.get("s3")!.playMethod, "DirectPlay", "fully-direct transcode info preserves a DirectPlay claim");
   assert.equal(byId.get("s4")!.playMethod, "DirectStream", "fully-direct with no DirectPlay claim is DirectStream");
   assert.equal(byId.get("s5")!.playMethod, "Transcode", "any non-direct leg overrides a stale DirectPlay claim");
-  assert.equal(byId.get("s5")!.transcodeReason, "Container not supported", "no TranscodeReasons ⇒ the fallback reason");
+  assert.equal(byId.get("s5")!.transcodeReason, "No reason reported", "no TranscodeReasons ⇒ say so, never a guessed cause");
   assert.equal(byId.get("s3")!.transcodeReason, undefined, "reason only accompanies Transcode");
   assert.equal(byId.get("s2")!.state, "playing", "not-paused (absent IsPaused) reads as playing");
 });
@@ -1111,6 +1207,38 @@ test("sessions bitrate: a transcode still reports the OUTPUT bitrate, not the so
   );
 });
 
+// Jellyfin's TranscodeReason enum (MediaBrowser.Model.Session.TranscodeReason,
+// 10.8–10.10). The activity UI translates a stored reason phrase by phrase via
+// TRANSCODE_REASON_KEYS; a phrase missing there shows up in English on every
+// non-English Statistics page. Renaming the humanizer's output, or Jellyfin
+// adding a reason, fails here instead.
+test("sessions: every Jellyfin TranscodeReason humanizes to a phrase the activity UI translates", async () => {
+  const { TRANSCODE_REASON_KEYS } = await import("../src/lib/transcode-reasons.ts");
+  const ENUM = [
+    "ContainerNotSupported", "VideoCodecNotSupported", "AudioCodecNotSupported", "SubtitleCodecNotSupported",
+    "AudioIsExternal", "SecondaryAudioNotSupported", "VideoProfileNotSupported", "VideoLevelNotSupported",
+    "VideoResolutionNotSupported", "VideoBitDepthNotSupported", "VideoFramerateNotSupported", "RefFramesNotSupported",
+    "AnamorphicVideoNotSupported", "InterlacedVideoNotSupported", "AudioChannelsNotSupported", "AudioProfileNotSupported",
+    "AudioSampleRateNotSupported", "AudioBitDepthNotSupported", "ContainerBitrateExceedsLimit", "VideoBitrateNotSupported",
+    "AudioBitrateNotSupported", "UnknownVideoStreamInfo", "UnknownAudioStreamInfo", "DirectPlayError",
+    "VideoRangeTypeNotSupported", "VideoCodecTagNotSupported", "StreamCountExceedsLimit",
+  ];
+  const B = nextBase();
+  respond = () => okJson([
+    {
+      Id: "r-1", UserId: "u", UserName: "u",
+      NowPlayingItem: { Id: "mv-r", Name: "R", Type: "Movie" },
+      PlayState: { PositionTicks: 1, IsPaused: false },
+      TranscodingInfo: { IsVideoDirect: false, IsAudioDirect: false, TranscodeReasons: ENUM },
+    },
+  ]);
+  const [s] = await getJellyfinSessions(B, "k");
+  const phrases = s.transcodeReason!.split(", ");
+  assert.equal(phrases.length, ENUM.length, "one phrase per reason");
+  const untranslated = phrases.filter((p) => !(p in TRANSCODE_REASON_KEYS));
+  assert.deepEqual(untranslated, []);
+});
+
 test("sessions bitrate: absent everywhere stays undefined rather than collapsing to 0", async () => {
   const B = nextBase();
   respond = () => okJson([
@@ -1181,11 +1309,13 @@ test("terminate: a whitespace-only reason skips the command, and a failed Stop r
 
 // ── getJellyfinAllUsers / getJellyfinUserCount ──────────────────────────────
 
-test("all users (plain array): elevated header, email @-gate, IsAdministrator===true, only explicit false disables downloads, rows missing Id/Name dropped", async () => {
+test("all users (plain array): elevated header, email @-gate, IsAdministrator===true, IsDisabled===true, only explicit false disables downloads, rows missing Id/Name dropped", async () => {
   const B = nextBase();
   respond = () => okJson([
     { Id: "u1", Name: "alice", Email: "alice@example.com", Policy: { IsAdministrator: true, EnableContentDownloading: true } },
-    { Id: "u2", Name: "bob", Email: "not-an-email", Policy: { IsAdministrator: false, EnableContentDownloading: false } },
+    // IsDisabled: the account exists but can't sign in — the user sync treats it
+    // as departed (guardrail 6j).
+    { Id: "u2", Name: "bob", Email: "not-an-email", Policy: { IsAdministrator: false, IsDisabled: true, EnableContentDownloading: false } },
     { Id: "u3", Name: "carol" },      // no Policy at all → Jellyfin defaults
     { Name: "no-id" },                // dropped
     { Id: "no-name" },                // dropped
@@ -1195,9 +1325,9 @@ test("all users (plain array): elevated header, email @-gate, IsAdministrator===
   assert.equal(sent[0].url, `${B}/Users`);
   assert.equal(sent[0].headers.get("authorization"), adminAuthHeader("key-9"), "GET /Users requires elevation — the token header alone is not enough");
   assert.deepEqual(users, [
-    { id: "u1", name: "alice", email: "alice@example.com", isAdmin: true, downloadsEnabled: true },
-    { id: "u2", name: "bob", email: undefined, isAdmin: false, downloadsEnabled: false },
-    { id: "u3", name: "carol", email: undefined, isAdmin: false, downloadsEnabled: true },
+    { id: "u1", name: "alice", email: "alice@example.com", isAdmin: true, isDisabled: false, downloadsEnabled: true },
+    { id: "u2", name: "bob", email: undefined, isAdmin: false, isDisabled: true, downloadsEnabled: false },
+    { id: "u3", name: "carol", email: undefined, isAdmin: false, isDisabled: false, downloadsEnabled: true },
   ]);
   assert.equal(warns.length, 0);
 });
@@ -1206,7 +1336,7 @@ test("all users: the Jellyfin 10.9 QueryResult {Items} wrapper parses too; zero 
   const B = nextBase();
   respond = () => okJson({ Items: [{ Id: "u1", Name: "dave", Policy: {} }] });
   const users = await getJellyfinAllUsers(B, "k");
-  assert.deepEqual(users, [{ id: "u1", name: "dave", email: undefined, isAdmin: false, downloadsEnabled: true }]);
+  assert.deepEqual(users, [{ id: "u1", name: "dave", email: undefined, isAdmin: false, isDisabled: false, downloadsEnabled: true }]);
 
   respond = () => okJson([]);
   assert.deepEqual(await getJellyfinAllUsers(B, "k"), []);
@@ -1283,4 +1413,167 @@ test("download policy failure contracts: a failed user read throws before any PO
     /returned no Policy — refusing to overwrite/,
   );
   assert.equal(sent.length, 1, "no Policy POST is attempted when the read exposed no policy");
+});
+
+// ── getJellyfinUserPlayedItems (the never-watched report's upstream evidence) ─
+// Appended for src/lib/upstream-watch-data.ts. Pins the exact per-user query
+// (GET /Items?userId= — never the [Obsolete] /Users/{userId}/Items, which is the
+// same Jellyfin handler; see the source citation above the query — encoded
+// user id, Filters, Fields, user data on, images off, a stable sort),
+// sequential paging, parse-while-paging with the raw record count, and the
+// AbortSignal stop (guardrail 41).
+
+const { getJellyfinUserPlayedItems } = await import("../src/lib/jellyfin.ts");
+
+test("getJellyfinUserPlayedItems: the exact per-user query, encoded user id, admin auth; parses movies/episodes and counts every record", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { Type: "Movie", Id: "m1", UserData: { PlayCount: 2, LastPlayedDate: "2025-04-01T00:00:00.0000000Z" } },
+      { Type: "Episode", Id: "e1", SeriesId: "s1", ParentIndexNumber: 3, UserData: { PlayCount: 0 } },
+      { Type: "Folder", Id: "f1" },
+    ],
+    TotalRecordCount: 3,
+  });
+  const res = await getJellyfinUserPlayedItems(`${B}/`, "key-uw", "user 1", "IsPlayed");
+  assert.equal(sent.length, 1);
+  assert.equal(
+    sent[0].url,
+    `${B}/Items?userId=user%201&Recursive=true&IncludeItemTypes=Movie,Episode&CollapseBoxSetItems=false&Filters=IsPlayed` +
+      "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending" +
+      "&StartIndex=0&Limit=1000",
+  );
+  assert.equal(sent[0].headers.get("authorization"), adminAuthHeader("key-uw"));
+  assert.equal(res.records, 3);
+  assert.deepEqual(res.items.map((i) => [i.kind, i.itemKey, i.showKey, i.seasonNumber, i.playCount]), [
+    ["movie", "m1", null, null, 2],
+    ["episode", "e1", "s1", 3, 1],
+  ]);
+
+  sent.length = 0;
+  respond = () => okJson({ Items: [], TotalRecordCount: 0 });
+  await getJellyfinUserPlayedItems(B, "key-uw", "u2", "IsResumable");
+  const second = new URL(sent[0].url);
+  assert.equal(second.pathname, "/Items", "the non-legacy route, never /Users/{id}/Items");
+  assert.equal(second.searchParams.get("userId"), "u2");
+  assert.equal(second.searchParams.get("Filters"), "IsResumable");
+});
+
+test("getJellyfinUserPlayedItems pages sequentially by StartIndex until a short page", async () => {
+  const B = nextBase();
+  const page = (n: number, from: number) => Array.from({ length: n }, (_, i) => ({ Type: "Movie", Id: `m${from + i}` }));
+  respond = (url) => {
+    const start = Number(new URL(url).searchParams.get("StartIndex"));
+    if (start === 0) return okJson({ Items: page(1000, 0), TotalRecordCount: 1500 });
+    if (start === 1000) return okJson({ Items: page(500, 1000), TotalRecordCount: 1500 });
+    throw new Error(`unexpected StartIndex ${start}`);
+  };
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed");
+  assert.equal(sent.length, 2);
+  assert.equal(res.items.length, 1500);
+  assert.equal(res.records, 1500);
+});
+
+test("getJellyfinUserPlayedItems re-reads a list that SHRANK mid-walk (fewer records than page 0's total) and returns the complete second read", async () => {
+  // Offset paging over a shrinking filter skips the item at the next page
+  // boundary, and the walk still ends on a short page. 1001 promised, 1000 read.
+  const B = nextBase();
+  const page = (n: number, from: number) => Array.from({ length: n }, (_, i) => ({ Type: "Movie", Id: `m${from + i}` }));
+  let walk = 0;
+  respond = (url) => {
+    const start = Number(new URL(url).searchParams.get("StartIndex"));
+    if (start === 0) walk++;
+    if (walk === 1) {
+      if (start === 0) return okJson({ Items: page(1000, 0), TotalRecordCount: 1001 });
+      return okJson({ Items: [], TotalRecordCount: 1000 }); // the skipped item shifted under the offset
+    }
+    if (start === 0) return okJson({ Items: page(1000, 0), TotalRecordCount: 1001 });
+    if (start === 1000) return okJson({ Items: page(1, 1000), TotalRecordCount: 1001 });
+    throw new Error(`unexpected StartIndex ${start}`);
+  };
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed");
+  assert.equal(walk, 2, "a short walk is read again");
+  assert.equal(res.records, 1001);
+  assert.ok(res.items.some((i) => i.itemKey === "m1000"), "the item the first walk skipped is in the answer");
+});
+
+test("getJellyfinUserPlayedItems THROWS when the re-read is short too and the count MOVED — a list changing under the read must not become a healthy snapshot", async () => {
+  const B = nextBase();
+  const page = (n: number, from: number) => Array.from({ length: n }, (_, i) => ({ Type: "Movie", Id: `m${from + i}` }));
+  let walk = 0;
+  respond = (url) => {
+    const start = Number(new URL(url).searchParams.get("StartIndex"));
+    if (start === 0) walk++;
+    const total = walk === 1 ? 1001 : 1003;
+    if (start === 0) return okJson({ Items: page(1000, 0), TotalRecordCount: total });
+    return okJson({ Items: [], TotalRecordCount: total });
+  };
+  await assert.rejects(() => getJellyfinUserPlayedItems(B, "k", "u", "IsResumable"), /IsResumable list changed while it was read/);
+  assert.equal(walk, 2, "exactly one re-read, then the failure");
+});
+
+test("getJellyfinUserPlayedItems reads a CONSTANT shortfall as served (one warning) — a server that overcounts must not fail every refresh", async () => {
+  const B = nextBase();
+  let walk = 0;
+  respond = (url) => {
+    if (new URL(url).searchParams.get("StartIndex") === "0") walk++;
+    return okJson({ Items: [{ Type: "Movie", Id: "m1" }], TotalRecordCount: 3 });
+  };
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed");
+  assert.equal(walk, 2);
+  assert.equal(res.records, 1);
+  assert.ok(warns.some((w) => w.includes("[jellyfin] IsPlayed list for user u reports 3 item(s) but serves 1")));
+});
+
+test("getJellyfinUserPlayedItems stops paging when its AbortSignal fires and does nothing when already aborted (guardrail 41)", async () => {
+  const B = nextBase();
+  const controller = new AbortController();
+  respond = () => {
+    controller.abort();
+    return okJson({ Items: Array.from({ length: 1000 }, (_, i) => ({ Type: "Movie", Id: `m${i}` })), TotalRecordCount: 5000 });
+  };
+  await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed", { signal: controller.signal });
+  assert.equal(sent.length, 1, "no second page after the abort");
+
+  sent.length = 0;
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed", { signal: controller.signal });
+  assert.equal(sent.length, 0);
+  assert.deepEqual(res, { items: [], records: 0 });
+});
+
+test("getJellyfinUserPlayedItems THROWS on a 4xx (no retry) — never an empty list the snapshot would trust", async () => {
+  const B = nextBase();
+  respond = () => okJson({}, 401);
+  await assert.rejects(() => getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed"), /Jellyfin fetch failed: 401/);
+  assert.equal(sent.length, 1);
+});
+
+// ── listJellyfinMatchEntries (the library match check) ──────────────────────
+
+test("listJellyfinMatchEntries lists every item ungrouped — copies and items with no Tmdb id included — once each across libraries", async () => {
+  const B = nextBase();
+  respond = (url) => {
+    const u = new URL(url);
+    assert.equal(u.searchParams.get("CollapseBoxSetItems"), "false", "a collection member must never hide behind its BoxSet (guardrail 37d)");
+    assert.equal(u.searchParams.get("IncludeItemTypes"), "Movie");
+    const both = [
+      { Id: "a1", Type: "Movie", Name: "Ghost in the Shell", ProductionYear: 1995, Path: "/m/Ghost in the Shell (1995)/a.mkv", ProviderIds: { Tmdb: "9323", Imdb: "tt0113568" } },
+      { Id: "b2", Type: "Movie", Name: "Ghost in the Shell", ProductionYear: 1995, Path: "/m/Ghost in the Shell (2017)/b.mkv", ProviderIds: { Tmdb: "9323" } },
+    ];
+    if (u.searchParams.get("ParentId") === "libA") return okJson({ Items: [...both, { Id: "c3", Type: "Movie", Name: "Left Holding Baby", Path: "/m/Left Holding Baby.mkv", ProviderIds: { Imdb: "tt1076827" } }], TotalRecordCount: 3 });
+    if (u.searchParams.get("ParentId") === "libB") return okJson({ Items: [both[1], { Id: "box", Type: "BoxSet", Name: "A Collection" }], TotalRecordCount: 2 });
+    throw new Error(`unexpected ${url}`);
+  };
+  const entries = await listJellyfinMatchEntries(B, "k", "remote", "MOVIE", new Set(["libA", "libB"]));
+  assert.deepEqual(entries.map((e) => [e.itemKey, e.tmdbIds, e.imdbId, e.path]), [
+    ["a1", [9323], "tt0113568", "/m/Ghost in the Shell (1995)/a.mkv"],
+    ["b2", [9323], null, "/m/Ghost in the Shell (2017)/b.mkv"],
+    ["c3", [], "tt1076827", "/m/Left Holding Baby.mkv"],
+  ]);
+  assert.ok(entries.every((e) => e.server === "jellyfin" && e.serverInstance === "remote" && e.mediaType === "MOVIE"));
+
+  respond = () => okJson({ Items: [{ Id: "s1", Type: "Series", Name: "Doctor Who", Path: "/tv/Doctor Who (2005)", ProviderIds: { Tmdb: "57243", Tvdb: "78804" } }], TotalRecordCount: 1 });
+  const series = await listJellyfinMatchEntries(B, "k", "", "TV");
+  assert.equal(new URL(sent.at(-1)!.url).searchParams.get("IncludeItemTypes"), "Series");
+  assert.deepEqual(series.map((e) => [e.itemKey, e.tmdbIds, e.tvdbId, e.mediaType]), [["s1", [57243], 78804, "TV"]]);
 });

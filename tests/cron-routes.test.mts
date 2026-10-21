@@ -1,5 +1,5 @@
-// Route-level unit tests for all thirteen POST /api/cron/* handlers:
-//   purge-auth-sessions, scrub-audit-pii, sync-download-policies,
+// Route-level unit tests for all sixteen POST /api/cron/* handlers:
+//   arr-watch, purge-auth-sessions, refresh-arr-snapshots, refresh-upstream-watch, scrub-audit-pii, sync-download-policies,
 //   sync-plex-watchlists, sync-trakt, trash-diagnostic, trash-sync, warm-activity, warm-library,
 //   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations
 //
@@ -96,6 +96,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
+const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -162,6 +163,8 @@ for (const model of [
   "account", "autoRequestLedger",
   // sync-trakt: the per-user Trakt connection and its imported history.
   "traktConnection", "traktWatchedItem",
+  // refresh-upstream-watch: the media servers' own watch-record snapshot.
+  "upstreamWatchEvidence",
 ]) {
   shadowPrismaModel(prisma, model, counter(model));
 }
@@ -217,7 +220,10 @@ async function load(name: string, lockId: number | null): Promise<CronRoute> {
 const AL = await import("../src/lib/advisory-lock.ts");
 
 const ROUTES: CronRoute[] = [
+  await load("arr-watch", AL.ARR_WATCH_LOCK_ID),
   await load("purge-auth-sessions", 2001),
+  await load("refresh-arr-snapshots", AL.ARR_SNAPSHOT_LOCK_ID),
+  await load("refresh-upstream-watch", AL.UPSTREAM_WATCH_LOCK_ID),
   await load("scrub-audit-pii", 2002),
   await load("sync-download-policies", 2009),
   await load("sync-plex-watchlists", AL.PLEX_WATCHLIST_LOCK_ID),
@@ -234,13 +240,24 @@ const ROUTES: CronRoute[] = [
 
 const LOCKING = ROUTES.filter((r) => r.lockId !== null);
 
+// refresh-arr-snapshots short-circuits before its lock unless an admin arr view
+// is due; beforeEach plants one (a queue view read 10 minutes ago, whose route
+// handler answers an empty report — no DB, no network).
+const SNAP = await import("../src/lib/arr-snapshot.ts");
+async function plantDueArrView(): Promise<void> {
+  SNAP.resetArrSnapshotsForTests();
+  const url = "http://localhost:3000/api/admin/queue";
+  await SNAP.snapshotted(async () => Response.json({ items: [] }))(new NextRequest(url, { headers: { "accept-language": "en" } }), {}, {});
+  SNAP.rememberSnapshot(SNAP.snapshotKey(url, "en")!, '{"items":[]}', Date.now() - 10 * 60_000, { url, locale: "en", viewed: true });
+}
+
 function req(route: CronRoute, headers: Record<string, string> = {}, query = ""): InstanceType<typeof NextRequest> {
   return new NextRequest(`http://localhost:3000${route.path}${query}`, { method: "POST", headers });
 }
 
 const authed = (route: CronRoute) => req(route, { authorization: `Bearer ${CRON_SECRET}` });
 
-beforeEach(() => {
+beforeEach(async () => {
   ops = [];
   pgLockCalls = [];
   fetchCalls.length = 0;
@@ -252,13 +269,23 @@ beforeEach(() => {
   // dedicated unconfigured-skip tests clear these again.
   settings.set("omdbApiKey", "an-omdb-key");
   settings.set("mdblistApiKey", "an-mdblist-key");
+  // refresh-upstream-watch also short-circuits before its lock unless a feature
+  // that reads its snapshot is on — pin one on rather than lean on a default.
+  settings.set("feature.admin.neverWatched", "true");
+  // arr-watch short-circuits before its lock unless a Radarr/Sonarr instance is
+  // configured. An RFC1918 literal: admin-configured SSRF mode, no DNS; every
+  // read answers the stub's 503.
+  settings.set("radarrUrl", "http://10.0.0.5:7878");
+  settings.set("radarrApiKey", "cron-routes-radarr-key");
+  invalidateFeatureFlagCache();
   lockAcquire = () => true;
+  await plantDueArrView();
 });
 
 // ── the matrix itself must not pass vacuously ────────────────────────────────
 
-test("all thirteen cron routes loaded and expose a POST handler", () => {
-  assert.equal(ROUTES.length, 13);
+test("all sixteen cron routes loaded and expose a POST handler", () => {
+  assert.equal(ROUTES.length, 16);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
 });
 
@@ -368,6 +395,9 @@ for (const route of LOCKING) {
     const res = await route.POST(authed(route));
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
+    // The skip header is what withCronRunRecording/the run ledger reads: a bare
+    // NextResponse.json({skipped}) records a busy lock as a successful run.
+    assert.equal(res.headers.get("x-cron-skipped"), "1", `${route.name} must answer through cronSkippedResponse`);
     assert.deepEqual(writeOps(), [], `${route.name} did work while another run held the lock`);
   });
 }
@@ -378,12 +408,27 @@ for (const route of LOCKING) {
 // run outlasts its tick. The warm-* routes record inside the work callback and
 // never recorded their skips; these now agree with them. sync-plex-watchlists
 // still answers a plain 200 skip and is recorded — not changed here.
-for (const name of ["trash-sync", "sync-download-policies", "sync-trakt"]) {
+for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refresh-upstream-watch", "arr-watch", "refresh-arr-snapshots"]) {
   test(`${name}: a BUSY lock writes NO cron:lastRun ledger row`, async () => {
     const route = ROUTES.find((r) => r.name === name)!;
     lockAcquire = () => false;
     const res = await route.POST(authed(route));
     assert.equal(res.headers.get("X-Cron-Skipped"), "1");
+    assert.equal(ops.filter(isBookkeeping).length, 0, `${name} recorded a run it skipped`);
+  });
+}
+
+// Every warm-* route answers a busy lock through cronSkippedResponse (the
+// X-Cron-Skipped marker) and records no run. warm-activity / warm-list-cache are
+// not in LOCKING (lockId null), so they are named explicitly here.
+for (const name of ["warm-recommendations", "warm-library", "warm-activity", "warm-mdblist", "warm-omdb", "warm-list-cache"]) {
+  test(`${name}: a BUSY lock answers X-Cron-Skipped and records no run`, async () => {
+    const route = ROUTES.find((r) => r.name === name)!;
+    lockAcquire = () => false;
+    const res = await route.POST(authed(route));
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
+    assert.equal(res.headers.get("x-cron-skipped"), "1", `${name} must answer through cronSkippedResponse`);
     assert.equal(ops.filter(isBookkeeping).length, 0, `${name} recorded a run it skipped`);
   });
 }
@@ -518,6 +563,49 @@ test("scrub-audit-pii: the auth-details clear is narrowed to the login-event act
     .find((list): list is string[] => Array.isArray(list));
   assert.ok(actions, "the auth-details pass is missing");
   assert.deepEqual([...actions].sort(), ["AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT"]);
+});
+
+test("scrub-audit-pii: aged admin-action rows lose the TARGET user's name/email from their details; recent rows keep them", async () => {
+  type Row = { id: string; createdAt: Date; action: string; details: string | null };
+  const aged = new Date(Date.now() - 200 * 86_400_000);
+  const rows: Row[] = [
+    { id: "a1", createdAt: aged, action: "USER_ROLE_CHANGE", details: JSON.stringify({ targetUser: "Alice", targetEmail: "alice@example.com", before: { role: "USER" } }) },
+    { id: "a2", createdAt: new Date(), action: "USER_ROLE_CHANGE", details: JSON.stringify({ targetUser: "Bob", targetEmail: "bob@example.com" }) },
+    { id: "a3", createdAt: aged, action: "USER_PURGE", details: JSON.stringify({ targetUser: "Carol", targetEmail: "carol@example.com", historyPreserved: { mediaRequests: 2 } }) },
+  ];
+  const aged_ = (r: Row, w: { createdAt?: { lt?: Date } }) => !w.createdAt?.lt || r.createdAt < w.createdAt.lt;
+  shadowPrismaModel(prisma, "auditLog", {
+    ...counter("auditLog"),
+    findMany: async (args: { where: { createdAt?: { lt?: Date }; OR?: Array<{ details: { contains: string } }> }; cursor?: { id: string } }) => {
+      rec("auditLog.findMany", args.where);
+      if (args.cursor) return [];
+      return rows
+        .filter((r) => aged_(r, args.where) && (args.where.OR ?? []).some((o) => r.details?.includes(o.details.contains)))
+        .map((r) => ({ id: r.id, details: r.details }));
+    },
+    updateMany: async (args: { where: { createdAt?: { lt?: Date }; id?: string; details?: string }; data: { details?: string | null } }) => {
+      rec("auditLog.updateMany", args.where);
+      if (args.where.id === undefined) return { count: 0 };
+      const r = rows.find((x) => x.id === args.where.id && x.details === args.where.details && aged_(x, args.where));
+      if (!r) return { count: 0 };
+      r.details = args.data.details ?? null;
+      return { count: 1 };
+    },
+  });
+  try {
+    const res = await scrub.POST(authed(scrub));
+    const body = await res.json();
+    assert.equal(body.adminDetailsScrubbed, 2);
+    assert.deepEqual(JSON.parse(rows[0].details!), { before: { role: "USER" } });
+    assert.deepEqual(JSON.parse(rows[2].details!), { historyPreserved: { mediaRequests: 2 } }, "a purge record keeps what happened, not who it was");
+    assert.match(rows[1].details!, /bob@example\.com/, "a row inside the retention window is untouched");
+    // The audit scrub's every write stays cutoff-bounded (the test above pins it for the column passes).
+    for (const u of opsOf("auditLog.updateMany")) {
+      assert.ok((u.args as { createdAt?: { lt?: Date } }).createdAt?.lt instanceof Date);
+    }
+  } finally {
+    shadowPrismaModel(prisma, "auditLog", counter("auditLog"));
+  }
 });
 
 // ── 5: purge-auth-sessions failure isolation ─────────────────────────────────

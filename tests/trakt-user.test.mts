@@ -100,6 +100,7 @@ shadowPrismaModel(prisma, "setting", {
 
 const accountModel = {
   findUnique: async (args: { where: { provider_providerAccountId: { provider: string; providerAccountId: string } } }) => {
+    rec("account.findUnique", args.where);
     const w = args.where.provider_providerAccountId;
     const a = accounts.find((r) => r.provider === w.provider && r.providerAccountId === w.providerAccountId);
     return a ? { userId: a.userId } : null;
@@ -205,7 +206,7 @@ const queryRawInTx = async () => {
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   rec("$transaction");
   if (Array.isArray(arg)) return Promise.all(arg);
-  return (arg as (tx: unknown) => Promise<unknown>)({ account: accountModel, traktConnection: connModel, traktWatchedItem: watchedModel, $queryRaw: queryRawInTx });
+  return (arg as (tx: unknown) => Promise<unknown>)({ account: accountModel, traktConnection: connModel, traktWatchedItem: watchedModel, $queryRaw: queryRawInTx, $executeRaw: async (strings: TemplateStringsArray) => { rec(`lock:${strings.join("?")}`); return 1; } });
 });
 
 const trakt = await import("../src/lib/trakt-user.ts");
@@ -363,6 +364,27 @@ test("device flow: start answers only the user code; polls are paced server-side
 
   // The code is spent: a further poll has nothing pending.
   assert.deepEqual(await trakt.pollTraktDeviceAuth("u1", CFG), { state: "expired" });
+});
+
+test("device flow: storing a connection takes the per-Trakt-account advisory lock BEFORE the ownership read and every write", async () => {
+  mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-08T12:00:00Z") });
+  addUser("u1");
+  respond = (c) => {
+    if (c.path === "/oauth/device/code") return json({ device_code: "D", user_code: "U", expires_in: 600, interval: 1 });
+    if (c.path === "/oauth/device/token") return json({ access_token: "acc", refresh_token: "ref", expires_in: 86_400 });
+    if (c.path === "/users/settings") return json({ user: { username: "neo", ids: { uuid: "uuid-neo" } } });
+    throw new Error(`unexpected ${c.path}`);
+  };
+  await trakt.startTraktDeviceAuth("u1", CFG);
+  mock.timers.tick(1_000);
+  ops.length = 0;
+  assert.deepEqual(await trakt.pollTraktDeviceAuth("u1", CFG), { state: "connected", username: "neo" });
+  const names = ops.map((o) => o.op);
+  const lockAt = names.findIndex((n) => n.startsWith("lock:"));
+  assert.ok(lockAt >= 0, "no advisory lock was taken");
+  assert.match(names[lockAt], /pg_advisory_xact_lock\(4611, hashtext\(\?\)\)/);
+  assert.ok(names.indexOf("account.findUnique") > lockAt, "the ownership read must come after the lock");
+  assert.ok(names.indexOf("account.upsert") > lockAt, "the credential write must come after the lock");
 });
 
 test("device flow: two concurrent polls redeem the code ONCE", async () => {

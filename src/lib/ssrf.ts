@@ -158,6 +158,9 @@ function isSafeAddr(addr: string): boolean {
   // Loopback
   if (/^127\./.test(addr)) return false;
   if (/^::1$/.test(addr)) return false;
+  // Loopback in any other spelling (0:0:0:0:0:0:0:1, 0000:…:0001) — unwrapEmbeddedV4
+  // deliberately skips ::1, so the textual check above was the only guard.
+  if (addr.includes(":") && ipv6ToBigInt(addr) === 1n) return false;
   // Unspecified / any-address
   if (/^0\./.test(addr)) return false;
   if (isUnspecifiedV6(addr)) return false;

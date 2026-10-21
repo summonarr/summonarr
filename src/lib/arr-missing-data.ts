@@ -2,17 +2,21 @@
 // the chosen service (guardrail 32 — every instance, addressed by its slug),
 // judged by the pure rules in arr-missing.ts. Every call goes through
 // arrFetch (guardrail 5). Nothing is cached and nothing is written.
-import { arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { arrErrorKind, arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { commandIdsOf, postArrCommand } from "./arr-admin";
+import type { ArrErrorKind } from "./arr-error-kind";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
+import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { prisma } from "./prisma";
 import {
   cutoffMovie,
   cutoffSeriesFromEpisodes,
   missingEpisodes,
   missingMovie,
-  missingSeries,
+  missingMovieList,
+  missingSeriesList,
   planCutoffSearch,
   planSeriesSearch,
   qualityProfileInfo,
@@ -26,7 +30,6 @@ import {
   type SonarrCutoffRecord,
   type SonarrEpisodeFileRow,
   type SonarrEpisodeRow,
-  type SonarrSeriesRow,
 } from "./arr-missing";
 
 export type MissingService = "radarr" | "sonarr";
@@ -50,8 +53,14 @@ export interface MissingReport<T> {
   enabled: boolean;
   instances: Array<{ slug: string; name: string }>;
   /** Instances whose listing could not be read; their titles are absent, not "complete". */
-  errors: Array<{ instance: string; error: string }>;
+  errors: Array<{ instance: string; error: string; kind: ArrErrorKind }>;
   items: T[];
+  /**
+   * Cutoff mode only, present only when non-empty: instances whose
+   * /wanted/cutoff listing ran past the page ceiling, so only the first `read`
+   * of `total` records were judged — the list is incomplete, never complete.
+   */
+  truncated?: Array<{ instance: string; read: number; total: number }>;
 }
 
 // Small and fixed: one library-sized listing per instance.
@@ -100,13 +109,21 @@ async function loadReport<T extends { tmdbId: number | null; posterPath: string 
 
   const report: MissingReport<T> = { service, enabled, instances, errors: [], items: [] };
   settled.forEach((s, i) => {
+    // The page re-reads on open and the snapshot refresh re-reads every 10
+    // minutes: a dark instance is one unchanged condition, logged once until it
+    // changes (guardrail 7b).
+    const logKey = `missing:${service}:${instances[i].slug}`;
     if (s.status === "fulfilled") {
-      report.items.push(...s.value);
+      // One by one, never a spread push: each list is capped (MAX_MISSING_ITEMS,
+      // the cutoff page ceiling), and a spread of an upstream-sized one throws
+      // RangeError (guardrail 5i).
+      for (const it of s.value) report.items.push(it);
+      forgetWarnOnChange(logKey);
       return;
     }
     const error = arrErrorMessage(s.reason);
-    report.errors.push({ instance: instances[i].slug, error });
-    console.warn(`[missing] ${service} instance "${instances[i].slug}" listing failed:`, error);
+    report.errors.push({ instance: instances[i].slug, error, kind: arrErrorKind(s.reason) });
+    warnOnChange(logKey, error, `[missing] ${service} instance "${instances[i].slug}" listing failed: ${error}`);
   });
 
   const needPoster = report.items.filter((it) => it.posterPath === null && it.tmdbId !== null).map((it) => it.tmdbId as number);
@@ -123,27 +140,13 @@ async function loadReport<T extends { tmdbId: number | null; posterPath: string 
 // the likeliest to still be in flight, the oldest are the stuck ones at the end.
 export async function loadMissingMovies(now: Date): Promise<MissingReport<MissingMovie>> {
   const nowMs = now.getTime();
-  const report = await loadReport<MissingMovie>("radarr", (rows, instance) => {
-    const out: MissingMovie[] = [];
-    for (const row of rows as RadarrMovieRow[]) {
-      const m = row && typeof row === "object" ? missingMovie(row, instance, nowMs) : null;
-      if (m) out.push(m);
-    }
-    return out;
-  });
+  const report = await loadReport<MissingMovie>("radarr", (rows, instance) => missingMovieList(rows, instance, nowMs));
   report.items.sort((a, b) => b.releasedAt.localeCompare(a.releasedAt) || a.title.localeCompare(b.title));
   return report;
 }
 
 export async function loadMissingSeries(): Promise<MissingReport<MissingSeries>> {
-  const report = await loadReport<MissingSeries>("sonarr", (rows, instance) => {
-    const out: MissingSeries[] = [];
-    for (const row of rows as SonarrSeriesRow[]) {
-      const s = row && typeof row === "object" ? missingSeries(row, instance) : null;
-      if (s) out.push(s);
-    }
-    return out;
-  });
+  const report = await loadReport<MissingSeries>("sonarr", (rows, instance) => missingSeriesList(rows, instance));
   report.items.sort((a, b) => (b.lastAired ?? "").localeCompare(a.lastAired ?? "") || a.title.localeCompare(b.title));
   return report;
 }
@@ -151,23 +154,38 @@ export async function loadMissingSeries(): Promise<MissingReport<MissingSeries>>
 // ── cutoff unmet ─────────────────────────────────────────────────────────────
 
 // /api/v3/wanted/cutoff is paged; same ceiling idea as the queue reads.
-const CUTOFF_PAGE_SIZE = 500;
-const CUTOFF_MAX_PAGES = 40;
+export const CUTOFF_PAGE_SIZE = 500;
+export const CUTOFF_MAX_PAGES = 40;
 
-async function readCutoffPages(cfg: ArrCfg, service: MissingService): Promise<unknown[]> {
+// `truncated` when the ceiling — not the end of the list — stopped the read:
+// the arr reported more records than were read. Sonarr's listing is per
+// EPISODE, so a raised cutoff on a large library can reach it; the series
+// past it would otherwise vanish from the page with nothing saying so.
+// Exported for its bounds pin (tests/arr-projection-bounds.test.mts).
+export async function readCutoffPages(cfg: ArrCfg, service: MissingService): Promise<{ records: unknown[]; total: number; truncated: boolean }> {
   const include = service === "sonarr" ? "&includeSeries=true&includeEpisodeFile=true" : "";
   const records: unknown[] = [];
+  let total = 0;
+  let reachedEnd = false;
   for (let page = 1; page <= CUTOFF_MAX_PAGES; page++) {
     const res = await arrFetch<{ records?: unknown; totalRecords?: unknown }>(
       cfg, `/api/v3/wanted/cutoff?page=${page}&pageSize=${CUTOFF_PAGE_SIZE}&monitored=true${include}`,
     );
     const batch = Array.isArray(res?.records) ? res.records : [];
-    records.push(...batch);
-    const total = typeof res?.totalRecords === "number" ? res.totalRecords : 0;
-    if (batch.length === 0 || page * CUTOFF_PAGE_SIZE >= total) break;
+    // At most a page's worth per page (an honest arr never sends more), appended
+    // one by one: a spread push of a hostile page past ~125k records throws
+    // RangeError, and an uncapped page would let one answer outgrow the page cap.
+    for (const r of batch.slice(0, CUTOFF_PAGE_SIZE)) records.push(r);
+    total = typeof res?.totalRecords === "number" ? res.totalRecords : 0;
+    if (batch.length === 0 || page * CUTOFF_PAGE_SIZE >= total) {
+      reachedEnd = true;
+      break;
+    }
   }
-  return records;
+  return { records, total, truncated: !reachedEnd && total > records.length };
 }
+
+type CutoffTruncation = NonNullable<MissingReport<unknown>["truncated"]>;
 
 // The profile names are labels only: a failed read leaves them blank rather
 // than failing the instance's listing.
@@ -179,29 +197,47 @@ async function readProfiles(cfg: ArrCfg) {
   }
 }
 
+// Attaches the instances whose listing hit the ceiling, in instance order.
+function withTruncation<T>(report: MissingReport<T>, truncated: CutoffTruncation): MissingReport<T> {
+  if (truncated.length === 0) return report;
+  const order = new Map(report.instances.map((i, n) => [i.slug, n]));
+  report.truncated = [...truncated].sort((a, b) => (order.get(a.instance) ?? 0) - (order.get(b.instance) ?? 0));
+  return report;
+}
+
 /** Radarr movies whose file is below the profile cutoff, monitored only, by title. */
 export async function loadCutoffMovies(): Promise<MissingReport<CutoffMovie>> {
+  const truncated: CutoffTruncation = [];
   const report = await loadReport<CutoffMovie>("radarr", () => [], async (cfg, instance) => {
-    const [records, profiles] = await Promise.all([readCutoffPages(cfg, "radarr"), readProfiles(cfg)]);
+    const [listing, profiles] = await Promise.all([readCutoffPages(cfg, "radarr"), readProfiles(cfg)]);
     const out: CutoffMovie[] = [];
-    for (const row of records as RadarrCutoffRow[]) {
+    const seen = new Set<number>();
+    for (const row of listing.records as RadarrCutoffRow[]) {
       const m = row && typeof row === "object" ? cutoffMovie(row, instance, profiles) : null;
-      if (m) out.push(m);
+      // A page boundary can repeat a record while the list changes under the read.
+      if (m && !seen.has(m.arrId)) {
+        seen.add(m.arrId);
+        out.push(m);
+      }
     }
+    if (listing.truncated) truncated.push({ instance, read: listing.records.length, total: listing.total });
     return out;
   });
   report.items.sort((a, b) => a.title.localeCompare(b.title));
-  return report;
+  return withTruncation(report, truncated);
 }
 
 /** Sonarr series with monitored episodes below the profile cutoff, most episodes first. */
 export async function loadCutoffSeries(): Promise<MissingReport<CutoffSeries>> {
+  const truncated: CutoffTruncation = [];
   const report = await loadReport<CutoffSeries>("sonarr", () => [], async (cfg, instance) => {
-    const [records, profiles] = await Promise.all([readCutoffPages(cfg, "sonarr"), readProfiles(cfg)]);
-    return cutoffSeriesFromEpisodes(records as SonarrCutoffRecord[], instance, profiles);
+    const [listing, profiles] = await Promise.all([readCutoffPages(cfg, "sonarr"), readProfiles(cfg)]);
+    const out = cutoffSeriesFromEpisodes(listing.records as SonarrCutoffRecord[], instance, profiles);
+    if (listing.truncated) truncated.push({ instance, read: listing.records.length, total: listing.total });
+    return out;
   });
   report.items.sort((a, b) => b.episodes.length - a.episodes.length || a.title.localeCompare(b.title));
-  return report;
+  return withTruncation(report, truncated);
 }
 
 export class MissingInstanceError extends Error {}
@@ -219,6 +255,25 @@ async function configuredCfg(service: MissingService, instance: string) {
   return cfg;
 }
 
+/** No series with that tvdb id is on the instance (deleted there, or never added). */
+export class SeriesNotOnInstanceError extends Error {}
+
+/**
+ * A TV request's Sonarr series id on its OWN instance, by the request's tvdb
+ * id. The instance must be a configured one (MissingInstanceError otherwise —
+ * no Setting read for a slug the registry doesn't list, guardrail 32), and the
+ * row must name that tvdb id itself: an arr that ignored the `tvdbId` filter
+ * answers with its whole library, and its first row is another series.
+ */
+export async function findSeriesIdOnInstance(instance: string, tvdbId: number): Promise<number> {
+  const cfg = await configuredCfg("sonarr", instance);
+  const rows = await arrFetch<unknown>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
+  const list = Array.isArray(rows) ? (rows as Array<{ id?: unknown; tvdbId?: unknown } | null>) : [];
+  const series = list.find((s) => s?.tvdbId === tvdbId && typeof s.id === "number" && Number.isSafeInteger(s.id) && s.id > 0);
+  if (!series) throw new SeriesNotOnInstanceError();
+  return series.id as number;
+}
+
 // One series' missing episodes, on demand (the page's row expansion).
 export async function loadMissingEpisodes(instance: string, seriesId: number, now: Date): Promise<MissingEpisode[]> {
   const cfg = await configuredCfg("sonarr", instance);
@@ -232,6 +287,12 @@ export interface MissingSearchResult {
   /** Sonarr only: seasons searched whole, and episodes searched one by one. */
   seasons: number[];
   episodes: number;
+  /**
+   * Present (true) only when a Sonarr search stopped part-way: a later command
+   * was refused after earlier ones were queued. `commands`/`seasons`/`episodes`
+   * then count only what WAS queued — those searches are running.
+   */
+  partial?: true;
 }
 
 // The page's per-row Search: queue a search on that instance for exactly what
@@ -240,27 +301,72 @@ export interface MissingSearchResult {
 // than sent hunting for an upgrade. Commands go through arrFetch (guardrail 5);
 // Radarr/Sonarr run them in the background, so this returns once they're queued.
 export async function searchMissing(service: MissingService, instance: string, arrId: number, now: Date): Promise<MissingSearchResult> {
+  const { commands, seasons, episodes, partial } = await searchMissingTracked(service, instance, arrId, now);
+  return partial ? { commands, seasons, episodes, partial } : { commands, seasons, episodes };
+}
+
+/**
+ * searchMissing, plus the arr's id for every command it queued — the title
+ * manager follows them live (GET /api/admin/arr/commands). The Missing page's
+ * own answer stays searchMissing's.
+ */
+export async function searchMissingTracked(
+  service: MissingService,
+  instance: string,
+  arrId: number,
+  now: Date,
+): Promise<MissingSearchResult & { commandIds: number[] }> {
   const cfg = await configuredCfg(service, instance);
-  const command = (body: Record<string, unknown>) =>
-    arrFetch<unknown>(cfg, "/api/v3/command", { method: "POST", body: JSON.stringify(body) });
+  const queued: Array<{ id: number | null }> = [];
+  const command = async (body: Record<string, unknown>) => {
+    queued.push(await postArrCommand(cfg, body));
+  };
 
   if (service === "radarr") {
     const row = await arrFetch<RadarrMovieRow>(cfg, `/api/v3/movie/${arrId}`);
     if (!row || typeof row !== "object" || !missingMovie(row, instance, now.getTime())) throw new NothingMissingError();
     await command({ name: "MoviesSearch", movieIds: [arrId] });
-    return { commands: 1, seasons: [], episodes: 0 };
+    return { commands: 1, seasons: [], episodes: 0, commandIds: commandIdsOf(queued) };
   }
 
   const rows = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${arrId}`);
-  const plan = planSeriesSearch(Array.isArray(rows) ? (rows as SonarrEpisodeRow[]) : [], now.getTime());
+  const episodeRows = Array.isArray(rows) ? (rows as SonarrEpisodeRow[]) : [];
+  // Sonarr answers an UNKNOWN seriesId's episode list with 200 [] — not a 404 —
+  // so an empty list can't tell "nothing to search" from "this series is gone".
+  // The series read can: a 404 there propagates (ArrResponseError), which both
+  // routes answer as not found rather than "nothing missing". Only on the empty
+  // path, so the common one costs no extra request.
+  if (episodeRows.length === 0) await arrFetch<unknown>(cfg, `/api/v3/series/${arrId}`);
+  const plan = planSeriesSearch(episodeRows, now.getTime());
   if (plan.seasons.length === 0 && plan.episodeIds.length === 0) throw new NothingMissingError();
   // Sequential and per series: a handful of commands at most, one per fully
-  // missing season plus one for the rest.
-  for (const seasonNumber of plan.seasons) {
-    await command({ name: "SeasonSearch", seriesId: arrId, seasonNumber });
+  // missing season plus one for the rest. A refusal part-way leaves the ones
+  // already queued RUNNING on Sonarr: answering a failure would drop their ids
+  // (nothing followed, nothing re-read) and invite a retry that queues them
+  // again, so once anything is queued the answer is what was, marked partial.
+  const seasons: number[] = [];
+  let episodes = 0;
+  try {
+    for (const seasonNumber of plan.seasons) {
+      await command({ name: "SeasonSearch", seriesId: arrId, seasonNumber });
+      seasons.push(seasonNumber);
+    }
+    if (plan.episodeIds.length > 0) {
+      await command({ name: "EpisodeSearch", episodeIds: plan.episodeIds });
+      episodes = plan.episodeIds.length;
+    }
+  } catch (err) {
+    if (queued.length === 0) throw err;
+    // An event (this one search stopping part-way), not a recomputed condition — guardrail 7b doesn't apply.
+    console.warn(`[missing] sonarr instance "${instance}" search for series ${arrId} stopped after ${queued.length} command(s):`, arrErrorMessage(err));
+    return { commands: queued.length, seasons, episodes, partial: true, commandIds: commandIdsOf(queued) };
   }
-  if (plan.episodeIds.length > 0) await command({ name: "EpisodeSearch", episodeIds: plan.episodeIds });
-  return { commands: plan.seasons.length + (plan.episodeIds.length > 0 ? 1 : 0), seasons: plan.seasons, episodes: plan.episodeIds.length };
+  return {
+    commands: plan.seasons.length + (plan.episodeIds.length > 0 ? 1 : 0),
+    seasons: plan.seasons,
+    episodes: plan.episodeIds.length,
+    commandIds: commandIdsOf(queued),
+  };
 }
 
 /** Nothing is below cutoff any more (upgraded, file removed, or unmonitored). */

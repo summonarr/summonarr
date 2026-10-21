@@ -60,9 +60,10 @@ export default async function ProfilePage() {
     prisma.setting.findUnique({ where: { key: "discordInviteUrl" } }),
     prisma.pushSubscription.findMany({
       where: { userId: session.user.id },
-      // Deliberately NOT selecting `endpoint`: for iOS rows it is `apns:<raw token>`,
-      // and serializing it to the client leaks the device token. Device management
-      // keys off `id` instead.
+      // Deliberately NOT selecting `endpoint`: nothing here needs it (device
+      // management keys off `id`), a web row's is the browser's push-service
+      // capability URL, and an iOS row's is a hash of its APNs token
+      // (apns-endpoint.ts) — older rows carried the raw token until migrated.
       select: { id: true, label: true, createdAt: true },
       orderBy: { createdAt: "asc" },
     }),
@@ -204,7 +205,18 @@ export default async function ProfilePage() {
               title={t("profile.password.title")}
               description={t("profile.password.description")}
             >
-              <ChangePassword hasPassword={hasPassword} />
+              <ChangePassword
+                hasPassword={hasPassword}
+                secondFactor={
+                  mfaState
+                    ? {
+                        enabled: mfaState.enabled,
+                        hasPasskeys: mfaState.passkeys.length > 0,
+                        webauthnAvailable: webAuthnConfigFromEnv() !== null,
+                      }
+                    : undefined
+                }
+              />
             </ProfileCard>
           )}
 
@@ -234,6 +246,7 @@ export default async function ProfilePage() {
           )}
 
           <ProfileCard
+            id="sessions"
             title={t("profile.sessions.title")}
             description={t("profile.sessions.description")}
           >

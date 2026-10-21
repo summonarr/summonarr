@@ -10,7 +10,7 @@ const errors: string[] = [];
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 const {
-  startFixMatchJob, getFixMatchJob, findRunningFixMatchJob, fixMatchJobKey, FixMatchError, _resetFixMatchJobsForTests,
+  startFixMatchJob, getFixMatchJob, findRunningFixMatchJob, fixMatchQueueAhead, listFixMatchJobs, fixMatchJobKey, FixMatchError, _resetFixMatchJobsForTests,
 } = await import("../src/lib/fix-match-jobs.ts");
 
 const settle = () => new Promise((r) => setTimeout(r, 5));
@@ -100,19 +100,50 @@ test("fixMatchJobKey identifies the remap by server, instance, type and the from
   );
 });
 
-test("the concurrent-running cap refuses admission beyond MAX_RUNNING_JOBS with a 429", async () => {
+test("past MAX_RUNNING_JOBS a job QUEUES (position reported) and starts when a slot frees", async () => {
+  const gates: Array<() => void> = [];
+  const gated = () => new Promise<{ ok: true }>((r) => { gates.push(() => r({ ok: true })); });
+  const started: string[] = [];
+  const run = (name: string) => () => { started.push(name); return gated(); };
+  for (let i = 0; i < 4; i++) startFixMatchJob(`run-${i}`, run(`run-${i}`));
+  const fifth = startFixMatchJob("run-5", run("run-5"));
+  const sixth = startFixMatchJob("run-6", run("run-6"));
+  await settle();
+  assert.equal(fifth.status, "queued");
+  assert.equal(fixMatchQueueAhead(fifth.id), 0);
+  assert.equal(fixMatchQueueAhead(sixth.id), 1);
+  assert.deepEqual(started, ["run-0", "run-1", "run-2", "run-3"], "queued runners have not started");
+  // The same key is JOINED even while queued.
+  assert.equal(startFixMatchJob("run-5", run("again")).id, fifth.id);
+  assert.equal(findRunningFixMatchJob("run-5")?.id, fifth.id);
+  // A slot frees: the oldest queued job starts, the next stays queued.
+  gates[0]();
+  await settle();
+  assert.equal(fifth.status, "running");
+  assert.equal(sixth.status, "queued");
+  assert.equal(fixMatchQueueAhead(sixth.id), 0);
+  assert.deepEqual(started.slice(-1), ["run-5"]);
+  // A failing job frees its slot too.
+  gates[1]();
+  await settle();
+  assert.equal(sixth.status, "running");
+});
+
+test("the queue itself is bounded: past MAX_QUEUED_JOBS a job is refused with a 429", () => {
   const never = () => new Promise<never>(() => {});
-  // Four distinct keys start and stay running.
-  for (let i = 0; i < 4; i++) startFixMatchJob(`run-${i}`, never);
-  // The fifth distinct key is refused — parallel metadata refreshes are how
-  // these calls start timing out (guardrail 37).
+  for (let i = 0; i < 4 + 50; i++) startFixMatchJob(`bulk-${i}`, never);
   let thrown: unknown = null;
-  try { startFixMatchJob("run-5", never); } catch (e) { thrown = e; }
-  assert.ok(thrown instanceof FixMatchError, "the cap throws a FixMatchError");
+  try { startFixMatchJob("one-too-many", never); } catch (e) { thrown = e; }
+  assert.ok(thrown instanceof FixMatchError);
   assert.equal((thrown as InstanceType<typeof FixMatchError>).status, 429);
-  // An already-running key is still JOINED, not counted as a new admission.
-  const joined = startFixMatchJob("run-0", never);
-  assert.equal(joined.status, "running");
+});
+
+test("listFixMatchJobs returns the registry newest first with each job's title", () => {
+  startFixMatchJob("a", () => new Promise<never>(() => {}), 1_000, undefined, "Dune (2021)");
+  startFixMatchJob("b", () => new Promise<never>(() => {}), 2_000, undefined, null);
+  const list = listFixMatchJobs(2_000);
+  assert.deepEqual(list.map((j) => j.key), ["b", "a"]);
+  assert.equal(list[1].title, "Dune (2021)");
 });
 
 test("findRunningFixMatchJob returns the running job for a key, null otherwise", async () => {

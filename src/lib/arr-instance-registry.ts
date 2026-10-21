@@ -7,7 +7,8 @@
 // The default ("") and legacy 4K ("4k") instances are synthesized so existing
 // deployments — which have radarr4kUrl set but no registry Setting yet — keep
 // working with zero config change. Named instances (anime, …) are added via the
-// admin settings UI, which writes the registry JSON through saveArrInstances().
+// admin settings UI (/api/admin/arr-instances), which writes the registry JSON
+// built by buildArrInstanceRegistryWrite inside its own transaction.
 //
 // Impure (reads Setting) — the pure key derivation + routing predicate live in
 // arr-instances.ts and are re-used here.
@@ -208,15 +209,4 @@ export function buildArrInstanceRegistryWrite(
     }
   }
   return { key: REGISTRY_KEY[service], value: JSON.stringify(clean) };
-}
-
-// Persist the named-instance registry (admin settings). Callers must separately
-// write the per-instance connection Setting rows via arrSettingKey.
-export async function saveArrInstances(service: ArrService, entries: ArrInstanceConfig[]): Promise<void> {
-  const { key, value } = buildArrInstanceRegistryWrite(service, entries);
-  await prisma.setting.upsert({
-    where: { key },
-    create: { key, value },
-    update: { value },
-  });
 }

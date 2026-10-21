@@ -223,13 +223,21 @@ export function WatchGradeModal({
 
   useModalA11y(dialogRef, onClose, closeBtnRef);
 
+  // The translator through a ref: the request queue / users page router.refresh()
+  // on every change, which hands the provider a new `t`. As an effect dependency
+  // that re-ran this (whole-account) grade computation under an open modal.
+  const tRef = useRef(t);
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
   useEffect(() => {
     let cancelled = false;
     fetch(withBasePath(`/api/admin/users/${encodeURIComponent(userId)}/watch-grade`))
       .then(async (res) => {
         if (!res.ok) {
           const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error ?? t("adminQueue.grade.loadFailedStatus", { status: res.status }));
+          throw new Error(body?.error ?? tRef.current("adminQueue.grade.loadFailedStatus", { status: res.status }));
         }
         return (await res.json()) as WatchGradeDetail;
       })
@@ -237,12 +245,12 @@ export function WatchGradeModal({
         if (!cancelled) setData(detail);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : t("adminQueue.grade.loadFailed"));
+        if (!cancelled) setError(err instanceof Error ? err.message : tRef.current("adminQueue.grade.loadFailed"));
       });
     return () => {
       cancelled = true;
     };
-  }, [userId, t]);
+  }, [userId]);
 
   const grade = data?.grade ?? null;
   const settings = data?.settings ?? null;

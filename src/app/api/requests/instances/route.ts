@@ -4,6 +4,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
@@ -43,6 +44,9 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const tmdbId = Number(sp.get("tmdbId"));
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
+  }
+  if (!isTmdbIdInRange(tmdbId)) {
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
   }
 
   const rows = await resolveNamedInstanceTargets({

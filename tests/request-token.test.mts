@@ -83,11 +83,11 @@ test("missing NEXTAUTH_SECRET throws instead of signing with an empty key", () =
     delete process.env.NEXTAUTH_SECRET;
     assert.throws(
       () => generateRequestToken(603, "MOVIE", "u_alice"),
-      /NEXTAUTH_SECRET is required for request signing/,
+      /NEXTAUTH_SECRET must be set/,
     );
     assert.throws(
       () => verifyRequestToken("deadbeef", 603, "MOVIE", "u_alice"),
-      /NEXTAUTH_SECRET is required for request signing/,
+      /NEXTAUTH_SECRET must be set/,
     );
   } finally {
     process.env.NEXTAUTH_SECRET = original;

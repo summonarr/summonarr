@@ -28,6 +28,11 @@ import { getFeatureFlags, groupFeaturesByCategory, isFeatureEnabled } from "@/li
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
 import { mfaEnforcementDisabledByEnv } from "@/lib/mfa/policy";
 import { RequireAdminMfaToggle } from "@/components/settings/forms/require-admin-mfa-toggle";
+import { OidcAllowlistForm } from "@/components/settings/forms/oidc-allowlist-form";
+import { DEFAULT_OIDC_ALLOWLIST, OIDC_ALLOWLIST_SETTING_KEY, parseOidcAllowlist } from "@/lib/oidc-allowlist";
+import { isOidcConfigured } from "@/lib/oidc";
+import { ArrWatchForm } from "@/components/settings/forms/arr-watch-form";
+import { ARR_WATCH_DISK_LOW_PERCENT_KEY, parseDiskLowPercent } from "@/lib/arr-watch";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
 import type { ReactNode } from "react";
@@ -69,6 +74,7 @@ const TAB_SECTIONS: Record<TabId, TabSection[]> = {
     { id: "discord-bot", i18nKey: "settings.nav.discordBot", group: "settings.group.notifications" },
     { id: "ios-push-relay", i18nKey: "settings.nav.iosPushRelay", group: "settings.group.notifications" },
     { id: "notification-agents", i18nKey: "settings.nav.notificationAgents", group: "settings.group.notifications" },
+    { id: "arr-alerts", i18nKey: "settings.nav.arrAlerts", group: "settings.group.notifications" },
   ],
   integrations: [
     { id: "external-ratings", i18nKey: "settings.nav.externalRatings", group: "settings.group.integrations" },
@@ -192,6 +198,8 @@ const ALL_KEYS = [
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
   "auditPiiRetentionDays",
   "plexWatchlistServerSource", "plexWatchlistServerAutoEnroll", "plexWatchlistServerStatus",
+  ARR_WATCH_DISK_LOW_PERCENT_KEY,
+  OIDC_ALLOWLIST_SETTING_KEY,
 ] as const;
 
 // Placeholder a translated sentence is split on so a client-formatted value can
@@ -220,6 +228,9 @@ export default async function SettingsPage({
   // safeDecryptSettingValue clears entries on successful read, so the banner
   // disappears automatically on the next page load after the operator re-saves.
   const decryptFailures = getSettingDecryptFailures();
+  // null ⇒ the stored allowlist doesn't parse, and sign-in is refusing every
+  // OIDC login until it is re-saved (guardrail 34e).
+  const oidcAllowlist = parseOidcAllowlist(cfg[OIDC_ALLOWLIST_SETTING_KEY]);
 
   // Exactly the gates /api/sync/plex and /api/sync/jellyfin apply themselves, so
   // the sync buttons can skip a server that is not there instead of POSTing to
@@ -347,7 +358,7 @@ export default async function SettingsPage({
     const cronTargets = [
       "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
       "activity", "mdblist", "omdb", "recommendations", "library", "audit-log:pii-scrub", "auth-sessions:purge-expired",
-      "trash-sync", "download-policies", "plex-watchlist", "trakt",
+      "trash-sync", "download-policies", "plex-watchlist", "trakt", "upstream-watch", "arr-watch", "arr-snapshots",
     ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
     // (admin- or cron-triggered). Several warm jobs deliberately skip the
@@ -480,6 +491,9 @@ export default async function SettingsPage({
       { name: t("settings.cron.job.trashSync.name"), description: t("settings.cron.job.trashSync.description"), endpoint: "/api/cron/trash-sync", interval: formatInterval(t, process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
       { name: t("settings.cron.job.plexWatchlist.name"), description: t("settings.cron.job.plexWatchlist.description"), endpoint: "/api/cron/sync-plex-watchlists", interval: formatInterval(t, process.env.PLEX_WATCHLIST_SYNC_INTERVAL, "1800"), ...lastRunInfo("plex-watchlist") },
       { name: t("settings.cron.job.trakt.name"), description: t("settings.cron.job.trakt.description"), endpoint: "/api/cron/sync-trakt", interval: formatInterval(t, process.env.TRAKT_SYNC_INTERVAL, "1800"), ...lastRunInfo("trakt") },
+      { name: t("settings.cron.job.upstreamWatch.name"), description: t("settings.cron.job.upstreamWatch.description"), endpoint: "/api/cron/refresh-upstream-watch", interval: formatInterval(t, process.env.UPSTREAM_WATCH_SYNC_INTERVAL, "86400"), ...lastRunInfo("upstream-watch") },
+      { name: t("settings.cron.job.arrWatch.name"), description: t("settings.cron.job.arrWatch.description"), endpoint: "/api/cron/arr-watch", interval: formatInterval(t, process.env.ARR_WATCH_INTERVAL, "900"), ...lastRunInfo("arr-watch") },
+      { name: t("settings.cron.job.arrSnapshots.name"), description: t("settings.cron.job.arrSnapshots.description"), endpoint: "/api/cron/refresh-arr-snapshots", interval: formatInterval(t, process.env.ARR_SNAPSHOT_INTERVAL, "300"), ...lastRunInfo("arr-snapshots") },
       { name: t("settings.cron.job.downloadPolicy.name"), description: t("settings.cron.job.downloadPolicy.description"), endpoint: "/api/cron/sync-download-policies", interval: formatInterval(t, process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("download-policies") },
     ];
   }
@@ -613,7 +627,7 @@ export default async function SettingsPage({
               description={t("settings.section.authentication.description")}
             >
               {/* The rows carry no spacing or rules of their own; this stack
-                  supplies both, so the four read as one list (the features
+                  supplies both, so the rows read as one list (the features
                   tab's switch list uses the same recipe). */}
               <div className="divide-y divide-[var(--ds-border)] [&>*]:py-3 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0">
                 <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
@@ -625,6 +639,11 @@ export default async function SettingsPage({
                 <EnableMachineSessionToggle
                   initialEnabled={cfg.enableMachineSession === "true"}
                   initialAllowedIps={cfg.machineSessionAllowedIps ?? ""}
+                />
+                <OidcAllowlistForm
+                  initial={oidcAllowlist ?? DEFAULT_OIDC_ALLOWLIST}
+                  initialUnreadable={oidcAllowlist === null}
+                  oidcConfigured={isOidcConfigured()}
                 />
               </div>
             </SettingsCard>
@@ -964,6 +983,14 @@ export default async function SettingsPage({
               description={t("settings.section.notificationAgents.description")}
             >
               <NotificationAgentsManager featureEnabled={agentsFeatureEnabled} />
+            </SettingsCard>
+
+            <SettingsCard
+              id="arr-alerts"
+              title={t("settings.section.arrAlerts.title")}
+              description={t("settings.section.arrAlerts.description")}
+            >
+              <ArrWatchForm initialPercent={String(parseDiskLowPercent(cfg[ARR_WATCH_DISK_LOW_PERCENT_KEY]))} />
             </SettingsCard>
           </>
         )}

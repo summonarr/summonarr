@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { DetailActionButton } from "@/components/media/detail-action-button";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -40,7 +41,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
         router.refresh();
       } else {
         setState("idle");
-        toast({ title: t("request.vote.recordFailed"), variant: "error" });
+        toast({ title: rateLimitMessage(res, t) ?? t("request.vote.recordFailed"), variant: "error" });
       }
     } catch {
       setState("idle");

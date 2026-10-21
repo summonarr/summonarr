@@ -7,7 +7,8 @@
 // The webhook secret never leaves the server: the report carries only the
 // verdict, and the URL handed to Radarr/Sonarr is built here.
 import { randomBytes } from "node:crypto";
-import { ArrResponseError, arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { ArrResponseError, arrErrorKind, arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import type { ArrErrorKind } from "./arr-error-kind";
 import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "./arr-instances";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { settleLimit } from "./concurrency";
@@ -35,6 +36,8 @@ export interface ArrInstanceHealth {
   /** False when /system/status could not be read — nothing else below is meaningful then. */
   reachable: boolean;
   error: string | null;
+  /** Why it failed, for translated display; null with no error. */
+  errorKind: ArrErrorKind | null;
   version: string | null;
   checks: ArrHealthCheck[];
   /** "unknown" when the Connect list could not be read. */
@@ -74,18 +77,19 @@ async function readInstanceHealth(inst: { service: ArrHealthService; slug: strin
     ...inst,
     reachable: false,
     error: null,
+    errorKind: null,
     version: null,
     checks: [],
     webhook: { state: "unknown", missingEvents: [] },
   };
   const cfg = await getArrCfg(inst.service, inst.slug);
-  if (!cfg) return { ...base, error: "not configured" };
+  if (!cfg) return { ...base, error: "not configured", errorKind: "other" };
   try {
     const status = await arrFetch<{ version?: unknown }>(cfg, "/api/v3/system/status");
     base.reachable = true;
     base.version = typeof status?.version === "string" ? status.version.slice(0, 50) : null;
   } catch (err) {
-    return { ...base, error: arrErrorMessage(err) };
+    return { ...base, error: arrErrorMessage(err), errorKind: arrErrorKind(err) };
   }
   // Health and the Connect list are independent: one failing must not hide the other.
   const [health, notifications, secret] = await Promise.allSettled([
@@ -94,7 +98,10 @@ async function readInstanceHealth(inst: { service: ArrHealthService; slug: strin
     effectiveWebhookSecret(inst.service, inst.slug),
   ]);
   if (health.status === "fulfilled") base.checks = normalizeHealthChecks(health.value);
-  else base.error = arrErrorMessage(health.reason);
+  else {
+    base.error = arrErrorMessage(health.reason);
+    base.errorKind = arrErrorKind(health.reason);
+  }
   if (notifications.status === "fulfilled" && secret.status === "fulfilled") {
     const verdict = evaluateWebhook(notifications.value, inst.service, secret.value);
     base.webhook = { state: verdict.state, missingEvents: verdict.missingEvents };
@@ -110,7 +117,7 @@ export async function loadArrHealth(): Promise<ArrHealthReport> {
     instances: settled.map((s, i) =>
       s.status === "fulfilled"
         ? s.value
-        : { ...instances[i], reachable: false, error: arrErrorMessage(s.reason), version: null, checks: [], webhook: { state: "unknown" as const, missingEvents: [] } },
+        : { ...instances[i], reachable: false, error: arrErrorMessage(s.reason), errorKind: arrErrorKind(s.reason), version: null, checks: [], webhook: { state: "unknown" as const, missingEvents: [] } },
     ),
   };
 }

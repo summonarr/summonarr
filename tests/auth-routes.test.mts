@@ -284,6 +284,7 @@ async function mintToken(opts: {
   name?: string;
   provider?: string;
   expiresInSeconds?: number;
+  transport?: "cookie" | "bearer"; // omitted ⇒ a pre-claim token (either transport)
 }): Promise<string> {
   const ttl = opts.expiresInSeconds ?? 7_200;
   const expiresAt = Math.floor(Date.now() / 1000) + ttl;
@@ -296,6 +297,7 @@ async function mintToken(opts: {
       sessionId: opts.sessionId,
       expiresAt,
       ...(opts.name ? { name: opts.name } : {}),
+      ...(opts.transport ? { transport: opts.transport } : {}),
     },
     { expiresInSeconds: ttl },
   );
@@ -408,6 +410,31 @@ test("register: the first sign-up bootstraps the initial ADMIN and returns the u
   assert.equal(settings.get("discordRequireLinkedAccount"), "true");
 });
 
+test("register: the first-admin bootstrap is audited — USER_CREATE kind first-admin, named by id, with the request's address", async () => {
+  auditRows.length = 0;
+  const res = await registerPost(registerReq({ name: "Owner", email: "owner@example.com", password: STRONG_PASSWORD }));
+  assert.equal(res.status, 201);
+  const body = await bodyOf(res);
+  await new Promise((r) => setTimeout(r, 0));
+  const rows = auditRows.filter((r) => r.action === "USER_CREATE");
+  assert.equal(rows.length, 1, "exactly one row for the bootstrap");
+  const row = rows[0];
+  assert.equal(row.userId, body.id, "the new admin is the actor");
+  assert.equal(row.target, `user:${body.id}`);
+  const details = JSON.parse(row.details as string);
+  assert.deepEqual(details, { kind: "first-admin", targetUserId: body.id, role: "ADMIN" });
+  assert.ok(!(row.details as string).includes("owner@example.com"), "the details never carry the email");
+  assert.equal(row.provider, "credentials");
+  assert.ok(row.ipAddress, "the request's address is recorded");
+
+  // A refused registration writes nothing.
+  auditRows.length = 0;
+  const closed = await registerPost(registerReq({ email: "late@example.com", password: STRONG_PASSWORD }));
+  assert.equal(closed.status, 403);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(auditRows.filter((r) => r.action === "USER_CREATE").length, 0);
+});
+
 test("register: onboarding is one-shot — a completed setup OR any existing user closes it (403)", async () => {
   // (a) setup_completed_at already present.
   settings.set("setup_completed_at", "2026-01-01T00:00:00.000Z");
@@ -454,6 +481,15 @@ test("register: a missing or malformed email is rejected (400) with no user crea
     const res = await registerPost(registerReq({ email, password: STRONG_PASSWORD }));
     assert.equal(res.status, 400, `${email} must be rejected`);
     assert.deepEqual(await bodyOf(res), { error: "Invalid email address" }, email);
+  }
+  assert.equal(users.length, 0);
+});
+
+test("register (guardrail 34e): an address in a domain Summonarr mints for itself is refused (400), whatever its case", async () => {
+  for (const email of ["jellyfin-abc@jellyfin.local", "Discord_1@DISCORD.local", "deleted-u1@deleted.invalid"]) {
+    const res = await registerPost(registerReq({ email, password: STRONG_PASSWORD }));
+    assert.equal(res.status, 400, `${email} must be rejected`);
+    assert.deepEqual(await bodyOf(res), { error: "That email address is reserved and can't be used for an account." }, email);
   }
   assert.equal(users.length, 0);
 });
@@ -588,6 +624,32 @@ test("sign-out is bearer-first: a bearer sign-out revokes the bearer's session, 
   assert.equal(authSessions.has("sess-ck"), true, "the cookie's session must be untouched (bearer-first, no fallback)");
 });
 
+test("sign-out (guardrail 6h): a token on the wrong transport revokes NOTHING, but the cookies are still cleared", async () => {
+  const t = new Date(Date.now() - 1000);
+  seedSession("sess-wt-browser", "u-wt-browser", t);
+  seedSession("sess-wt-native", "u-wt-native", t);
+  seedUser({ id: "u-wt-browser", createdAt: t });
+  seedUser({ id: "u-wt-native", createdAt: t });
+  const browser = await mintToken({ id: "u-wt-browser", sessionId: "sess-wt-browser", transport: "cookie" });
+  const native = await mintToken({ id: "u-wt-native", sessionId: "sess-wt-native", transport: "bearer" });
+
+  const asBearer = await signOutPost(signOutReq({ authorization: `Bearer ${browser}` }));
+  assert.equal(asBearer.status, 200);
+  assert.ok(asBearer.headers.getSetCookie().some((c) => c.includes("Max-Age=0")));
+  const asCookie = await signOutPost(signOutReq({ cookie: `${COOKIE}=${native}` }));
+  assert.equal(asCookie.status, 200);
+  await flush();
+  assert.equal(authSessions.has("sess-wt-browser"), true, "a cookie-bound token presented as a bearer is no session");
+  assert.equal(authSessions.has("sess-wt-native"), true, "a bearer-bound token presented as a cookie is no session");
+  assert.equal(auditRows.length, 0, "and no AUTH_LOGOUT is written for either");
+
+  // On its own transport each one signs out.
+  await signOutPost(signOutReq({ cookie: `${COOKIE}=${browser}` }));
+  await signOutPost(signOutReq({ authorization: `Bearer ${native}` }));
+  assert.equal(authSessions.has("sess-wt-browser"), false);
+  assert.equal(authSessions.has("sess-wt-native"), false);
+});
+
 test("sign-out (guardrail 6b): appends only cleared cookies — no sliding-refresh token — plus no-store headers", async () => {
   const t = new Date(Date.now() - 1000);
   seedSession("sess-b6", "u-b6", t);
@@ -705,6 +767,10 @@ test("machine-session mint: a valid request mints an admin-provider JWT delivere
   assert.equal(claims.id, "admin-1");
   assert.equal(claims.role, "ADMIN");
   assert.equal(claims.provider, "machine");
+  // Delivered only as a cookie, so bound to that transport: the same token
+  // presented as `Authorization: Bearer` is no session (guardrail 6h).
+  assert.equal(claims.transport, "cookie");
+  assert.equal(await verifySessionJwt(cookieToken, "bearer"), null);
   // The AuthSession row was persisted under the minted sessionId.
   assert.ok(claims.sessionId && authSessions.has(claims.sessionId), "the AuthSession row must be created");
 });

@@ -13,6 +13,20 @@ export const WARM_LIBRARY_LOCK_ID = 2012;
 export const PLEX_WATCHLIST_LOCK_ID = 2021;
 // Same reasoning: a parallel-branch-safe id, not the next free one.
 export const TRAKT_SYNC_LOCK_ID = 2031;
+// The media servers' own watch records (refresh-upstream-watch cron + the admin
+// "Refresh" on the never-watched page share it). Same reasoning: a
+// parallel-branch-safe id, not the next free one.
+export const UPSTREAM_WATCH_LOCK_ID = 2041;
+// The Radarr/Sonarr monitor (arr-watch cron): disk space, failed downloads,
+// newly stuck downloads. Same reasoning: a parallel-branch-safe id.
+export const ARR_WATCH_LOCK_ID = 2051;
+// The admin arr pages' background re-reads (refresh-arr-snapshots cron,
+// src/lib/arr-snapshot.ts). Same reasoning: a parallel-branch-safe id.
+export const ARR_SNAPSHOT_LOCK_ID = 2061;
+// The library match check's walk of every media server and Radarr/Sonarr
+// (src/lib/library-match-data.ts). Its report row is written under the
+// two-key xact lock (2071, 1), which this single-key session lock never meets.
+export const LIBRARY_MATCH_CHECK_LOCK_ID = 2071;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

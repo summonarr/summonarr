@@ -249,6 +249,13 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     : (raw.production_countries?.length
         ? raw.production_countries.map((c) => c.iso_3166_1)
         : (raw.origin_country ?? []));
+  // Index-aligned with `countries` (normalizeMovie/normalizeTV store the same
+  // pairing as `productionCountryCodes`). Omitting it made every prewarm rewrite
+  // drop the codes localizedProductionCountry needs, so a non-English viewer got
+  // TMDB's English country name for library titles.
+  const productionCountryCodes = raw.production_countries?.length
+    ? raw.production_countries.map((c) => c.iso_3166_1)
+    : (raw.origin_country ?? []);
   // Match the normalize shape (src/lib/tmdb.ts): `genres`/`keywords` = names (back-compat),
   // `genreList`/`keywordList` = id+name. Both writers persist the same `:details` cache key.
   const genreObjs = raw.genres?.map((g) => ({ id: g.id, name: g.name })) ?? [];
@@ -318,6 +325,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     originalLanguage:    raw.original_language ?? null,
     spokenLanguages:     raw.spoken_languages?.map((l) => l.english_name || l.name || pwLanguage(l.iso_639_1)) ?? [],
     productionCountries: countries,
+    productionCountryCodes,
     originCountryCodes:  countryCodes,
     homepage:            raw.homepage || null,
     budget:              raw.budget || null,

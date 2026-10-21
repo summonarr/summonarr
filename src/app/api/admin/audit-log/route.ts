@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext, getAuditPiiRetentionDays } from "@/lib/audit";
+import { scrubTargetPiiFromAudit } from "@/lib/audit-scrub";
 import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
@@ -118,7 +119,9 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   //   - ipAddress / userAgent: nulled on every row
   //   - userName: redacted on every row (still keyed by userId for joinability)
   //   - details: nulled on auth events (free-form payload may contain identifiers);
-  //     preserved on USER_DELETE so the deletion record stays intact for audit purposes.
+  //     preserved otherwise (a USER_DELETE record stays intact for audit purposes),
+  //     except the target-user name/email keys of admin actions (audit-scrub.ts),
+  //     which go — the row keeps the account id, not who it was.
   // Window comes from the shared reader (auditPiiRetentionDays Setting, default
   // 90d) so this manual scrub and the scrub-audit-pii cron enforce one promise.
   const retentionDays = await getAuditPiiRetentionDays();
@@ -145,6 +148,8 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
     data: { details: null },
   });
 
+  const adminDetailsScrubbed = await scrubTargetPiiFromAudit(prisma, { createdAt: { lt: cutoff } });
+
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,
@@ -154,6 +159,7 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
       type: "audit-pii-scrub",
       scrubbed: piiResult.count,
       detailsScrubbed: detailsResult.count,
+      adminDetailsScrubbed,
       cutoff: cutoff.toISOString(),
     },
     ...auditContext(req, session),
@@ -162,6 +168,7 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   return NextResponse.json({
     scrubbed: piiResult.count,
     detailsScrubbed: detailsResult.count,
+    adminDetailsScrubbed,
     cutoff: cutoff.toISOString(),
     retentionDays,
   });

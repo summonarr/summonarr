@@ -6,6 +6,10 @@ import { posterUrl } from "./tmdb-types";
 import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import { DELIVERED_KBPS_SQL } from "./bitrate";
 import { processSingleton } from "./process-singleton";
+import { coalesce } from "./concurrency";
+import { pickPlexRowForKey } from "./plex-dedupe";
+import { LEGACY_PLEX_REASON_LABELS, OTHER_REASONS, UNKNOWN_REASON } from "./transcode-reasons";
+import { TRACKING_STAMP_KEYS, parseStampDate } from "./never-watched";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 // Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
@@ -35,6 +39,11 @@ const SETTING_KEYS = [
   "playHistoryCompletionThreshold",
   "playHistoryArcGapDays",
   "playHistoryRetentionDays",
+  // The tracking switches' last off→on stamps (TRACKING_STAMP_KEYS, written by
+  // /api/settings): the Statistics delta's coverage check reads them.
+  "playHistoryTrackedSince",
+  "playHistoryPlexTrackedSince",
+  "playHistoryJellyfinTrackedSince",
 ] as const;
 type SettingKey = (typeof SETTING_KEYS)[number];
 
@@ -74,6 +83,15 @@ async function loadSettings(): Promise<Record<SettingKey, string | null>> {
 const activityCache = processSingleton(
   "play-history:activityCache",
   () => new Map<string, { data: unknown; expiresAt: number }>(),
+);
+// Bumped by every clearActivityCache(). A computation reads it BEFORE it starts
+// and stores its result only if no clear landed meanwhile. Without it, a stats
+// fan-out that began before a session finalized finished AFTER the clear and
+// re-cached the pre-finalize numbers for the whole TTL, silently undoing the
+// invalidation. Process-wide for the same reason as the cache itself.
+const activityCacheGeneration = processSingleton(
+  "play-history:activityCacheGeneration",
+  () => ({ n: 0 }),
 );
 const STATS_TTL = 5 * 60 * 1000;
 const CALENDAR_TTL = 30 * 60 * 1000;
@@ -118,6 +136,11 @@ export async function getArcGapDays(): Promise<number> {
 // different shows — an unscoped lookup could attribute one server's watch to
 // another server's title. Jellyfin item ids are UUIDs (near-zero collision
 // risk) but are scoped identically for consistency.
+// Rows holding one ratingKey are 1 (normal) or a few (a conflated item's key
+// also rides the array of every title it claims — kept there on purpose, the
+// never-watched join credits each of them; `plex-dedupe.ts` header).
+const SHOW_KEY_HOLDERS_MAX = 25;
+
 export async function resolveShowTmdbId(
   source: "plex" | "jellyfin",
   showKey: string | null | undefined,
@@ -125,11 +148,29 @@ export async function resolveShowTmdbId(
 ): Promise<number | null> {
   if (!showKey) return null;
   if (source === "plex") {
-    const item = await prisma.plexLibraryItem.findFirst({
-      where: { plexRatingKey: showKey, mediaType: "TV", serverInstance },
-      select: { tmdbId: true },
+    // ORed across both ratingKey columns (guardrail 37c): a show in two
+    // sections has two ratingKeys and only one can be the stored plexRatingKey,
+    // so episodes of the other copy used to be recorded with tmdbId null.
+    //
+    // findMany + pickPlexRowForKey, never findFirst: the OR can match TWO rows
+    // (a conflated item's key is one row's canonical key and rides another's
+    // array), and an unordered findFirst then follows physical row order — a
+    // different show after any full-sync rewrite, PERSISTED onto every episode
+    // play. Canonical holder first, else lowest tmdbId (the 37b order). The
+    // bound only caps a pathological key; ordered, so it can't cut the owner
+    // out from under a pick among array holders (a canonical holder is cut
+    // only past SHOW_KEY_HOLDERS_MAX lower-id titles claiming the same item).
+    const rows = await prisma.plexLibraryItem.findMany({
+      where: {
+        mediaType: "TV",
+        serverInstance,
+        OR: [{ plexRatingKey: showKey }, { plexRatingKeys: { has: showKey } }],
+      },
+      select: { tmdbId: true, plexRatingKey: true },
+      orderBy: { tmdbId: "asc" },
+      take: SHOW_KEY_HOLDERS_MAX,
     });
-    return item?.tmdbId ?? null;
+    return pickPlexRowForKey(rows, showKey)?.tmdbId ?? null;
   }
   // ORed across both id columns (guardrail 37): a show in two libraries has two
   // item ids and only one can be the stored `jellyfinItemId`, so a watch filed
@@ -573,6 +614,7 @@ export async function recordCompletedSession(
     episodeTitle: session.episodeTitle,
     sourceSessionId: uniqueSourceSessionId,
     sourceItemId: session.sourceItemId,
+    sourceShowId: session.sourceShowId ?? null,
     platform: session.platform,
     player: session.player,
     device: session.device,
@@ -854,6 +896,16 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
 
 // Delete PlayHistory rows older than the configured retention window (no-op when
 // retention is unset/0). Returns the number of rows deleted.
+// The moment before which retention deletes recorded plays (null = keep
+// forever). Nothing before it can be evidence, so the never-watched verdict
+// never lets a window start earlier (guardrail 14d).
+export async function getRetentionCutoff(now: Date): Promise<Date | null> {
+  const val = (await loadSettings()).playHistoryRetentionDays;
+  const days = val ? parseInt(val, 10) : 0;
+  if (!days || days <= 0) return null;
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+}
+
 export async function purgeOldHistory(): Promise<number> {
   const val = (await loadSettings()).playHistoryRetentionDays;
   const days = val ? parseInt(val, 10) : 0;
@@ -958,7 +1010,7 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "mediaServerUserId" IN (${idIn}) AND "resolution" IS NOT NULL
-       GROUP BY resolution ORDER BY count DESC LIMIT 8`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 8`,
       ...ids,
     ),
     prisma.$queryRawUnsafe<{ dow: number; hour: number; count: bigint }[]>(
@@ -1221,7 +1273,7 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
       // otherwise one looped session reads as 300% and drags the title's
       // average past 100%.
       `SELECT AVG(
-         CASE WHEN "duration" > 0 THEN LEAST("playDuration"::float / "duration", 1.0) * 100 ELSE 0 END
+         CASE WHEN "duration" > 0 THEN LEAST("playDuration"::float / "duration", 1.0) * 100 ELSE NULL END
        )::float8 AS avg_pct
        FROM "PlayHistory" WHERE "tmdbId" = $1 AND ${mtClause}`,
       tmdbId,
@@ -1273,7 +1325,7 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "tmdbId" = $1 AND ${mtClause} AND "resolution" IS NOT NULL
-       GROUP BY resolution ORDER BY count DESC`,
+       GROUP BY 1 ORDER BY count DESC`,
       tmdbId,
       mt,
     ),
@@ -1432,6 +1484,9 @@ export async function getMostPopularOnServer(
   const cacheKey = JSON.stringify({ mediaType, sort, page, limit });
   const cached = popularCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.data;
+  // Read before computing: a clearActivityCache() landing mid-query must not be
+  // undone by this result being stored afterwards (see activityCacheGeneration).
+  const generation = activityGeneration();
 
   const [completionPct, arcGapDays] = await Promise.all([
     getCompletionThreshold(),
@@ -1592,6 +1647,7 @@ export async function getMostPopularOnServer(
   // Evict the oldest entry when at capacity so the map can't grow unbounded from
   // distinct cache keys (the page/limit clamps already cap the key space; this is a
   // hard backstop). Map preserves insertion order, so the first key is the oldest.
+  if (generation !== activityGeneration()) return result;
   if (popularCache.size >= MAX_POPULAR_CACHE_ENTRIES && !popularCache.has(cacheKey)) {
     const oldest = popularCache.keys().next().value;
     if (oldest !== undefined) popularCache.delete(oldest);
@@ -1601,13 +1657,11 @@ export async function getMostPopularOnServer(
 }
 
 export async function getMostRewatched(filters: PlayHistoryStatsFilters = {}, limit = 10) {
-  const cacheKey = getCacheKey("rewatched", { ...filters, limit });
-  const cached = getCached<Awaited<ReturnType<typeof getMostRewatchedUncached>>>(cacheKey);
-  if (cached) return cached;
-
-  const result = await getMostRewatchedUncached(filters, limit);
-  setCached(cacheKey, result, REWATCHED_TTL);
-  return result;
+  return memoizeActivity(
+    getCacheKey("rewatched", { ...filters, limit }),
+    REWATCHED_TTL,
+    () => getMostRewatchedUncached(filters, limit),
+  );
 }
 
 // Canonical resolution bucketing. Plex/Jellyfin report the same resolution in
@@ -1624,6 +1678,24 @@ const RESOLUTION_BUCKET_SQL = `CASE
     OR LOWER("resolution") LIKE '480%'
     OR LOWER("resolution") = 'sd' THEN 'SD'
   ELSE 'Other'
+END`;
+
+// Canonical transcode-reason read for every surface that groups by reason. Rows
+// with no reason (recorded before capture began) bucket as 'Unknown'. Plex rows
+// written before plex.ts stopped guessing carry a cause Plex never reported
+// ("Video codec not supported" for a bandwidth step-down too); they are read back
+// as what Plex did report — which stream it transcoded — so old and new rows
+// share one bucket. Jellyfin rows keep their reasons: those come from Jellyfin's
+// own TranscodeReasons. The replacements are fixed literals from
+// transcode-reasons.ts, none containing a quote.
+const PLEX_REASON_SQL = Object.entries(LEGACY_PLEX_REASON_LABELS).reduce(
+  (expr, [from, to]) => `REPLACE(${expr}, '${from}', '${to}')`,
+  `"transcodeReason"`,
+);
+const TRANSCODE_REASON_SQL = `CASE
+  WHEN "transcodeReason" IS NULL OR "transcodeReason" = '' THEN '${UNKNOWN_REASON}'
+  WHEN "source" = 'plex' THEN ${PLEX_REASON_SQL}
+  ELSE "transcodeReason"
 END`;
 
 // Shared tail of the two leaderboard queries: swap the row's stored
@@ -1809,7 +1881,13 @@ export type PlayHistoryStatsResult = {
   bandwidthByDay: { day: string; gb: number }[];
 
   uniqueViewers: number;
+  // Distinct (tmdbId, mediaType) pairs — TMDB movie and TV ids overlap.
   uniqueTitles: number;
+  // Watched plays in the window whose viewer had ALREADY watched the same item
+  // (same movie, or same episode) before — see the rewatch query below — and
+  // that count as a share (0–100, one decimal) of the window's watched plays.
+  rewatchPlays: number;
+  rewatchRate: number;
   avgSessionMinutes: number;
   longestSessionMinutes: number;
   pauseRatio: number;
@@ -1834,7 +1912,11 @@ export type PlayHistoryStatsResult = {
   topWatched: { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: number; viewers: number }[];
   topEpisodes: { tmdbId: number | null; title: string; season: number | null; episode: number | null; episodeTitle: string | null; count: number }[];
 
-  prevPeriod: { totalPlays: number; totalWatchTimeHours: number; uniqueViewers: number };
+  // `complete` is false when play history does not reach back across the whole
+  // previous window — tracking started inside it, or retention purged part of
+  // it — so a comparison would measure the gap, not a change. Callers show no
+  // period-over-period delta then.
+  prevPeriod: { totalPlays: number; totalWatchTimeHours: number; uniqueViewers: number; complete: boolean };
 };
 
 export async function getPlayHistoryStats(
@@ -1845,20 +1927,20 @@ export async function getPlayHistoryStats(
   // or dynamic fragments built only from whitelisted enum values + parseInt +
   // bound parameters. No user-controlled strings reach SQL structure or identifiers.
   // Keep this discipline on any future edits. See also the route's groupedQuery.
-  const cacheKey = getCacheKey("stats", filters as Record<string, unknown>);
-  const cached = getCached<PlayHistoryStatsResult>(cacheKey);
-  if (cached) return cached;
-
-  const result = await getPlayHistoryStatsUncached(filters);
-  setCached(cacheKey, result, STATS_TTL);
-  return result;
+  return memoizeActivity(
+    getCacheKey("stats", filters as Record<string, unknown>),
+    STATS_TTL,
+    () => getPlayHistoryStatsUncached(filters),
+  );
 }
 
 async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}) {
   const { where, params } = buildStatsFilters(filters);
   const { where: joinWhere, params: joinParams } = buildStatsFilters(filters, "p");
   // "plays" surfaces use wwhere (filter watched=true); analytics surfaces (completion rate, codecs,
-  // bitrate, bandwidth, peak concurrent) use the raw `where` so the denominator stays complete.
+  // bitrate, bandwidth, peak concurrent, stream method, source split, client apps) use the raw
+  // `where` so the denominator stays complete. The Statistics page groups its cards the same way,
+  // so no card mixes the two.
   const wwhere = `${where} AND "watched" = true`;
   const joinWWhere = `${joinWhere} AND p."watched" = true`;
 
@@ -1873,6 +1955,16 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     mediaType: filters.mediaType,
   });
   const prevWhere = `"startedAt" >= $1 AND "startedAt" < $2${prevFilterSql}`;
+  // Was the whole previous window recorded? A play older than its start proves
+  // tracking (of this source) was already running then. Nothing older means it
+  // began inside the window, or retention purged it, and a delta would measure
+  // that gap ("+400%", or "new" on every tile) instead of a change. mediaType is
+  // deliberately left out: a media type nobody watched is not an untracked one.
+  // Two more parts of the same question are answered after the settings read:
+  // the tracking stamps (a gap in tracking leaves old rows behind) and, with no
+  // source filter, the per-source probe (one source's old rows must not vouch
+  // for a source tracked only recently).
+  const sourceFiltered = filters.source === "plex" || filters.source === "jellyfin";
 
   // Arc-grouped completion: three sittings of one movie should count as one completion, not
   // "one watched + two incomplete". Same arc definition as getMostPopularOnServer — consecutive
@@ -1882,10 +1974,56 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   // histogram uses fixed bucket thresholds so it must NOT receive completionRatio — Postgres
   // rejects prepared statements with unused binds ("bind message supplies N parameters, but
   // prepared statement requires M"). Keep arcHistogramParams and arcRateParams separate.
-  const [completionPct, arcGapDays] = await Promise.all([
+  const [completionPct, arcGapDays, settings] = await Promise.all([
     getCompletionThreshold(),
     getArcGapDays(),
+    loadSettings(),
   ]);
+  // Retention shorter than both windows together means the purge has cut into
+  // the previous one even if a few not-yet-purged rows survive past its start.
+  const retentionDays = parseInt(settings.playHistoryRetentionDays ?? "", 10) || 0;
+  const retentionCutsPrevious = retentionDays > 0 && retentionDays < days * 2;
+  // The probe's bound. With retention ≥ both windows the purge deletes exactly
+  // the rows older than now − retention — at retention = 2 × days, every row
+  // before the previous window's start, i.e. the evidence. A row within a day of
+  // the purge cutoff then shows history was clipped by the purge, not by
+  // tracking starting, so the bound moves to cutoff + 1 day. Accepted: up to one
+  // day of the previous window may be uncovered.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const probeBound =
+    retentionDays > 0 && retentionDays >= days * 2
+      ? new Date(Math.max(prevStart.getTime(), Date.now() - retentionDays * DAY_MS + DAY_MS))
+      : prevStart;
+  const { sql: observedFilterSql, params: observedParams } = appendPlayHistoryFilter([probeBound], {
+    source: filters.source,
+  });
+  // Unfiltered: EVERY source with plays since the bound must also have one
+  // before it — old Plex rows say nothing about a Jellyfin server added last
+  // week (one with tracking on by default never wrote a stamp). Index-shaped
+  // on (source, startedAt). Filtered, the probe above is already per source.
+  const perSourceObservedSql = sourceFiltered
+    ? ""
+    : ` AND NOT EXISTS (
+         SELECT 1 FROM (VALUES ('plex'), ('jellyfin')) AS s(src)
+         WHERE EXISTS (SELECT 1 FROM "PlayHistory" n WHERE n."source" = s.src AND n."startedAt" >= $1)
+           AND NOT EXISTS (SELECT 1 FROM "PlayHistory" o WHERE o."source" = s.src AND o."startedAt" < $1)
+       )`;
+  // Tracking stamps: a switch turned back on after the previous window began
+  // means a gap inside it, whatever older rows exist. The global switch always
+  // counts; the filtered source's, or both with no filter. No stamp keeps the
+  // old behaviour (installs from before the stamps existed).
+  const stampKeys = [
+    TRACKING_STAMP_KEYS.playHistoryEnabled,
+    ...(filters.source === "plex"
+      ? [TRACKING_STAMP_KEYS.playHistoryPlexEnabled]
+      : filters.source === "jellyfin"
+        ? [TRACKING_STAMP_KEYS.playHistoryJellyfinEnabled]
+        : [TRACKING_STAMP_KEYS.playHistoryPlexEnabled, TRACKING_STAMP_KEYS.playHistoryJellyfinEnabled]),
+  ];
+  const stampsCoverPrevious = stampKeys.every((key) => {
+    const stamp = parseStampDate(settings[key as SettingKey]);
+    return stamp === null || stamp.getTime() <= prevStart.getTime();
+  });
   const arcHistogramParams = [...params, arcGapDays * 24 * 60 * 60];
   const arcRateParams = [...arcHistogramParams, completionPct / 100];
   const arcGapIdx = params.length + 1;
@@ -1969,6 +2107,8 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     prevPeriodStats,
     topRewatchedRaw,
     topWatchedRaw,
+    rewatchRaw,
+    observedRaw,
   ] = await Promise.all([
     prisma.$queryRawUnsafe<{ count: bigint }[]>(
       `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE ${wwhere}`,
@@ -2109,8 +2249,11 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     }[]>(
       // unique_viewers/unique_titles are plays-semantic (filter watched). avg/longest/pause are
       // session analytics; keep across all sessions for honest "how long do people sit through this".
+      // unique_titles counts (tmdbId, mediaType) PAIRS: TMDB movie and TV ids are separate
+      // namespaces that overlap numerically, so a bare DISTINCT "tmdbId" merged a movie and a
+      // show sharing an integer into one title.
       `SELECT COUNT(DISTINCT "mediaServerUserId") FILTER (WHERE "watched" = true)::bigint AS unique_viewers,
-              COUNT(DISTINCT "tmdbId") FILTER (WHERE "tmdbId" IS NOT NULL AND "watched" = true)::bigint AS unique_titles,
+              COUNT(DISTINCT ("tmdbId", "mediaType")) FILTER (WHERE "tmdbId" IS NOT NULL AND "watched" = true)::bigint AS unique_titles,
               COALESCE(AVG(NULLIF("playDuration", 0)), 0)::float8 AS avg_session_s,
               COALESCE(MAX("playDuration"), 0)::int AS longest_session_s,
               (COALESCE(SUM("pausedDuration"), 0)::float8
@@ -2155,7 +2298,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       `SELECT COALESCE(NULLIF(LOWER("container"), ''), 'unknown') AS container,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
-       GROUP BY container ORDER BY count DESC LIMIT 8`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 8`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
@@ -2187,7 +2330,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       // so the buckets sum to exactly the transcode total again and the claim
       // holds. The row is omitted entirely when there is no tail.
       `WITH reasons AS (
-         SELECT COALESCE(NULLIF("transcodeReason", ''), 'Unknown') AS reason,
+         SELECT ${TRANSCODE_REASON_SQL} AS reason,
                 COUNT(*)::bigint AS count
          FROM "PlayHistory"
          WHERE ${where} AND "playMethod" = 'Transcode'
@@ -2198,7 +2341,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        ), rolled AS (
          SELECT reason, count, rn FROM ranked WHERE rn <= 8
          UNION ALL
-         SELECT 'Other reasons', SUM(count)::bigint, 9 FROM ranked WHERE rn > 8
+         SELECT '${OTHER_REASONS}', SUM(count)::bigint, 9 FROM ranked WHERE rn > 8
          HAVING SUM(count) > 0
        )
        SELECT reason, count FROM rolled ORDER BY rn`,
@@ -2208,32 +2351,43 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       `SELECT COALESCE(NULLIF("device", ''), 'Unknown') AS device,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY device ORDER BY count DESC LIMIT 10`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
+    // Client apps and the source split are SESSION analytics (raw `where`), like the codec,
+    // resolution and stream-method breakdowns they sit beside on the Statistics page. They
+    // used to count watched plays only, so "Source split" summed to fewer sessions than the
+    // stream-method bar directly above it in the same card.
     prisma.$queryRawUnsafe<{ player: string; count: bigint }[]>(
       `SELECT COALESCE(NULLIF("player", ''), 'Unknown') AS player,
               COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY player ORDER BY count DESC LIMIT 10`,
+       FROM "PlayHistory" WHERE ${where}
+       GROUP BY 1 ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ source: string; count: bigint }[]>(
       `SELECT "source", COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${wwhere}
+       FROM "PlayHistory" WHERE ${where}
        GROUP BY "source" ORDER BY count DESC`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ decade: string; count: bigint }[]>(
-      `SELECT CASE
-         WHEN "year" IS NULL OR "year" = '' THEN 'Unknown'
-         WHEN "year" ~ '^[0-9]{4}' THEN (SUBSTRING("year", 1, 3) || '0s')
-         ELSE 'Unknown'
-       END AS decade, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY decade ORDER BY decade`,
-      ...params,
-    ),
+    // Movies only, as the card says. An episode's "year" is its own air year and every
+    // episode is a play, so without the filter a few binged shows outweighed every film.
+    // Under a TV filter the two predicates contradict — the answer is [] by construction,
+    // so it is not asked (one statement fewer on the five-connection pool; the wire
+    // shape is the same []).
+    filters.mediaType === "TV"
+      ? Promise.resolve([] as { decade: string; count: bigint }[])
+      : prisma.$queryRawUnsafe<{ decade: string; count: bigint }[]>(
+          `SELECT CASE
+             WHEN "year" IS NULL OR "year" = '' THEN 'Unknown'
+             WHEN "year" ~ '^[0-9]{4}' THEN (SUBSTRING("year", 1, 3) || '0s')
+             ELSE 'Unknown'
+           END AS decade, COUNT(*)::bigint AS count
+           FROM "PlayHistory" WHERE ${wwhere} AND "mediaType"::text = 'MOVIE'
+           GROUP BY decade ORDER BY decade`,
+          ...params,
+        ),
     prisma.$queryRawUnsafe<{
       tmdbId: number | null;
       title: string;
@@ -2252,9 +2406,13 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
+    // Sessions are half-open [startedAt, stoppedAt): at a tie the stop (-1) is applied
+    // before the start (+1). Both pollers finalize an autoplayed episode and create the
+    // next one with the SAME `now`, so ordering starts first counted every autoplay
+    // hand-off as two simultaneous streams — one viewer binge-watching read as a peak of 2.
     prisma.$queryRawUnsafe<{ peak: number | null }[]>(
       `SELECT COALESCE(MAX(concurrent), 0)::int AS peak FROM (
-         SELECT SUM(delta) OVER (ORDER BY t, delta DESC) AS concurrent
+         SELECT SUM(delta) OVER (ORDER BY t, delta ASC) AS concurrent
          FROM (
            SELECT "startedAt" AS t, 1 AS delta FROM "PlayHistory" WHERE ${where}
            UNION ALL
@@ -2277,6 +2435,58 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     ),
     getMostRewatchedUncached(filters, 10),
     getTopWatchedUncached(filters, 8),
+    // Rewatch rate. A watched play is a REWATCH when the same viewer (server identity, like
+    // every viewer count on this page) had already watched the same item before it started:
+    // the same movie, or the same EPISODE. Matching per episode is the point — episode 2
+    // after episode 1 is a new play, not a repeat; the old "plays per title" figure counted
+    // it as one (the trap getMostRewatchedUncached documents). The earlier play may predate
+    // the window; plays retention has purged are not seen. The server's own item id is a
+    // SECOND match for every play, not only for unmatched ones: PlayHistory.tmdbId is
+    // write-once, so an earlier play recorded unmatched (watched before the next library
+    // sync) never meets a later matched rewatch through the tmdb branch — same item, same
+    // viewer, earlier, watched is a rewatch whatever tmdbId either row carries. The
+    // show-level tmdb match is MOVIES only: a TV play missing its season/episode numbers
+    // matched every other numberless episode of the show (IS NOT DISTINCT FROM NULL), so
+    // it is judged by its per-episode item id alone, and with none counts as a first
+    // watch. A play with no match at all can't be judged and counts as a first watch.
+    // Each branch is shaped for an index:
+    // (mediaServerUserId, tmdbId, mediaType, seasonNumber, episodeNumber, startedAt) and
+    // (source, sourceItemId, mediaServerUserId, startedAt). `plays` is counted here, over the
+    // same rows, so the rate's two halves can't drift apart.
+    prisma.$queryRawUnsafe<{ plays: bigint; rewatches: bigint }[]>(
+      `SELECT COUNT(*)::bigint AS plays,
+              COUNT(*) FILTER (WHERE (CASE
+                WHEN p."tmdbId" IS NOT NULL AND p."mediaType" IS NOT NULL
+                     AND p."seasonNumber" IS NOT NULL AND p."episodeNumber" IS NOT NULL THEN EXISTS (
+                  SELECT 1 FROM "PlayHistory" q
+                  WHERE q."mediaServerUserId" = p."mediaServerUserId"
+                    AND q."tmdbId" = p."tmdbId" AND q."mediaType" = p."mediaType"
+                    AND q."seasonNumber" = p."seasonNumber" AND q."episodeNumber" = p."episodeNumber"
+                    AND q."startedAt" < p."startedAt" AND q."watched" = true)
+                WHEN p."tmdbId" IS NOT NULL AND p."mediaType"::text = 'MOVIE' THEN EXISTS (
+                  SELECT 1 FROM "PlayHistory" q
+                  WHERE q."mediaServerUserId" = p."mediaServerUserId"
+                    AND q."tmdbId" = p."tmdbId"
+                    AND q."mediaType" IS NOT DISTINCT FROM p."mediaType"
+                    AND q."seasonNumber" IS NOT DISTINCT FROM p."seasonNumber"
+                    AND q."episodeNumber" IS NOT DISTINCT FROM p."episodeNumber"
+                    AND q."startedAt" < p."startedAt" AND q."watched" = true)
+                ELSE false
+              END) OR (p."sourceItemId" IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM "PlayHistory" q
+                  WHERE q."source" = p."source" AND q."serverInstance" = p."serverInstance"
+                    AND q."sourceItemId" = p."sourceItemId"
+                    AND q."mediaServerUserId" = p."mediaServerUserId"
+                    AND q."startedAt" < p."startedAt" AND q."watched" = true)))::bigint AS rewatches
+       FROM "PlayHistory" p WHERE ${joinWWhere}`,
+      ...joinParams,
+    ),
+    prisma.$queryRawUnsafe<{ observed: boolean }[]>(
+      `SELECT (EXISTS (
+         SELECT 1 FROM "PlayHistory" WHERE "startedAt" < $1${observedFilterSql}
+       )${perSourceObservedSql}) AS observed`,
+      ...observedParams,
+    ),
   ]);
 
   const watchedCount = Number(completionStats[0]?.watched ?? 0);
@@ -2287,6 +2497,8 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   const pauseRatio = extras ? Math.round(Number(extras.pause_ratio ?? 0) * 1000) / 1000 : 0;
   const peakConcurrent = Number(peakConcurrentRaw[0]?.peak ?? 0);
   const prev = prevPeriodStats[0];
+  const rewatchBase = Number(rewatchRaw[0]?.plays ?? 0);
+  const rewatchPlays = Number(rewatchRaw[0]?.rewatches ?? 0);
 
   // The cutoff is a rolling `now - days*24h`, so the window spans days+1 UTC
   // calendar days (both edges partial). Padding to `days` would drop the oldest
@@ -2324,6 +2536,8 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     ),
     uniqueViewers: Number(extras?.unique_viewers ?? 0),
     uniqueTitles: Number(extras?.unique_titles ?? 0),
+    rewatchPlays,
+    rewatchRate: rewatchBase > 0 ? Math.round((rewatchPlays / rewatchBase) * 1000) / 10 : 0,
     avgSessionMinutes,
     longestSessionMinutes,
     pauseRatio,
@@ -2358,6 +2572,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       totalPlays: Number(prev?.plays ?? 0),
       totalWatchTimeHours: Math.round(Number(prev?.hours ?? 0) * 10) / 10,
       uniqueViewers: Number(prev?.viewers ?? 0),
+      complete: observedRaw[0]?.observed === true && !retentionCutsPrevious && stampsCoverPrevious,
     },
   };
 }
@@ -2366,13 +2581,11 @@ export async function getActivityCalendar(
   source?: string,
   mediaType?: string,
 ): Promise<{ day: string; count: number }[]> {
-  const cacheKey = getCacheKey("calendar", { source, mediaType });
-  const cached = getCached<{ day: string; count: number }[]>(cacheKey);
-  if (cached) return cached;
-
-  const result = await getActivityCalendarUncached(source, mediaType);
-  setCached(cacheKey, result, CALENDAR_TTL);
-  return result;
+  return memoizeActivity(
+    getCacheKey("calendar", { source, mediaType }),
+    CALENDAR_TTL,
+    () => getActivityCalendarUncached(source, mediaType),
+  );
 }
 
 async function getActivityCalendarUncached(
@@ -2444,6 +2657,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
   const cacheKey = `heatmap-cell:${JSON.stringify(q)}`;
   const cached = getCached<HeatmapCellDetail>(cacheKey);
   if (cached) return cached;
+  const generation = activityGeneration();
 
   // Build the WHERE incrementally so the $-index always tracks params.length —
   // same discipline as appendPlayHistoryFilter (the 803cd11 bug class).
@@ -2540,10 +2754,12 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
        FROM "PlayHistory" WHERE ${where}`,
       ...params,
     ),
+    // Same reason read as the Statistics page (legacy Plex labels normalized), so a
+    // cell's reasons and the page's chart name one cause the same way.
     prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
-      `SELECT "transcodeReason" AS reason, COUNT(*)::bigint AS count
+      `SELECT ${TRANSCODE_REASON_SQL} AS reason, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "transcodeReason" IS NOT NULL AND "transcodeReason" <> ''
-       GROUP BY "transcodeReason" ORDER BY count DESC LIMIT 4`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 4`,
       ...params,
     ),
     // Bucket via the canonical CASE so "720"/"720p" and "1080"/"1080p" collapse
@@ -2552,7 +2768,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     prisma.$queryRawUnsafe<{ resolution: string; count: bigint }[]>(
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "resolution" IS NOT NULL AND "resolution" <> ''
-       GROUP BY resolution ORDER BY count DESC LIMIT 4`,
+       GROUP BY 1 ORDER BY count DESC LIMIT 4`,
       ...params,
     ),
     // Most-played titles in the bucket — same tmdbId/title dedup as the stats
@@ -2629,7 +2845,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     })),
   };
 
-  setCached(cacheKey, detail, STATS_TTL);
+  setCached(cacheKey, detail, STATS_TTL, generation);
   return detail;
 }
 
@@ -2652,6 +2868,7 @@ export async function getTranscodeOffenders(
   const cacheKey = `transcode-offenders:${JSON.stringify({ ...filters, limit })}`;
   const cached = getCached<TranscodeOffenders>(cacheKey);
   if (cached) return cached;
+  const generation = activityGeneration();
 
   const { where, params } = buildStatsFilters(filters);
   const twhere = `${where} AND "playMethod" = 'Transcode'`;
@@ -2696,7 +2913,7 @@ export async function getTranscodeOffenders(
       count: Number(t.count),
     })),
   };
-  setCached(cacheKey, result, STATS_TTL);
+  setCached(cacheKey, result, STATS_TTL, generation);
   return result;
 }
 
@@ -2732,7 +2949,11 @@ function getCached<T>(key: string): T | null {
 // insertion order) until under the cap.
 const ACTIVITY_CACHE_MAX = 500;
 
-function setCached<T>(key: string, data: T, ttlMs: number): void {
+// `generation` is activityCacheGeneration.n as read BEFORE the data was computed
+// (activityGeneration()). A clear since then means the data may predate a write
+// the clear was meant to surface, so it is returned to the caller but not stored.
+function setCached<T>(key: string, data: T, ttlMs: number, generation: number): void {
+  if (generation !== activityCacheGeneration.n) return;
   if (activityCache.size >= ACTIVITY_CACHE_MAX && !activityCache.has(key)) {
     const now = Date.now();
     for (const [k, v] of activityCache) {
@@ -2747,7 +2968,35 @@ function setCached<T>(key: string, data: T, ttlMs: number): void {
   activityCache.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
+function activityGeneration(): number {
+  return activityCacheGeneration.n;
+}
+
+// The current activity-cache generation, for a cache that lives OUTSIDE this
+// module but is fed by the same PlayHistory rows (the never-watched report):
+// it compares generations instead of being cleared, so a finalize still drops it.
+export function currentActivityGeneration(): number {
+  return activityGeneration();
+}
+
+// Read-through for the memoized aggregates. Concurrent cold loads of one key —
+// two admins, the iOS app, the warm cron — share ONE computation instead of each
+// running the full fan-out on the five-connection pool (guardrail 31). The
+// coalesce key carries the generation, so a request arriving after a clear
+// starts a fresh computation rather than joining one that predates the clear.
+function memoizeActivity<T>(key: string, ttlMs: number, compute: () => Promise<T>): Promise<T> {
+  const cached = getCached<T>(key);
+  if (cached) return Promise.resolve(cached);
+  const generation = activityGeneration();
+  return coalesce(`play-history:${generation}:${key}`, async () => {
+    const result = await compute();
+    setCached(key, result, ttlMs, generation);
+    return result;
+  });
+}
+
 export function clearActivityCache(): void {
+  activityCacheGeneration.n++;
   activityCache.clear();
   // popularCache lives in the same module with its own 5-min TTL but is fed by the same
   // PlayHistory rows. Without flushing it here a freshly-finalized session can take up to

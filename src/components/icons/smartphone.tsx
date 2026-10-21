@@ -12,6 +12,7 @@ export function Smartphone({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <rect width="14" height="20" x="5" y="2" rx="2" ry="2" />

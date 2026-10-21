@@ -11,6 +11,16 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 class TargetBecameAdminError extends Error {}
 
+// An admin target is one with role ADMIN OR the ADMIN superbit. The two are kept
+// in lockstep by the users PATCH, but this gate guards stripping an admin's
+// second factor, so it must not depend on that invariant holding for legacy or
+// hand-edited rows.
+function isAdminTarget(row: { role: string; permissions?: bigint | null } | null | undefined): boolean {
+  if (!row) return false;
+  if (row.role === "ADMIN") return true;
+  return typeof row.permissions === "bigint" && (row.permissions & Permission.ADMIN) !== 0n;
+}
+
 // DELETE /api/admin/users/[id]/mfa — reset a user's two-factor authentication
 // (lost phone / lost security key). Removes their authenticator app, every
 // passkey and every recovery code, and signs the account out everywhere; their
@@ -40,10 +50,10 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { role: true, name: true, email: true },
+    select: { role: true, permissions: true, name: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-  if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+  if (isAdminTarget(target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminResetMfa") }, { status: 403 });
   }
 
@@ -56,8 +66,8 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       // the role-change and deactivate paths take (admin/users/[id]/route.ts) —
       // and decide on that value.
       await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-      const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
-      if ((fresh?.role ?? target.role) === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+      const fresh = await tx.user.findUnique({ where: { id }, select: { role: true, permissions: true } });
+      if (isAdminTarget(fresh ?? target) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
         throw new TargetBecameAdminError();
       }
       await deleteAllMfaInTx(tx, id);
@@ -75,14 +85,16 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   await revokeAllUserSessions(id);
   if (before.enabled) void notifyMfaSecurityEvent(id, "mfa-reset");
 
-  // Committed — a failed audit write must not 500 it (guardrail 26).
+  // Committed — a failed audit write must not 500 it (guardrail 26). The target
+  // is named by id (+ display name), never by email (audit-scrub.ts).
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? "unknown",
     action: "MFA_RESET",
     target: `user:${id}`,
     details: {
-      targetUser: target.name ?? target.email,
+      targetUserId: id,
+      ...(target.name ? { targetUser: target.name } : {}),
       role: target.role,
       before: { totp: before.totpEnabled, passkeys: before.passkeys.length, recoveryCodes: before.recoveryRemaining },
     },

@@ -197,7 +197,7 @@ shadowPrismaModel(prisma, "user", userModel);
 const authSessionModel = {
   findUnique: async (args: { where: { sessionId: string } }) =>
     sessionRows.has(args.where.sessionId)
-      ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId }
+      ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId, createdAt: new Date() }
       : null,
   update: async () => ({}), // lastSeenAt fire-and-forget touch — no-op, unrecorded
   deleteMany: async (args: unknown) => {
@@ -206,6 +206,13 @@ const authSessionModel = {
   },
 };
 shadowPrismaModel(prisma, "authSession", authSessionModel);
+
+// The password route asks whether the account has a second factor (guardrail
+// 6i). None of these accounts has one; the two-factor branch is pinned in
+// tests/auth-passwords.test.mts.
+shadowPrismaModel(prisma, "userTotp", { findUnique: async () => null });
+shadowPrismaModel(prisma, "webAuthnCredential", { findMany: async () => [] });
+shadowPrismaModel(prisma, "mfaRecoveryCode", { count: async () => 0 });
 
 // Settings drive maintenanceGuard (maintenance keys), isNotificationEmailEnabled
 // (EMAIL_KEYS), and the feature-flag read. Map-based like requests-route.test.mts.
@@ -487,6 +494,14 @@ test("password change with the CORRECT current password re-hashes, stamps the in
   const del = opsOf("authSession.deleteMany")[0].args as { where: { userId: string } };
   assert.equal(del.where.userId, userId, "all of the user's AuthSession rows are deleted");
   assert.equal(shouldForceDbCheck(userId, "any-session"), true, "invalidateUserSession must mark the user force-revalidate");
+
+  // Guardrail 6g: what a session holder could have planted goes with the
+  // sessions — push registrations and pending Discord link/merge codes.
+  for (const op of ["pushSubscription.deleteMany", "discordLinkToken.deleteMany", "discordMergeCode.deleteMany"]) {
+    const calls = opsOf(op);
+    assert.equal(calls.length, 1, `${op} runs with the password change`);
+    assert.deepEqual(calls[0].args, { where: { userId } });
+  }
 });
 
 test("new-password validation rejects a missing, too-short, or too-long password before any DB read", async () => {
@@ -634,14 +649,14 @@ test("notification-email verification is Jellyfin-only: a non-Jellyfin caller ge
 });
 
 test("notification-email validates the address and requires a configured transport before storing anything", async () => {
-  const bad = await mintSession({ provider: "jellyfin" });
+  const bad = await mintSession({ provider: "jellyfin", passwordHash: null });
   const invalid = await postNotifEmail(bad.token, { email: "not-an-email" });
   assert.equal(invalid.status, 400);
   assert.deepEqual(await invalid.json(), { error: "Invalid email address" });
 
   // Valid address, but no email transport configured (feature default-on but the
   // send master switch/backend are absent) → the enabled gate 400s before storing.
-  const unconfigured = await mintSession({ provider: "jellyfin" });
+  const unconfigured = await mintSession({ provider: "jellyfin", passwordHash: null });
   const res = await postNotifEmail(unconfigured.token, { email: "notify@example.com" });
   assert.equal(res.status, 400);
   assert.deepEqual(await res.json(), { error: "Email notifications aren't configured on this server." });
@@ -660,7 +675,7 @@ test("notification-email happy path stores a PENDING (unverified) hashed token a
   settings.set("resendFrom", "Summonarr <noreply@example.com>");
   fetchImpl = () => new Response(JSON.stringify({ id: "email_123" }), { status: 200 });
 
-  const { userId, token } = await mintSession({ provider: "jellyfin" });
+  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
   const before = Date.now();
   const res = await postNotifEmail(token, { email: "Notify@Example.com" });
   assert.equal(res.status, 200);
@@ -690,7 +705,7 @@ test("notification-email: the pending token is persisted even when the send fail
   settings.set("resendApiKey", "re_test_key");
   fetchImpl = () => { throw new Error("resend unreachable"); };
 
-  const { userId, token } = await mintSession({ provider: "jellyfin" });
+  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
   const res = await postNotifEmail(token, { email: "notify@example.com" });
   assert.equal(res.status, 502);
   assert.deepEqual(await res.json(), { error: "Couldn't send the verification email — contact the server owner." });
@@ -708,7 +723,7 @@ test("notification-email rate-limits verification sends (4th within the window �
   settings.set("resendApiKey", "re_test_key");
   fetchImpl = () => new Response(JSON.stringify({ id: "ok" }), { status: 200 });
 
-  const { token } = await mintSession({ provider: "jellyfin" });
+  const { token } = await mintSession({ provider: "jellyfin", passwordHash: null });
   for (let i = 0; i < 3; i++) {
     const r = await postNotifEmail(token, { email: "notify@example.com" });
     assert.equal(r.status, 200, "the first three sends are within budget");

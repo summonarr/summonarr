@@ -2,6 +2,7 @@ import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { requireFeature } from "@/lib/features";
 import Link from "next/link";
 import { posterUrl } from "@/lib/tmdb-types";
 import { User, CheckCircle2, Circle } from "@/components/icons";
@@ -81,6 +82,7 @@ export default async function PlayDetailPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 

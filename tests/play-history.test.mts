@@ -121,10 +121,14 @@ function setSettings(rows: Record<string, string>): void {
 type LibArgs = { where: Record<string, unknown>; select?: Record<string, unknown> };
 const plexLibCalls: LibArgs[] = [];
 let plexLibRow: { tmdbId: number | null } | null = null;
+// The Plex branch reads findMany (several rows can hold one key — C138); a test
+// that only needs one answer sets plexLibRow, a multi-row case sets plexLibRows.
+let plexLibRows: Array<{ tmdbId: number; plexRatingKey: string | null }> | null = null;
 shadowPrismaModel(prisma, "plexLibraryItem", {
-  findFirst: async (args: LibArgs) => {
+  findMany: async (args: LibArgs) => {
     plexLibCalls.push(args);
-    return plexLibRow;
+    if (plexLibRows) return plexLibRows;
+    return plexLibRow && plexLibRow.tmdbId != null ? [{ tmdbId: plexLibRow.tmdbId, plexRatingKey: null }] : [];
   },
 });
 const jellyfinLibCalls: LibArgs[] = [];
@@ -248,6 +252,7 @@ beforeEach(() => {
   plexLibCalls.length = 0;
   jellyfinLibCalls.length = 0;
   plexLibRow = null;
+  plexLibRows = null;
   jellyfinLibRow = null;
   activeSessionDeletes.length = 0;
   activeSessionDeleteError = null;
@@ -298,6 +303,7 @@ function makeSession(overrides: Partial<ActiveSession> = {}): ActiveSession {
     episodeNumber: null,
     episodeTitle: null,
     sourceItemId: "item-1",
+    sourceShowId: null,
     posterPath: null,
     progressPercent: 83,
     progressMs: 2_000_000n,
@@ -630,7 +636,13 @@ test("resolveShowTmdbId: plex keys map via PlexLibraryItem, TV- and serverInstan
   plexLibRow = { tmdbId: 1399 };
   assert.equal(await resolveShowTmdbId("plex", "rk-1399", ""), 1399);
   assert.equal(plexLibCalls.length, 1);
-  assert.deepEqual(plexLibCalls[0].where, { plexRatingKey: "rk-1399", mediaType: "TV", serverInstance: "" });
+  // guardrail 37c: matched against BOTH ratingKey columns — a show in two
+  // sections has a ratingKey per copy and only one is the stored plexRatingKey.
+  assert.deepEqual(plexLibCalls[0].where, {
+    mediaType: "TV",
+    serverInstance: "",
+    OR: [{ plexRatingKey: "rk-1399" }, { plexRatingKeys: { has: "rk-1399" } }],
+  });
   assert.equal(jellyfinLibCalls.length, 0);
 
   // Unmapped: a row without a tmdbId and no row at all both read as null.
@@ -640,12 +652,34 @@ test("resolveShowTmdbId: plex keys map via PlexLibraryItem, TV- and serverInstan
   assert.equal(await resolveShowTmdbId("plex", "rk-missing", ""), null);
 });
 
+test("resolveShowTmdbId: two rows holding one key (a conflated item's key on a second title's array) resolve to the CANONICAL holder, whatever order Postgres returns them in", async () => {
+  // Row 100 lists k2 as a duplicate copy key; row 200's canonical key IS k2.
+  // An unordered findFirst followed physical row order, which a full-sync
+  // delete-and-reinsert changes — and the poller persists the answer.
+  for (const order of [
+    [{ tmdbId: 100, plexRatingKey: "k1" }, { tmdbId: 200, plexRatingKey: "k2" }],
+    [{ tmdbId: 200, plexRatingKey: "k2" }, { tmdbId: 100, plexRatingKey: "k1" }],
+  ]) {
+    plexLibRows = order;
+    assert.equal(await resolveShowTmdbId("plex", "k2", ""), 200, "the canonical holder owns the key");
+  }
+  // No canonical holder: the lowest tmdbId, in either order.
+  for (const order of [
+    [{ tmdbId: 300, plexRatingKey: "k3" }, { tmdbId: 50, plexRatingKey: "k4" }],
+    [{ tmdbId: 50, plexRatingKey: "k4" }, { tmdbId: 300, plexRatingKey: "k3" }],
+  ]) {
+    plexLibRows = order;
+    assert.equal(await resolveShowTmdbId("plex", "k9", ""), 50);
+  }
+  assert.deepEqual(plexLibCalls[0].select, { tmdbId: true, plexRatingKey: true }, "the pick needs the canonical column");
+});
+
 test("resolveShowTmdbId: a named instance's lookup carries ITS serverInstance in the where — ratingKeys are server-local integers, so an unscoped lookup can hit another server's show", async () => {
   plexLibRow = { tmdbId: 4589 };
   assert.equal(await resolveShowTmdbId("plex", "42", "remote"), 4589);
   assert.deepEqual(
     plexLibCalls[0].where,
-    { plexRatingKey: "42", mediaType: "TV", serverInstance: "remote" },
+    { mediaType: "TV", serverInstance: "remote", OR: [{ plexRatingKey: "42" }, { plexRatingKeys: { has: "42" } }] },
     "dropping the serverInstance term would attribute the remote server's episode watches to whichever instance's show holds ratingKey 42 in the cache",
   );
 });
@@ -932,6 +966,7 @@ test("recordCompletedSession: writes the full PlayHistory row via createMany({sk
     episodeTitle: null,
     sourceSessionId: "key-1:2026-07-01T20:00:00.000Z", // sessionKey + startedAt — unique per watch instance
     sourceItemId: "item-1",
+    sourceShowId: null,
     platform: "Roku",
     player: "Plex for Roku",
     device: "Roku Ultra",

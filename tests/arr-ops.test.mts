@@ -187,7 +187,7 @@ test("messages: errorMessage first, statusMessages flattened, deduplicated, boun
   assert.deepEqual(row.messages, ["Import failed", "Not a valid movie file", "Title-only line"]);
 });
 
-test("sortQueueItems: attention first, then pipeline stage, then soonest to finish", () => {
+test("sortQueueItems: attention first, then pipeline stage, then title (never time left)", () => {
   const items = [
     ...foldQueueRecords("radarr", "", [{ id: 1, movie: { title: "B" }, status: "downloading", timeleft: "01:00:00" }]),
     ...foldQueueRecords("radarr", "", [{ id: 2, movie: { title: "A" }, status: "downloading", timeleft: "00:10:00" }]),
@@ -628,4 +628,13 @@ test("planCutoffSearch: monitored episodes with a file Sonarr says is below cuto
   ];
   assert.deepEqual(planCutoffSearch(episodes, files), [1, 5]);
   assert.deepEqual(planCutoffSearch(episodes, []), []);
+});
+
+test("sortQueueItems: attention rows ignore time left so auto-refresh doesn't reorder them", () => {
+  const mk = (id: number, title: string, left: string) =>
+    foldQueueRecords("radarr", "", [{ id, movie: { title }, status: "completed", trackedDownloadState: "importBlocked", trackedDownloadStatus: "warning", timeleft: left }]);
+  const a = sortQueueItems([...mk(1, "B", "00:01:00"), ...mk(2, "A", "09:00:00")]).map((i) => i.ids[0]);
+  const b = sortQueueItems([...mk(1, "B", "09:00:00"), ...mk(2, "A", "00:01:00")]).map((i) => i.ids[0]);
+  assert.deepEqual(a, [2, 1]);
+  assert.deepEqual(b, [2, 1]);
 });

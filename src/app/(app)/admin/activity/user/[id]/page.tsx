@@ -2,6 +2,7 @@ import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { requireFeature } from "@/lib/features";
 import { getUserPlayStats } from "@/lib/play-history";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
@@ -26,6 +27,7 @@ export default async function UserActivityPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 

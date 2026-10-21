@@ -5,11 +5,14 @@ import { useRouter } from "next/navigation";
 import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell, Smartphone } from "@/components/icons";
 import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { withBasePath } from "@/lib/base-path";
+import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Chip } from "@/components/ui/design";
+import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
+import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
 
 interface NotificationPrefsProps {
   // Worked out on the server: true only when the email feature is on, the
@@ -111,6 +114,12 @@ export function NotificationPrefs({
   const [emailInput, setEmailInput] = useState("");
   const [emailSavingState, setEmailSavingState] = useState<"idle" | "saving" | "sent" | "error">("idle");
   const [emailError, setEmailError] = useState<string | null>(null);
+  // Sending a verification link needs a step-up (guardrail 6g): the server
+  // answers "password-required" and the password is asked for inline. Holds the
+  // address being verified while the prompt is open (the input, or the pending
+  // address on "Resend"), so the confirmed retry sends the same one.
+  const [stepUpAddress, setStepUpAddress] = useState<string | null>(null);
+  const [stepUpError, setStepUpError] = useState<string | null>(null);
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPrefsRef = useRef<AllPrefs | null>(null);
@@ -166,7 +175,7 @@ export function NotificationPrefs({
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         rollBack();
-        setSaveError(data?.error ?? t("profile.error.saveFailed"));
+        setSaveError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.error.saveFailed"));
         return;
       }
       savedPrefsRef.current = updated;
@@ -193,7 +202,7 @@ export function NotificationPrefs({
   // server only saves the address once that link is clicked, so nobody can point
   // notifications at an address they don't control.
   // `address` is set by "Resend" for the pending address; otherwise the input.
-  async function sendVerification(address?: string) {
+  async function sendVerification(address?: string, confirmPassword?: string) {
     const trimmed = (address ?? emailInput).trim();
     if (trimmed === "" || !EMAIL_RE.test(trimmed)) {
       setEmailError(t("profile.notifications.error.invalidEmail"));
@@ -206,14 +215,25 @@ export function NotificationPrefs({
       const res = await fetch(withBasePath("/api/profile/notification-email"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: trimmed }),
+        body: JSON.stringify(withStepUpPassword({ email: trimmed }, confirmPassword)),
       });
+      const data = await res.json().catch(() => ({}));
+      const need = stepUpNeedOf(res.status, data);
+      if (need) {
+        setStepUpAddress(trimmed);
+        setStepUpError(need === "retry" ? t("profile.sessions.error.incorrectPassword") : null);
+        setEmailSavingState("idle");
+        return;
+      }
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setEmailError(data?.error ?? t("profile.notifications.error.sendVerification"));
+        // `message` first: a step-up refusal ("session-too-old", "rate_limit")
+        // carries its sentence there and a machine code in `error`.
+        setEmailError(data?.message ?? rateLimitMessage(res, t) ?? data?.error ?? t("profile.notifications.error.sendVerification"));
         setEmailSavingState("error");
         return;
       }
+      setStepUpAddress(null);
+      setStepUpError(null);
       setEmailSavingState("sent");
       // The page re-reads the pending address so the "pending" line follows it.
       router.refresh();
@@ -234,7 +254,7 @@ export function NotificationPrefs({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setEmailError(data?.error ?? t("profile.notifications.error.removeEmail"));
+        setEmailError(rateLimitMessage(res, t) ?? data?.error ?? t("profile.notifications.error.removeEmail"));
         setEmailSavingState("error");
         return;
       }
@@ -336,31 +356,40 @@ export function NotificationPrefs({
                   </Button>
                 </div>
               )}
-              <div className="flex gap-2">
-                <Input
-                  id="notificationEmail"
-                  type="email"
-                  value={emailInput}
-                  onChange={(e) => {
-                    setEmailInput(e.target.value);
-                    if (emailSavingState !== "idle") setEmailSavingState("idle");
-                    if (emailError) setEmailError(null);
-                  }}
-                  placeholder={notificationEmail ? t("profile.notifications.changeAddress") : t("auth.field.emailPlaceholder")}
-                  aria-invalid={emailError ? true : undefined}
-                  className="flex-1"
-                  autoComplete="email"
-                  spellCheck={false}
+              {stepUpAddress !== null ? (
+                <StepUpPasswordForm
+                  busy={emailSavingState === "saving"}
+                  error={stepUpError}
+                  onSubmit={(password) => void sendVerification(stepUpAddress, password)}
+                  onCancel={() => { setStepUpAddress(null); setStepUpError(null); }}
                 />
-                <Button
-                  type="button"
-                  onClick={() => sendVerification()}
-                  disabled={emailSavingState === "saving" || emailInput.trim() === ""}
-                  className="shrink-0"
-                >
-                  {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.notifications.sendVerification")}
-                </Button>
-              </div>
+              ) : (
+                <div className="flex gap-2">
+                  <Input
+                    id="notificationEmail"
+                    type="email"
+                    value={emailInput}
+                    onChange={(e) => {
+                      setEmailInput(e.target.value);
+                      if (emailSavingState !== "idle") setEmailSavingState("idle");
+                      if (emailError) setEmailError(null);
+                    }}
+                    placeholder={notificationEmail ? t("profile.notifications.changeAddress") : t("auth.field.emailPlaceholder")}
+                    aria-invalid={emailError ? true : undefined}
+                    className="flex-1"
+                    autoComplete="email"
+                    spellCheck={false}
+                  />
+                  <Button
+                    type="button"
+                    onClick={() => sendVerification()}
+                    disabled={emailSavingState === "saving" || emailInput.trim() === ""}
+                    className="shrink-0"
+                  >
+                    {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.notifications.sendVerification")}
+                  </Button>
+                </div>
+              )}
               {emailError && <p role="alert" className="text-xs text-red-400 mt-1.5">{emailError}</p>}
               {emailSavingState === "sent" && !emailError && (
                 <p className="text-xs text-green-400 mt-1.5 flex items-center gap-1">

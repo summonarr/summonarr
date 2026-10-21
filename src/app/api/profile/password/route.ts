@@ -4,14 +4,25 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { logAudit } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
+import { footholdDeletes } from "@/lib/session-footholds";
+import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 import { invalidateUserSession } from "@/lib/auth";
-import { hashPassword, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { verifyStepUpPassword } from "@/lib/step-up-auth";
+import { mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { tooManyRequests } from "@/lib/http";
 
 // PATCH /api/profile/password — the signed-in user changes their own local
 // password; revokes all existing sessions on success.
+//
+// Body: { currentPassword, newPassword, secondFactor? }. On an account with an
+// active second factor, `secondFactor` is REQUIRED too (guardrail 6i) — the same
+// shape and the same `400 { error, secondFactorRequired: true, methods }` as the
+// two-factor enrollment routes (src/lib/mfa/step-up.ts). An account without 2FA
+// is unchanged: the field is ignored and the responses are what they always were
+// (the iOS app depends on that).
 export const PATCH = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
@@ -20,7 +31,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
   }
 
-  const parsed = await readJsonCapped<{ currentPassword?: string; newPassword?: string }>(req, 16384);
+  const parsed = await readJsonCapped<{ currentPassword?: string; newPassword?: string; secondFactor?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
@@ -64,10 +75,38 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     // TypeError; reject it explicitly (mirrors the newPassword guard above).
     return NextResponse.json({ error: t("apiAuth.profile.invalidRequest") }, { status: 400 });
   }
-  const currentOk = await verifyPassword(currentPassword ?? "", user.passwordHash);
-  if (!currentOk) {
+  // The current password is a step-up proof like any other: it draws on the
+  // shared per-account guess budget and a miss is audited (step-up-auth.ts).
+  const verdict = await verifyStepUpPassword({
+    userId: session.user.id,
+    userName: user.name ?? user.email,
+    passwordHash: user.passwordHash,
+    password: currentPassword ?? "",
+    context: "password-change",
+    req,
+  });
+  if (verdict === "rate-limited") return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
+  if (verdict === "invalid") {
     return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
+
+  // The password alone is what a phishing relay holds: a session minted by
+  // relaying it plus ONE code could otherwise set a password the owner doesn't
+  // know and take the account over. So an account with an active second factor
+  // must present a FRESH one (a recovery code used here is consumed). Checked only
+  // after the password verified, so a wrong password never burns a code. A failed
+  // factor lookup throws (500) — it never falls through to "no 2FA".
+  const proof = await mfaSecondFactorStepUp(
+    req,
+    session,
+    { id: session.user.id, name: user.name, email: user.email },
+    body.secondFactor,
+    undefined,
+    // A client that predates this check (the shipped iOS app) shows `error` and
+    // can't send a code, so the text says where the change CAN be made.
+    { requiredMessage: t("apiAuth.profile.secondFactorRequired") },
+  );
+  if (proof instanceof NextResponse) return proof;
 
   const newHash = await hashPassword(newPassword);
   const now = new Date();
@@ -95,9 +134,15 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     prisma.authSession.deleteMany({
       where: { userId: session.user.id },
     }),
+    // Anything a session holder could have planted that would outlive the
+    // sessions (guardrail 6g): push registrations and pending Discord links.
+    ...footholdDeletes(prisma, session.user.id),
   ]);
 
   invalidateUserSession(session.user.id);
+  // Best-effort owner email, listing what is still connected (a Discord link, a
+  // Trakt connection) — the password change is the usual compromise response.
+  void notifyAccountSecurityEvent(session.user.id, "password-changed");
 
   void logAudit({
     userId: session.user.id,
@@ -105,6 +150,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     action: "SETTINGS_CHANGE",
     target: `user:${session.user.id}`,
     details: { kind: "password-change" },
+    ...auditContext(req, session),
   });
 
   return NextResponse.json({ ok: true, requiresRelogin: true });

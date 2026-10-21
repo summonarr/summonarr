@@ -54,5 +54,7 @@
   "shared.bell.loadFailed": "Não foi possível carregar as notificações.",
   "shared.bell.loading": "Carregando notificações…",
   "shared.common.clearSearch": "Limpar busca",
-  "shared.thread.placeholderShortcut": "Escreva uma mensagem… ({shortcut} para enviar)"
+  "shared.thread.placeholderShortcut": "Escreva uma mensagem… ({shortcut} para enviar)",
+  "shared.rateLimited.generic": "Muitas solicitações. Tente novamente em instantes.",
+  "shared.rateLimited.seconds": "Muitas solicitações. Tente novamente em {seconds} s."
 }

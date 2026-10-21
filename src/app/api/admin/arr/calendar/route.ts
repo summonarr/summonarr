@@ -1,0 +1,32 @@
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
+import { snapshotted } from "@/lib/arr-snapshot";
+import { parseCalendarWindow, MAX_CALENDAR_DAYS } from "@/lib/arr-calendar";
+import { loadCalendar } from "@/lib/arr-calendar-data";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+
+// Admin → Calendar (ADMIN): what Radarr and Sonarr have coming up (and just
+// had), from their own calendars — every configured instance, live.
+//   GET ?start=<ISO>&end=<ISO>[&unmonitored=1] — at most MAX_CALENDAR_DAYS.
+//   → { instances, errors, entries, now }: one entry per episode airing and
+//   per movie release date (in cinemas / physical / digital) in the window,
+//   each with whether the arr has the file or is downloading it (downloaded /
+//   downloading / missing / airing / aired / upcoming / unmonitored /
+//   released — see CalendarStatus); a `downloading` entry also carries
+//   `attention`, Radarr/Sonarr's own needs-attention verdict on the download.
+//   Both arrs are asked for a PADDED window (Radarr a day either side, Sonarr
+//   14 h — calendarFetchWindow), so entries may fall slightly outside
+//   [start, end): the page keeps only those in its own days (entriesInWindow).
+//   An instance that could not be read is named in `errors` with the KIND of
+//   failure (the page translates it) — its titles are absent, not "nothing
+//   airing". `now` is the server's clock, which the page's "today" follows.
+// GET with `cached=1` → the last answer kept for this exact read, for display only
+// (src/lib/arr-snapshot.ts).
+export const GET = withAdmin(snapshotted(async (req) => {
+  const t = translatorForRequest(req);
+  const q = req.nextUrl.searchParams;
+  const range = parseCalendarWindow(q.get("start"), q.get("end"));
+  if (!range) return NextResponse.json({ error: t("apiAdmin.arr.calendarWindowInvalid", { days: MAX_CALENDAR_DAYS }) }, { status: 400 });
+  const unmonitored = q.get("unmonitored") === "1" || q.get("unmonitored") === "true";
+  return NextResponse.json(await loadCalendar(range.start, range.end, unmonitored, new Date()));
+}));

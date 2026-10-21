@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
@@ -45,7 +46,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   const mediaType: "MOVIE" | "TV" | null =
     mediaTypeRaw === "MOVIE" || mediaTypeRaw === "TV" ? mediaTypeRaw : null;
 
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0 || !mediaType) {
+  if (!isTmdbIdInRange(tmdbId) || !mediaType) {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.missingParamsShort") }, { status: 400 });
   }
 

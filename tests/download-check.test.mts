@@ -158,10 +158,13 @@ let requesterDiscordId: string | null = null;
 shadowPrismaModel(prisma, "user", {
   // Serves BOTH readers: runDownloadCheck selects deactivatedAt, discord-notify's
   // notifyUser selects discordId + the notifyOn* prefs. Dispatch on the select so
-  // one stub can answer both without either seeing the other's fields.
+  // one stub can answer both.
   findUnique: async (args: { select?: Record<string, boolean> }) => {
-    if (args.select?.deactivatedAt) return { deactivatedAt: requesterDeactivatedAt };
+    // discord-notify's notifyUser ALSO selects deactivatedAt now (guardrail 33 at the
+    // single-user chokepoint), so key the narrow reply on "no discordId asked for".
+    if (args.select?.deactivatedAt && !args.select?.discordId) return { deactivatedAt: requesterDeactivatedAt };
     return {
+      deactivatedAt: requesterDeactivatedAt,
       discordId: requesterDiscordId,
       notifyOnApproved: true,
       notifyOnAvailable: true,

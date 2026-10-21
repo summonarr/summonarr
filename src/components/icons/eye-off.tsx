@@ -12,6 +12,7 @@ export function EyeOff({ size, ...props }: IconProps) {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
+      aria-hidden={props["aria-label"] || props["aria-labelledby"] || props.role === "img" ? undefined : true}
       {...props}
     >
       <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />

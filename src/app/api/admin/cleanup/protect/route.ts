@@ -6,8 +6,10 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
 import { CLEANUP_FEATURE_KEY } from "@/lib/library-cleanup-data";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 
 // Per-title "never a cleanup candidate" pins (ADMIN).
 //   POST   → protect   { tmdbId, mediaType, title?, reason? }
@@ -27,7 +29,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const parsed = await readJsonCapped<{ tmdbId?: unknown; mediaType?: unknown; title?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const { tmdbId, mediaType, title, reason } = parsed;
-  if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) {
+  if (typeof tmdbId !== "number" || !isTmdbIdInRange(tmdbId)) {
     return NextResponse.json({ error: t("apiAdmin.common.tmdbIdPositive") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
@@ -49,6 +51,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     create: { tmdbId, mediaType, ...data },
     update: data,
   });
+  invalidateNeverWatchedReport();
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,
@@ -67,11 +70,12 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   const sp = req.nextUrl.searchParams;
   const tmdbId = Number(sp.get("tmdbId"));
   const mediaType = sp.get("mediaType");
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0 || (mediaType !== "MOVIE" && mediaType !== "TV")) {
+  if (!isTmdbIdInRange(tmdbId) || (mediaType !== "MOVIE" && mediaType !== "TV")) {
     return NextResponse.json({ error: t("apiAdmin.common.tmdbIdAndMediaTypeRequired") }, { status: 400 });
   }
   const removed = await prisma.cleanupProtection.deleteMany({ where: { tmdbId, mediaType } });
   if (removed.count > 0) {
+    invalidateNeverWatchedReport();
     void logAudit({
       userId: session.user.id,
       userName: session.user.name ?? session.user.email,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { FixMatchButton } from "@/components/admin/fix-match-button";
@@ -9,6 +9,7 @@ import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { rich } from "@/components/settings/forms/rich";
+import { suggestWrongSide, type DiffSource } from "@/lib/library-diff";
 
 interface RequestSummary {
   total: number;
@@ -38,6 +39,8 @@ export interface DiffItem {
 
   inArr: boolean;
   requests: RequestSummary;
+  // Why the OTHER server lacks this title (mirrored libraries: never random).
+  diffSource: DiffSource;
 }
 
 export interface BadMatchSideData {
@@ -251,6 +254,8 @@ function MediaCard({
           </p>
         )}
 
+        <DiffSourceNote source={item.diffSource} server={server} />
+
         {item.arrMismatch && item.arrTmdbId !== null ? (
           <div style={{ marginTop: 2 }} className="flex items-center gap-2 flex-wrap">
             <span className="ds-mono" style={{ fontSize: 10, color: "var(--ds-warning)" }}>
@@ -299,6 +304,33 @@ function MediaCard({
         )}
       </div>
     </div>
+  );
+}
+
+function DiffSourceNote({ source, server }: { source: DiffSource; server?: "plex" | "jellyfin" }) {
+  const t = useT();
+  const other = server === "plex" ? "Jellyfin" : "Plex";
+  const warn = source.kind === "idMismatch" || source.kind === "unmatched";
+  let text: string;
+  switch (source.kind) {
+    case "idMismatch":
+      text = t("adminManage.library.diff.source.idMismatch", {
+        server: other,
+        title: source.otherTitle || `TMDB #${source.otherTmdbId}`,
+        id: source.otherTmdbId ?? 0,
+      });
+      break;
+    case "unmatched":   text = t("adminManage.library.diff.source.unmatched", { server: other }); break;
+    case "notOnOther":  text = t("adminManage.library.diff.source.notOnOther", { server: other }); break;
+    default:            text = t("adminManage.library.diff.source.noPath", { server: other }); break;
+  }
+  return (
+    <span
+      className="ds-mono"
+      style={{ fontSize: 10, lineHeight: 1.4, color: warn ? "var(--ds-warning)" : "var(--ds-fg-subtle)" }}
+    >
+      {text}
+    </span>
   );
 }
 
@@ -412,6 +444,8 @@ function sideLabel(service: "plex" | "jellyfin", serverInstance: string): string
 function BadMatchCard({ match }: { match: ClientBadMatch }) {
   const t = useT();
   const { arrVerdict, arrTmdbId } = match;
+  // No arr verdict: the folder's year may still say which side is off.
+  const yearHint = suggestWrongSide(match.relativePath, match.plex.releaseYear, match.jellyfin.releaseYear);
   const plexCorrectId     = arrTmdbId ?? match.jellyfin.tmdbId;
   const jellyfinCorrectId = arrTmdbId ?? match.plex.tmdbId;
 
@@ -473,6 +507,16 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
               : t("adminManage.library.diff.arrDisagree")}
           </p>
         </div>
+      )}
+
+      {!arrVerdict && yearHint && (
+        <p className="ds-mono" style={{ margin: "0 0 10px", fontSize: 11, color: "var(--ds-warning)" }}>
+          {t("adminManage.library.diff.yearHint", {
+            year: yearHint.year,
+            right: yearHint.wrong === "plex" ? "Jellyfin" : "Plex",
+            wrong: yearHint.wrong === "plex" ? "Plex" : "Jellyfin",
+          })}
+        </p>
       )}
 
       <div className="flex gap-3 flex-wrap md:flex-nowrap">
@@ -546,37 +590,47 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
   );
 }
 
+type FixResult = { key: string; title: string; kind: "ok" | "warn" | "error"; text?: string };
+
 function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
   const t = useT();
   const router  = useRouter();
   const fixable = matches.filter((m) => m.arrVerdict !== null && m.arrTmdbId !== null);
 
-  const [state, setRunState] = useState<"idle" | "running" | "done">("idle");
-  const [progress, setProgress] = useState({ done: 0, failed: 0, partial: 0, total: 0 });
-  // Per-title outcomes worth reading after the run: a partial remap's warning
-  // (guardrail 37 — a Jellyfin copy that failed to re-match may re-elect the
-  // unfixed id on the next sync) or the reason a title failed. The per-row
-  // FixMatchButton shows both; a bulk run that discarded them read "N/N fixed"
-  // over a title that was not.
-  const [outcomes, setOutcomes] = useState<Array<{ key: string; title: string; warning?: string; error?: string }>>([]);
+  const [state, setRunState] = useState<"idle" | "confirm" | "running" | "done">("idle");
+  const [progress, setProgress] = useState({ fixed: 0, failed: 0, partial: 0, handled: 0, total: 0, stopped: false });
+  // Every title's outcome, in order, so a long run is readable while it goes and
+  // after it ends: a partial remap's warning (guardrail 37) or the reason a title
+  // failed is shown beside its name, not discarded into an "N/N fixed" total.
+  const [results, setResults] = useState<FixResult[]>([]);
+  // Stop request + unmount guard. The title already running finishes on the
+  // server (its job is not cancelled), but no further title is started.
+  const stopRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => { stopRef.current = true; abortRef.current?.abort(); }, []);
 
   const handleFixAll = useCallback(async () => {
+    stopRef.current = false;
     setRunState("running");
-    setProgress({ done: 0, failed: 0, partial: 0, total: fixable.length });
-    setOutcomes([]);
+    setProgress({ fixed: 0, failed: 0, partial: 0, handled: 0, total: fixable.length, stopped: false });
+    setResults([]);
 
-    let done = 0;
+    let fixed = 0;
     let failed = 0;
     let partial = 0;
-    const collected: Array<{ key: string; title: string; warning?: string; error?: string }> = [];
+    let handled = 0;
+    const collected: FixResult[] = [];
 
     for (const match of fixable) {
+      if (stopRef.current) break;
       const { arrVerdict, arrTmdbId } = match;
       if (!arrVerdict || arrTmdbId === null) continue;
 
       const wrongItem = arrVerdict === "plex" ? match.plex : match.jellyfin;
       const title = wrongItem.title ?? `TMDB #${wrongItem.tmdbId}`;
       const key = `${arrVerdict}:${wrongItem.serverInstance}:${wrongItem.mediaType}:${wrongItem.tmdbId}`;
+      const ac = new AbortController();
+      abortRef.current = ac;
       try {
         // Background job + status poll (guardrail 37a). Titles are fixed one
         // at a time: each finishes on the server before the next starts.
@@ -590,57 +644,86 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
           // default server and remap the wrong library. Omitted for the
           // default server so that request body stays unchanged.
           ...(wrongItem.serverInstance ? { serverInstance: wrongItem.serverInstance } : {}),
-        });
-        done++;
+        }, { signal: ac.signal });
+        fixed++;
         const warning = fixMatchWarningMessage(outcome, t);
-        if (warning) {
-          partial++;
-          collected.push({ key, title, warning });
-        }
+        if (warning) partial++;
+        collected.push(warning ? { key, title, kind: "warn", text: warning } : { key, title, kind: "ok" });
       } catch (err) {
+        // Unmounted mid-run: stop quietly — the job itself carries on.
+        if (err instanceof DOMException && err.name === "AbortError") break;
         failed++;
-        collected.push({ key, title, error: fixMatchErrorMessage(err, t) });
+        collected.push({ key, title, kind: "error", text: fixMatchErrorMessage(err, t) });
       }
-      setProgress({ done: done + failed, failed, partial, total: fixable.length });
-      setOutcomes([...collected]);
+      handled++;
+      setProgress({ fixed, failed, partial, handled, total: fixable.length, stopped: false });
+      setResults([...collected]);
     }
 
+    if (stopRef.current && handled < fixable.length) {
+      setProgress({ fixed, failed, partial, handled, total: fixable.length, stopped: true });
+    }
     setRunState("done");
-    if (done > 0) router.refresh();
+    if (fixed > 0) router.refresh();
   }, [fixable, router, t]);
 
-  if (fixable.length === 0) return null;
+  if (fixable.length === 0 && state === "idle") return null;
 
-  const fixed = progress.total - progress.failed;
+  const buttonStyle = {
+    padding: "5px 12px",
+    fontSize: 12,
+    borderRadius: 6,
+  } as const;
+  const ghost = { ...buttonStyle, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" } as const;
 
   return (
     <div className="flex flex-col items-end gap-1" style={{ maxWidth: 440 }}>
-      <button
-        onClick={handleFixAll}
-        disabled={state === "running"}
-        className="ds-tap inline-flex items-center font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        style={{
-          padding: "5px 12px",
-          fontSize: 12,
-          borderRadius: 6,
-          background: "color-mix(in oklab, var(--ds-success) 14%, transparent)",
-          border: "1px solid color-mix(in oklab, var(--ds-success) 35%, var(--ds-border))",
-          color: "var(--ds-success)",
-        }}
-      >
-        {state === "idle"    && t("adminManage.library.diff.fixAll", { count: fixable.length })}
-        {state === "running" && t("adminManage.library.diff.fixing", { done: progress.done, total: progress.total })}
-        {state === "done"    && (progress.partial > 0
-          ? t("adminManage.library.diff.fixDonePartial", { fixed, total: progress.total, partial: progress.partial })
-          : t("adminManage.library.diff.fixDone", { fixed, total: progress.total }))}
-      </button>
-      {state === "done" && outcomes.length > 0 && (
-        <ul role="status" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35 }}>
-          {outcomes.map((o) => (
-            <li key={o.key} className={o.error ? "text-red-400" : "text-amber-400"}>
+      {state === "confirm" ? (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>{t("adminManage.library.match.confirmAll", { count: fixable.length })}</span>
+          <button type="button" onClick={handleFixAll} className="ds-tap inline-flex items-center font-medium transition-colors" style={{ ...buttonStyle, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}>
+            {t("adminManage.library.match.rematchAll")}
+          </button>
+          <button type="button" onClick={() => setRunState("idle")} className="ds-tap ds-hover-tint inline-flex items-center font-medium transition-colors" style={ghost}>
+            {t("adminManage.library.match.cancel")}
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setRunState("confirm")}
+            disabled={state === "running" || fixable.length === 0}
+            className="ds-tap inline-flex items-center font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              ...buttonStyle,
+              background: "color-mix(in oklab, var(--ds-success) 14%, transparent)",
+              border: "1px solid color-mix(in oklab, var(--ds-success) 35%, var(--ds-border))",
+              color: "var(--ds-success)",
+            }}
+          >
+            {state === "idle"    && t("adminManage.library.diff.fixAll", { count: fixable.length })}
+            {state === "running" && t("adminManage.library.diff.fixing", { done: progress.handled, total: progress.total })}
+            {state === "done"    && (progress.stopped
+              ? t("adminManage.library.diff.fixStopped", { fixed: progress.fixed, total: progress.total })
+              : progress.partial > 0
+                ? t("adminManage.library.diff.fixDonePartial", { fixed: progress.fixed, total: progress.total, partial: progress.partial })
+                : t("adminManage.library.diff.fixDone", { fixed: progress.fixed, total: progress.total }))}
+          </button>
+          {state === "running" && (
+            <button type="button" onClick={() => { stopRef.current = true; }} className="ds-tap ds-hover-tint inline-flex items-center font-medium transition-colors" style={ghost}>
+              {t("adminManage.library.diff.stop")}
+            </button>
+          )}
+        </div>
+      )}
+      {results.length > 0 && (
+        <ul role="status" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35, maxHeight: 160, overflowY: "auto" }}>
+          {results.map((o) => (
+            <li key={o.key} className={o.kind === "error" ? "text-red-400" : o.kind === "warn" ? "text-amber-400" : ""} style={o.kind === "ok" ? { color: "var(--ds-fg-subtle)" } : undefined}>
+              <span aria-hidden>{o.kind === "ok" ? "✓ " : o.kind === "warn" ? "⚠ " : "✕ "}</span>
               <span className="font-medium">{o.title}</span>
-              <span style={{ color: "var(--ds-fg-subtle)" }}> — </span>
-              {o.error ?? o.warning}
+              {o.text && (<><span style={{ color: "var(--ds-fg-subtle)" }}> — </span>{o.text}</>)}
             </li>
           ))}
         </ul>
@@ -713,6 +796,11 @@ function DiffColumn({
   const otherConfiguredMsg = otherServer === "plex"
     ? t("adminManage.library.diff.plexHasAll")
     : t("adminManage.library.diff.jellyfinHasAll");
+  // A ?tmdbId= deep link lands on a row; float it to the top so it is on screen
+  // instead of buried under the render cap. Stable: the rest keep their order.
+  const ordered = highlightServer === server && highlightKey
+    ? [...items.filter((i) => `${i.tmdbId}:${i.mediaType}` === highlightKey), ...items.filter((i) => `${i.tmdbId}:${i.mediaType}` !== highlightKey)]
+    : items;
   const emptyMsg = !configured
     ? t("adminManage.library.diff.notSynced", { server: server === "plex" ? "Plex" : "Jellyfin" })
     : otherConfiguredMsg;
@@ -769,7 +857,7 @@ function DiffColumn({
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {items.slice(0, RENDER_CAP).map((item) => (
+          {ordered.slice(0, RENDER_CAP).map((item) => (
             <MediaCard
               // serverInstance is part of the key: the same title present on two
               // configured servers is two rows here, and without it React sees a

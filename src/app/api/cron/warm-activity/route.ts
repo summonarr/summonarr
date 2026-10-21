@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { clearActivityCache, warmActivityCache } from "@/lib/play-history";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, WARM_ACTIVITY_LOCK_ID } from "@/lib/advisory-lock";
-import { getCronActor, recordCronRun } from "@/lib/cron-auth";
+import { cronSkippedResponse, getCronActor, recordCronRun } from "@/lib/cron-auth";
 
 export async function POST(request: NextRequest) {
   const authCtx = await getCronActor(request);
@@ -50,6 +50,6 @@ export async function POST(request: NextRequest) {
         timestamp: new Date().toISOString(),
       });
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    () => cronSkippedResponse(),
   );
 }

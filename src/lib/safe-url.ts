@@ -43,6 +43,12 @@ export function safeInternalPath(raw: string | null | undefined): string | undef
   try {
     const u = new URL(raw, INTERNAL_BASE);
     if (u.origin !== INTERNAL_BASE) return undefined;
+    // Dot-segment collapsing can LEAVE a leading "//" in the pathname
+    // (`/.//evil.com`, `/a/..//evil.com`, `/%2e//evil.com` all resolve to
+    // pathname "//evil.com" on the internal origin). Emitted as a Location or
+    // `new URL(path, base)` target, that is a protocol-relative URL — an open
+    // redirect. No real in-app route starts with "//", so refuse it.
+    if (u.pathname.startsWith("//")) return undefined;
     return `${u.pathname}${u.search}${u.hash}`;
   } catch {
     return undefined;

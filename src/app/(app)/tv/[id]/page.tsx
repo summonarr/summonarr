@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { cache } from "react";
+import { cache, Fragment } from "react";
 import { getTVDetails, tmdbLanguageFor, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
@@ -17,7 +17,11 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 import { TrailerButton } from "@/components/media/trailer-button";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
-import { arrInstancesHolding } from "@/lib/arr-links-data";
+import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
+import { ArrAddButton } from "@/components/admin/arr-title/add-dialog";
+import { arrInstancesForTitle, parseManageLink } from "@/lib/arr-links-data";
+import { getAdminTitleNeverWatched } from "@/lib/never-watched-report";
+import { NeverWatchedChip } from "@/components/admin/never-watched-chip";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
 import { attachAllAvailability } from "@/lib/attach-all";
@@ -86,10 +90,15 @@ export async function generateMetadata({
 
 export default async function TVDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  // `?manage=<service>:<slug>&tab=` opens the title manager on that instance
+  // (a link from an admin list); it only ever selects among this page's own.
+  const sp = await searchParams;
   const { session, t, locale, media } = await loadShow(id);
 
   const provider = session.user.provider;
@@ -231,9 +240,18 @@ export default async function TVDetailPage({
   // "Open in Sonarr" for an admin, one link per configured instance whose
   // synced cache holds the title. A cosmetic shortcut (JWT-level session is
   // fine — guardrail 29); the route behind it is ADMIN-gated itself.
-  const arrLinks = hasPermission(session.user.permissions, Permission.ADMIN)
-    ? await arrInstancesHolding("sonarr", media.id).catch(() => [])
-    : [];
+  const [arrLinks, neverWatched] = await Promise.all([
+    hasPermission(session.user.permissions, Permission.ADMIN)
+      // Nothing while the integration is switched off — every route behind
+      // the links would answer "integration disabled".
+      ? isFeatureEnabled("feature.integration.sonarr")
+        .then((on) => (on ? arrInstancesForTitle("sonarr", media.id) : []))
+        .catch(() => [])
+      : Promise.resolve([]),
+    // ADMIN-only "never watched" chip (guardrail 14d) — null for anyone else.
+    getAdminTitleNeverWatched(session.user.permissions, media.id, "TV"),
+  ]);
+  const manageLink = parseManageLink(sp.manage, sp.tab, "sonarr");
   const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
   const backdrop = backdropUrl(media.backdropPath, "original");
@@ -294,6 +312,7 @@ export default async function TVDetailPage({
                 showJellyfin={showJellyfin}
                 show4k={show4k}
               />
+              <NeverWatchedChip info={neverWatched} t={t} locale={locale} />
             </div>
 
             <h1
@@ -482,15 +501,39 @@ export default async function TVDetailPage({
               {(media.trailerKey || media.trailerUrl) && (
                 <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
               )}
-              {arrLinks.map((inst) => (
-                <OpenInArrLink
-                  key={inst.slug || "default"}
-                  service="sonarr"
-                  instance={inst.slug}
-                  target={{ tmdbId: media.id }}
-                  label={t("adminManage.openIn", { name: arrInstanceLabel("sonarr", inst.name, inst.slug) })}
-                />
-              ))}
+              {arrLinks.map((inst) => {
+                const label = arrInstanceLabel("sonarr", inst.name, inst.slug);
+                const deep = manageLink !== null && manageLink.instance === inst.slug;
+                // An instance holding the title: manage it there. Any other
+                // configured one: add it there, with the arr's own choices. A
+                // ?manage= deep link (an external/bookmarked URL — nothing in the
+                // app emits one) opens the manager even on a non-holder: `holds`
+                // is the synced cache, and the manager resolves the title live, so
+                // a title added since the last sync still opens; a true non-holder
+                // gets the dialog's own not-found state.
+                return inst.holds || deep ? (
+                  <Fragment key={inst.slug || "default"}>
+                    <ArrManageButton
+                      service="sonarr"
+                      instance={inst.slug}
+                      tmdbId={media.id}
+                      instanceLabel={label}
+                      autoOpen={deep}
+                      initialTab={deep ? manageLink.tab : undefined}
+                    />
+                    {inst.holds && (
+                      <OpenInArrLink
+                        service="sonarr"
+                        instance={inst.slug}
+                        target={{ tmdbId: media.id }}
+                        label={t("adminManage.openIn", { name: label })}
+                      />
+                    )}
+                  </Fragment>
+                ) : (
+                  <ArrAddButton key={inst.slug || "default"} service="sonarr" instance={inst.slug} tmdbId={media.id} instanceLabel={label} />
+                );
+              })}
             </div>
           </div>
         </div>

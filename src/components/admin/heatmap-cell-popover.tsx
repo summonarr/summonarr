@@ -13,6 +13,7 @@ import { Loader2, X } from "@/components/icons";
 import type { HeatmapCellDetail } from "@/lib/play-history";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { translateTranscodeReason } from "@/lib/transcode-reasons";
 
 const POPOVER_WIDTH = 264;
 const MARGIN = 8;
@@ -283,7 +284,7 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       {detail.topTranscodeReasons.length > 0 && (
         <Section title={t("adminActivity.popover.transcodeReasons")}>
           {detail.topTranscodeReasons.map((r) => (
-            <KV key={r.reason} k={r.reason} v={`${r.count}`} />
+            <KV key={r.reason} k={translateTranscodeReason(r.reason, t)} v={`${r.count}`} />
           ))}
         </Section>
       )}

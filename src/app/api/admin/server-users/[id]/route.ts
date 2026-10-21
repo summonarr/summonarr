@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withPermission } from "@/lib/api-auth";
-import { Permission } from "@/lib/permissions";
+import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
@@ -12,8 +12,10 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // media-server identity:
 //
 //   { downloadsEnabled }        Jellyfin download policy (pushed to the server).
+//                               MANAGE_USERS delegates may do this.
 //   { userId } | { autoLink }   Which Summonarr account this identity's watch
-//                               history is attributed to.
+//                               history is attributed to. ADMIN bit only
+//                               (guardrail 34d).
 //
 // The linking half exists because automatic resolution can't always be right:
 // it matches on the provider subject id first and the email second, so an
@@ -54,6 +56,17 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       { status: 400 },
     );
   }
+  // Linking is ADMIN-only (guardrail 34d). Linking an identity is what makes its
+  // watch history readable by its new owner (/api/play-history/mine*), and a
+  // MANAGE_USERS delegate can create local accounts with a password they choose.
+  // Without this gate a delegate could create a puppet account, point a member's
+  // identity at it, sign in as the puppet and read everything that member
+  // watched — the self/admin/server-owner checks this route used to run for
+  // delegates did not stop that. Decided before the row is read, so a delegate
+  // learns nothing about the identity either.
+  if ((wantsLink || wantsAutoLink) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+    return NextResponse.json({ error: t("apiAdmin.serverUsers.onlyAdminLink") }, { status: 403 });
+  }
 
   const record = await prisma.mediaServerUser.findUnique({
     where: { id },
@@ -68,11 +81,11 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   });
   if (!record) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
-  // ── Account linking ───────────────────────────────────────────────────────
+  // ── Account linking (ADMIN only — gated above) ────────────────────────────
   // Deliberately NOT gated on isServerAdmin, source, or `active`: those are
-  // download-policy concerns (below). Every identity — Plex or Jellyfin, admin
-  // or not, still on the server or long departed — owns watch history that has
-  // to land on the right account. A DEPARTED row is in fact the likeliest one to
+  // download-policy concerns (below). Every identity — Plex or Jellyfin, admin or
+  // not, still on the server or long departed — owns watch history that has to
+  // land on the right account. A DEPARTED row is in fact the likeliest one to
   // need re-attaching by hand: its history outlives the user's removal from the
   // media server (guardrail 28), so refusing to link it would strand that
   // history with no way to reach it.

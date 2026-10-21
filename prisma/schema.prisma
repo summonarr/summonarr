@@ -118,6 +118,14 @@ model User {
   // email but not its plexUserId/jellyfinUserId, sign-in is REFUSED.
   plexUserId     String? @unique
   jellyfinUserId String? @unique
+  // The Jellyfin server instance (MediaServerUser.serverInstance slug, "" =
+  // default) jellyfinUserId was bound through. Sign-in through any OTHER
+  // configured Jellyfin server is refused, so a second server can't vouch for
+  // an identity it doesn't own (guardrail 34e). Null only on rows bound before
+  // this column existed: the boot backfill fills it from the earliest
+  // MediaServerUser row for the id, and a row with no such evidence adopts the
+  // instance of its next sign-in. Unrelated to play-history attribution (34).
+  jellyfinInstance String? @db.VarChar(32)
 
   // Discord notification preferences (opt-in by default)
   notifyOnApproved  Boolean @default(true)
@@ -253,6 +261,12 @@ model Account {
   scope             String?
   id_token          String?
   session_state     String?
+  // OIDC only: the ID token's `iss`. A `sub` is unique only within its issuer,
+  // so an `oidc` row matches a sign-in on (issuer, sub), never sub alone — a
+  // changed OIDC_ISSUER must not sign a new IdP's user into an old account
+  // with the same subject (guardrail 34e). Null on rows created before the
+  // column existed; such a row adopts the issuer of its next sign-in.
+  issuer            String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -356,6 +370,8 @@ model AuthSession {
 // ─── Discord Linking ──────────────────────────────────────────────────────────
 
 model DiscordLinkToken {
+  // The SHA-256 (hex) of the one-time /link code, never the code itself — the
+  // VerificationToken.token pattern (src/lib/discord-link-token.ts).
   token     String   @id
   userId    String   @unique
   discordId String?
@@ -441,8 +457,17 @@ model MediaRequest {
   requestedBy String
   user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
 
+  // The account that FILED this request when it was made on someone else's
+  // behalf (POST /api/requests/bulk with onBehalfOfUserId); null for a user's
+  // own request. A non-admin filer's own quota counts these as well as their
+  // own requests, so naming other users can't multiply what they may file
+  // (guardrail 6g). A plain id, not a relation: the row belongs to requestedBy,
+  // and this is only a quota key. Null on rows filed before the column existed.
+  filedBy String?
+
   @@unique([tmdbId, mediaType, requestedBy, arrInstance])
   @@index([requestedBy])
+  @@index([filedBy])
   // Serves the admin request list: `where {status?}` + `ORDER BY createdAt DESC`
   // (requests/route.ts). The composite's `status` prefix also covers the plain
   // `where {status}` filter, so a standalone @@index([status]) is unneeded.
@@ -464,6 +489,14 @@ model PlexLibraryItem {
   serverInstance String    @default("")
   filePath      String?
   plexRatingKey String? // Plex internal ratingKey — needed to call fix-match API
+  // EVERY Plex ratingKey this title occupies on this server, plexRatingKey
+  // included — the Plex twin of JellyfinLibraryItem.jellyfinItemIds (guardrail
+  // 37c). A title in two sections ("Movies" + "4K Movies", "TV" + "Anime") is two
+  // Plex items with two ratingKeys, but the @@id below keeps one row, so a play
+  // or a server-side history entry filed under the other copy resolved to
+  // nobody. Rows written before this column existed are `[]`, so every read ORs
+  // it against plexRatingKey rather than replacing it.
+  plexRatingKeys String[] @default([])
   title         String?
   year          String?
   overview      String?
@@ -472,6 +505,7 @@ model PlexLibraryItem {
 
   @@id([tmdbId, mediaType, serverInstance])
   @@index([plexRatingKey]) // play-history sync filters on plexRatingKey every poll
+  @@index([plexRatingKeys], type: Gin) // the same lookups OR a has/hasSome over the array — a btree can't serve those
   @@index([addedAt]) // /admin/activity/recent orders by addedAt desc; without an index this seq-scans the full library every render
   @@index([serverInstance])
 }
@@ -524,6 +558,10 @@ model TVEpisodeCache {
   stillPath   String?
   runtime     Int?
   overview    String?
+  // When the episode's file reached the media server (Plex addedAt / Jellyfin
+  // DateCreated) — the earliest across that source's servers. Dates a season
+  // for the never-watched report; null for rows written before it existed.
+  addedAt     DateTime?
 
   @@id([source, tmdbId, seasonNumber, episodeNumber])
 }
@@ -558,6 +596,7 @@ model TVEpisodeCacheStaging {
   stillPath   String?
   runtime     Int?
   overview    String?
+  addedAt     DateTime?
 
   createdAt DateTime @default(now())
 
@@ -845,7 +884,6 @@ model DeletionVote {
   reason String? @db.VarChar(200)
 
   @@unique([tmdbId, mediaType, userId]) // one vote per user per item
-  @@index([tmdbId, mediaType])
   // Serves the `where {userId}` reads on account delete (admin/users/[id]) and
   // Discord account merge (discord-merge.ts) — the unique key leads with tmdbId
   // and can't serve a userId-only predicate.
@@ -908,6 +946,34 @@ model CleanupProtection {
   @@id([tmdbId, mediaType])
 }
 
+// ─── Upstream watch evidence (never-watched report) ──────────────────────────
+// A read-only snapshot of what each media server ITSELF says was played: Plex's
+// all-account watch history, Jellyfin's per-user played/resumable items. It
+// covers plays Summonarr never saw (before it was installed, while it was down,
+// while tracking was off) and is used ONLY as evidence that a title was
+// watched — never written into PlayHistory (guardrail 19), never read as "zero
+// plays" when it is missing (guardrail 14d).
+//
+// Keyed by the upstream id, never a tmdbId: a movie's own ratingKey/itemId, or
+// for an episode the SHOW's ratingKey/SeriesId plus its season. The join to a
+// library title happens at read time through PlexLibraryItem.plexRatingKey(s) /
+// JellyfinLibraryItem.jellyfinItemId(s), so a later fix-match can't orphan a row.
+// Replaced per (source, serverInstance) only after that server's fetch
+// succeeded; a failed server keeps its previous snapshot.
+model UpstreamWatchEvidence {
+  source         String    @db.VarChar(16) // "plex" | "jellyfin"
+  serverInstance String    @default("") @db.VarChar(32)
+  itemKey        String    @db.VarChar(256)
+  // -1 = the whole item (a movie, or an episode whose season is unknown).
+  seasonNumber   Int       @default(-1)
+  mediaType      MediaType
+  playCount      Int
+  lastPlayedAt   DateTime?
+  fetchedAt      DateTime
+
+  @@id([source, serverInstance, itemKey, seasonNumber])
+}
+
 enum AuditAction {
   REQUEST_APPROVE
   REQUEST_DECLINE
@@ -961,6 +1027,25 @@ enum AuditAction {
   ARR_RELEASE_GRAB
   // An admin imported a download Radarr/Sonarr had refused (Admin → Download Queue → Import).
   ARR_QUEUE_IMPORT
+  // An admin changed a movie's or series' settings in Radarr/Sonarr (the title
+  // manager: monitored, profile, root folder, tags, season/episode monitoring).
+  ARR_TITLE_EDIT
+  // An admin deleted a title's files through Radarr/Sonarr.
+  ARR_FILE_DELETE
+  // An admin renamed a title's files to Radarr/Sonarr's naming scheme.
+  ARR_FILE_RENAME
+  // An admin marked a grabbed release failed (blocklisted, re-searched).
+  ARR_MARK_FAILED
+  // An admin removed releases from a Radarr/Sonarr blocklist, or cleared it.
+  ARR_BLOCKLIST_CHANGE
+  // An admin ran a library-wide search (every missing / cutoff-unmet title).
+  ARR_COMMAND
+  // An admin switched an indexer or download client on/off in Radarr/Sonarr.
+  ARR_PROVIDER_CHANGE
+  // An admin added a title to a Radarr/Sonarr instance by hand (no request).
+  ARR_TITLE_ADD
+  // An admin removed a title from one Radarr/Sonarr instance (files optionally deleted).
+  ARR_TITLE_DELETE
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────
@@ -1012,7 +1097,6 @@ model MediaServerUser {
 
   @@unique([source, serverInstance, sourceUserId])
   @@index([userId])
-  @@index([source, serverInstance])
 }
 
 model PlayHistory {
@@ -1047,6 +1131,11 @@ model PlayHistory {
   // Source-specific keys (for deduplication)
   sourceSessionId String?  @db.VarChar(256)
   sourceItemId    String?  @db.VarChar(256)
+  // The SHOW's source key for an episode (Plex grandparentRatingKey / Jellyfin
+  // SeriesId); null for movies and for rows recorded before it existed. Lets a
+  // play whose show wasn't in the library cache yet (tmdbId null) still be
+  // attributed to its show later — the never-watched verdict joins on it.
+  sourceShowId    String?  @db.VarChar(256)
 
   // Playback metadata
   platform  String?        @db.VarChar(256)
@@ -1117,7 +1206,12 @@ model PlayHistory {
   // 30+ range-scoped aggregate queries from a smaller heap when filters are set.
   @@index([source, startedAt(sort: Desc)])
   @@index([mediaType, startedAt(sort: Desc)])
-  @@index([source, serverInstance])
+  // The never-watched verdict's narrowed read (the ADMIN detail-page chip, the
+  // cleanup delete's re-judgement) looks a show's plays up by `sourceShowId IN
+  // (…)` with no source predicate; without this it is a sequential scan of the
+  // whole table on every admin TV page view. The movie twin is served by
+  // [source, sourceItemId, …] above (never-watched-data.ts scopes it by source).
+  @@index([sourceShowId])
 }
 
 model ActiveSession {
@@ -1151,6 +1245,7 @@ model ActiveSession {
   episodeNumber Int?
   episodeTitle  String?  @db.VarChar(500)
   sourceItemId  String?  @db.VarChar(256)
+  sourceShowId  String?  @db.VarChar(256) // copied onto PlayHistory.sourceShowId at finalize
 
   posterPath String?    @db.VarChar(500) // populated from TmdbMediaCore on session create
 
@@ -1204,7 +1299,6 @@ model ActiveSession {
   creditsEndMs   Int?
 
   @@unique([source, serverInstance, sessionKey])
-  @@index([source, serverInstance])
 }
 
 // ─── IP Geolocation Cache ────────────────────────────────────────────────────
@@ -1250,7 +1344,6 @@ model TrashSpec {
   applications TrashApplication[]
 
   @@unique([service, kind, trashId])
-  @@index([service, kind])
 }
 
 // One row per spec the admin has chosen to push to Radarr/Sonarr. `enabled=false`
