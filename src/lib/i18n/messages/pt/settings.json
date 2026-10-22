@@ -427,5 +427,9 @@
   "settings.cron.job.arrWatch.name": "Monitor do Radarr/Sonarr",
   "settings.cron.job.arrWatch.description": "Verifica cada instância do Radarr e do Sonarr em busca de pouco espaço em disco, downloads com falha e downloads que precisam de atenção, e alerta os canais de notificação que assinam esses eventos",
   "settings.cron.job.arrSnapshots.name": "Atualização das páginas do Radarr/Sonarr",
-  "settings.cron.job.arrSnapshots.description": "Volta a ler as páginas do Radarr/Sonarr que os administradores abriram no último dia, por prioridade (fila e estado a cada 5 minutos; Em falta, histórico, calendário e títulos a cada 10; Sistema Arr a cada 15), para que abram com dados recentes"
+  "settings.cron.job.arrSnapshots.description": "Volta a ler as páginas do Radarr/Sonarr que os administradores abriram no último dia, por prioridade (fila e estado a cada 5 minutos; Em falta, histórico, calendário e títulos a cada 10; Sistema Arr a cada 15), para que abram com dados recentes",
+  "settings.featureLabel.admin_watchSync": "Página de sincronização de vistos",
+  "settings.featureDesc.admin_watchSync": "Mostra a página /admin/watch-sync: associe uma conta do Plex a um usuário do Jellyfin, e tudo o que o Plex conta como visto para essa conta é marcado como visto na conta do Jellyfin, incluindo o histórico do Plex anterior à associação. Unidirecional e só adiciona: nada é marcado como não visto. Desativada por padrão.",
+  "settings.cron.job.watchSync.name": "Sincronização de vistos",
+  "settings.cron.job.watchSync.description": "Marcar como visto, em cada conta do Jellyfin associada por um administrador, o que o Plex contou como visto"
 }

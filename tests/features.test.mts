@@ -61,7 +61,7 @@ const LEGACY_KEYS = ["motdEnabled", "playHistoryEnabled", "trashGuidesEnabled"] 
 // operator opts in rather than having it start on upgrade.
 // feature.admin.cleanup defaults OFF because its page deletes media: an
 // operator opts in deliberately rather than finding it switched on by an upgrade.
-const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou", "feature.behavior.watchlistAutoRequest", "feature.admin.cleanup"] as const;
+const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou", "feature.behavior.watchlistAutoRequest", "feature.admin.cleanup", "feature.admin.watchSync"] as const;
 
 // ── Registry invariants ──────────────────────────────────────────────────
 
@@ -189,7 +189,7 @@ test("group sizes are exact (pins accidental category reassignment)", () => {
   assert.equal(groups.pages.length, 8);
   assert.equal(groups.behaviors.length, 6);
   assert.equal(groups.integrations.length, 9);
-  assert.equal(groups.admin.length, 8);
+  assert.equal(groups.admin.length, 9);
 });
 
 // ── getFeatureFlags(cfg) — the pure computeFlags path ────────────────────

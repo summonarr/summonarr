@@ -427,5 +427,9 @@
   "settings.cron.job.arrWatch.name": "Radarr/Sonarr Monitor",
   "settings.cron.job.arrWatch.description": "Check every Radarr and Sonarr instance for low disk space, failed downloads and downloads that need attention, and alert the notification channels that subscribe to them",
   "settings.cron.job.arrSnapshots.name": "Radarr/Sonarr Page Refresh",
-  "settings.cron.job.arrSnapshots.description": "Re-read the Radarr/Sonarr pages admins opened in the last day, by priority (queue and health every 5 minutes, Missing, history, calendar and titles every 10, Arr System every 15), so they open on recent data"
+  "settings.cron.job.arrSnapshots.description": "Re-read the Radarr/Sonarr pages admins opened in the last day, by priority (queue and health every 5 minutes, Missing, history, calendar and titles every 10, Arr System every 15), so they open on recent data",
+  "settings.featureLabel.admin_watchSync": "Watch Sync page",
+  "settings.featureDesc.admin_watchSync": "Show the /admin/watch-sync page: pair a Plex account with a Jellyfin user, and everything Plex counts as watched for that account is marked played in the Jellyfin account, including the Plex history from before the pair was made. One-way and add-only: nothing is ever marked unplayed. Off by default.",
+  "settings.cron.job.watchSync.name": "Watch Sync",
+  "settings.cron.job.watchSync.description": "Mark what Plex counted as watched as played in each admin-paired Jellyfin account"
 }

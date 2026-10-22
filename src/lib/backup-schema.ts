@@ -57,6 +57,8 @@ export const BACKUP_TABLES = [
   "AuditLog",
   "MediaServerUser",
   "PlayHistory",
+  "WatchSyncPair",
+  "WatchSyncMark",
   "ActiveSession",
   "TrashSpec",
   "TrashApplication",

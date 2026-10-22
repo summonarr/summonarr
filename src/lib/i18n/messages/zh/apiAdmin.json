@@ -362,5 +362,11 @@
   "apiAdmin.libraryMatch.jobGone": "该检查已不可用。请重新运行检查。",
   "apiAdmin.libraryMatch.running": "已有匹配检查正在运行。请稍后再试。",
   "apiAdmin.fixMatch.itemKeyInvalid": "itemKey 必须是 Plex 的 ratingKey 或 Jellyfin 项目 ID。",
-  "apiAdmin.fixMatch.itemNotFlagged": "该项目不在最近一次匹配检查中。请重新运行检查。"
+  "apiAdmin.fixMatch.itemNotFlagged": "该项目不在最近一次匹配检查中。请重新运行检查。",
+  "apiAdmin.watchSync.disabled": "观看同步页面已停用",
+  "apiAdmin.watchSync.running": "已有观看同步正在运行。请一分钟后再试。",
+  "apiAdmin.watchSync.jobGone": "已不再跟踪该同步运行。Summonarr 可能已重启。请重新加载查看最新结果。",
+  "apiAdmin.watchSync.pairInvalid": "请选择一个 Plex 账户和一个仍在其服务器上的 Jellyfin 用户",
+  "apiAdmin.watchSync.pairExists": "该配对已存在",
+  "apiAdmin.watchSync.pairNotFound": "未找到配对"
 }

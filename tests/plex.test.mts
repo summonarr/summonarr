@@ -1396,3 +1396,24 @@ test("listPlexMatchEntries lists EVERY item of the selected sections — copies,
     ["21", [], 1, null],
   ]);
 });
+
+test("getPlexWatchHistory stopBefore (watch sync): the first DATED record older than the bound ends the walk; it and everything after are dropped; undated records never stop it", async () => {
+  const S = "http://plex-hist-stop.test:32400";
+  respond = (url) => {
+    const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+    if (start === 0) {
+      return mediaContainer([
+        { type: "movie", ratingKey: "1", viewedAt: 1_700_000_300 },
+        { type: "movie", ratingKey: "2" },
+        { type: "movie", ratingKey: "3", viewedAt: 1_700_000_200 },
+        { type: "movie", ratingKey: "4", viewedAt: 1_700_000_099 },
+        { type: "movie", ratingKey: "5", viewedAt: 1_700_000_500 },
+      ], { totalSize: 10 });
+    }
+    throw new Error("no second page: the stop ends the walk");
+  };
+  const h = await getPlexWatchHistory(S, "t", { stopBefore: new Date(1_700_000_100 * 1000) });
+  assert.equal(fetchCalls.length, 1);
+  assert.deepEqual(h.entries.map((e) => e.itemKey), ["1", "2", "3"]);
+  assert.equal(h.truncated, false);
+});

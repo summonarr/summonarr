@@ -27,6 +27,9 @@ export const ARR_SNAPSHOT_LOCK_ID = 2061;
 // (src/lib/library-match-data.ts). Its report row is written under the
 // two-key xact lock (2071, 1), which this single-key session lock never meets.
 export const LIBRARY_MATCH_CHECK_LOCK_ID = 2071;
+// Watch sync, Plex → Jellyfin (watch-sync cron + the admin page's "Run now"
+// share it, src/lib/watch-sync-data.ts). Same reasoning: a parallel-branch-safe id.
+export const WATCH_SYNC_LOCK_ID = 2081;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

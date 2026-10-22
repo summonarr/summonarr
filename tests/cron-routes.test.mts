@@ -1,7 +1,7 @@
-// Route-level unit tests for all sixteen POST /api/cron/* handlers:
+// Route-level unit tests for all seventeen POST /api/cron/* handlers:
 //   arr-watch, purge-auth-sessions, refresh-arr-snapshots, refresh-upstream-watch, scrub-audit-pii, sync-download-policies,
 //   sync-plex-watchlists, sync-trakt, trash-diagnostic, trash-sync, warm-activity, warm-library,
-//   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations
+//   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations, watch-sync
 //
 // These are the internet-facing entry points the container's own cron loop
 // POSTs to with `Bearer ${CRON_SECRET}`, and they do the destructive
@@ -165,6 +165,8 @@ for (const model of [
   "traktConnection", "traktWatchedItem",
   // refresh-upstream-watch: the media servers' own watch-record snapshot.
   "upstreamWatchEvidence",
+  // watch-sync: the admin-made pairs and their per-pair ledger.
+  "watchSyncPair", "watchSyncMark",
 ]) {
   shadowPrismaModel(prisma, model, counter(model));
 }
@@ -236,6 +238,7 @@ const ROUTES: CronRoute[] = [
   await load("warm-mdblist", AL.WARM_MDBLIST_LOCK_ID),
   await load("warm-omdb", AL.WARM_OMDB_LOCK_ID),
   await load("warm-recommendations", AL.WARM_RECOMMENDATIONS_LOCK_ID),
+  await load("watch-sync", AL.WATCH_SYNC_LOCK_ID),
 ];
 
 const LOCKING = ROUTES.filter((r) => r.lockId !== null);
@@ -272,6 +275,8 @@ beforeEach(async () => {
   // refresh-upstream-watch also short-circuits before its lock unless a feature
   // that reads its snapshot is on — pin one on rather than lean on a default.
   settings.set("feature.admin.neverWatched", "true");
+  // watch-sync short-circuits before its lock while its feature (default OFF) is off.
+  settings.set("feature.admin.watchSync", "true");
   // arr-watch short-circuits before its lock unless a Radarr/Sonarr instance is
   // configured. An RFC1918 literal: admin-configured SSRF mode, no DNS; every
   // read answers the stub's 503.
@@ -284,8 +289,8 @@ beforeEach(async () => {
 
 // ── the matrix itself must not pass vacuously ────────────────────────────────
 
-test("all sixteen cron routes loaded and expose a POST handler", () => {
-  assert.equal(ROUTES.length, 16);
+test("all seventeen cron routes loaded and expose a POST handler", () => {
+  assert.equal(ROUTES.length, 17);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
 });
 
@@ -408,7 +413,7 @@ for (const route of LOCKING) {
 // run outlasts its tick. The warm-* routes record inside the work callback and
 // never recorded their skips; these now agree with them. sync-plex-watchlists
 // still answers a plain 200 skip and is recorded — not changed here.
-for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refresh-upstream-watch", "arr-watch", "refresh-arr-snapshots"]) {
+for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refresh-upstream-watch", "arr-watch", "refresh-arr-snapshots", "watch-sync"]) {
   test(`${name}: a BUSY lock writes NO cron:lastRun ledger row`, async () => {
     const route = ROUTES.find((r) => r.name === name)!;
     lockAcquire = () => false;

@@ -55,6 +55,10 @@ export interface PlexHistoryEntry {
   showKey: string | null;
   // Plex parentIndex for an episode (0 = specials); null when unknown.
   seasonNumber: number | null;
+  // Plex index (the episode number) for an episode; null for a movie or when
+  // unknown. Read only by watch sync (watch-sync.ts), which marks the SAME
+  // episode on Jellyfin by (season, episode).
+  episodeNumber: number | null;
   viewedAt: Date | null;
   accountId: string | null;
 }
@@ -168,6 +172,7 @@ export function parsePlexHistoryItem(raw: unknown): PlexHistoryEntry | null {
     itemKey,
     showKey: kind === "episode" ? plexKey(o.grandparentRatingKey) ?? plexKeyFromPath(o.grandparentKey) : null,
     seasonNumber: kind === "episode" ? nonNegativeInt(o.parentIndex) : null,
+    episodeNumber: kind === "episode" ? nonNegativeInt(o.index) : null,
     viewedAt: epochSecondsToDate(o.viewedAt),
     accountId,
   };

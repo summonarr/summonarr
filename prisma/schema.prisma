@@ -974,6 +974,57 @@ model UpstreamWatchEvidence {
   @@id([source, serverInstance, itemKey, seasonNumber])
 }
 
+// ─── Watch sync (Plex → Jellyfin played state) ──────────────────────────────
+// An ADMIN pairs a Plex account on one Plex server with a Jellyfin user on one
+// Jellyfin server; the watch-sync cron marks, in that Jellyfin account, every
+// title Plex's own history COUNTED as watched for that Plex account. One-way and
+// add-only: it never unmarks, never writes PlayHistory (guardrail 19), and
+// nothing is paired automatically. See src/lib/watch-sync.ts.
+model WatchSyncPair {
+  id             String          @id @default(cuid(2))
+  // MediaServerUser rows: source "plex" and source "jellyfin" respectively. The
+  // rows carry the server instance and the provider subject id. Restrict, never
+  // Cascade (guardrail 28: a MediaServerUser is never hard-deleted).
+  plexUserId     String
+  plexUser       MediaServerUser @relation("WatchSyncPlex", fields: [plexUserId], references: [id], onDelete: Restrict)
+  jellyfinUserId String
+  jellyfinUser   MediaServerUser @relation("WatchSyncJellyfin", fields: [jellyfinUserId], references: [id], onDelete: Restrict)
+  enabled        Boolean         @default(true)
+  // Plex history has been read for this pair down to here (the newest viewedAt
+  // of the last read). null = never read: the next run is the full backfill.
+  historyReadTo  DateTime?
+  lastRunAt      DateTime?
+  // Counts from the last run: { queued, unmatched, marked, already, missing, failed, error? }.
+  lastResult     Json?
+  createdById    String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  marks WatchSyncMark[]
+
+  @@unique([plexUserId, jellyfinUserId])
+}
+
+// The per-pair queue AND ledger of Jellyfin items to mark. A planned item is
+// inserted "pending" (createMany skipDuplicates — one row per pair+item, ever),
+// then applied in bounded batches. Terminal: marked | already | missing.
+// "failed" retries until WATCH_SYNC_MAX_ATTEMPTS.
+model WatchSyncMark {
+  pairId         String
+  pair           WatchSyncPair @relation(fields: [pairId], references: [id], onDelete: Cascade)
+  jellyfinItemId String        @db.VarChar(256)
+  // Plex's viewedAt for the play, sent as Jellyfin's datePlayed.
+  datePlayed     DateTime?
+  status         String        @default("pending") @db.VarChar(16)
+  attempts       Int           @default(0)
+  lastError      String?       @db.VarChar(300)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@id([pairId, jellyfinItemId])
+  @@index([pairId, status])
+}
+
 enum AuditAction {
   REQUEST_APPROVE
   REQUEST_DECLINE
@@ -1094,6 +1145,8 @@ model MediaServerUser {
 
   playHistory    PlayHistory[]
   activeSessions ActiveSession[]
+  watchSyncFrom  WatchSyncPair[] @relation("WatchSyncPlex")
+  watchSyncTo    WatchSyncPair[] @relation("WatchSyncJellyfin")
 
   @@unique([source, serverInstance, sourceUserId])
   @@index([userId])

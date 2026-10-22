@@ -362,5 +362,11 @@
   "apiAdmin.libraryMatch.jobGone": "Esa comprobación ya no está disponible. Vuelve a ejecutarla.",
   "apiAdmin.libraryMatch.running": "Ya hay una comprobación de coincidencias en curso. Inténtalo de nuevo en breve.",
   "apiAdmin.fixMatch.itemKeyInvalid": "itemKey debe ser un ratingKey de Plex o un id de elemento de Jellyfin.",
-  "apiAdmin.fixMatch.itemNotFlagged": "Ese elemento no está en la última comprobación de coincidencias. Vuelve a ejecutarla."
+  "apiAdmin.fixMatch.itemNotFlagged": "Ese elemento no está en la última comprobación de coincidencias. Vuelve a ejecutarla.",
+  "apiAdmin.watchSync.disabled": "La página de sincronización de vistos está desactivada",
+  "apiAdmin.watchSync.running": "Ya hay una sincronización de vistos en curso. Inténtalo de nuevo en un minuto.",
+  "apiAdmin.watchSync.jobGone": "Ya no se sigue esa sincronización. Puede que Summonarr se haya reiniciado. Recarga para ver los últimos resultados.",
+  "apiAdmin.watchSync.pairInvalid": "Elige una cuenta de Plex y un usuario de Jellyfin que siga en su servidor",
+  "apiAdmin.watchSync.pairExists": "Ese par ya existe",
+  "apiAdmin.watchSync.pairNotFound": "Par no encontrado"
 }

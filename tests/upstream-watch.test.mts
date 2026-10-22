@@ -33,6 +33,7 @@ test("plex movie: its OWN ratingKey is the item key, no show, no season; viewedA
     itemKey: "4521",
     showKey: null,
     seasonNumber: null,
+    episodeNumber: null,
     viewedAt: new Date(T0 * 1000),
     accountId: "1",
   });
@@ -47,6 +48,7 @@ test("plex episode: grandparentRatingKey is the show key and parentIndex the sea
   assert.equal(e?.itemKey, "9001");
   assert.equal(e?.showKey, "700");
   assert.equal(e?.seasonNumber, 2);
+  assert.equal(e?.episodeNumber, 5, "index is the episode number");
   assert.deepEqual(e?.viewedAt, new Date(T0 * 1000), "a numeric-string viewedAt is accepted");
   assert.equal(e?.accountId, "42");
 });

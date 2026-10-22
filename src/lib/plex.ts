@@ -747,18 +747,26 @@ export interface PlexWatchHistory {
 export async function getPlexWatchHistory(
   serverUrl: string,
   token: string,
-  opts: { signal?: AbortSignal; maxItems?: number; maxRaw?: number } = {},
+  // `stopBefore`: an incremental read (watch sync). The history is sorted
+  // newest first, so the first DATED record older than this ends the walk —
+  // nothing past it is kept — and the result is complete for (stopBefore, now].
+  opts: { signal?: AbortSignal; maxItems?: number; maxRaw?: number; stopBefore?: Date } = {},
 ): Promise<PlexWatchHistory> {
   const maxItems = opts.maxItems ?? PLEX_WATCH_HISTORY_MAX_ITEMS;
   const maxRaw = opts.maxRaw ?? PLEX_WATCH_HISTORY_MAX_RAW;
   const out: PlexWatchHistory = { entries: [], records: 0, truncated: false };
   if (opts.signal?.aborted) return out;
   let seen = 0;
+  let reachedStop = false;
   await plexFetchAllPages<unknown>(
     `${serverUrl.replace(/\/+$/, "")}/status/sessions/history/all?sort=viewedAt:desc`,
     token,
     (batch) => {
       for (const raw of batch) {
+        if (opts.stopBefore && plexHistoryViewedBefore(raw, opts.stopBefore)) {
+          reachedStop = true;
+          break;
+        }
         const counts = countsAsPlexWatchRecord(raw);
         // Truncated only when a record PAST a cap exists — a history of exactly
         // maxItems records is complete.
@@ -773,10 +781,19 @@ export async function getPlexWatchHistory(
       }
       // Stop paging on abort (guardrail 41 — the caller discards the result) or
       // at a cap. Overshoot is bounded to the page already in flight.
-      return opts.signal?.aborted === true || out.truncated;
+      return opts.signal?.aborted === true || out.truncated || reachedStop;
     },
   );
   return out;
+}
+
+// A history record's viewedAt (epoch SECONDS) is strictly before `bound`. An
+// undated or unreadable record is never "before" — it can't end the walk.
+function plexHistoryViewedBefore(raw: unknown, bound: Date): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const v = (raw as { viewedAt?: unknown }).viewedAt;
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\s*\d+(\.\d+)?\s*$/.test(v) ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 && n * 1000 < bound.getTime();
 }
 
 export interface PlexSessionData {

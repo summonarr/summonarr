@@ -29,6 +29,7 @@ Then open <http://localhost:3001>. The first user to register is auto-promoted t
 - Admin approval with automatic fulfillment through Radarr and Sonarr
 - Plex and Jellyfin library + play-history ingestion (including active sessions)
 - GitHub-style 365-day activity heatmap and per-user stats
+- Watch sync: admin-paired Plex accounts' watches (including past history) are marked played in Jellyfin — one-way, add-only
 - Local, Plex OAuth, Jellyfin (standard + QuickConnect), and OIDC sign-in
 - Per-device session tracking, Web Push notifications, optional SMTP email
 - AES-256-GCM encryption at rest for provider secrets and push/OAuth tokens

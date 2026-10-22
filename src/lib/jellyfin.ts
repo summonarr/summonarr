@@ -711,6 +711,81 @@ export async function getJellyfinEpisodesForShow(
   return episodes;
 }
 
+// One episode's own item Id, for watch sync (watch-sync.ts) — which marks an
+// episode played by Id, so it needs the Id getJellyfinEpisodesForShow drops.
+// Season 0 (specials) is kept here; the planner decides whether to use it.
+export interface JellyfinEpisodeId {
+  seasonNumber: number;
+  episodeNumber: number;
+  // IndexNumberEnd for a multi-episode file (S01E01-E02); null otherwise.
+  episodeNumberEnd: number | null;
+  itemId: string;
+}
+
+export async function getJellyfinEpisodeIds(
+  baseUrl: string,
+  apiKey: string,
+  seriesId: string,
+): Promise<JellyfinEpisodeId[]> {
+  const base = baseUrl.replace(/\/$/, "");
+  const out: JellyfinEpisodeId[] = [];
+  await fetchJellyfinPagesSequential(
+    `${base}/Items?ParentId=${encodeURIComponent(seriesId)}&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber,IndexNumberEnd&EnableImages=false&ImageTypeLimit=0&SortBy=SortName&SortOrder=Ascending`,
+    apiKey,
+    (batch: Array<{ Id?: unknown; ParentIndexNumber?: unknown; IndexNumber?: unknown; IndexNumberEnd?: unknown }>) => {
+      for (const ep of batch) {
+        if (typeof ep.Id !== "string" || ep.Id.length === 0 || ep.Id.length > 256) continue;
+        if (!Number.isInteger(ep.ParentIndexNumber) || (ep.ParentIndexNumber as number) < 0) continue;
+        if (!Number.isInteger(ep.IndexNumber) || (ep.IndexNumber as number) < 0) continue;
+        const end = Number.isInteger(ep.IndexNumberEnd) && (ep.IndexNumberEnd as number) > (ep.IndexNumber as number)
+          ? (ep.IndexNumberEnd as number)
+          : null;
+        out.push({ seasonNumber: ep.ParentIndexNumber as number, episodeNumber: ep.IndexNumber as number, episodeNumberEnd: end, itemId: ep.Id });
+      }
+    },
+  );
+  return out;
+}
+
+export type JellyfinMarkPlayedResult = "marked" | "missing";
+
+// Mark one item played for one user (watch sync). The API key is an admin key,
+// so it may act for any user. Routes, read from Jellyfin's PlaystateController:
+//   - POST Users/{userId}/PlayedItems/{itemId} — the only route through 10.8,
+//     still on master as an [Obsolete] wrapper around the one below;
+//   - POST UserPlayedItems/{itemId}?userId= — 10.9+.
+// The new route goes first; a 404 there is either "no such route" (≤10.8) or
+// "no such user/item", so the legacy route decides: a 404 there too is
+// "missing" (the item or user is gone — terminal, not an error).
+// `datePlayed` makes Jellyfin INCREMENT PlayCount (BaseItem.MarkPlayed), so the
+// caller must only mark items the user has not already played. The call also
+// resets the item's saved resume position.
+export async function markJellyfinPlayed(
+  baseUrl: string,
+  apiKey: string,
+  userId: string,
+  itemId: string,
+  datePlayed: Date | null,
+): Promise<JellyfinMarkPlayedResult> {
+  const base = baseUrl.replace(/\/+$/, "");
+  const date = datePlayed ? `datePlayed=${encodeURIComponent(datePlayed.toISOString())}` : "";
+  const uid = encodeURIComponent(userId);
+  const iid = encodeURIComponent(itemId);
+  const attempt = async (url: string): Promise<number> => {
+    const res = await safeFetchAdminConfigured(url, { method: "POST", headers: jellyfinHeaders(apiKey), timeoutMs: FETCH_TIMEOUT_MS });
+    // The body (a UserItemDataDto) is not needed; drain it.
+    await res.text().catch(() => "");
+    return res.status;
+  };
+  const current = await attempt(`${base}/UserPlayedItems/${iid}?userId=${uid}${date ? `&${date}` : ""}`);
+  if (current >= 200 && current < 300) return "marked";
+  if (current !== 404 && current !== 405) throw new Error(`Jellyfin mark played status=${current}`);
+  const legacy = await attempt(`${base}/Users/${uid}/PlayedItems/${iid}${date ? `?${date}` : ""}`);
+  if (legacy >= 200 && legacy < 300) return "marked";
+  if (legacy === 404) return "missing";
+  throw new Error(`Jellyfin mark played status=${legacy}`);
+}
+
 export interface JellyfinSessionData {
   sessionId: string;
   playSessionId: string;
