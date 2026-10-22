@@ -8,7 +8,6 @@ import { localizedTitleFor } from "@/lib/tmdb-localize";
 import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
-import { Prisma } from "@/generated/prisma";
 import { DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { hashDiscordLinkToken, isWellFormedDiscordLinkToken, normalizeDiscordLinkToken } from "@/lib/discord-link-token";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -38,6 +37,7 @@ import { sessionForUser } from "@/lib/auto-request";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { instanceDefaultLocale, localeForUser, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 export const dynamic = "force-dynamic";
 
@@ -1532,7 +1532,7 @@ async function handleComponent(interaction: any): Promise<void> {
           }
         }
       } catch (err) {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        if (isPrismaErrorCode(err, "P2002")) {
           confirmEmbed.color = 0xfee75c;
           confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.alreadyRequested")}`;
           await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
@@ -2012,7 +2012,7 @@ export async function POST(req: NextRequest) {
         data: { queryKey: `nonce:${interactionId}`, data: "", expiresAt: new Date(Date.now() + 30 * 1000) },
       });
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      if (isPrismaErrorCode(err, "P2002")) {
         console.warn(`[interactions] Replayed interaction rejected: ${sanitizeForLog(interactionId)}`);
         return new NextResponse("Duplicate interaction", { status: 401 });
       }

@@ -1,10 +1,11 @@
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@/generated/prisma";
+import type { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { maybeAutoRequestWatchlistAdd, type AutoRequestAttempt } from "@/lib/auto-request";
 import type { SummonarrSession } from "@/lib/api-auth";
 import type { Translator } from "@/lib/i18n/translate";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // Adding a title to a user's watchlist — POST /api/watchlist minus its HTTP
 // shell, shared with Discord's /watchlist add so the two can't drift on the
@@ -50,7 +51,7 @@ export async function addToWatchlist(
       select: WATCHLIST_ITEM_SELECT,
     });
   } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    if (isPrismaErrorCode(err, "P2002")) {
       return { ok: false, status: 409, reason: "already-added", error: t("apiUser.watchlist.alreadyAdded") };
     }
     throw err;

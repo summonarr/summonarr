@@ -136,7 +136,7 @@ shadowPrismaModel(prisma, "user", {
   findFirst: async ({ where }: { where?: Where } = {}) => users.find((u) => matches(u, where)) ?? null,
   update: async ({ where, data }: { where: Where; data: Row }) => {
     const u = users.find((x) => matches(x, where));
-    if (!u) throw Object.assign(new Error("Record not found"), { code: "P2025" });
+    if (!u) throw Object.assign(new Error("Record not found"), { name: "PrismaClientKnownRequestError", code: "P2025" });
     applyData(u, data);
     return u;
   },
@@ -196,7 +196,7 @@ shadowPrismaModel(prisma, "webAuthnCredential", {
   count: async ({ where }: { where: Where }) => passkeys.filter((p) => matches(p, where)).length,
   create: async ({ data }: { data: Row }) => {
     if (passkeys.some((p) => p.credentialId === data.credentialId)) {
-      throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+      throw Object.assign(new Error("Unique constraint failed"), { name: "PrismaClientKnownRequestError", code: "P2002" });
     }
     const row = { id: `pk-${++seq}`, createdAt: new Date(), lastUsedAt: null, ...data };
     passkeys.push(row);

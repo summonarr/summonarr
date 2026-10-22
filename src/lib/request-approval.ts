@@ -1,6 +1,6 @@
-import { Prisma } from "@/generated/prisma";
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // MediaRequest.approvedAt records that a request was approved, and the request
 // watch grade counts only approved requests (guardrail 34a). The status column
@@ -70,7 +70,7 @@ async function backfillOnce(): Promise<number> {
       return stamped;
     }, { maxWait: 10_000, timeout: BATCH_TX_TIMEOUT });
   } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") return 0;
+    if (isPrismaErrorCode(err, "P2002")) return 0;
     throw err;
   }
 }

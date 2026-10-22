@@ -301,7 +301,7 @@ test("a non-P2002 create failure propagates (fail closed — the handler 500s, t
   assert.equal(calls.updateMany.length, 0); // never treated as a replay
 });
 
-test("FAIL-CLOSED PIN: a duck-typed { code: 'P2002' } plain Error propagates (instanceof gate)", async () => {
+test("FAIL-CLOSED PIN: a duck-typed { code: 'P2002' } plain Error propagates (name+code gate, guardrail 23b)", async () => {
   createError = Object.assign(new Error("unique violation"), { code: "P2002" });
   await assert.rejects(
     checkAndRecordWebhookJson("sonarr", "s", { a: 1 }),
@@ -393,7 +393,7 @@ test("clear swallows other failures but warns with source + TRUNCATED digest", a
   assert.equal(detail, "connection refused");
 });
 
-test("FAIL-CLOSED PIN: a duck-typed { code: 'P2025' } plain Error still warns (instanceof gate)", async (t) => {
+test("FAIL-CLOSED PIN: a duck-typed { code: 'P2025' } plain Error still warns (name+code gate, guardrail 23b)", async (t) => {
   deleteError = Object.assign(new Error("record not found"), { code: "P2025" });
   const warn = t.mock.method(console, "warn", () => {});
   await clearWebhookReplayDigestJson("sonarr", "s", { a: 1 }); // still resolves

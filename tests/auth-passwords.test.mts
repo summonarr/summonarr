@@ -147,7 +147,7 @@ shadowPrismaModel(prisma, "user", {
   findFirst: async ({ where }: { where?: Where } = {}) => users.find((u) => matches(u, where)) ?? null,
   update: async ({ where, data }: { where: Where; data: Row }) => {
     const u = users.find((x) => matches(x, where));
-    if (!u) throw Object.assign(new Error("Record not found"), { code: "P2025" });
+    if (!u) throw Object.assign(new Error("Record not found"), { name: "PrismaClientKnownRequestError", code: "P2025" });
     if (typeof data.passwordHash === "string") hashWrites.push({ via: "update", where, hash: data.passwordHash });
     applyData(u, data);
     return u;

@@ -132,13 +132,13 @@ test("a non-Error thrown value propagates unchanged without a retry", async () =
   assert.equal(calls, 1);
 });
 
-test("FAIL-CLOSED PIN: a duck-typed { code: 'P2034' } object is NOT retried (instanceof gate)", async () => {
-  // Only the real Prisma error class qualifies. A look-alike (e.g. an error
-  // from a different Prisma client instance's copy of the class, or a shaped
-  // object from a wrapper) fails the instanceof check and propagates on
-  // attempt 1. If Prisma is ever upgraded such that dual-package hazards make
-  // real P2034s fail this gate, retries silently stop — this test documents
-  // that the gate is instance-based, not shape-based.
+test("FAIL-CLOSED PIN: a duck-typed { code: 'P2034' } object is NOT retried (name+code gate, guardrail 23b)", async () => {
+  // Only a real Prisma error qualifies — judged by its name AND code
+  // (isPrismaErrorCode, guardrail 23b). The gate used to be instanceof, and the
+  // dual-copy hazard this comment warned about was real: in `next dev` a real
+  // P2034 from another chunk's copy of the client failed it and was never
+  // retried. A look-alike that only carries the code still propagates on
+  // attempt 1.
   let calls = 0;
   const fake = Object.assign(new Error("write conflict"), { code: "P2034" });
   await assert.rejects(

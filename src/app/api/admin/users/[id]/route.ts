@@ -4,7 +4,6 @@ import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, rolePresetExceeds, presetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
 import type { InstanceGrants, MediaServerGrants } from "@/lib/permissions";
@@ -13,6 +12,7 @@ import { getMediaInstances } from "@/lib/media-instance-registry";
 import { isValidContentRatingCap, exceedsCap } from "@/lib/content-rating";
 import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // Thrown by the DELETE tx when the in-transaction role re-read shows the target became
 // ADMIN after the pre-tx authority check (guardrail 23: propagate, never swallow in-tx).
@@ -179,7 +179,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     try {
       await prisma.user.update({ where: { id }, data: { mediaServer: ms } });
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      if (isPrismaErrorCode(err, "P2025")) {
         return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
@@ -203,7 +203,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     try {
       await prisma.user.update({ where: { id }, data: { maxContentRating: mcr } });
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      if (isPrismaErrorCode(err, "P2025")) {
         return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
@@ -274,7 +274,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     try {
       await prisma.user.update({ where: { id }, data: { permissions: parsed } });
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      if (isPrismaErrorCode(err, "P2025")) {
         return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
@@ -309,7 +309,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     try {
       await prisma.user.update({ where: { id }, data: { instanceGrants: grants } });
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      if (isPrismaErrorCode(err, "P2025")) {
         return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
@@ -353,7 +353,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     try {
       await prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } });
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      if (isPrismaErrorCode(err, "P2025")) {
         return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
@@ -392,7 +392,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     try {
       await prisma.user.update({ where: { id }, data: { [quotaField]: nextVal } });
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      if (isPrismaErrorCode(err, "P2025")) {
         return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
@@ -412,7 +412,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     try {
       await prisma.user.update({ where: { id }, data: { [notifKey]: body[notifKey] } });
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+      if (isPrismaErrorCode(err, "P2025")) {
         return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;

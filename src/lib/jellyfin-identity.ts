@@ -1,5 +1,6 @@
-import { Prisma } from "@/generated/prisma";
+import type { Prisma } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // Which Jellyfin server a Summonarr account's Jellyfin identity belongs to
 // (guardrail 34e), and the boot backfill that moves pre-34e rows onto the
@@ -92,7 +93,7 @@ export async function backfillJellyfinIdentities(): Promise<JellyfinIdentityBack
         result.boundFromEmail += count;
       } catch (err) {
         // P2002: another row already holds this id. Leave both for an admin.
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        if (isPrismaErrorCode(err, "P2002")) {
           result.skippedFromEmail++;
           continue;
         }

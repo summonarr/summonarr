@@ -583,6 +583,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - A fragment is anything from `Prisma.sql` / `Prisma.empty` / `Prisma.join` / `Prisma.raw`, or a variable or helper that produces one (`sinceClause(since)`, `statusCond`). Plain values — a `Date`, a number, `String(now)` — are what a tagged template is for, and stay as they are.
     - `tests/raw-sql-composition.test.mts` scans `src/` for the tagged shape (a fragment named directly, or an identifier/call declared in the same file from one). It is mutation-verified against reverting one `admin-stats-data.ts` query. A fragment produced in ANOTHER file and interpolated here is invisible to it — so the rule, not the scan, is the boundary.
     - A test stub of `$queryRaw` must accept both call shapes (a template-strings array, or a single `{ sql, values }` object) — see `tests/admin-stats.test.mts`.
+23b. **NEVER identify a Prisma error with `instanceof Prisma.PrismaClientKnownRequestError` (or any `instanceof Prisma*Error`). Read its code: `isPrismaErrorCode(err, "P2002")` from [prisma-errors.ts](src/lib/prisma-errors.ts).**
+
+    Why:
+    - Turbopack copies the generated client into each server chunk. In `next dev` the client is cached on `globalThis` ([prisma.ts](src/lib/prisma.ts)), so the chunk that loaded first created it, and every other chunk's `instanceof` against its own `Prisma` namespace is false. Measured live 2026-10-22: a second identical `POST /api/hidden` answered **500** in `next dev`, while the standalone production build answered the intended **409**. The bug is dev-only today, but dev is where everything gets tested, and a different chunking would make it a production one.
+    - The same check gated ~25 sites: P2002 "already exists" answers (requests, votes, hidden, user create, Jellyfin identity, APNs, webhook replay), P2025 "already gone" no-ops, and the P2034 retry in `runWithSerializableRetry`, which in dev never retried.
+
+    Rules:
+    - The gate is `name === "PrismaClientKnownRequestError"` AND the code: `name` is an own property Prisma's constructor sets, so it is the same in every copy, while a plain Error that merely carries `code: "P2002"` is still refused (the fail-closed pins in `tests/webhook-replay.test.mts` / `tests/serializable-retry.test.mts`).
+    - Add a new code to `PrismaErrorCode` when you need one; never inline `(err as { code })…` checks.
+    - Type-only `Prisma` imports (`Prisma.UserWhereInput`) are fine; this is about runtime class identity only. Tests may still construct real `Prisma.PrismaClientKnownRequestError`s — the helper reads them.
+    - `tests/prisma-errors.test.mts` scans `src` for `instanceof …PrismaClient*Error` and inline `.code === "Pxxxx"`; four mutations each fail it.
 24. **The native-client version gate (426) fails SOFT and is NEVER an authz input.**
 
     Why:

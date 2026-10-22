@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // PushSubscription.endpoint is the row's UNIQUE key: the push-service URL for a
 // web row, a synthetic handle for an iOS (APNs) row. That handle used to be
@@ -64,7 +64,7 @@ export async function migrateLegacyApnsEndpoints(): Promise<{ migrated: number; 
       } catch (err) {
         // A registration created the hashed row between the read and this
         // write: it wins, the legacy duplicate goes below.
-        if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002")) throw err;
+        if (!isPrismaErrorCode(err, "P2002")) throw err;
       }
     }
     const res = await prisma.pushSubscription.deleteMany({ where: { id: row.id, endpoint: row.endpoint } });

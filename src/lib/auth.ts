@@ -34,6 +34,7 @@ import { isReservedEmailDomain } from "@/lib/reserved-email";
 
 import { normalizeEmail } from "@/lib/email-normalize";
 import { passwordVersion } from "@/lib/mfa/mfa-store";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 // Re-exported so existing imports of `normalizeEmail` from "@/lib/auth"
 // continue to work.
 export { normalizeEmail };
@@ -647,7 +648,7 @@ export async function revokeSessionById(
 }
 
 function isPrismaNotFound(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2025";
+  return isPrismaErrorCode(err, "P2025");
 }
 
 export async function revokeAllUserSessions(

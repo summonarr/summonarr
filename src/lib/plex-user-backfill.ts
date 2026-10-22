@@ -1,9 +1,9 @@
-import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
 import { getPlexAccountsDetailed, type PlexAccountInfo } from "./plex";
 import { normalizeEmail } from "./email-normalize";
 import { getMediaInstances } from "./media-instance-registry";
 import { mediaInstanceLabel, plexSettingKey } from "./media-instances";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // Boot-time self-heal for the Plex SSO identity-binding migration.
 //
@@ -161,7 +161,7 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
         // P2002 means a DIFFERENT User row already owns this plex id. Retrying
         // cannot fix that, so it doesn't hold the marker back — but it must be
         // named, or the account stays unbound with no operator signal.
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        if (isPrismaErrorCode(err, "P2002")) {
           console.warn(
             `[plex-backfill] Could not bind ${u.email} (${u.id}) to Plex account ${plexId}: another user already ` +
               "holds that plexUserId. Plex sign-in for that account resolves to the other user; merge or fix the " +

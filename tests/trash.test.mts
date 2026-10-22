@@ -219,8 +219,10 @@ function applyAppData(row: AppRow, data: Record<string, unknown>): void {
     }
   }
 }
+// Shaped like a real Prisma known-request error: isPrismaErrorCode reads the
+// name AND the code (guardrail 23b), never the class.
 function prismaError(code: string, message: string): Error {
-  return Object.assign(new Error(message), { code });
+  return Object.assign(new Error(message), { name: "PrismaClientKnownRequestError", code });
 }
 
 // When set, the next trashApplication.create simulates losing a concurrent-create
