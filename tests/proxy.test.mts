@@ -31,8 +31,10 @@
 //      carries a refreshed session cookie;
 //   7. the /api/admin/* defense-in-depth backstop (403 only for principals
 //      with NO admin-surface access; ISSUE_ADMIN and granular MANAGE_* bits
-//      pass — the per-route wrapper stays the fine-grained authority) and the
-//      /admin page-gate redirects;
+//      pass — the per-route wrapper stays the fine-grained authority), the
+//      stricter /api/settings backstop (role ADMIN exactly, mirroring
+//      withAdmin: every management bit, and the ADMIN bit alone, is refused)
+//      and the /admin page-gate redirects;
 //   8. header stamping: the coarse-integer X-Summonarr-Api (guardrail 25) and
 //      the per-request CSP nonce (response + propagated request header).
 //
@@ -923,6 +925,65 @@ test("when bearer and cookie are BOTH valid, the bearer identity drives the back
   );
   assert.equal(res.status, 403);
   assert.deepEqual(await bodyOf(res), { error: "Forbidden" });
+});
+
+// ── the /api/settings backstop: role ADMIN exactly, mirroring withAdmin ──────
+
+test("PIN: /api/settings and /api/settings/* answer the JSON 403 to every non-ADMIN role — a plain USER, ISSUE_ADMIN, a USER with EVERY management bit, a USER with the ADMIN bit; the ADMIN role passes", async () => {
+  // Every settings route is withAdmin, which is hasRole on the role LABEL, so
+  // this backstop can be exact where the /api/admin/* one cannot. The ADMIN BIT
+  // alone is refused on purpose: withAdmin does not honour it either, and the
+  // two layers must agree about who may reach a settings route (guardrail 6a).
+  const refused: Array<[string, { token: string }]> = [
+    ["a plain USER", await mintSession({ role: "USER" })],
+    ["ISSUE_ADMIN", await mintSession({ role: "ISSUE_ADMIN" })],
+    [
+      "a USER holding every MANAGE_* bit",
+      await mintSession({
+        role: "USER",
+        permissions: String(Permission.MANAGE_USERS | Permission.MANAGE_REQUESTS | Permission.MANAGE_ISSUES),
+      }),
+    ],
+    ["a USER holding the ADMIN bit but not the role", await mintSession({ role: "USER", permissions: String(Permission.ADMIN) })],
+  ];
+  for (const [who, { token }] of refused) {
+    for (const path of ["/api/settings", "/api/settings/plex", "/api/settings/webhook-urls"]) {
+      const res = await proxy(req(path, { headers: asCookie(token) }));
+      assert.equal(res.status, 403, `${who} on ${path} must be refused by the backstop`);
+      assert.deepEqual(await bodyOf(res), { error: "Forbidden" });
+    }
+  }
+
+  const admin = await mintSession({ role: "ADMIN" });
+  for (const path of ["/api/settings", "/api/settings/plex"]) {
+    assertPassedThrough(await proxy(req(path, { headers: asCookie(admin.token) })), `the ADMIN role must reach ${path}`);
+  }
+});
+
+test("the settings backstop covers mutations, after CSRF: a same-origin PATCH from a MANAGE_* delegate is 403, from an ADMIN it passes", async () => {
+  const delegate = await mintSession({ role: "USER", permissions: String(Permission.MANAGE_REQUESTS) });
+  const denied = await proxy(
+    req("/api/settings", { method: "PATCH", headers: { origin: SELF, ...asCookie(delegate.token) } }),
+  );
+  assert.equal(denied.status, 403);
+  assert.deepEqual(await bodyOf(denied), { error: "Forbidden" });
+
+  const admin = await mintSession({ role: "ADMIN" });
+  assertPassedThrough(
+    await proxy(req("/api/settings", { method: "PATCH", headers: { origin: SELF, ...asCookie(admin.token) } })),
+  );
+});
+
+test("the settings backstop is anchored: the same delegate still passes the delegate-admitting /api/admin/* backstop, and a sibling prefix is not caught", async () => {
+  const delegate = await mintSession({ role: "USER", permissions: String(Permission.MANAGE_REQUESTS) });
+  assertPassedThrough(
+    await proxy(req("/api/admin/requests", { headers: asCookie(delegate.token) })),
+    "stricter on /api/settings must not leak into /api/admin/*, whose per-route guards admit delegates",
+  );
+  assertPassedThrough(
+    await proxy(req("/api/settingsx/anything", { headers: asCookie(delegate.token) })),
+    "the match is the bare route or its subtree, never a prefix of the letters",
+  );
 });
 
 // ── the /admin page gate ────────────────────────────────────────────────────

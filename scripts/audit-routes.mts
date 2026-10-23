@@ -6,7 +6,9 @@
  * guard. It does NOT validate the guard is logically correct — `tsc` and the
  * `withAdmin`/`withAuth` wrappers (CLAUDE.md guardrail 6a) cover that. This
  * catches the dangerous, common mistake: a route shipped with NO guard at all,
- * or an `/api/admin/*` route guarded only as any-authenticated-user.
+ * an `/api/admin/*` route guarded only as any-authenticated-user, or a route
+ * under a STRICT_ADMIN_PREFIXES prefix (`/api/settings`) wrapped in anything
+ * weaker than `withAdmin`.
  *
  * Detection is PER HTTP-METHOD EXPORT, not per file: a file whose GET is
  * `withAuth(...)` but whose POST is a bare `export async function POST` fails
@@ -118,6 +120,27 @@ const INLINE_GUARDED_ADMIN_ROUTES: Array<{ route: string; check: string; reason:
     route: "/api/admin/fix-match/thumb",
     check: "hasPermission",
     reason: "returns an image, so it can't use withIssueAdmin; requireAuth (DB-checked) then hasPermission(MANAGE_ISSUES) — the same bit withIssueAdmin gates its sibling fix-match routes on, so clearing it revokes thumbnail access too",
+  },
+];
+
+/**
+ * Prefixes OUTSIDE /api/admin/ whose every route is ADMIN-only, and where the
+ * proxy (src/proxy.ts) 403s every non-ADMIN role before the handler runs. The
+ * entry covers the bare route AND its subtree (`settings` ⇒ /api/settings and
+ * /api/settings/*). Each handler there must be `withAdmin` — exactly the check
+ * the proxy backstop mirrors (hasRole: the role label, never the ADMIN bit) —
+ * so a weaker wrapper (withAuth, withPermission, withIssueAdmin, requireAuth) is
+ * refused: it would admit a caller the proxy is meant to refuse on the path the
+ * proxy's matcher skips (prefetch-headed requests), and the two layers would
+ * disagree about who may reach the route. Admitting a delegate here means
+ * changing the proxy's backstop, this list and both tests together, on
+ * purpose. Adding or removing an entry is a security decision.
+ */
+const STRICT_ADMIN_PREFIXES: Array<{ prefix: string; reason: string }> = [
+  {
+    prefix: "settings",
+    reason:
+      "instance configuration — Radarr/Sonarr/Plex/Jellyfin URLs and API keys, webhook secrets, auth policy; every route is withAdmin and the proxy 403s every non-ADMIN role on /api/settings and /api/settings/*",
   },
 ];
 
@@ -365,14 +388,23 @@ function routePath(file: string): string {
   return `/api/${rel}`;
 }
 
+// A subtree match must stop at a path separator. `rel.startsWith("health")`
+// also matched a sibling like `health-internal/…`, silently exempting a brand
+// new route from the CI auth gate — the one thing this script exists to stop.
+// Exact matches still pass (the bare `health` / `interactions` / `settings`
+// routes). Shared by the public allowlist and the strict-admin prefixes so the
+// two boundaries can never drift apart.
+function matchesPrefix(rel: string, prefix: string): boolean {
+  return rel === prefix || rel.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`);
+}
+
 export function isAllowlisted(rel: string): boolean {
-  // A subtree match must stop at a path separator. `rel.startsWith("health")`
-  // also matched a sibling like `health-internal/…`, silently exempting a brand
-  // new route from the CI auth gate — the one thing this script exists to stop.
-  // Exact matches still pass (the bare `health` / `interactions` routes).
-  return ALLOWLIST.some(
-    (a) => rel === a.prefix || rel.startsWith(a.prefix.endsWith("/") ? a.prefix : `${a.prefix}/`),
-  );
+  return ALLOWLIST.some((a) => matchesPrefix(rel, a.prefix));
+}
+
+/** True for a route under STRICT_ADMIN_PREFIXES (the bare route or its subtree). */
+export function isStrictAdminPrefixed(rel: string): boolean {
+  return STRICT_ADMIN_PREFIXES.some((p) => matchesPrefix(rel, p.prefix));
 }
 
 function main(): void {
@@ -433,6 +465,7 @@ function main(): void {
       rel.startsWith("cron/") || rel === "sync" || rel.startsWith("sync/");
     const isWebhook = rel.startsWith("webhooks/");
     const isAdmin = rel.startsWith("admin/");
+    const strictAdmin = STRICT_ADMIN_PREFIXES.find((p) => matchesPrefix(rel, p.prefix));
 
     for (const handler of handlers) {
       if (isCronSync) {
@@ -458,6 +491,17 @@ function main(): void {
             reason: inline
               ? `${handler.name}: inline-guarded admin handler must call both requireAuth and ${inline.check}`
               : `${handler.name}: admin handler missing an ADMIN-capable guard (withAdmin/withIssueAdmin; requireAuth alone is authentication only)`,
+          });
+        }
+      } else if (strictAdmin) {
+        // Exactly withAdmin, no inline or permission-guarded exceptions: the
+        // proxy refuses every non-ADMIN role on this prefix, and this is what
+        // keeps the route's own gate saying the same thing.
+        if (!reachesToken(handler, ["withAdmin"], byName)) {
+          failures.push({
+            route,
+            file,
+            reason: `${handler.name}: /api/${strictAdmin.prefix} handler must be withAdmin — the proxy 403s every non-ADMIN role on this prefix, so a weaker wrapper (withAuth/withPermission/withIssueAdmin/requireAuth) would disagree with the backstop; see STRICT_ADMIN_PREFIXES`,
           });
         }
       } else if (!reachesToken(handler, ANY_AUTH_TOKENS, byName)) {
