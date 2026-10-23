@@ -3071,7 +3071,7 @@ const spec = {
           "and Jellyfin server user (row id, username, server display name — never a provider id, token or address); and " +
           "suggested pairs (both identities linked to one Summonarr account). A suggestion is never paired automatically.",
         responses: {
-          "200": { description: "{ pairs: [{ id, enabled, direction, syncProgress, plex, jellyfin, historyReadTo, jellyfinReadTo, lastRunAt, lastResult, counts: { toJellyfin: {pending, marked, already, missing, failed}, toPlex: {…} } }], plexUsers, jellyfinUsers, suggestions: [{ plexUserId, jellyfinUserId, account }] }" },
+          "200": { description: "{ pairs: [{ id, enabled, direction, syncProgress, plex, jellyfin, historyReadTo, jellyfinReadTo, lastRunAt, lastResult, counts: { toJellyfin: {pending, marked, already, missing, failed}, toPlex: {…} } }], plexUsers, jellyfinUsers, suggestions: [{ plexUserId, jellyfinUserId, account }], run: { running, startedAt, pairId } }" },
           "403": { description: "Not ADMIN" },
           "404": { description: "The Watch Sync page is disabled" },
         },

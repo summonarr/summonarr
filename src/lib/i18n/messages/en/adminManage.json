@@ -1342,5 +1342,7 @@
   "adminManage.watchSync.notReadYetJellyfin": "Jellyfin played list not read yet",
   "adminManage.watchSync.progress.label": "Resume points",
   "adminManage.watchSync.progress.hint": "Also copy in-progress positions (for example “12 min in”) in the pair's direction. The newer side wins; nothing already watched is changed. Writing positions to Plex is new — try it on one pair first.",
-  "adminManage.watchSync.progress.result": "Resume points last run: {toJellyfin} to Jellyfin, {toPlex} to Plex"
+  "adminManage.watchSync.progress.result": "Resume points last run: {toJellyfin} to Jellyfin, {toPlex} to Plex",
+  "adminManage.watchSync.run.inProgress": "A sync run is in progress (started {date}). This page updates when it finishes.",
+  "adminManage.watchSync.run.syncingPair": "Syncing now…"
 }

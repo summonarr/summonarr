@@ -406,3 +406,34 @@ export function targetIdsFor(p: WatchSyncPlay, targets: MarkTargets): readonly s
   if (p.seasonNumber === null || p.seasonNumber < 1 || p.episodeNumber === null) return [];
   return targets.episodes.get(p.tmdbId)?.get(`${p.seasonNumber}:${p.episodeNumber}`) ?? [];
 }
+
+// ── Run budget and checkpoints ───────────────────────────────────────────────
+//
+// A first run can be big (a whole history, an episode walk per show). It is
+// planned OLDEST FIRST in chunks of WATCH_SYNC_PLAN_CHUNK plays, and the read
+// point moves to each finished chunk's newest play — so everything at or
+// before the read point is queued, and a run cut short resumes exactly where
+// it stopped (the next read takes only plays after the read point, less the
+// overlap; the ledger absorbs the overlap). The whole run gets
+// WATCH_SYNC_RUN_BUDGET_MS, below the advisory lock's 30-minute timeout, so it
+// stops on its own terms and records what it did.
+
+export const WATCH_SYNC_PLAN_CHUNK = 200;
+export const WATCH_SYNC_RUN_BUDGET_MS = 20 * 60 * 1000;
+export const WATCH_SYNC_STOPPED_MESSAGE = "Stopped at the run time limit; continues on the next run";
+
+// Oldest play first; undated plays first of all (they can't be placed after a
+// read point, so a first run takes them before any dated chunk moves it).
+export function oldestFirst<T extends { viewedAt: Date | null }>(plays: readonly T[]): T[] {
+  return [...plays].sort((a, b) => (a.viewedAt?.getTime() ?? -Infinity) - (b.viewedAt?.getTime() ?? -Infinity));
+}
+
+// The newest dated play in a chunk — the read point once it is queued.
+export function chunkReadTo(chunk: ReadonlyArray<{ viewedAt: Date | null }>): Date | null {
+  let best: number | null = null;
+  for (const p of chunk) {
+    const t = p.viewedAt?.getTime();
+    if (t !== undefined && Number.isFinite(t) && (best === null || t > best)) best = t;
+  }
+  return best === null ? null : new Date(best);
+}

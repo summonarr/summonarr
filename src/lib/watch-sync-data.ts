@@ -56,16 +56,21 @@ import {
   setJellyfinPosition,
 } from "./jellyfin";
 import { indexPlexRowsByKey } from "./plex-dedupe";
+import { processSingleton } from "./process-singleton";
 import type { JellyfinPlayedItem, PlexHistoryEntry } from "./upstream-watch";
 import {
   WATCH_SYNC_BATCH,
   WATCH_SYNC_MAX_ATTEMPTS,
+  WATCH_SYNC_PLAN_CHUNK,
+  WATCH_SYNC_RUN_BUDGET_MS,
+  WATCH_SYNC_STOPPED_MESSAGE,
+  chunkReadTo,
+  oldestFirst,
   WATCH_SYNC_PROGRESS_MAX_UNITS,
   decideProgress,
   latestState,
   progressUnitKey,
   targetIdsFor,
-  historyStopBefore,
   indexEpisodes,
   jellyfinStopBefore,
   newestPlayedAt,
@@ -154,9 +159,43 @@ function emptyDirection(): WatchSyncDirectionResult {
   return { queued: 0, unresolved: 0, unmatched: 0, marked: 0, already: 0, missing: 0, failed: 0 };
 }
 
-export async function runWatchSync({ signal, pairIds }: { signal?: AbortSignal; pairIds?: readonly string[] } = {}): Promise<WatchSyncRunResult> {
+// What the admin page shows while a run is going. Process-wide (guardrail 27a):
+// the cron route and "Run now" are different route chunks.
+export interface WatchSyncRunState {
+  running: boolean;
+  startedAt: number | null;
+  pairId: string | null;
+}
+const runState = processSingleton("watch-sync:run-state", (): WatchSyncRunState => ({ running: false, startedAt: null, pairId: null }));
+
+export function watchSyncRunState(): WatchSyncRunState {
+  return { ...runState };
+}
+
+// `budgetMs` is a test seam; production always runs on WATCH_SYNC_RUN_BUDGET_MS.
+export async function runWatchSync(
+  { signal: lockSignal, pairIds, budgetMs = WATCH_SYNC_RUN_BUDGET_MS }: { signal?: AbortSignal; pairIds?: readonly string[]; budgetMs?: number } = {},
+): Promise<WatchSyncRunResult> {
   const out: WatchSyncRunResult = { pairs: [], aborted: false };
-  if (signal?.aborted) return { ...out, aborted: true };
+  if (lockSignal?.aborted) return { ...out, aborted: true };
+  runState.running = true;
+  runState.startedAt = Date.now();
+  runState.pairId = null;
+  try {
+    return await runWatchSyncInner(lockSignal, pairIds, budgetMs);
+  } finally {
+    runState.running = false;
+    runState.startedAt = null;
+    runState.pairId = null;
+  }
+}
+
+async function runWatchSyncInner(lockSignal: AbortSignal | undefined, pairIds: readonly string[] | undefined, budgetMs: number): Promise<WatchSyncRunResult> {
+  const out: WatchSyncRunResult = { pairs: [], aborted: false };
+  // The run's own budget, below the lock's timeout: on it the run stops between
+  // steps, records what it did and says it will continue (never a silent stop).
+  const budget = AbortSignal.timeout(budgetMs);
+  const signal = lockSignal ? AbortSignal.any([lockSignal, budget]) : budget;
 
   const pairs: PairRow[] = await prisma.watchSyncPair.findMany({
     where: { enabled: true, ...(pairIds ? { id: { in: [...pairIds] } } : {}) },
@@ -213,38 +252,45 @@ export async function runWatchSync({ signal, pairIds }: { signal?: AbortSignal; 
     return s;
   };
 
-  // ── 1. PLAN ────────────────────────────────────────────────────────────────
-  const byPlex = new Map<string, PairRow[]>();
+  // Per pair: plan and apply each direction, then resume points. A pair's
+  // steps finish before the next pair starts, so a run that stops on its budget
+  // leaves earlier pairs fully done and the rest continuing next run.
+  const completed = new Set<string>();
   for (const p of valid) {
-    if (!syncsToward(p.direction, "toJellyfin")) continue;
-    const list = byPlex.get(p.plexUser.serverInstance);
-    if (list) list.push(p);
-    else byPlex.set(p.plexUser.serverInstance, [p]);
-  }
-  for (const [slug, group] of byPlex) {
-    if (signal?.aborted) return finish(results, true);
-    await planToJellyfin(plexServer(slug), group, jellyfin, results, fail, signal);
-  }
-  for (const p of valid) {
-    if (!syncsToward(p.direction, "toPlex")) continue;
-    if (signal?.aborted) return finish(results, true);
-    await planToPlex(p, plexServer(p.plexUser.serverInstance), jellyfin, results.get(p.id)!.toPlex!, (e) => fail(p.id, "toPlex", e), signal);
-  }
-
-  // ── 2. APPLY ───────────────────────────────────────────────────────────────
-  for (const p of valid) {
+    if (signal.aborted) break;
+    runState.pairId = p.id;
     const r = results.get(p.id)!;
-    if (signal?.aborted) return finish(results, true);
-    if (r.toJellyfin) await applyToJellyfin(p, r.toJellyfin, (e) => fail(p.id, "toJellyfin", e), signal);
-    if (signal?.aborted) return finish(results, true);
-    if (r.toPlex) await applyToPlex(p, plexServer(p.plexUser.serverInstance), r.toPlex, (e) => fail(p.id, "toPlex", e), signal);
-    if (signal?.aborted) return finish(results, true);
+    const plex = plexServer(p.plexUser.serverInstance);
+    if (r.toJellyfin) {
+      await planToJellyfin(p, plex, jellyfin, r.toJellyfin, (e) => fail(p.id, "toJellyfin", e), signal);
+      if (!signal.aborted) await applyToJellyfin(p, r.toJellyfin, (e) => fail(p.id, "toJellyfin", e), signal);
+      if (!signal.aborted) completed.add(`${p.id}:toJellyfin`);
+    }
+    if (r.toPlex && !signal.aborted) {
+      await planToPlex(p, plex, jellyfin, r.toPlex, (e) => fail(p.id, "toPlex", e), signal);
+      if (!signal.aborted) await applyToPlex(p, plex, r.toPlex, (e) => fail(p.id, "toPlex", e), signal);
+      if (!signal.aborted) completed.add(`${p.id}:toPlex`);
+    }
     // After the played-state apply, so a title just marked watched reads as
     // watched here (watched beats in-progress).
-    if (r.progress) await syncProgress(p, plexServer(p.plexUser.serverInstance), jellyfin, r.progress, signal);
+    if (r.progress && !signal.aborted) {
+      await syncProgress(p, plex, jellyfin, r.progress, signal);
+      if (!signal.aborted) completed.add(`${p.id}:progress`);
+    }
   }
 
-  const done = finish(results, signal?.aborted === true);
+  // Whatever didn't finish says so — on the pair, in the result and (by the
+  // route) in the log. What did finish was queued and recorded as it went.
+  if (signal.aborted) {
+    for (const r of results.values()) {
+      if (r.error !== undefined) continue;
+      if (r.toJellyfin && !completed.has(`${r.pairId}:toJellyfin`)) r.toJellyfin.error ??= WATCH_SYNC_STOPPED_MESSAGE;
+      if (r.toPlex && !completed.has(`${r.pairId}:toPlex`)) r.toPlex.error ??= WATCH_SYNC_STOPPED_MESSAGE;
+      if (r.progress && !completed.has(`${r.pairId}:progress`)) r.progress.error ??= WATCH_SYNC_STOPPED_MESSAGE;
+    }
+  }
+
+  const done = finish(results, signal.aborted);
   // Recorded per pair for the admin page. Best-effort: a failed write must not
   // turn a run that marked items into an error.
   const now = new Date();
@@ -272,104 +318,107 @@ async function queueMarks(
 // ── Plex → Jellyfin ──────────────────────────────────────────────────────────
 
 async function planToJellyfin(
+  pair: PairRow,
   plex: PlexServer,
-  group: PairRow[],
   jellyfin: JellyfinLookups,
-  results: Map<string, WatchSyncPairResult>,
-  fail: (id: string, dir: Dir, err: unknown) => void,
-  signal: AbortSignal | undefined,
+  r: WatchSyncDirectionResult,
+  fail: (err: unknown) => void,
+  signal: AbortSignal,
 ): Promise<void> {
-  const failAll = (msg: unknown) => { for (const p of group) fail(p.id, "toJellyfin", msg); };
   const cfg = await plex.config();
-  if (!cfg) { failAll("Plex server is not configured"); return; }
-
-  const inputs: WatchSyncPairInput[] = group.map((p) => ({ id: p.id, plexAccountId: p.plexUser.sourceUserId, historyReadTo: p.historyReadTo }));
+  if (!cfg) { fail("Plex server is not configured"); return; }
 
   let entries: PlexHistoryEntry[];
   let owner: string | null;
   try {
-    // The owner's plays are recorded under "1" (normalizePlexAccountId). A failed
-    // lookup only means the owner's plays wait for a later run: the owner's pair
-    // is held below.
     owner = await plex.ownerId();
-    const stopBefore = historyStopBefore(inputs);
-    const history = await getPlexWatchHistory(cfg.url, cfg.token, stopBefore ? { signal, stopBefore } : { signal });
-    entries = history.entries;
+    // The owner's plays are recorded under the local account id "1"
+    // (normalizePlexAccountId). Unknown owner ⇒ the owner's pair waits rather
+    // than reading past those plays.
+    if (owner === null && pair.plexUser.isServerAdmin) {
+      fail("Couldn't identify the Plex server owner this run; will retry");
+      return;
+    }
+    const accountId = pair.plexUser.sourceUserId === owner ? "1" : pair.plexUser.sourceUserId;
+    const since = jellyfinStopBefore(pair.historyReadTo);
+    // Only this account's history, only after the read point (Plex-side
+    // filters; playsForPair filters again).
+    entries = (await getPlexWatchHistory(cfg.url, cfg.token, since ? { signal, stopBefore: since, accountId } : { signal, accountId })).entries;
   } catch (err) {
-    failAll(err);
+    fail(err);
     return;
   }
-  if (signal?.aborted) return;
+  if (signal.aborted) return;
 
-  const readTo = newestViewedAt(entries);
-  const ownerUnresolved = owner === null && entries.some((e) => e.accountId === "1");
-
-  // The Plex library cache, only for keys this run's plays name.
+  const input: WatchSyncPairInput = { id: pair.id, plexAccountId: pair.plexUser.sourceUserId, historyReadTo: pair.historyReadTo };
   const keys = new Set<string>();
   for (const e of entries) {
     if (e.kind === "movie") keys.add(e.itemKey);
     else if (e.showKey) keys.add(e.showKey);
   }
-  const keyList = [...keys];
-  const plexRows = keyList.length === 0
-    ? []
-    : await prisma.plexLibraryItem.findMany({
-        where: { serverInstance: plex.slug, OR: [{ plexRatingKey: { in: keyList } }, { plexRatingKeys: { hasSome: keyList } }] },
-        select: { tmdbId: true, mediaType: true, plexRatingKey: true, plexRatingKeys: true },
-      });
-  const plexIndex = indexPlexRowsByKey(plexRows);
-  const plexTitleForKey = (k: string): PlexTitle | null => {
-    const row = plexIndex.get(k);
-    return row ? { tmdbId: row.tmdbId, mediaType: row.mediaType } : null;
-  };
+  const plexTitleForKey = await plex.titlesFor([...keys]);
   const itemKeys = [...new Set(entries.map((e) => e.itemKey))];
+  // Plex items this sync marked for the account: their history is our echo.
+  const echo = itemKeys.length === 0
+    ? new Set<string>()
+    : new Set((await prisma.watchSyncPlexMark.findMany({
+        where: { pairId: pair.id, status: "marked", plexRatingKey: { in: itemKeys } },
+        select: { plexRatingKey: true },
+      })).map((m) => m.plexRatingKey));
+  const { plays, unresolved } = playsForPair(entries, input, owner, plexTitleForKey, echo);
+  r.unresolved = unresolved;
 
-  for (let i = 0; i < group.length; i++) {
-    if (signal?.aborted) return;
-    const pair = group[i];
-    const r = results.get(pair.id)!.toJellyfin!;
-    // Plex items this sync marked for the account: their history is our echo.
-    const echo = itemKeys.length === 0
-      ? new Set<string>()
-      : new Set((await prisma.watchSyncPlexMark.findMany({
-          where: { pairId: pair.id, status: "marked", plexRatingKey: { in: itemKeys } },
-          select: { plexRatingKey: true },
-        })).map((m) => m.plexRatingKey));
-    const { plays, unresolved } = playsForPair(entries, inputs[i], owner, plexTitleForKey, echo);
-    r.unresolved = unresolved;
+  const queued = await planInChunks(plays, signal, r,
+    (chunk) => jellyfin.targetsFor(pair.jellyfinUser.serverInstance, chunk),
+    async (marks) => (await prisma.watchSyncMark.createMany({
+      data: marks.map((m) => ({ pairId: pair.id, jellyfinItemId: m.targetId, datePlayed: m.datePlayed })),
+      skipDuplicates: true,
+    })).count,
+    (readTo) => advance(pair, "historyReadTo", readTo),
+    fail);
+  if (!queued || signal.aborted) return;
+  // Everything read was planned: the read point is the newest record read,
+  // unresolved and echo records included.
+  await advance(pair, "historyReadTo", newestViewedAt(entries));
+}
 
-    let targets: MarkTargets;
+// Plan plays oldest first, a chunk at a time: resolve the chunk's targets,
+// queue its marks, then move the read point to the chunk's newest play. A
+// failed lookup or insert stops planning with the read point where the last
+// finished chunk left it. true = every chunk was planned.
+async function planInChunks(
+  plays: readonly WatchSyncPlay[],
+  signal: AbortSignal,
+  r: WatchSyncDirectionResult,
+  resolve: (chunk: readonly WatchSyncPlay[]) => Promise<MarkTargets>,
+  insert: (marks: readonly PlannedMark[]) => Promise<number>,
+  checkpoint: (readTo: Date | null) => Promise<void>,
+  fail: (err: unknown) => void,
+): Promise<boolean> {
+  const ordered = oldestFirst(plays);
+  for (let i = 0; i < ordered.length; i += WATCH_SYNC_PLAN_CHUNK) {
+    if (signal.aborted) return false;
+    const chunk = ordered.slice(i, i + WATCH_SYNC_PLAN_CHUNK);
     try {
-      targets = await jellyfin.targetsFor(pair.jellyfinUser.serverInstance, plays);
+      const targets = await resolve(chunk);
+      if (signal.aborted) return false;
+      const plan = planMarks(chunk, targets);
+      r.unmatched += plan.unmatched;
+      r.queued += await queueMarks(plan.marks, insert);
     } catch (err) {
-      // Read point held: the next run re-plans this window.
-      fail(pair.id, "toJellyfin", err);
-      continue;
+      fail(err);
+      return false;
     }
-    if (signal?.aborted) return;
-    const plan = planMarks(plays, targets);
-    r.unmatched = plan.unmatched;
-
-    try {
-      r.queued += await queueMarks(plan.marks, async (chunk) => (await prisma.watchSyncMark.createMany({
-        data: chunk.map((m) => ({ pairId: pair.id, jellyfinItemId: m.targetId, datePlayed: m.datePlayed })),
-        skipDuplicates: true,
-      })).count);
-    } catch (err) {
-      fail(pair.id, "toJellyfin", err);
-      continue;
-    }
-
-    // The owner's plays (account "1") couldn't be attributed this run: the
-    // owner's pair keeps its read point so they are planned on a later run.
-    if (ownerUnresolved && pair.plexUser.isServerAdmin) {
-      fail(pair.id, "toJellyfin", "Couldn't identify the Plex server owner this run; will retry");
-      continue;
-    }
-    if (readTo && (!pair.historyReadTo || readTo > pair.historyReadTo)) {
-      await prisma.watchSyncPair.update({ where: { id: pair.id }, data: { historyReadTo: readTo } });
-    }
+    await checkpoint(chunkReadTo(chunk));
   }
+  return true;
+}
+
+async function advance(pair: PairRow, column: "historyReadTo" | "jellyfinReadTo", readTo: Date | null): Promise<void> {
+  const current = pair[column];
+  if (!readTo || (current && readTo <= current)) return;
+  await prisma.watchSyncPair.update({ where: { id: pair.id }, data: { [column]: readTo } });
+  pair[column] = readTo;
 }
 
 async function applyToJellyfin(
@@ -423,7 +472,7 @@ async function planToPlex(
   jellyfin: JellyfinLookups,
   r: WatchSyncDirectionResult,
   fail: (err: unknown) => void,
-  signal: AbortSignal | undefined,
+  signal: AbortSignal,
 ): Promise<void> {
   let items: JellyfinPlayedItem[];
   try {
@@ -434,8 +483,7 @@ async function planToPlex(
     fail(err);
     return;
   }
-  if (signal?.aborted) return;
-  const readTo = newestPlayedAt(items);
+  if (signal.aborted) return;
   if (items.length > 0) {
     const ids = [...new Set(items.map((i) => i.itemKey))];
     // Jellyfin items this sync marked for the user: our own echo.
@@ -446,30 +494,17 @@ async function planToPlex(
     const titleForId = await jellyfin.titlesFor(pair.jellyfinUser.serverInstance, items);
     const { plays, unresolved } = playsFromJellyfin(items, titleForId, echo);
     r.unresolved = unresolved;
-
-    let targets: MarkTargets;
-    try {
-      targets = await plex.targetsFor(plays);
-    } catch (err) {
-      fail(err);
-      return;
-    }
-    if (signal?.aborted) return;
-    const plan = planMarks(plays, targets);
-    r.unmatched = plan.unmatched;
-    try {
-      r.queued += await queueMarks(plan.marks, async (chunk) => (await prisma.watchSyncPlexMark.createMany({
-        data: chunk.map((m) => ({ pairId: pair.id, plexRatingKey: m.targetId, datePlayed: m.datePlayed })),
+    const planned = await planInChunks(plays, signal, r,
+      (chunk) => plex.targetsFor(chunk),
+      async (marks) => (await prisma.watchSyncPlexMark.createMany({
+        data: marks.map((m) => ({ pairId: pair.id, plexRatingKey: m.targetId, datePlayed: m.datePlayed })),
         skipDuplicates: true,
-      })).count);
-    } catch (err) {
-      fail(err);
-      return;
-    }
+      })).count,
+      (readTo) => advance(pair, "jellyfinReadTo", readTo),
+      fail);
+    if (!planned || signal.aborted) return;
   }
-  if (readTo && (!pair.jellyfinReadTo || readTo > pair.jellyfinReadTo)) {
-    await prisma.watchSyncPair.update({ where: { id: pair.id }, data: { jellyfinReadTo: readTo } });
-  }
+  await advance(pair, "jellyfinReadTo", newestPlayedAt(items));
 }
 
 async function applyToPlex(

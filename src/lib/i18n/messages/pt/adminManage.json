@@ -1342,5 +1342,7 @@
   "adminManage.watchSync.notReadYetJellyfin": "Lista de vistos do Jellyfin ainda não lida",
   "adminManage.watchSync.progress.label": "Pontos de retomada",
   "adminManage.watchSync.progress.hint": "Copia também as posições em andamento (por exemplo, “aos 12 min”) na direção da associação. O lado mais recente vence; nada já visto é alterado. Gravar posições no Plex é novo: teste primeiro em uma associação.",
-  "adminManage.watchSync.progress.result": "Pontos de retomada na última execução: {toJellyfin} para o Jellyfin, {toPlex} para o Plex"
+  "adminManage.watchSync.progress.result": "Pontos de retomada na última execução: {toJellyfin} para o Jellyfin, {toPlex} para o Plex",
+  "adminManage.watchSync.run.inProgress": "Uma sincronização está em andamento (iniciada em {date}). Esta página é atualizada quando ela terminar.",
+  "adminManage.watchSync.run.syncingPair": "Sincronizando…"
 }

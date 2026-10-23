@@ -24,6 +24,12 @@ export async function POST(request: NextRequest) {
       // returns early on abort (guardrail 41).
       const result = await runWatchSync({ signal });
       const durationMs = Date.now() - startTime;
+      // The entrypoint runs this job quietly (no line for a 200), so a run that
+      // stopped on its budget would otherwise leave no trace in the log. One
+      // line per such run — an event, not a repeated condition (7b).
+      if (result.aborted) {
+        console.warn(`[watch-sync] run stopped at its time limit after ${Math.round(durationMs / 1000)}s; finished work is saved and the rest continues on the next run`);
+      }
       // 200 on a partial failure (the entrypoint fast-retries any non-2xx);
       // X-Cron-Degraded marks the run failed in the ledger.
       const problems = watchSyncProblems(result);

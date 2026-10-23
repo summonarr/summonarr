@@ -6,7 +6,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { getMediaInstances } from "@/lib/media-instance-registry";
-import { WATCH_SYNC_FEATURE_KEY, markCountsByPair } from "@/lib/watch-sync-data";
+import { WATCH_SYNC_FEATURE_KEY, markCountsByPair, watchSyncRunState } from "@/lib/watch-sync-data";
 import { parseWatchSyncDirection } from "@/lib/watch-sync";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
@@ -93,6 +93,11 @@ export const GET = withAdmin(async (req) => {
     plexUsers: plexUsers.map(out),
     jellyfinUsers: jellyfinUsers.map(out),
     suggestions,
+    // A run in progress in this process (cron or Run now).
+    run: (() => {
+      const s = watchSyncRunState();
+      return { running: s.running, startedAt: s.startedAt ? new Date(s.startedAt).toISOString() : null, pairId: s.pairId };
+    })(),
   });
 });
 

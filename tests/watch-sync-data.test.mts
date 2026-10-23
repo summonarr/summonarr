@@ -130,19 +130,27 @@ shadowPrismaModel(prisma, "plexLibraryItem", {
     { tmdbId: 900, mediaType: "TV", plexRatingKey: "19", plexRatingKeys: [] },
   ],
 });
+let jfLibCalls = 0;
+let jfLibFailOnCall = 0;
 shadowPrismaModel(prisma, "jellyfinLibraryItem", {
-  findMany: async () => [
+  findMany: async () => {
+    jfLibCalls++;
+    if (jfLibFailOnCall && jfLibCalls === jfLibFailOnCall) throw new Error("simulated library read failure");
+    return jfLibRows;
+  },
+});
+const jfLibRows = [
     { tmdbId: 100, mediaType: "MOVIE", jellyfinItemId: "jm1", jellyfinItemIds: ["jm1"] },
     { tmdbId: 200, mediaType: "MOVIE", jellyfinItemId: "jm2", jellyfinItemIds: [] },
     { tmdbId: 900, mediaType: "TV", jellyfinItemId: "jshow", jellyfinItemIds: ["jshow"] },
-  ],
-});
+];
 const forbidden: string[] = [];
 shadowPrismaModel(prisma, "playHistory", Object.fromEntries(
   ["create", "createMany", "update", "updateMany", "upsert", "delete", "deleteMany"].map((m) => [m, async () => { forbidden.push(m); throw new Error("forbidden"); }]),
 ));
 
-const { runWatchSync } = await import("../src/lib/watch-sync-data.ts");
+const { runWatchSync, watchSyncRunState } = await import("../src/lib/watch-sync-data.ts");
+const { WATCH_SYNC_PLAN_CHUNK, WATCH_SYNC_STOPPED_MESSAGE } = await import("../src/lib/watch-sync.ts");
 
 const S = (iso: string) => Math.floor(new Date(iso).getTime() / 1000);
 let history: unknown[] = [];
@@ -274,6 +282,8 @@ beforeEach(() => {
   plexDeck = [];
   jfResumable = [];
   progressWrites = [];
+  jfLibCalls = 0;
+  jfLibFailOnCall = 0;
   respond = defaultRespond;
   history = [
     { type: "movie", ratingKey: "11", viewedAt: S("2025-02-01T10:00:00Z"), accountID: 1 },              // owner → 555
@@ -472,14 +482,18 @@ test("Jellyfin → Plex: an incremental read STOPS at the first item played befo
   assert.ok(!plexLedger.rows.some((m) => m.key === "11"));
 });
 
-test("both ways in one run: each side marked, and neither echoes the other on the next run", async () => {
+test("both ways in one run: each side marked, and a mark made this run is not echoed back the other way", async () => {
   pairs = [pair("both")];
   plexUser = { source: "plex", serverInstance: "", sourceUserId: "555", isServerAdmin: true };
   jfPlayed = JF_PLAYED;
   const r = await runWatchSync();
   assert.ok(r.pairs[0].toJellyfin && r.pairs[0].toPlex);
   assert.equal(r.pairs[0].toJellyfin?.marked, 3);
-  assert.equal(r.pairs[0].toPlex?.marked, 3);
+  // Plex → Jellyfin runs first and marks jm2 (Plex movie 12); the Jellyfin →
+  // Plex plan then reads jm2 as its own echo and skips it — only the episode
+  // goes back to Plex.
+  assert.equal(r.pairs[0].toPlex?.marked, 1);
+  assert.deepEqual(scrobbled.map((x) => x.key), ["191"]);
   assert.ok(calls.every((c) => c.method !== "DELETE"), "never unmarks");
   assert.deepEqual(forbidden, []);
 });
@@ -588,4 +602,73 @@ test("resume points with no Plex token for the account: an error, and nothing wr
   const r = await runWatchSync();
   assert.match(r.pairs[0].progress?.error ?? "", /No Plex access/);
   assert.deepEqual(progressWrites, []);
+});
+
+// ── account filter, checkpoints, budget, run state ───────────────────────────
+
+test("the Plex history read asks for the paired account only (owner = local id 1) and, incrementally, only after the read point", async () => {
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "777", isServerAdmin: false };
+  await runWatchSync();
+  let hist = calls.filter((c) => c.url.pathname === "/status/sessions/history/all");
+  assert.equal(hist[0].url.searchParams.get("accountID"), "777");
+  assert.equal(hist[0].url.searchParams.get("viewedAt>"), null, "first run: the whole history");
+
+  calls = [];
+  pairs = [pair("toJellyfin")];
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "555", isServerAdmin: true };
+  await runWatchSync();
+  hist = calls.filter((c) => c.url.pathname === "/status/sessions/history/all");
+  assert.equal(hist[0].url.searchParams.get("accountID"), "1", "the owner's local account id");
+  calls = [];
+  await runWatchSync();
+  hist = calls.filter((c) => c.url.pathname === "/status/sessions/history/all");
+  const bound = Number(hist[0].url.searchParams.get("viewedAt>"));
+  assert.ok(bound > 0 && bound < S("2025-02-01T10:00:00Z"), "after the read point less the overlap");
+});
+
+test("CHECKPOINT: a first run that fails mid-plan keeps every finished chunk — the read point sits at the last queued play", async () => {
+  // More plays than one chunk, all resolving to movie 11 → jm1, oldest first.
+  const n = WATCH_SYNC_PLAN_CHUNK + 50;
+  history = Array.from({ length: n }, (_, i) => ({ type: "movie", ratingKey: "11", viewedAt: S("2025-01-01T00:00:00Z") + (n - i) * 60, accountID: 555 }));
+  jfLibFailOnCall = 2; // the second chunk's Jellyfin lookup fails
+  const r = await runWatchSync();
+  assert.ok(r.pairs[0].toJellyfin?.error);
+  const firstChunkNewest = new Date((S("2025-01-01T00:00:00Z") + WATCH_SYNC_PLAN_CHUNK * 60) * 1000);
+  assert.deepEqual(pairs[0].historyReadTo, firstChunkNewest, "moved to the end of the first (oldest) chunk, no further");
+  assert.equal(jfLedger.rows.length, 1, "the first chunk's mark was queued");
+  // The next run resumes after the checkpoint and finishes.
+  calls = [];
+  const again = await runWatchSync();
+  assert.equal(again.pairs[0].toJellyfin?.error, undefined);
+  assert.deepEqual(pairs[0].historyReadTo, new Date((S("2025-01-01T00:00:00Z") + n * 60) * 1000));
+  const bound = Number(calls.find((c) => c.url.pathname === "/status/sessions/history/all")!.url.searchParams.get("viewedAt>"));
+  assert.ok(bound * 1000 < firstChunkNewest.getTime(), "re-read from the checkpoint (less the overlap), not from scratch");
+});
+
+test("BUDGET: a run that hits its time limit says so on every unfinished direction and still records the pair's result", async () => {
+  pairs = [pair("both")];
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "777", isServerAdmin: false };
+  jfPlayed = JF_PLAYED;
+  respond = async (url, method, token) => {
+    await new Promise((res) => setTimeout(res, 15));
+    return defaultRespond(url, method, token);
+  };
+  const r = await runWatchSync({ budgetMs: 5 });
+  assert.equal(r.aborted, true);
+  assert.equal(r.pairs[0].toJellyfin?.error, WATCH_SYNC_STOPPED_MESSAGE);
+  assert.equal(r.pairs[0].toPlex?.error, WATCH_SYNC_STOPPED_MESSAGE);
+  assert.ok(pairs[0].lastResult, "recorded on the pair — never a silent stop");
+  assert.equal(watchSyncRunState().running, false);
+});
+
+test("RUN STATE: running (with the pair being synced) during a run, cleared after — even when it fails", async () => {
+  const seen: Array<{ running: boolean; pairId: string | null }> = [];
+  respond = (url, method, token) => {
+    const st = watchSyncRunState();
+    seen.push({ running: st.running, pairId: st.pairId });
+    return defaultRespond(url, method, token);
+  };
+  await runWatchSync();
+  assert.ok(seen.length > 0 && seen.every((x) => x.running && x.pairId === "p1"));
+  assert.deepEqual(watchSyncRunState(), { running: false, startedAt: null, pairId: null });
 });

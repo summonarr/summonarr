@@ -42,9 +42,12 @@ type Overview = {
   plexUsers: ServerUser[];
   jellyfinUsers: ServerUser[];
   suggestions: Array<{ plexUserId: string; jellyfinUserId: string; account: string }>;
+  run?: { running: boolean; startedAt: string | null; pairId: string | null };
 };
 
 const RUN_POLL_MS = 3_000;
+// While a scheduled run is in progress the page re-reads itself this often.
+const RUNNING_REFRESH_MS = 10_000;
 const RUN_MAX_POLLS = 400;
 const NO_COUNTS: Counts = { pending: 0, marked: 0, already: 0, missing: 0, failed: 0 };
 const DIRECTION_KEYS: Record<Direction, string> = {
@@ -106,6 +109,15 @@ export function WatchSyncPanel() {
   }, [t]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // A run in progress (the cron's, or another admin's Run now): keep the page
+  // current until it finishes.
+  const serverRunning = data?.run?.running === true;
+  useEffect(() => {
+    if (!serverRunning) return;
+    const id = setTimeout(() => { void load(); }, RUNNING_REFRESH_MS);
+    return () => clearTimeout(id);
+  }, [serverRunning, data, load]);
 
   const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString(locale) : "");
   const dirLabel = (d: string) => t(DIRECTION_KEYS[(DIRECTIONS as readonly string[]).includes(d) ? (d as Direction) : "both"]);
@@ -215,6 +227,13 @@ export function WatchSyncPanel() {
     <div className="space-y-8">
       <p className="max-w-3xl text-sm text-[var(--ds-fg-muted)]">{t("adminManage.watchSync.intro")}</p>
 
+      {serverRunning && !running && (
+        <p role="status" className="flex items-center gap-2 text-sm text-[var(--ds-fg-muted)]">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          {t("adminManage.watchSync.run.inProgress", { date: fmt(data.run?.startedAt ?? null) })}
+        </p>
+      )}
+
       {(error || note) && (
         <p role="status" className={`text-sm ${error ? "text-[var(--ds-danger)]" : "text-[var(--ds-fg-muted)]"}`}>{error || note}</p>
       )}
@@ -248,6 +267,9 @@ export function WatchSyncPanel() {
                       <span className="truncate text-[var(--ds-fg)]">{userLabel(p.jellyfin)}</span>
                     </span>
                     {!p.jellyfin.active && <Chip tone="declined" className="whitespace-nowrap">{t("adminManage.watchSync.jellyfinGone")}</Chip>}
+                    {serverRunning && data.run?.pairId === p.id && (
+                      <Chip tone="pending" className="whitespace-nowrap">{t("adminManage.watchSync.run.syncingPair")}</Chip>
+                    )}
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-2">
                     <StyledSelect

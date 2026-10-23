@@ -1342,5 +1342,7 @@
   "adminManage.watchSync.notReadYetJellyfin": "Jellyfin-Gesehen-Liste noch nicht gelesen",
   "adminManage.watchSync.progress.label": "Fortsetzungspunkte",
   "adminManage.watchSync.progress.hint": "Kopiert auch begonnene Positionen (zum Beispiel „bei 12 Min.“) in der Richtung der Verknüpfung. Die neuere Seite gewinnt; bereits Gesehenes wird nicht geändert. Das Schreiben von Positionen in Plex ist neu – teste es zuerst mit einer Verknüpfung.",
-  "adminManage.watchSync.progress.result": "Fortsetzungspunkte beim letzten Lauf: {toJellyfin} nach Jellyfin, {toPlex} nach Plex"
+  "adminManage.watchSync.progress.result": "Fortsetzungspunkte beim letzten Lauf: {toJellyfin} nach Jellyfin, {toPlex} nach Plex",
+  "adminManage.watchSync.run.inProgress": "Ein Sync-Lauf ist im Gange (gestartet {date}). Diese Seite aktualisiert sich, wenn er fertig ist.",
+  "adminManage.watchSync.run.syncingPair": "Wird synchronisiert…"
 }

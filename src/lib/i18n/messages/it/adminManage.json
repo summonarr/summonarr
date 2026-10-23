@@ -1342,5 +1342,7 @@
   "adminManage.watchSync.notReadYetJellyfin": "Elenco visti di Jellyfin non ancora letto",
   "adminManage.watchSync.progress.label": "Punti di ripresa",
   "adminManage.watchSync.progress.hint": "Copia anche le posizioni in corso (per esempio «a 12 min») nella direzione dell'associazione. Vince il lato più recente; nulla di già visto viene cambiato. Scrivere le posizioni su Plex è una novità: provalo prima su un'associazione.",
-  "adminManage.watchSync.progress.result": "Punti di ripresa all'ultima esecuzione: {toJellyfin} verso Jellyfin, {toPlex} verso Plex"
+  "adminManage.watchSync.progress.result": "Punti di ripresa all'ultima esecuzione: {toJellyfin} verso Jellyfin, {toPlex} verso Plex",
+  "adminManage.watchSync.run.inProgress": "È in corso una sincronizzazione (avviata il {date}). Questa pagina si aggiorna al termine.",
+  "adminManage.watchSync.run.syncingPair": "Sincronizzazione in corso…"
 }

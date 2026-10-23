@@ -1001,7 +1001,13 @@ export async function getPlexWatchHistory(
   // `stopBefore`: an incremental read (watch sync). The history is sorted
   // newest first, so the first DATED record older than this ends the walk —
   // nothing past it is kept — and the result is complete for (stopBefore, now].
-  opts: { signal?: AbortSignal; maxItems?: number; maxRaw?: number; stopBefore?: Date } = {},
+  // It is also sent to Plex as a `viewedAt>` filter (python-plexapi's
+  // history(mindate=)), so the server can skip the rest.
+  // `accountId`: one account's records only (python-plexapi's
+  // history(accountID=)) — the LOCAL account id ("1" for the owner). Both
+  // filters are UNVERIFIED against a live server; the caller still filters the
+  // answer itself, so a server that ignores them is only slower, never wrong.
+  opts: { signal?: AbortSignal; maxItems?: number; maxRaw?: number; stopBefore?: Date; accountId?: string } = {},
 ): Promise<PlexWatchHistory> {
   const maxItems = opts.maxItems ?? PLEX_WATCH_HISTORY_MAX_ITEMS;
   const maxRaw = opts.maxRaw ?? PLEX_WATCH_HISTORY_MAX_RAW;
@@ -1009,8 +1015,11 @@ export async function getPlexWatchHistory(
   if (opts.signal?.aborted) return out;
   let seen = 0;
   let reachedStop = false;
+  const filters =
+    (opts.accountId && /^\d{1,20}$/.test(opts.accountId) ? `&accountID=${opts.accountId}` : "") +
+    (opts.stopBefore ? `&viewedAt%3E=${Math.max(0, Math.floor(opts.stopBefore.getTime() / 1000) - 1)}` : "");
   await plexFetchAllPages<unknown>(
-    `${serverUrl.replace(/\/+$/, "")}/status/sessions/history/all?sort=viewedAt:desc`,
+    `${serverUrl.replace(/\/+$/, "")}/status/sessions/history/all?sort=viewedAt:desc${filters}`,
     token,
     (batch) => {
       for (const raw of batch) {
