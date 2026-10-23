@@ -1,20 +1,29 @@
-// Watch sync, Plex → Jellyfin — the PURE half: which Plex plays belong to a
-// pair, and which Jellyfin items they mark. Zero runtime imports, so the unit
-// suite pins every rule without a DB or a server. The data half is
+// Watch sync, Plex ⇄ Jellyfin — the PURE half: which plays belong to a pair,
+// and which items on the other server they mark. Zero runtime imports, so the
+// unit suite pins every rule without a DB or a server. The data half is
 // watch-sync-data.ts.
 //
 // What it does: an ADMIN pairs a Plex account (a MediaServerUser on one Plex
-// server) with a Jellyfin user (a MediaServerUser on one Jellyfin server). Every
-// movie and episode Plex's own history COUNTED as watched for that account
-// (/status/sessions/history/all — Plex's "played" threshold, never Summonarr's
-// 80% one) is marked played in that Jellyfin account, with Plex's viewedAt as
-// the play date.
+// server) with a Jellyfin user (a MediaServerUser on one Jellyfin server), and
+// picks a direction ("both" by default):
+//   - Plex → Jellyfin: every movie and episode Plex's own history COUNTED as
+//     watched for that account (/status/sessions/history/all — Plex's "played"
+//     threshold, never Summonarr's 80% one) is marked played in the Jellyfin
+//     account, with Plex's viewedAt as the play date.
+//   - Jellyfin → Plex: every item the Jellyfin user has PLAYED (Jellyfin's own
+//     flag) is marked watched for the Plex account (/:/scrobble — no date can
+//     be sent).
 //
 // Rules (guardrail 19e):
-//   - One-way and ADD-ONLY. Nothing here ever marks an item unplayed: Plex's
-//     history can't say "marked unwatched", and an unmark is not recoverable.
-//   - It never writes PlayHistory. A mark creates no Jellyfin session, so the
-//     5s poller (the sole Jellyfin PlayHistory writer, guardrail 19) never sees it.
+//   - ADD-ONLY in both directions. Nothing here ever marks an item unplayed:
+//     neither server's record says "marked unwatched" reliably, and an unmark is
+//     not recoverable.
+//   - No echo. An item this sync marked on one side is never read back as a
+//     source on that side (`skipItemKeys` / `skipItemIds`), and an item already
+//     played on the target is recorded "already" without a write — so a mark
+//     can't bounce back and forth or bump a play count.
+//   - It never writes PlayHistory. A mark creates no session on either server,
+//     so the play-history poller and SSE stream never see it (guardrail 19).
 //   - Nothing is paired automatically. A Plex account and a Jellyfin user linked
 //     to the same Summonarr user are only SUGGESTED to the admin.
 //   - A title is matched by TMDB id through each server's library cache; an
@@ -39,6 +48,20 @@ export const WATCH_SYNC_MAX_ATTEMPTS = 5;
 export const WATCH_SYNC_MAX_EPISODE_SPAN = 50;
 
 export type WatchSyncMediaType = "MOVIE" | "TV";
+
+export type WatchSyncDirection = "both" | "toJellyfin" | "toPlex";
+export const WATCH_SYNC_DIRECTIONS: readonly WatchSyncDirection[] = ["both", "toJellyfin", "toPlex"];
+
+export function parseWatchSyncDirection(v: unknown): WatchSyncDirection | null {
+  return typeof v === "string" && (WATCH_SYNC_DIRECTIONS as readonly string[]).includes(v) ? (v as WatchSyncDirection) : null;
+}
+
+// Does a pair stored with `direction` sync toward `target`? An unknown stored
+// value syncs NOTHING (fail closed: a write into someone's account needs an
+// explicit direction).
+export function syncsToward(direction: string, target: "toJellyfin" | "toPlex"): boolean {
+  return direction === "both" || direction === target;
+}
 
 export interface WatchSyncPairInput {
   id: string;
@@ -114,6 +137,9 @@ export function playsForPair(
   pair: WatchSyncPairInput,
   ownerAccountId: string | null,
   plexTitleForKey: (ratingKey: string) => PlexTitle | null,
+  // Plex items THIS sync marked watched for the account (Jellyfin → Plex): their
+  // history entries are our own echo, never a source.
+  skipItemKeys: ReadonlySet<string> = new Set(),
 ): PairPlaysResult {
   const since = pair.historyReadTo === null ? null : pair.historyReadTo.getTime() - WATCH_SYNC_HISTORY_OVERLAP_MS;
   const plays: WatchSyncPlay[] = [];
@@ -123,6 +149,7 @@ export function playsForPair(
     // An undated entry on an incremental run can't be placed in the window;
     // the first (full) run took it.
     if (since !== null && (e.viewedAt === null || e.viewedAt.getTime() < since)) continue;
+    if (skipItemKeys.has(e.itemKey)) continue;
     if (e.kind === "movie") {
       const title = plexTitleForKey(e.itemKey);
       if (!title || title.mediaType !== "MOVIE") { unresolved++; continue; }
@@ -132,6 +159,58 @@ export function playsForPair(
     const title = e.showKey ? plexTitleForKey(e.showKey) : null;
     if (!title || title.mediaType !== "TV" || e.seasonNumber === null || e.episodeNumber === null) { unresolved++; continue; }
     plays.push({ tmdbId: title.tmdbId, mediaType: "TV", seasonNumber: e.seasonNumber, episodeNumber: e.episodeNumber, viewedAt: e.viewedAt });
+  }
+  return { plays, unresolved };
+}
+
+// ── Jellyfin → Plex ─────────────────────────────────────────────────────────
+
+// One played item from the Jellyfin user's list (upstream-watch's parser).
+export interface JellyfinPlayedInput {
+  kind: "movie" | "episode";
+  itemKey: string;
+  showKey: string | null;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  lastPlayedAt: Date | null;
+}
+
+// Where a pair's Jellyfin played list must be read back to: undefined (all of
+// it) on a first run, otherwise the read point minus the overlap.
+export function jellyfinStopBefore(readTo: Date | null): Date | undefined {
+  return readTo === null ? undefined : new Date(readTo.getTime() - WATCH_SYNC_HISTORY_OVERLAP_MS);
+}
+
+export function newestPlayedAt(items: readonly JellyfinPlayedInput[]): Date | null {
+  let best: number | null = null;
+  for (const it of items) {
+    const t = it.lastPlayedAt?.getTime();
+    if (t !== undefined && Number.isFinite(t) && (best === null || t > best)) best = t;
+  }
+  return best === null ? null : new Date(best);
+}
+
+// The Jellyfin user's played items as plays: a movie resolves by its own item
+// id, an episode by its series id, through the Jellyfin library cache. Items
+// THIS sync marked played (Plex → Jellyfin) are skipped — our own echo.
+export function playsFromJellyfin(
+  items: readonly JellyfinPlayedInput[],
+  jellyfinTitleForId: (itemId: string) => PlexTitle | null,
+  skipItemIds: ReadonlySet<string> = new Set(),
+): PairPlaysResult {
+  const plays: WatchSyncPlay[] = [];
+  let unresolved = 0;
+  for (const it of items) {
+    if (skipItemIds.has(it.itemKey)) continue;
+    if (it.kind === "movie") {
+      const title = jellyfinTitleForId(it.itemKey);
+      if (!title || title.mediaType !== "MOVIE") { unresolved++; continue; }
+      plays.push({ tmdbId: title.tmdbId, mediaType: "MOVIE", seasonNumber: null, episodeNumber: null, viewedAt: it.lastPlayedAt });
+      continue;
+    }
+    const title = it.showKey ? jellyfinTitleForId(it.showKey) : null;
+    if (!title || title.mediaType !== "TV" || it.seasonNumber === null || it.episodeNumber === null) { unresolved++; continue; }
+    plays.push({ tmdbId: title.tmdbId, mediaType: "TV", seasonNumber: it.seasonNumber, episodeNumber: it.episodeNumber, viewedAt: it.lastPlayedAt });
   }
   return { plays, unresolved };
 }
@@ -169,16 +248,20 @@ export function indexEpisodes(rows: Iterable<EpisodeIdRow>): Map<string, string[
   return out;
 }
 
-export interface JellyfinTargets {
-  // tmdbId → every Jellyfin movie item id for it on the pair's server.
+// The items a set of plays can mark on the TARGET server — Jellyfin item ids, or
+// Plex ratingKeys. Every copy of a title is listed.
+export interface MarkTargets {
+  // tmdbId → every movie item id/key for it on the pair's target server.
   movies: ReadonlyMap<number, readonly string[]>;
-  // tmdbId → (season:episode → episode item ids) on the pair's server. A TV
-  // title absent here is not on that Jellyfin server.
+  // tmdbId → (season:episode → episode item ids/keys) on the target server. A
+  // TV title absent here is not on that server.
   episodes: ReadonlyMap<number, ReadonlyMap<string, readonly string[]>>;
 }
+export type JellyfinTargets = MarkTargets;
 
 export interface PlannedMark {
-  jellyfinItemId: string;
+  // A Jellyfin item id or a Plex ratingKey, per the direction.
+  targetId: string;
   // The LATEST Plex viewedAt among the plays that map to this item.
   datePlayed: Date | null;
 }
@@ -189,7 +272,7 @@ export interface PlanResult {
   unmatched: number;
 }
 
-export function planMarks(plays: readonly WatchSyncPlay[], targets: JellyfinTargets): PlanResult {
+export function planMarks(plays: readonly WatchSyncPlay[], targets: MarkTargets): PlanResult {
   const byItem = new Map<string, Date | null>();
   let unmatched = 0;
   const add = (id: string, at: Date | null) => {
@@ -207,7 +290,7 @@ export function planMarks(plays: readonly WatchSyncPlay[], targets: JellyfinTarg
     if (!ids || ids.length === 0) { unmatched++; continue; }
     for (const id of ids) add(id, p.viewedAt);
   }
-  return { marks: [...byItem].map(([jellyfinItemId, datePlayed]) => ({ jellyfinItemId, datePlayed })), unmatched };
+  return { marks: [...byItem].map(([targetId, datePlayed]) => ({ targetId, datePlayed })), unmatched };
 }
 
 export type WatchSyncMarkStatus = "pending" | "marked" | "already" | "missing" | "failed";
@@ -221,4 +304,105 @@ export function safeWatchSyncError(err: unknown): string {
     .replace(/(token|api_key|apikey)=\S+/gi, "$1=<redacted>")
     .replace(/\s+/g, " ")
     .slice(0, 300);
+}
+
+// ── Resume positions (pair.syncProgress) ─────────────────────────────────────
+//
+// An in-progress item ("played 12 min") is copied to the other server as a
+// resume point. The rules keep it from fighting the user or itself:
+//   - Only a real resume point moves: at least WATCH_SYNC_PROGRESS_MIN_MS in and
+//     short of WATCH_SYNC_PROGRESS_MAX_FRACTION of the runtime (past that the
+//     item is watched, which the played-state sync handles).
+//   - The NEWER side wins (Plex lastViewedAt vs Jellyfin LastPlayedDate). A
+//     target that has seen activity since the source's never gets overwritten:
+//     the user moved on there (finished it, restarted it).
+//   - Within WATCH_SYNC_PROGRESS_TOLERANCE_MS nothing is written, so a copy can't
+//     bounce back as a "change" on the next run.
+//   - Watched beats in-progress: a target that is played with no resume point is
+//     left alone, and nothing here ever clears a played flag.
+
+export const WATCH_SYNC_PROGRESS_MIN_MS = 60_000;
+export const WATCH_SYNC_PROGRESS_TOLERANCE_MS = 30_000;
+export const WATCH_SYNC_PROGRESS_MAX_FRACTION = 0.95;
+// Titles considered per pair per run.
+export const WATCH_SYNC_PROGRESS_MAX_UNITS = 200;
+
+export interface ProgressState {
+  positionMs: number;
+  durationMs: number | null;
+  // The server's last-activity stamp for this user and item; null = unknown.
+  lastActivity: Date | null;
+  played: boolean;
+}
+
+export function isResumePoint(s: ProgressState | null): boolean {
+  if (!s || !Number.isFinite(s.positionMs) || s.positionMs < WATCH_SYNC_PROGRESS_MIN_MS) return false;
+  if (s.durationMs && s.durationMs > 0 && s.positionMs / s.durationMs >= WATCH_SYNC_PROGRESS_MAX_FRACTION) return false;
+  return true;
+}
+
+export interface ProgressDecision {
+  target: "toJellyfin" | "toPlex";
+  positionMs: number;
+}
+
+// One title's state on each side → the write to make, if any. `direction` is
+// the pair's; a side missing on a server (null) is never a target.
+export function decideProgress(
+  plex: ProgressState | null,
+  jellyfin: ProgressState | null,
+  direction: string,
+): ProgressDecision | null {
+  const plexResume = isResumePoint(plex);
+  const jfResume = isResumePoint(jellyfin);
+  if (!plex || !jellyfin || (!plexResume && !jfResume)) return null;
+  const t = (s: ProgressState) => s.lastActivity?.getTime() ?? null;
+
+  let source: "plex" | "jellyfin";
+  if (plexResume && jfResume) {
+    const a = t(plex);
+    const b = t(jellyfin);
+    if (a === null || b === null || a === b) return null; // can't tell which is newer: leave both
+    source = a > b ? "plex" : "jellyfin";
+  } else {
+    source = plexResume ? "plex" : "jellyfin";
+  }
+  const src = source === "plex" ? plex : jellyfin;
+  const dst = source === "plex" ? jellyfin : plex;
+  const target = source === "plex" ? "toJellyfin" : "toPlex";
+  if (!syncsToward(direction, target)) return null;
+  if (Math.abs(src.positionMs - dst.positionMs) <= WATCH_SYNC_PROGRESS_TOLERANCE_MS) return null;
+  // Watched beats in-progress.
+  if (dst.played && !isResumePoint(dst)) return null;
+  // The target saw activity at or after the source's: the user moved on there.
+  const ts = t(src);
+  const td = t(dst);
+  if (td !== null && (ts === null || td >= ts)) return null;
+  return { target, positionMs: Math.round(src.positionMs) };
+}
+
+// The progress unit a play belongs to: a movie, or one episode of a show.
+export function progressUnitKey(p: Pick<WatchSyncPlay, "tmdbId" | "mediaType" | "seasonNumber" | "episodeNumber">): string | null {
+  if (p.mediaType === "MOVIE") return `m:${p.tmdbId}`;
+  if (p.seasonNumber === null || p.seasonNumber < 1 || p.episodeNumber === null) return null;
+  return `e:${p.tmdbId}:${p.seasonNumber}:${p.episodeNumber}`;
+}
+
+// Several copies of one title on a server: the one the user touched last.
+export function latestState(states: ReadonlyArray<ProgressState>): ProgressState | null {
+  let best: ProgressState | null = null;
+  for (const s of states) {
+    if (!best) { best = s; continue; }
+    const a = s.lastActivity?.getTime() ?? -Infinity;
+    const b = best.lastActivity?.getTime() ?? -Infinity;
+    if (a > b || (a === b && s.positionMs > best.positionMs)) best = s;
+  }
+  return best;
+}
+
+// Every copy of a play's title on the target, from resolved MarkTargets.
+export function targetIdsFor(p: WatchSyncPlay, targets: MarkTargets): readonly string[] {
+  if (p.mediaType === "MOVIE") return targets.movies.get(p.tmdbId) ?? [];
+  if (p.seasonNumber === null || p.seasonNumber < 1 || p.episodeNumber === null) return [];
+  return targets.episodes.get(p.tmdbId)?.get(`${p.seasonNumber}:${p.episodeNumber}`) ?? [];
 }

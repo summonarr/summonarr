@@ -429,7 +429,7 @@
   "settings.cron.job.arrSnapshots.name": "Radarr/Sonarr 页面刷新",
   "settings.cron.job.arrSnapshots.description": "按优先级重新读取管理员在过去一天内打开过的 Radarr/Sonarr 页面（队列和健康状况每 5 分钟；缺失、历史、日历和标题每 10 分钟；Arr 系统每 15 分钟），让页面打开时即显示最新数据",
   "settings.featureLabel.admin_watchSync": "观看同步页面",
-  "settings.featureDesc.admin_watchSync": "显示 /admin/watch-sync 页面：将一个 Plex 账户与一个 Jellyfin 用户配对，Plex 为该账户计为已观看的所有内容（包括配对之前的 Plex 历史记录）都会在该 Jellyfin 账户中标记为已播放。单向且只增不减：不会将任何内容标记为未播放。默认关闭。",
+  "settings.featureDesc.admin_watchSync": "显示 /admin/watch-sync 页面：将一个 Plex 账户与一个 Jellyfin 用户配对并选择方向，一台服务器计为已观看的内容（包括配对之前的历史记录）会在另一台上标记为已播放。只增不减：不会将任何内容标记为未播放。默认关闭。",
   "settings.cron.job.watchSync.name": "观看同步",
-  "settings.cron.job.watchSync.description": "在管理员配对的每个 Jellyfin 账户中，将 Plex 计为已观看的内容标记为已播放"
+  "settings.cron.job.watchSync.description": "按配对所选方向，让管理员配对的每个 Plex 与 Jellyfin 账户的观看状态保持一致"
 }

@@ -717,6 +717,257 @@ export async function getPlexEpisodesForShow(
   return episodes;
 }
 
+// ── Watch sync, Jellyfin → Plex (watch-sync.ts, guardrail 19e) ──────────────
+//
+// Plex has no admin "mark watched for user X": /:/scrobble marks an item watched
+// for whoever's token makes the call. So each paired Plex account is written
+// with ITS OWN server token, obtained with the owner's token:
+//   - a shared user (friend): plex.tv /api/servers/{machineId}/shared_servers
+//     lists every user this server is shared with, each with `userID` and a
+//     server-scoped `accessToken` (the field Tautulli and python-plexapi read);
+//   - a managed home user: POST plex.tv /api/home/users/{id}/switch answers that
+//     user's token (`authenticationToken`, older `authToken`). A user with a
+//     home PIN is refused there — reported, never guessed.
+// These tokens are held IN MEMORY for one run only: never stored, logged,
+// audited or sent to the browser.
+// UNVERIFIED against a live plex.tv (checked against client code only) — the
+// parsers are defensive and an unparseable answer reads as "no token".
+
+const PLEX_TOKEN_RE = /^[A-Za-z0-9_\-]{8,200}$/;
+
+function xmlAttr(tag: string, name: string): string | null {
+  const m = new RegExp(`\\b${name}="([^"]*)"`).exec(tag);
+  return m ? m[1] : null;
+}
+
+/** userID → server access token, from a shared_servers XML answer. */
+export function parsePlexSharedServerTokens(xml: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const block of xml.split(/<SharedServer\b/).slice(1)) {
+    const tag = block.slice(0, block.indexOf(">") >= 0 ? block.indexOf(">") : block.length);
+    const userId = xmlAttr(tag, "userID");
+    const token = xmlAttr(tag, "accessToken");
+    if (userId && /^\d{1,20}$/.test(userId) && token && PLEX_TOKEN_RE.test(token)) out.set(userId, token);
+  }
+  return out;
+}
+
+/** The token from a home-user switch answer (XML or JSON); null when absent. */
+export function parsePlexHomeSwitchToken(body: string): string | null {
+  const trimmed = body.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const j = JSON.parse(trimmed) as { authToken?: unknown; authenticationToken?: unknown };
+      const t = typeof j.authToken === "string" ? j.authToken : typeof j.authenticationToken === "string" ? j.authenticationToken : null;
+      return t && PLEX_TOKEN_RE.test(t) ? t : null;
+    } catch {
+      return null;
+    }
+  }
+  const m = /<user\b[^>]*>/i.exec(trimmed);
+  if (!m) return null;
+  const t = xmlAttr(m[0], "authenticationToken") ?? xmlAttr(m[0], "authToken");
+  return t && PLEX_TOKEN_RE.test(t) ? t : null;
+}
+
+export async function getPlexSharedServerTokens(adminToken: string, machineId: string): Promise<Map<string, string>> {
+  if (!/^[A-Za-z0-9]{1,128}$/.test(machineId)) throw new Error("Invalid Plex machine identifier");
+  const res = await safeFetchTrusted(`https://plex.tv/api/servers/${machineId}/shared_servers`, {
+    allowedHosts: PLEX_TV_HOSTS,
+    headers: { "X-Plex-Client-Identifier": PLEX_CLIENT_ID, "X-Plex-Token": adminToken },
+    timeoutMs: 15_000,
+  });
+  if (!res.ok) throw new Error(`Plex shared servers lookup failed: ${res.status}`);
+  return parsePlexSharedServerTokens(await res.text());
+}
+
+export async function getPlexHomeUserToken(adminToken: string, plexUserId: string): Promise<string | null> {
+  if (!/^\d{1,20}$/.test(plexUserId)) return null;
+  const res = await safeFetchTrusted(`https://plex.tv/api/home/users/${plexUserId}/switch`, {
+    allowedHosts: PLEX_TV_HOSTS,
+    method: "POST",
+    headers: { "X-Plex-Client-Identifier": PLEX_CLIENT_ID, "X-Plex-Token": adminToken },
+    timeoutMs: 15_000,
+  });
+  // 4xx: not a home user, or a PIN-protected one — no token, not an error.
+  if (res.status >= 400 && res.status < 500) return null;
+  if (!res.ok) throw new Error(`Plex home user switch failed: ${res.status}`);
+  return parsePlexHomeSwitchToken(await res.text());
+}
+
+export interface PlexEpisodeKey {
+  seasonNumber: number;
+  episodeNumber: number;
+  episodeNumberEnd: number | null;
+  itemId: string;
+}
+
+/** Every episode of a show with its own ratingKey (season 0 included). */
+export async function getPlexEpisodeKeys(serverUrl: string, token: string, showKey: string): Promise<PlexEpisodeKey[]> {
+  if (!/^\d{1,20}$/.test(showKey)) return [];
+  const out: PlexEpisodeKey[] = [];
+  await plexFetchAllPages<{ ratingKey?: unknown; parentIndex?: unknown; index?: unknown }>(
+    `${serverUrl.replace(/\/+$/, "")}/library/metadata/${showKey}/allLeaves`,
+    token,
+    (batch) => {
+      for (const ep of batch) {
+        const key = typeof ep.ratingKey === "number" ? String(ep.ratingKey) : typeof ep.ratingKey === "string" ? ep.ratingKey : "";
+        if (!/^\d{1,20}$/.test(key)) continue;
+        if (!Number.isInteger(ep.parentIndex) || (ep.parentIndex as number) < 0) continue;
+        if (!Number.isInteger(ep.index) || (ep.index as number) < 0) continue;
+        out.push({ seasonNumber: ep.parentIndex as number, episodeNumber: ep.index as number, episodeNumberEnd: null, itemId: key });
+      }
+    },
+  );
+  return out;
+}
+
+const PLEX_VIEW_COUNT_CHUNK = 50;
+
+/** One item AS SEEN BY one user's token. */
+export interface PlexUserItemState {
+  viewCount: number;
+  // Resume position (ms); 0 = none.
+  viewOffset: number;
+  durationMs: number | null;
+  lastViewedAt: Date | null;
+}
+
+function plexNum(v: unknown): number {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function plexUserState(m: { viewCount?: unknown; viewOffset?: unknown; duration?: unknown; lastViewedAt?: unknown }): PlexUserItemState {
+  const lv = plexNum(m.lastViewedAt);
+  const d = plexNum(m.duration);
+  return { viewCount: plexNum(m.viewCount), viewOffset: plexNum(m.viewOffset), durationMs: d > 0 ? d : null, lastViewedAt: lv > 0 ? new Date(lv * 1000) : null };
+}
+
+/**
+ * ratingKey → that item's state AS SEEN BY `token`'s user. A key the server
+ * didn't return is absent: the item is gone.
+ */
+export async function getPlexUserStates(serverUrl: string, token: string, keys: readonly string[]): Promise<Map<string, PlexUserItemState>> {
+  const base = serverUrl.replace(/\/+$/, "");
+  const valid = [...new Set(keys.filter((k) => /^\d{1,20}$/.test(k)))];
+  const out = new Map<string, PlexUserItemState>();
+  const queue: string[][] = [];
+  for (let i = 0; i < valid.length; i += PLEX_VIEW_COUNT_CHUNK) queue.push(valid.slice(i, i + PLEX_VIEW_COUNT_CHUNK));
+  while (queue.length > 0) {
+    const chunk = queue.shift()!;
+    const res = await plexFetch(`${base}/library/metadata/${chunk.join(",")}`, token);
+    if (res.status === 404) {
+      await res.text().catch(() => "");
+      // One gone key can 404 the whole list: ask for each key on its own, so
+      // only the truly absent ones read as gone.
+      if (chunk.length > 1) for (const k of chunk) queue.push([k]);
+      continue;
+    }
+    if (!res.ok) throw new Error(`Plex metadata read failed: ${res.status}`);
+    const data = (await res.json()) as { MediaContainer?: { Metadata?: Array<Record<string, unknown>> } };
+    for (const m of data.MediaContainer?.Metadata ?? []) {
+      const k = typeof m.ratingKey === "number" ? String(m.ratingKey) : typeof m.ratingKey === "string" ? m.ratingKey : "";
+      if (!chunk.includes(k)) continue;
+      out.set(k, plexUserState(m));
+    }
+  }
+  return out;
+}
+
+/** ratingKey → viewCount AS SEEN BY `token`'s user (0 = unwatched); absent = gone. */
+export async function getPlexViewCounts(serverUrl: string, token: string, keys: readonly string[]): Promise<Map<string, number>> {
+  const states = await getPlexUserStates(serverUrl, token, keys);
+  return new Map([...states].map(([k, s]) => [k, s.viewCount]));
+}
+
+export interface PlexInProgressItem {
+  kind: "movie" | "episode";
+  ratingKey: string;
+  // The show's ratingKey for an episode.
+  showKey: string | null;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  state: PlexUserItemState;
+}
+
+const PLEX_IN_PROGRESS_MAX = 500;
+
+export function parsePlexInProgress(items: ReadonlyArray<Record<string, unknown>>): PlexInProgressItem[] {
+  const out: PlexInProgressItem[] = [];
+  const key = (v: unknown) => {
+    const s = typeof v === "number" ? String(v) : typeof v === "string" ? v : "";
+    return /^\d{1,20}$/.test(s) ? s : null;
+  };
+  const idx = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : typeof v === "string" && /^\d+$/.test(v) ? Number(v) : null);
+  for (const m of items) {
+    if (out.length >= PLEX_IN_PROGRESS_MAX) break;
+    const kind = m.type === "movie" ? "movie" : m.type === "episode" ? "episode" : null;
+    const ratingKey = key(m.ratingKey);
+    if (!kind || !ratingKey) continue;
+    const state = plexUserState(m);
+    if (state.viewOffset <= 0) continue; // an "up next" episode, not in progress
+    out.push({
+      kind,
+      ratingKey,
+      showKey: kind === "episode" ? key(m.grandparentRatingKey) : null,
+      seasonNumber: kind === "episode" ? idx(m.parentIndex) : null,
+      episodeNumber: kind === "episode" ? idx(m.index) : null,
+      state,
+    });
+  }
+  return out;
+}
+
+/**
+ * The user's in-progress items (resume points), read with THEIR token:
+ * /library/onDeck, falling back to the Continue Watching hub on servers that
+ * dropped it. UNVERIFIED against a live server — both answer MediaContainer
+ * Metadata[] in client code.
+ */
+export async function getPlexInProgress(serverUrl: string, token: string): Promise<PlexInProgressItem[]> {
+  const base = serverUrl.replace(/\/+$/, "");
+  for (const path of ["/library/onDeck", "/hubs/continueWatching/items"]) {
+    const res = await plexFetch(`${base}${path}?X-Plex-Container-Start=0&X-Plex-Container-Size=${PLEX_IN_PROGRESS_MAX}`, token);
+    if (res.status === 404) { await res.text().catch(() => ""); continue; }
+    if (!res.ok) throw new Error(`Plex in-progress read failed: ${res.status}`);
+    const data = (await res.json()) as { MediaContainer?: { Metadata?: Array<Record<string, unknown>> } };
+    return parsePlexInProgress(data.MediaContainer?.Metadata ?? []);
+  }
+  return [];
+}
+
+/**
+ * Set one item's resume position for `token`'s user (/:/progress, state=stopped
+ * — python-plexapi's updateProgress). 404 = the item is gone. UNVERIFIED against
+ * a live server, including whether it ever surfaces as a playback session —
+ * which is why resume-point sync is a per-pair switch, off by default.
+ */
+export async function setPlexProgress(serverUrl: string, token: string, ratingKey: string, timeMs: number): Promise<"marked" | "missing"> {
+  if (!/^\d{1,20}$/.test(ratingKey) || !Number.isFinite(timeMs) || timeMs <= 0) return "missing";
+  const res = await plexFetch(
+    `${serverUrl.replace(/\/+$/, "")}/:/progress?key=${ratingKey}&identifier=com.plexapp.plugins.library&time=${Math.round(timeMs)}&state=stopped`,
+    token,
+  );
+  await res.text().catch(() => "");
+  if (res.ok) return "marked";
+  if (res.status === 404) return "missing";
+  throw new Error(`Plex set progress failed: ${res.status}`);
+}
+
+/** Mark one item watched for `token`'s user. 404 = the item is gone. */
+export async function scrobblePlexItem(serverUrl: string, token: string, ratingKey: string): Promise<"marked" | "missing"> {
+  if (!/^\d{1,20}$/.test(ratingKey)) return "missing";
+  const res = await plexFetch(
+    `${serverUrl.replace(/\/+$/, "")}/:/scrobble?identifier=com.plexapp.plugins.library&key=${ratingKey}`,
+    token,
+  );
+  await res.text().catch(() => "");
+  if (res.ok) return "marked";
+  if (res.status === 404) return "missing";
+  throw new Error(`Plex mark watched failed: ${res.status}`);
+}
+
 // The server's own all-account watch history — READ-ONLY evidence for the
 // never-watched report (src/lib/upstream-watch.ts explains the use and lists the
 // UNVERIFIED response-shape assumptions). Newest first, so a walk stopped at

@@ -10,6 +10,7 @@ export { AlertCircle } from "./alert-circle";
 export { AlertTriangle } from "./alert-triangle";
 export { ArrowDown } from "./arrow-down";
 export { ArrowLeft } from "./arrow-left";
+export { ArrowLeftRight } from "./arrow-left-right";
 export { ArrowRight } from "./arrow-right";
 export { ArrowUp } from "./arrow-up";
 export { ArrowUpDown } from "./arrow-up-down";

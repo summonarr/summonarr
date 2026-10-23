@@ -59,6 +59,7 @@ export const BACKUP_TABLES = [
   "PlayHistory",
   "WatchSyncPair",
   "WatchSyncMark",
+  "WatchSyncPlexMark",
   "ActiveSession",
   "TrashSpec",
   "TrashApplication",

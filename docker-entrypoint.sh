@@ -514,8 +514,8 @@ _cron_loop() {
       _cron_sync "${UPSTREAM_WATCH_SYNC_URL:-${CRON_BASE}/api/cron/refresh-upstream-watch}" "refresh-upstream-watch" quiet && rc=0 || rc=$?
       UPSTREAM_WATCH_NEXT=$(_cron_next "$rc" "$NOW" "${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}" 86400)
     fi
-    # Watch sync, Plex → Jellyfin: marks played in each admin-paired Jellyfin
-    # account what Plex counted as watched. A no-op while the feature is off or
+    # Watch sync, Plex ⇄ Jellyfin: marks played in each admin-paired account what
+    # the other server counted as watched. A no-op while the feature is off or
     # no pair exists; quiet so the every-5-minutes run doesn't log.
     if [ "$NOW" -ge "$WATCH_SYNC_NEXT" ]; then
       _cron_sync "${WATCH_SYNC_URL:-${CRON_BASE}/api/cron/watch-sync}" "watch-sync" quiet && rc=0 || rc=$?

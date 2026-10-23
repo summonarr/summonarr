@@ -429,7 +429,7 @@
   "settings.cron.job.arrSnapshots.name": "Radarr/Sonarr-Seitenaktualisierung",
   "settings.cron.job.arrSnapshots.description": "Liest die Radarr/Sonarr-Seiten, die Admins am letzten Tag geöffnet haben, nach Priorität neu ein (Warteschlange und Status alle 5 Minuten, Fehlend, Verlauf, Kalender und Titel alle 10, Arr-System alle 15), damit sie mit aktuellen Daten öffnen",
   "settings.featureLabel.admin_watchSync": "Seite Gesehen-Sync",
-  "settings.featureDesc.admin_watchSync": "Zeigt die Seite /admin/watch-sync: Verknüpfe ein Plex-Konto mit einem Jellyfin-Benutzer, und alles, was Plex für dieses Konto als gesehen zählt, wird im Jellyfin-Konto als gesehen markiert – einschließlich des Plex-Verlaufs von vor der Verknüpfung. Nur in eine Richtung und nur hinzufügend: Nichts wird je als ungesehen markiert. Standardmäßig aus.",
+  "settings.featureDesc.admin_watchSync": "Zeigt die Seite /admin/watch-sync: Verknüpfe ein Plex-Konto mit einem Jellyfin-Benutzer und wähle eine Richtung, und was ein Server als gesehen zählt, wird auf dem anderen als gesehen markiert – einschließlich des Verlaufs von vor der Verknüpfung. Nur hinzufügend: Nichts wird je als ungesehen markiert. Standardmäßig aus.",
   "settings.cron.job.watchSync.name": "Gesehen-Sync",
-  "settings.cron.job.watchSync.description": "Was Plex als gesehen gezählt hat, in jedem vom Admin verknüpften Jellyfin-Konto als gesehen markieren"
+  "settings.cron.job.watchSync.description": "Den Gesehen-Status jedes vom Admin verknüpften Plex- und Jellyfin-Kontos abgleichen, in der für die Verknüpfung gewählten Richtung"
 }

@@ -174,7 +174,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `PLEX_WATCHLIST_SYNC_INTERVAL` | `1800` | Plex watchlist auto-request (a no-op unless *Watchlist auto-request* is enabled in Features). |
 | `TRAKT_SYNC_INTERVAL` | `1800` | Per-user Trakt: watchlist auto-request and watch history for *For You* (a no-op until a Trakt client ID and secret are saved in Settings). |
 | `UPSTREAM_WATCH_SYNC_INTERVAL` | `86400` | Plex/Jellyfin's own watch records for the *Never Watched* report (a no-op while Never Watched and Library cleanup are both off). |
-| `WATCH_SYNC_INTERVAL` | `300` | *Watch sync*: marks what Plex counted as watched as played in each admin-paired Jellyfin account (a no-op while the feature is off). |
+| `WATCH_SYNC_INTERVAL` | `300` | *Watch sync*: keeps each admin-paired Plex and Jellyfin account's watched status in step, in the pair's direction (a no-op while the feature is off). |
 | `ARR_WATCH_INTERVAL` | `900` | Radarr/Sonarr monitor: low disk space, failed downloads and downloads newly needing attention, sent to your notification channels (skipped while no Radarr/Sonarr is configured). |
 | `ARR_SNAPSHOT_INTERVAL` | `300` | How often the admin Radarr/Sonarr pages are re-read in the background so they open on recent data. Each page keeps its own pace by priority (queue and health every 5 minutes, Missing, history, calendar and titles every 10, Arr System every 15); only pages an admin opened in the last day are re-read. |
 | `WARM_RECOMMENDATIONS_INTERVAL` | `43200` | *For You* recommendations rebuild. |

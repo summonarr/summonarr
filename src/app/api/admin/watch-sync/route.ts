@@ -7,16 +7,20 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { WATCH_SYNC_FEATURE_KEY, markCountsByPair } from "@/lib/watch-sync-data";
+import { parseWatchSyncDirection } from "@/lib/watch-sync";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
-// Watch sync, Plex → Jellyfin — the admin page's data (ADMIN). Pairs are made
+// Watch sync, Plex ⇄ Jellyfin — the admin page's data (ADMIN). Pairs are made
 // ONLY here, by an admin (guardrail 19e): a Plex account and a Jellyfin user
 // linked to the same Summonarr user are offered as a suggestion, never paired
 // automatically.
 //
 //   GET                                   → pairs + per-pair ledger counts, the
 //                                            pickable accounts, suggestions.
-//   POST { plexUserId, jellyfinUserId }   → create a pair (MediaServerUser ids).
+//   POST { plexUserId, jellyfinUserId, direction?, syncProgress? } → create a
+//                                            pair (MediaServerUser ids; direction
+//                                            "both" (default) | "toJellyfin" | "toPlex";
+//                                            syncProgress: resume points, default false).
 //
 // No provider subject id, token or server address reaches the browser: an
 // account is its row id, username and server display name.
@@ -41,7 +45,7 @@ export const GET = withAdmin(async (req) => {
   const [pairs, users] = await Promise.all([
     prisma.watchSyncPair.findMany({
       select: {
-        id: true, enabled: true, historyReadTo: true, lastRunAt: true, lastResult: true, createdAt: true,
+        id: true, enabled: true, direction: true, syncProgress: true, historyReadTo: true, jellyfinReadTo: true, lastRunAt: true, lastResult: true, createdAt: true,
         plexUser: { select: serverUserSelect },
         jellyfinUser: { select: serverUserSelect },
       },
@@ -76,9 +80,12 @@ export const GET = withAdmin(async (req) => {
     pairs: pairs.map((p) => ({
       id: p.id,
       enabled: p.enabled,
+      direction: p.direction,
+      syncProgress: p.syncProgress,
       plex: out(p.plexUser),
       jellyfin: out(p.jellyfinUser),
       historyReadTo: p.historyReadTo,
+      jellyfinReadTo: p.jellyfinReadTo,
       lastRunAt: p.lastRunAt,
       lastResult: p.lastResult,
       counts: counts.get(p.id),
@@ -94,10 +101,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (!(await isFeatureEnabled(WATCH_SYNC_FEATURE_KEY))) {
     return NextResponse.json({ error: t("apiAdmin.watchSync.disabled") }, { status: 404 });
   }
-  const parsed = await readJsonCapped<{ plexUserId?: unknown; jellyfinUserId?: unknown }>(req, 4096);
+  const parsed = await readJsonCapped<{ plexUserId?: unknown; jellyfinUserId?: unknown; direction?: unknown; syncProgress?: unknown }>(req, 4096);
   if (parsed instanceof NextResponse) return parsed;
   const { plexUserId, jellyfinUserId } = parsed;
-  if (typeof plexUserId !== "string" || typeof jellyfinUserId !== "string" || plexUserId.length > 64 || jellyfinUserId.length > 64) {
+  const direction = parsed.direction === undefined ? "both" : parseWatchSyncDirection(parsed.direction);
+  const syncProgress = parsed.syncProgress === undefined ? false : parsed.syncProgress;
+  if (typeof syncProgress !== "boolean" || !direction || typeof plexUserId !== "string" || typeof jellyfinUserId !== "string" || plexUserId.length > 64 || jellyfinUserId.length > 64) {
     return NextResponse.json({ error: t("apiAdmin.common.invalidBody") }, { status: 400 });
   }
   const [plex, jellyfin] = await Promise.all([
@@ -109,7 +118,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   try {
     const pair = await prisma.watchSyncPair.create({
-      data: { plexUserId, jellyfinUserId, createdById: session.user.id },
+      data: { plexUserId, jellyfinUserId, direction, syncProgress, createdById: session.user.id },
       select: { id: true },
     });
     void logAudit({
@@ -118,7 +127,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       ...auditContext(req, session),
       action: "SETTINGS_CHANGE",
       target: `watch-sync:${pair.id}`,
-      details: { change: "pair-create", plexServerUserId: plexUserId, jellyfinServerUserId: jellyfinUserId },
+      details: { change: "pair-create", plexServerUserId: plexUserId, jellyfinServerUserId: jellyfinUserId, direction, syncProgress },
     });
     return NextResponse.json({ id: pair.id }, { status: 201 });
   } catch (err) {

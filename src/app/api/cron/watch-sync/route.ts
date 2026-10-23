@@ -4,9 +4,9 @@ import { withAdvisoryLock, WATCH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { isFeatureEnabled } from "@/lib/features";
 import { WATCH_SYNC_FEATURE_KEY, runWatchSync, watchSyncProblems } from "@/lib/watch-sync-data";
 
-// Watch sync, Plex → Jellyfin (src/lib/watch-sync-data.ts): for every enabled
-// admin-made pair, marks in the Jellyfin account what Plex's own history counted
-// as watched for the Plex account. Add-only; never unmarks. A no-op while the
+// Watch sync, Plex ⇄ Jellyfin (src/lib/watch-sync-data.ts): for every enabled
+// admin-made pair, marks in each account what the other server counted as
+// watched, per the pair's direction. Add-only; never unmarks. A no-op while the
 // feature is off. Scheduled by docker-entrypoint.sh every WATCH_SYNC_INTERVAL.
 export async function POST(request: NextRequest) {
   const authCtx = await getCronActor(request);

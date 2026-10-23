@@ -249,7 +249,7 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
   {
     key: "feature.admin.watchSync",
     label: "Watch Sync page",
-    description: "Show the /admin/watch-sync page: pair a Plex account with a Jellyfin user, and everything Plex counts as watched for that account is marked played in the Jellyfin account, including the Plex history from before the pair was made. One-way and add-only: nothing is ever marked unplayed. Off by default.",
+    description: "Show the /admin/watch-sync page: pair a Plex account with a Jellyfin user and pick a direction, and what one server counts as watched is marked played on the other, including history from before the pair was made. Add-only: nothing is ever marked unplayed. Off by default.",
     category: "admin",
     defaultEnabled: false,
   },
