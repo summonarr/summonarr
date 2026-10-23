@@ -437,3 +437,21 @@ export function chunkReadTo(chunk: ReadonlyArray<{ viewedAt: Date | null }>): Da
   }
   return best === null ? null : new Date(best);
 }
+
+// ── admin page ordering ──────────────────────────────────────────────────────
+
+// A–Z ignoring case and accents, numbers in natural order ("user2" < "user10").
+const NAME_COLLATOR = new Intl.Collator("en", { sensitivity: "base", numeric: true });
+
+export function compareNames(a: string, b: string): number {
+  return NAME_COLLATOR.compare(a, b);
+}
+
+// Server accounts by user name, then server, then id — a total order, so the
+// page never reshuffles between loads.
+export function compareServerUsers(
+  a: { username: string; serverInstance: string; id: string },
+  b: { username: string; serverInstance: string; id: string },
+): number {
+  return compareNames(a.username, b.username) || compareNames(a.serverInstance, b.serverInstance) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}

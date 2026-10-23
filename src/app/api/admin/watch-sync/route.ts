@@ -7,7 +7,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { WATCH_SYNC_FEATURE_KEY, markCountsByPair, watchSyncRunState } from "@/lib/watch-sync-data";
-import { parseWatchSyncDirection } from "@/lib/watch-sync";
+import { compareNames, compareServerUsers, parseWatchSyncDirection } from "@/lib/watch-sync";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // Watch sync, Plex ⇄ Jellyfin — the admin page's data (ADMIN). Pairs are made
@@ -63,8 +63,11 @@ export const GET = withAdmin(async (req) => {
   const out = (u: { id: string; source: string; serverInstance: string; username: string; active: boolean }): ServerUserOut =>
     ({ id: u.id, username: u.username, server: label(u), active: u.active });
 
-  const plexUsers = users.filter((u) => u.source === "plex");
-  const jellyfinUsers = users.filter((u) => u.source === "jellyfin");
+  // Every list on the page reads A–Z by user name, ignoring case (the database
+  // order is case-sensitive: "GuestRoom" before "alice").
+  const plexUsers = users.filter((u) => u.source === "plex").sort(compareServerUsers);
+  const jellyfinUsers = users.filter((u) => u.source === "jellyfin").sort(compareServerUsers);
+  pairs.sort((a, b) => compareServerUsers(a.plexUser, b.plexUser) || compareServerUsers(a.jellyfinUser, b.jellyfinUser));
   const paired = new Set(pairs.map((p) => `${p.plexUser.id}\u0000${p.jellyfinUser.id}`));
   // Suggestions: both identities linked to the same Summonarr account.
   const suggestions: Array<{ plexUserId: string; jellyfinUserId: string; account: string }> = [];
@@ -75,6 +78,7 @@ export const GET = withAdmin(async (req) => {
       suggestions.push({ plexUserId: p.id, jellyfinUserId: j.id, account: p.user?.name || p.user?.email || p.username });
     }
   }
+  suggestions.sort((a, b) => compareNames(a.account, b.account));
 
   return NextResponse.json({
     pairs: pairs.map((p) => ({

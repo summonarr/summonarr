@@ -206,3 +206,12 @@ test("latestState / progressUnitKey / targetIdsFor", () => {
   assert.deepEqual(W.targetIdsFor({ tmdbId: 9, mediaType: "TV", seasonNumber: 2, episodeNumber: 3, viewedAt: null }, targets), ["e"]);
   assert.deepEqual(W.targetIdsFor({ tmdbId: 9, mediaType: "TV", seasonNumber: 2, episodeNumber: 4, viewedAt: null }, targets), []);
 });
+
+test("compareServerUsers: A–Z by user name ignoring case and accents, numbers in natural order, then server and id", () => {
+  const u = (username: string, serverInstance = "", id = username) => ({ username, serverInstance, id });
+  const sorted = [u("zoe"), u("GuestRoom"), u("alice"), u("Émile"), u("user10"), u("user2"), u("Bob")].sort(W.compareServerUsers);
+  assert.deepEqual(sorted.map((x) => x.username), ["alice", "Bob", "Émile", "GuestRoom", "user2", "user10", "zoe"]);
+  const tie = [u("sam", "remote", "b"), u("Sam", "", "z"), u("sam", "", "a")].sort(W.compareServerUsers);
+  assert.deepEqual(tie.map((x) => `${x.serverInstance}/${x.id}`), ["/a", "/z", "remote/b"]);
+  assert.ok(W.compareNames("alice", "Bob") < 0);
+});
