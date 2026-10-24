@@ -32,13 +32,5 @@
     "    \"reason\": \"Dev-only; not present in the runtime image. Upstream fix tracked in #123.\"",
     "  }"
   ],
-  "exceptions": [
-    {
-      "id": "GHSA-vfj7-8cjw-p6xm",
-      "package": "braces",
-      "owner": "@gadgetusaf",
-      "expires": "2026-11-23",
-      "reason": "Dev-only: reached solely via eslint-config-next -> @next/eslint-plugin-next -> fast-glob -> micromatch, a lint-time dependency absent from the standalone runtime image. Renewed 2026-10-21: still no patched braces (latest 3.0.3, advisory first_patched_version null); micromatch 4.0.8 (latest) still requires braces ^3.0.3 and @next/eslint-plugin-next 16.4.2 (latest) and 16.5 canary still pin fast-glob 3.3.1. Remove once any link in that chain drops the vulnerable range."
-    }
-  ]
+  "exceptions": []
 }
