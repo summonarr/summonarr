@@ -148,18 +148,8 @@ const matches = (r: Req, where: Record<string, unknown>): boolean => Object.entr
   if (v && typeof v === "object" && !(v instanceof Date) && "not" in (v as object)) return (r as unknown as Record<string, unknown>)[k] !== (v as { not: unknown }).not;
   return (r as unknown as Record<string, unknown>)[k] === v;
 });
-// A concurrent removal's stamp, landing the moment before this call writes
-// its own (a test sets it; it fires once). Applied after a pre-read and before
-// a conditional write, so a count taken from a pre-read is caught out.
-let concurrentStamp: Date | null = null;
-const raceIn = () => {
-  if (!concurrentStamp) return;
-  for (const r of requests) if (r.status === "AVAILABLE" && r.cleanedUpAt === null) r.cleanedUpAt = concurrentStamp;
-  concurrentStamp = null;
-};
 shadowPrismaModel(prisma, "mediaRequest", {
   updateManyAndReturn: async (args: { where: Record<string, unknown>; data: { cleanedUpAt: Date | null } }) => {
-    raceIn();
     const hit = requests.filter((x) => matches(x, args.where));
     for (const r of hit) r.cleanedUpAt = args.data.cleanedUpAt;
     return hit.map((r) => ({ id: r.id }));
@@ -173,7 +163,6 @@ shadowPrismaModel(prisma, "mediaRequest", {
   findMany: async (args: { where: Record<string, unknown>; select?: Record<string, boolean> }) => {
     const rows = requests.filter((x) => matches(x, args.where)).map((r) =>
       Object.fromEntries(Object.keys(args.select ?? { id: true }).map((k) => [k, (r as unknown as Record<string, unknown>)[k]])));
-    raceIn();
     return rows;
   },
   updateMany: async (args: { where: Record<string, unknown>; data: { cleanedUpAt: Date | null } }) => {
@@ -296,7 +285,6 @@ beforeEach(() => {
 
 beforeEach(() => {
   requests = [];
-  concurrentStamp = null;
 });
 
 const REMOVE = { service: "radarr", id: 11, deleteFiles: true, addImportExclusion: false, execute: true, confirm: 11 };

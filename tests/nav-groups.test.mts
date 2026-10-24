@@ -65,7 +65,7 @@ test("every admin item is in exactly the group it belongs to", () => {
   assert.deepEqual(byGroup, {
     requests: ["/admin", "/admin/issues", "/admin/users", "/admin/blacklist"],
     downloads: ["/admin/queue", "/admin/missing", "/admin/arr-calendar", "/admin/arr-history", "/admin/arr-system", "/admin/trash-guides"],
-    library: ["/admin/library", "/admin/never-watched", "/admin/cleanup"],
+    library: ["/admin/library", "/admin/never-watched", "/admin/cleanup", "/admin/watch-sync"],
     insights: ["/admin/stats", "/admin/activity", "/admin/audit-log"],
     system: ["/admin/backup", "/admin/api-docs", "/settings"],
   });

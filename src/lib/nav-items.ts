@@ -25,6 +25,7 @@ import {
   Ban,
   Bookmark,
   EyeOff,
+  RefreshCw,
   FileText,
   FileX,
   CircleDashed,
@@ -104,6 +105,7 @@ export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
   "/admin/api-docs":     "feature.admin.apiDocs",
   "/admin/cleanup":      "feature.admin.cleanup",
   "/admin/never-watched": "feature.admin.neverWatched",
+  "/admin/watch-sync":   "feature.admin.watchSync",
   "/admin/trash-guides": "trashGuidesEnabled",
 };
 
@@ -223,6 +225,7 @@ export const adminNavItems: NavItem[] = [
   { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin", group: "library" },
   { href: "/admin/never-watched", label: "Never Watched", icon: EyeOff, section: "admin", group: "library" },
   { href: "/admin/cleanup", label: "Library Cleanup", icon: FileX, section: "admin", group: "library" },
+  { href: "/admin/watch-sync", label: "Watch Sync", i18nKey: "adminManage.watchSync.title", icon: RefreshCw, section: "admin", group: "library" },
   { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin", group: "insights" },
   { href: "/admin/activity", label: "Activity", icon: Activity, section: "admin", group: "insights" },
   { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin", group: "insights" },

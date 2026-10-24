@@ -22,6 +22,7 @@ import {
   type RegistrationResponseJSON,
 } from "@/lib/mfa/webauthn";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // POST /api/profile/mfa/passkeys — step 2 of adding a passkey.
 // Body: { registrationToken, name, credential } where `credential` is the
@@ -123,7 +124,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
       return { kind: "added" as const, recoveryCodes: await ensureRecoveryCodesInTx(tx, user.id), firstFactor: !state.enabled };
     });
   } catch (err) {
-    if ((err as { code?: string })?.code === "P2002") {
+    if (isPrismaErrorCode(err, "P2002")) {
       return NextResponse.json({ error: t("apiAuth.mfa.passkeyAlreadyRegistered") }, { status: 409 });
     }
     throw err;

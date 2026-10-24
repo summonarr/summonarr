@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import {
   findUnmodeledMethodExports,
   isAllowlisted,
+  isStrictAdminPrefixed,
   parseTopLevelDecls,
   reachesToken,
   stripComments,
@@ -468,6 +469,70 @@ test("PIN: the hand-audited fix-match/thumb passes only with requireAuth AND its
   });
   assert.equal(noAuth.status, 1, noAuth.output);
   assert.match(noAuth.output, /must call both requireAuth and hasPermission/);
+});
+
+// ── settings is a STRICT admin prefix: withAdmin, nothing weaker ────────────
+
+// Every wrapper a settings route could plausibly reach for instead of withAdmin.
+// Each admits someone withAdmin refuses (any user; the ADMIN BIT, which hasRole
+// ignores; MANAGE_ISSUES delegates), and the proxy's settings backstop refuses
+// every one of them — so each must fail the audit, or the two layers disagree.
+const WEAKER_SETTINGS_GUARDS: Record<string, string> = {
+  "withAuth (any signed-in user)":
+    "export const GET = withAuth(async (req, ctx, session) => {\n  return NextResponse.json({});\n});\n",
+  "withPermission(Permission.ADMIN) (the bit — withAdmin honours the role label only)":
+    "export const GET = withPermission(Permission.ADMIN)(async (req, ctx, session) => {\n  return NextResponse.json({});\n});\n",
+  "withIssueAdmin (MANAGE_ISSUES delegates)":
+    "export const GET = withIssueAdmin(async (req, ctx, session) => {\n  return NextResponse.json({});\n});\n",
+  "requireAuth plus an inline ADMIN-bit check": [
+    "export async function GET(request: NextRequest) {",
+    "  const session = await requireAuth();",
+    "  if (session instanceof NextResponse) return session;",
+    "  if (!hasPermission(session.user.permissions, Permission.ADMIN)) return new Response(null, { status: 403 });",
+    "  return NextResponse.json({ ok: true });",
+    "}",
+  ].join("\n"),
+};
+
+test("PIN: the real CLI fails a /api/settings route guarded by anything weaker than withAdmin — on the bare route and in the subtree", () => {
+  // The proxy 403s every non-ADMIN role on /api/settings and /api/settings/*
+  // (tests/proxy.test.mts). A weaker wrapper would admit a caller the backstop
+  // refuses, on the path the proxy's matcher skips (prefetch-headed requests).
+  for (const [label, source] of Object.entries(WEAKER_SETTINGS_GUARDS)) {
+    for (const route of ["settings", "settings/plex"]) {
+      const { status, output } = auditFixture({ [route]: source });
+      assert.equal(status, 1, `${label} on ${route} must fail:\n${output}`);
+      assert.match(output, /must be withAdmin/, `${label} on ${route}`);
+      assert.match(output, new RegExp(`/api/${route}`), `${label} on ${route}: the failing route is named`);
+    }
+  }
+});
+
+test("a withAdmin /api/settings route passes, and a MIXED file fails on the weaker method alone", () => {
+  const admin = "export const GET = withAdmin(async (req, ctx, session) => {\n  return NextResponse.json({});\n});\n";
+  const ok = auditFixture({
+    settings: `${admin}export const PATCH = withAdmin(async (req, ctx, session) => {\n  return NextResponse.json({});\n});\n`,
+    "settings/plex/libraries": admin,
+  });
+  assert.equal(ok.status, 0, ok.output);
+
+  const mixed = auditFixture({
+    settings: `${admin}export const PATCH = withAuth(async (req, ctx, session) => {\n  return NextResponse.json({});\n});\n`,
+  });
+  assert.equal(mixed.status, 1, mixed.output);
+  assert.match(mixed.output, /PATCH: \/api\/settings handler must be withAdmin/);
+  assert.doesNotMatch(mixed.output, /GET: \/api\/settings handler/, "the withAdmin method must not be blamed");
+});
+
+test("the strict-admin prefix covers the bare route and its subtree, stops at a path separator, and is never also public", () => {
+  assert.equal(isStrictAdminPrefixed("settings"), true, "the bare /api/settings route (GET config, PATCH save) is the one that matters most");
+  assert.equal(isStrictAdminPrefixed("settings/plex/libraries"), true);
+  assert.equal(isStrictAdminPrefixed("settings-export/all"), false, "a sibling prefix is an ordinary session route");
+  assert.equal(isStrictAdminPrefixed("admin/settings"), false, "/api/admin/* keeps its own, delegate-admitting rule");
+  assert.equal(isStrictAdminPrefixed("profile/settings"), false);
+  // A prefix that is both strict-admin and allowlisted would be SKIPPED by the
+  // audit (the allowlist check runs first) — the strict rule would never fire.
+  assert.equal(isAllowlisted("settings"), false);
 });
 
 // ── Allowlist boundary ──────────────────────────────────────────────────────

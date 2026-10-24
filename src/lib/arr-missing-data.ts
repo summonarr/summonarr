@@ -363,8 +363,8 @@ export async function searchMissingTracked(
   }
   return {
     commands: plan.seasons.length + (plan.episodeIds.length > 0 ? 1 : 0),
-    seasons: plan.seasons,
-    episodes: plan.episodeIds.length,
+    seasons,
+    episodes,
     commandIds: commandIdsOf(queued),
   };
 }

@@ -33,6 +33,7 @@ test("plex movie: its OWN ratingKey is the item key, no show, no season; viewedA
     itemKey: "4521",
     showKey: null,
     seasonNumber: null,
+    episodeNumber: null,
     viewedAt: new Date(T0 * 1000),
     accountId: "1",
   });
@@ -47,6 +48,7 @@ test("plex episode: grandparentRatingKey is the show key and parentIndex the sea
   assert.equal(e?.itemKey, "9001");
   assert.equal(e?.showKey, "700");
   assert.equal(e?.seasonNumber, 2);
+  assert.equal(e?.episodeNumber, 5, "index is the episode number");
   assert.deepEqual(e?.viewedAt, new Date(T0 * 1000), "a numeric-string viewedAt is accepted");
   assert.equal(e?.accountId, "42");
 });
@@ -113,7 +115,7 @@ test("countsAsPlexWatchRecord: music/photos/extras don't count; movies, episodes
 test("jellyfin movie: Id is the item key; LastPlayedDate and PlayCount come from UserData", () => {
   const e = parseJellyfinPlayedItem({ Type: "Movie", Id: "abc123", UserData: { PlayCount: 3, LastPlayedDate: "2025-03-01T10:00:00.0000000Z", Played: true } });
   assert.deepEqual(e, {
-    kind: "movie", itemKey: "abc123", showKey: null, seasonNumber: null,
+    kind: "movie", itemKey: "abc123", showKey: null, seasonNumber: null, episodeNumber: null,
     lastPlayedAt: new Date("2025-03-01T10:00:00.000Z"), playCount: 3,
   });
 });
@@ -122,6 +124,7 @@ test("jellyfin episode: SeriesId is the show key and ParentIndexNumber the seaso
   const e = parseJellyfinPlayedItem({ Type: "Episode", Id: "ep1", SeriesId: "ser1", SeasonId: "sea1", ParentIndexNumber: 4, IndexNumber: 2, UserData: { PlayCount: 1 } });
   assert.equal(e?.showKey, "ser1");
   assert.equal(e?.seasonNumber, 4);
+  assert.equal(e?.episodeNumber, 2, "IndexNumber is the episode number");
   assert.equal(e?.itemKey, "ep1");
 });
 

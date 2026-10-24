@@ -362,5 +362,11 @@
   "apiAdmin.libraryMatch.jobGone": "Diese Prüfung ist nicht mehr verfügbar. Starte sie erneut.",
   "apiAdmin.libraryMatch.running": "Eine Zuordnungsprüfung läuft bereits. Versuche es gleich noch einmal.",
   "apiAdmin.fixMatch.itemKeyInvalid": "itemKey muss ein Plex-ratingKey oder eine Jellyfin-Element-ID sein.",
-  "apiAdmin.fixMatch.itemNotFlagged": "Dieses Element ist nicht in der letzten Zuordnungsprüfung. Starte sie erneut."
+  "apiAdmin.fixMatch.itemNotFlagged": "Dieses Element ist nicht in der letzten Zuordnungsprüfung. Starte sie erneut.",
+  "apiAdmin.watchSync.disabled": "Die Seite Gesehen-Sync ist deaktiviert",
+  "apiAdmin.watchSync.running": "Ein Gesehen-Sync läuft bereits. Versuche es in einer Minute erneut.",
+  "apiAdmin.watchSync.jobGone": "Dieser Sync-Lauf wird nicht mehr verfolgt. Summonarr wurde möglicherweise neu gestartet. Lade neu, um die neuesten Ergebnisse zu sehen.",
+  "apiAdmin.watchSync.pairInvalid": "Wähle ein Plex-Konto und einen Jellyfin-Benutzer, der noch auf seinem Server ist",
+  "apiAdmin.watchSync.pairExists": "Diese Verknüpfung gibt es bereits",
+  "apiAdmin.watchSync.pairNotFound": "Verknüpfung nicht gefunden"
 }

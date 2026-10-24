@@ -3,7 +3,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@/generated/prisma";
+import type { Prisma } from "@/generated/prisma";
 import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { normalizeEmail } from "@/lib/email-normalize";
 import { isReservedEmailDomain } from "@/lib/reserved-email";
@@ -12,6 +12,7 @@ import { Permission, hasPermission, defaultPermissionsForRole, rolePresetExceeds
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { deriveUserSource } from "@/lib/user-source";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 export const dynamic = "force-dynamic";
 
@@ -242,7 +243,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
       select: USER_SELECT,
     });
   } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    if (isPrismaErrorCode(err, "P2002")) {
       return NextResponse.json({ error: t("apiAdmin.users.emailExists") }, { status: 409 });
     }
     throw err;

@@ -402,8 +402,8 @@ const models = {
       dbOp("authSession.delete");
       const row = authSessions.get(args.where.sessionId);
       // Prisma rejects a delete of a missing row with code P2025 — the shape
-      // revokeSessionById's idempotency check keys on.
-      if (!row) throw Object.assign(new Error("authSession.delete: row not found"), { code: "P2025" });
+      // revokeSessionById's idempotency check keys on (name + code, guardrail 23b).
+      if (!row) throw Object.assign(new Error("authSession.delete: row not found"), { name: "PrismaClientKnownRequestError", code: "P2025" });
       authSessions.delete(args.where.sessionId);
       return { ...row };
     },

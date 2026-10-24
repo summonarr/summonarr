@@ -234,6 +234,7 @@ const SETTINGS_SCHEMA = [
   ["feature.admin.apiDocs",           false],
   ["feature.admin.cleanup",           false],
   ["feature.admin.neverWatched",      false],
+  ["feature.admin.watchSync",         false],
 ] as const satisfies ReadonlyArray<readonly [string, boolean]>;
 
 type AllowedKey = (typeof SETTINGS_SCHEMA)[number][0];

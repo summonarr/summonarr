@@ -1,4 +1,4 @@
-import { Prisma } from "@/generated/prisma";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // Retry a Serializable transaction on a write-conflict (P2034): concurrent
 // read+insert transactions (e.g. the request quota count+create) conflict and
@@ -12,8 +12,7 @@ export async function runWithSerializableRetry<T>(fn: () => Promise<T>, attempts
     } catch (err) {
       if (
         attempt < attempts &&
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        err.code === "P2034"
+        isPrismaErrorCode(err, "P2034")
       ) {
         continue;
       }

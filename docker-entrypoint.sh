@@ -438,10 +438,11 @@ _cron_loop() {
   PLEX_WATCHLIST_NEXT=$((NOW_INIT + 420))
   TRAKT_SYNC_NEXT=$((NOW_INIT + 540))
   UPSTREAM_WATCH_NEXT=$((NOW_INIT + 1020))
+  WATCH_SYNC_NEXT=$((NOW_INIT + 780))
   ARR_WATCH_NEXT=$((NOW_INIT + 660))
   ARR_SNAPSHOT_NEXT=$((NOW_INIT + 300))
 
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s  UpstreamWatch: ${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}s  ArrWatch: ${ARR_WATCH_INTERVAL:-900}s  ArrPages: ${ARR_SNAPSHOT_INTERVAL:-300}s"
+  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s  UpstreamWatch: ${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}s  WatchSync: ${WATCH_SYNC_INTERVAL:-300}s  ArrWatch: ${ARR_WATCH_INTERVAL:-900}s  ArrPages: ${ARR_SNAPSHOT_INTERVAL:-300}s"
   while true; do
     sleep 60
     NOW=$(date +%s)
@@ -512,6 +513,13 @@ _cron_loop() {
     if [ "$NOW" -ge "$UPSTREAM_WATCH_NEXT" ]; then
       _cron_sync "${UPSTREAM_WATCH_SYNC_URL:-${CRON_BASE}/api/cron/refresh-upstream-watch}" "refresh-upstream-watch" quiet && rc=0 || rc=$?
       UPSTREAM_WATCH_NEXT=$(_cron_next "$rc" "$NOW" "${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}" 86400)
+    fi
+    # Watch sync, Plex ⇄ Jellyfin: marks played in each admin-paired account what
+    # the other server counted as watched. A no-op while the feature is off or
+    # no pair exists; quiet so the every-5-minutes run doesn't log.
+    if [ "$NOW" -ge "$WATCH_SYNC_NEXT" ]; then
+      _cron_sync "${WATCH_SYNC_URL:-${CRON_BASE}/api/cron/watch-sync}" "watch-sync" quiet && rc=0 || rc=$?
+      WATCH_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${WATCH_SYNC_INTERVAL:-300}" 300)
     fi
     # The Radarr/Sonarr monitor: low disks, failed downloads, downloads newly
     # needing attention → the notification channels, plus the Download Queue

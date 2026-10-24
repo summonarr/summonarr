@@ -312,6 +312,24 @@ export async function proxy(request: NextRequest) {
       }
     }
 
+    // The instance-configuration API is ADMIN-only, exactly: every /api/settings
+    // route is withAdmin, which is hasRole on the role LABEL (a USER holding the
+    // ADMIN bit is refused there too), and scripts/audit-routes.mts refuses any
+    // weaker wrapper on this prefix (STRICT_ADMIN_PREFIXES). So this backstop
+    // mirrors the routes precisely — it can never deny a caller a settings
+    // handler would admit — and is deliberately stricter than the /api/admin/*
+    // one above, which must let MANAGE_* delegates reach their per-route guard.
+    // A settings route that ever ships with a weaker guard still answers 403
+    // here to everyone but an ADMIN; the audit catches it in CI before that.
+    // Admitting a delegate here means changing the wrapper, this check, the
+    // audit list and both tests together, on purpose. tests/proxy.test.mts pins it.
+    if (
+      (pathname === "/api/settings" || pathname.startsWith("/api/settings/")) &&
+      role !== "ADMIN"
+    ) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     const lowerPath = pathname.toLowerCase();
     if (lowerPath.startsWith("/admin") && role !== "ADMIN") {
       const perms = effectivePermissions(

@@ -3,10 +3,10 @@ import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { clearActivityCache } from "@/lib/play-history";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 export const dynamic = "force-dynamic";
 
@@ -97,7 +97,7 @@ export const DELETE = withPermission(Permission.ADMIN)(async (
         .delete({ where: { id } })
         .then(() => ({ count: 1 }))
         .catch((err: unknown) => {
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") return { count: 0 };
+          if (isPrismaErrorCode(err, "P2025")) return { count: 0 };
           throw err;
         });
 

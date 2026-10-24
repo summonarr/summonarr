@@ -258,6 +258,7 @@ const spec = {
     { name: "Admin – Fix Match", description: "Manual metadata correction" },
     { name: "Admin – Cleanup", description: "Library cleanup: rule-based candidates and admin-confirmed deletion (ADMIN only)" },
     { name: "Admin – Never watched", description: "Library titles and seasons nobody has watched in the server's recorded history, checked against each media server's own watch records (ADMIN only, read-only)" },
+    { name: "Admin – Watch sync", description: "Pair a Plex account with a Jellyfin user and pick a direction; what one server counts as watched is marked played on the other. Add-only (ADMIN only)" },
     { name: "Admin – Arr", description: "Managing Radarr/Sonarr without opening them: a title's settings, files, history and searches; download history and blocklist; the calendar; tasks, indexers, download clients and storage (ADMIN only)" },
     { name: "Admin – Missing", description: "Radarr/Sonarr titles that should already have a file: released movies and aired episodes — or, in cutoff mode, files below the quality profile's cutoff (ADMIN only)" },
     { name: "Admin – Downloads", description: "Radarr/Sonarr download queues, health checks, the Summonarr webhook connection and \"Open in\" links (ADMIN only)" },
@@ -3061,6 +3062,101 @@ const spec = {
       },
     },
 
+    "/admin/watch-sync": {
+      get: {
+        tags: ["Admin – Watch sync"],
+        summary: "Watch sync pairs, their ledger counts, the pickable accounts and suggestions (ADMIN)",
+        description:
+          "Every pair (Plex account → Jellyfin user) with its read point, last run and per-status item counts; every active Plex " +
+          "and Jellyfin server user (row id, username, server display name — never a provider id, token or address); and " +
+          "suggested pairs (both identities linked to one Summonarr account). A suggestion is never paired automatically.",
+        responses: {
+          "200": { description: "{ pairs: [{ id, enabled, direction, syncProgress, plex, jellyfin, historyReadTo, jellyfinReadTo, lastRunAt, lastResult, counts: { toJellyfin: {pending, marked, already, missing, failed}, toPlex: {…} } }], plexUsers, jellyfinUsers, suggestions: [{ plexUserId, jellyfinUserId, account }], run: { running, startedAt, pairId } }" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "The Watch Sync page is disabled" },
+        },
+      },
+      post: {
+        tags: ["Admin – Watch sync"],
+        summary: "Pair a Plex account with a Jellyfin user (ADMIN)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["plexUserId", "jellyfinUserId"], properties: {
+            plexUserId: { type: "string", description: "A MediaServerUser id with source plex" },
+            jellyfinUserId: { type: "string", description: "A MediaServerUser id with source jellyfin, still active on its server" },
+            direction: { type: "string", enum: ["both", "toJellyfin", "toPlex"], description: "Default both" },
+            syncProgress: { type: "boolean", description: "Also copy resume positions (in-progress items). Default false" },
+          } } } },
+        },
+        responses: {
+          "201": { description: "{ id } — the first run reads each side's whole history" },
+          "400": { description: "Not a Plex account and an active Jellyfin user, or an unknown direction" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "The Watch Sync page is disabled" },
+          "409": { description: "That pair already exists" },
+        },
+      },
+    },
+    "/admin/watch-sync/{id}": {
+      patch: {
+        tags: ["Admin – Watch sync"],
+        summary: "Pause/resume a pair, change its direction, or re-read its whole history on both servers on the next run (ADMIN)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: {
+            enabled: { type: "boolean" },
+            direction: { type: "string", enum: ["both", "toJellyfin", "toPlex"] },
+            syncProgress: { type: "boolean", description: "Copy resume positions too" },
+            rescan: { type: "boolean", enum: [true], description: "Forget both read points; items already in a ledger are not re-queued" },
+          } } } },
+        },
+        responses: {
+          "200": { description: "{ ok: true }" },
+          "400": { description: "None of enabled / direction / syncProgress / rescan, or a wrong value" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Pair not found, or the page is disabled" },
+        },
+      },
+      delete: {
+        tags: ["Admin – Watch sync"],
+        summary: "Remove a pair and its ledgers (ADMIN) — nothing on either server is unmarked",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ ok: true }" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Pair not found, or the page is disabled" },
+        },
+      },
+    },
+    "/admin/watch-sync/run": {
+      post: {
+        tags: ["Admin – Watch sync"],
+        summary: "Run watch sync now, in the background (ADMIN)",
+        description:
+          "Always a background job on the cron's advisory lock: 202 { job } at once, poll GET ?job=. The same admin asking again " +
+          "while theirs runs joins it. 6 runs per 10 minutes per admin.",
+        responses: {
+          "202": { description: "{ job }", content: { "application/json": { schema: { type: "object", required: ["job"], properties: { job: { type: "string", pattern: "^[0-9a-f]{32}$" } } } } } },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "The Watch Sync page is disabled" },
+          "429": { description: "Rate limited (6 per 10 minutes per admin)" },
+        },
+      },
+      get: {
+        tags: ["Admin – Watch sync"],
+        summary: "Poll a background watch sync run (ADMIN)",
+        description: "202 { job, running: true } while it runs, then the run's own answer: 200 { pairs: [{ pairId, toJellyfin, toPlex, progress, error? }], aborted } — progress is { toJellyfin, toPlex, failed, error? } (titles whose resume point was copied) or null when the pair doesn't sync them; each direction { queued, unresolved, unmatched, marked, already, missing, failed, error? } or null when the pair doesn't sync that way — or 409 when the lock was held.",
+        parameters: [{ name: "job", in: "query", required: true, schema: { type: "string", pattern: "^[0-9a-f]{32}$" } }],
+        responses: {
+          "200": { description: "The run's result" },
+          "202": { description: "Still running" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Job not found (expired, another admin's, or dropped by a restart)" },
+          "409": { description: "Another watch sync run held the lock" },
+        },
+      },
+    },
     "/admin/never-watched/refresh": {
       post: {
         tags: ["Admin – Never watched"],
@@ -5800,6 +5896,17 @@ const spec = {
         security: [{ cronSecret: [] }],
         responses: {
           "200": { description: "{ ok, ...per-server results, durationMs, trigger, timestamp } (a server that could not be checked sets ok:false, `error` and X-Cron-Degraded) — or { skipped: true, reason } while both the Never Watched page and Library Cleanup are off, or another run holds the lock" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+        },
+      },
+    },
+    "/cron/watch-sync": {
+      post: {
+        tags: ["Cron"],
+        summary: "Watch sync: keep each admin-paired Plex and Jellyfin account's watched status in step, per the pair's direction",
+        security: [{ cronSecret: [] }],
+        responses: {
+          "200": { description: "{ ok, pairs: [{ pairId, toJellyfin, toPlex, error? }], aborted, durationMs, trigger, timestamp } (a pair with an error or failed items in either direction sets ok:false, `error` and X-Cron-Degraded) — or { skipped: true, reason } while the feature is off or another run holds the lock" },
           "401": { description: "Neither an admin session nor the cron secret" },
         },
       },

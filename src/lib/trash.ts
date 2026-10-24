@@ -12,6 +12,7 @@ import {
   isQualitySizePayload,
 } from "./trash-validators";
 import type { TrashService, TrashSpecKind } from "@/generated/prisma";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // Maps a raw DB error to an actionable "run prisma db push" hint when trash tables/enum values are missing; null otherwise.
 export function describeSchemaError(err: unknown): string | null {
@@ -824,11 +825,11 @@ async function arrPutOrRecreate<T extends { id: number }>(
 }
 
 function isPrismaNotFound(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2025";
+  return isPrismaErrorCode(err, "P2025");
 }
 
 function isPrismaUniqueViolation(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2002";
+  return isPrismaErrorCode(err, "P2002");
 }
 
 async function recordApply(

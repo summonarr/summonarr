@@ -362,5 +362,11 @@
   "apiAdmin.libraryMatch.jobGone": "That check is no longer available. Run the check again.",
   "apiAdmin.libraryMatch.running": "A match check is already running. Try again shortly.",
   "apiAdmin.fixMatch.itemKeyInvalid": "itemKey must be a Plex ratingKey or a Jellyfin item id.",
-  "apiAdmin.fixMatch.itemNotFlagged": "That item isn't in the latest match check. Run the check again."
+  "apiAdmin.fixMatch.itemNotFlagged": "That item isn't in the latest match check. Run the check again.",
+  "apiAdmin.watchSync.disabled": "The Watch Sync page is disabled",
+  "apiAdmin.watchSync.running": "A watch sync run is already in progress. Try again in a minute.",
+  "apiAdmin.watchSync.jobGone": "That sync run is no longer being followed. Summonarr may have restarted. Reload to see the latest results.",
+  "apiAdmin.watchSync.pairInvalid": "Choose a Plex account and a Jellyfin user that is still on its server",
+  "apiAdmin.watchSync.pairExists": "That pair already exists",
+  "apiAdmin.watchSync.pairNotFound": "Pair not found"
 }

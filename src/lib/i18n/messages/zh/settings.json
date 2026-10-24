@@ -427,5 +427,9 @@
   "settings.cron.job.arrWatch.name": "Radarr/Sonarr 监控",
   "settings.cron.job.arrWatch.description": "检查每个 Radarr 和 Sonarr 实例是否存在磁盘空间不足、下载失败以及需要处理的下载，并提醒订阅了这些事件的通知通道",
   "settings.cron.job.arrSnapshots.name": "Radarr/Sonarr 页面刷新",
-  "settings.cron.job.arrSnapshots.description": "按优先级重新读取管理员在过去一天内打开过的 Radarr/Sonarr 页面（队列和健康状况每 5 分钟；缺失、历史、日历和标题每 10 分钟；Arr 系统每 15 分钟），让页面打开时即显示最新数据"
+  "settings.cron.job.arrSnapshots.description": "按优先级重新读取管理员在过去一天内打开过的 Radarr/Sonarr 页面（队列和健康状况每 5 分钟；缺失、历史、日历和标题每 10 分钟；Arr 系统每 15 分钟），让页面打开时即显示最新数据",
+  "settings.featureLabel.admin_watchSync": "观看同步页面",
+  "settings.featureDesc.admin_watchSync": "显示 /admin/watch-sync 页面：将一个 Plex 账户与一个 Jellyfin 用户配对并选择方向，一台服务器计为已观看的内容（包括配对之前的历史记录）会在另一台上标记为已播放。只增不减：不会将任何内容标记为未播放。默认关闭。",
+  "settings.cron.job.watchSync.name": "观看同步",
+  "settings.cron.job.watchSync.description": "按配对所选方向，让管理员配对的每个 Plex 与 Jellyfin 账户的观看状态保持一致"
 }

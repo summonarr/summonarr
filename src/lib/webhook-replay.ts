@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { Prisma } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // How long a delivery is remembered. 24 hours covers Sonarr/Radarr's long retry windows.
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -56,7 +56,7 @@ async function checkAndRecordDigest(key: string): Promise<boolean> {
       data: { digest: key, expiresAt: new Date(Date.now() + TTL_MS) },
     });
   } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+    if (isPrismaErrorCode(e, "P2002")) {
       // The row already exists. If it has expired, the delivery is allowed
       // again. The update only matches an EXPIRED row (expiresAt <= now), so when
       // two deliveries race after expiry exactly one of them renews it
@@ -100,8 +100,7 @@ export async function clearWebhookReplayDigestJson(
     await prisma.webhookReplay.delete({ where: { digest: key } });
   } catch (err) {
     if (
-      err instanceof Prisma.PrismaClientKnownRequestError &&
-      err.code === "P2025"
+      isPrismaErrorCode(err, "P2025")
     ) {
       // The row is already gone (e.g. the expiry sweep removed it). Nothing to do.
       return;

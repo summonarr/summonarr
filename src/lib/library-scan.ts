@@ -71,11 +71,9 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, v
     } else if (existing.tmdbId !== undefined && existing.tmdbId !== tmdbId) {
       // Two different titles merged into one scan window — fall back to checking the whole queue
       existing.tmdbId = undefined;
-    } else if (tmdbId !== undefined && existing.tmdbId === undefined) {
-      // Already a full-queue check; a single-title hint can't narrow it back down
-    } else if (tmdbId !== undefined) {
-      existing.tmdbId = tmdbId;
     }
+    // Otherwise it's the same title (nothing to change) or already a full-queue
+    // check, which a single-title hint can't narrow back down.
     return existing.promise;
   }
 

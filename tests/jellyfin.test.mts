@@ -1577,3 +1577,61 @@ test("listJellyfinMatchEntries lists every item ungrouped — copies and items w
   assert.equal(new URL(sent.at(-1)!.url).searchParams.get("IncludeItemTypes"), "Series");
   assert.deepEqual(series.map((e) => [e.itemKey, e.tmdbIds, e.tvdbId, e.mediaType]), [["s1", [57243], 78804, "TV"]]);
 });
+
+// ── watch sync: markJellyfinPlayed + getJellyfinEpisodeIds (watch-sync.ts) ──
+// Routes read from Jellyfin's PlaystateController: UserPlayedItems/{id}?userId=
+// (10.9+) first, the legacy Users/{uid}/PlayedItems/{id} (≤10.8, still on
+// master as an [Obsolete] wrapper) on a 404/405. A 404 on BOTH is "missing".
+
+const { markJellyfinPlayed, getJellyfinEpisodeIds } = await import("../src/lib/jellyfin.ts");
+
+test("markJellyfinPlayed: POSTs the 10.9+ route with the user, item and ISO datePlayed, admin auth; 2xx is marked (catches: wrong route/params, GET)", async () => {
+  const B = nextBase();
+  respond = () => okJson({ Played: true });
+  const d = new Date("2025-03-04T05:06:07.000Z");
+  assert.equal(await markJellyfinPlayed(`${B}/`, "key-ws", "user 1", "item/1", d), "marked");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].method, "POST");
+  assert.equal(sent[0].url, `${B}/UserPlayedItems/item%2F1?userId=user%201&datePlayed=2025-03-04T05%3A06%3A07.000Z`);
+  assert.equal(sent[0].headers.get("authorization"), adminAuthHeader("key-ws"));
+});
+
+test("markJellyfinPlayed: a 404 on the new route falls back to the legacy route (≤10.8); no date ⇒ no datePlayed param", async () => {
+  const B = nextBase();
+  respond = (url) => (url.includes("/UserPlayedItems/") ? new Response("", { status: 404 }) : okJson({}));
+  assert.equal(await markJellyfinPlayed(B, "k", "u1", "i1", null), "marked");
+  assert.deepEqual(sent.map((s) => s.url), [`${B}/UserPlayedItems/i1?userId=u1`, `${B}/Users/u1/PlayedItems/i1`]);
+});
+
+test("markJellyfinPlayed: 404 on BOTH routes is 'missing' (terminal); any other status throws without a URL leak in the caller's text", async () => {
+  const B = nextBase();
+  respond = () => new Response("", { status: 404 });
+  assert.equal(await markJellyfinPlayed(B, "k", "u", "gone", null), "missing");
+  sent.length = 0;
+  respond = () => new Response("", { status: 500 });
+  await assert.rejects(markJellyfinPlayed(B, "k", "u", "i", null), /status=500/);
+  assert.equal(sent.length, 1, "a 500 on the new route is not a 'no such route' — no legacy retry");
+});
+
+test("getJellyfinEpisodeIds: keeps each episode's Id, season (specials included) and a multi-episode IndexNumberEnd; drops malformed rows", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { Id: "e1", ParentIndexNumber: 1, IndexNumber: 1 },
+      { Id: "e2", ParentIndexNumber: 1, IndexNumber: 2, IndexNumberEnd: 3 },
+      { Id: "s0", ParentIndexNumber: 0, IndexNumber: 4 },
+      { Id: "bad", ParentIndexNumber: 1 },
+      { ParentIndexNumber: 1, IndexNumber: 9 },
+      { Id: "e5", ParentIndexNumber: 2, IndexNumber: 5, IndexNumberEnd: 5 },
+    ],
+    TotalRecordCount: 6,
+  });
+  const eps = await getJellyfinEpisodeIds(B, "k", "series 1");
+  assert.ok(sent[0].url.startsWith(`${B}/Items?ParentId=series%201&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber,IndexNumberEnd`));
+  assert.deepEqual(eps, [
+    { seasonNumber: 1, episodeNumber: 1, episodeNumberEnd: null, itemId: "e1" },
+    { seasonNumber: 1, episodeNumber: 2, episodeNumberEnd: 3, itemId: "e2" },
+    { seasonNumber: 0, episodeNumber: 4, episodeNumberEnd: null, itemId: "s0" },
+    { seasonNumber: 2, episodeNumber: 5, episodeNumberEnd: null, itemId: "e5" },
+  ]);
+});

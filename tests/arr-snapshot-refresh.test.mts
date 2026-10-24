@@ -89,7 +89,6 @@ test("due: a view is re-read once its priority's interval (less a minute's slack
 });
 
 test("a cached open is a view too; a background re-read is NOT — a page nobody opens stops being refreshed", async () => {
-  let real = Date.now;
   const t0 = 1_000_000_000_000;
   const queue = fakeRoute(() => Response.json({ n: 1 }));
   await openAt(queue.GET, "http://x/api/admin/queue", t0);
@@ -105,7 +104,7 @@ test("a cached open is a view too; a background re-read is NOT — a page nobody
   // …whereas an admin's cached open does.
   resetArrSnapshotsForTests();
   await openAt(queue.GET, "http://x/api/admin/queue", t0);
-  real = Date.now;
+  const real = Date.now;
   Date.now = () => t0 + 20 * 60 * MIN;
   try {
     assert.equal((await queue.GET(at("http://x/api/admin/queue?cached=1"), {}, {})).status, 200);

@@ -4,7 +4,7 @@ import { withAuth } from "@/lib/api-auth";
 import { parsePageParam } from "@/lib/pagination";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@/generated/prisma";
+import type { Prisma } from "@/generated/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { maintenanceGuard } from "@/lib/maintenance";
@@ -17,6 +17,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 const PAGE_SIZE = 40;
 const VALID_VOTE_SORTS = ["votes", "recent"] as const;
@@ -259,7 +260,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
       },
     });
   } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    if (isPrismaErrorCode(err, "P2002")) {
       return NextResponse.json({ error: t("apiUser.votes.alreadyVoted") }, { status: 409 });
     }
     throw err;

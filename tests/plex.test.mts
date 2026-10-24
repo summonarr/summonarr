@@ -1396,3 +1396,62 @@ test("listPlexMatchEntries lists EVERY item of the selected sections — copies,
     ["21", [], 1, null],
   ]);
 });
+
+test("getPlexWatchHistory stopBefore (watch sync): the first DATED record older than the bound ends the walk; it and everything after are dropped; undated records never stop it", async () => {
+  const S = "http://plex-hist-stop.test:32400";
+  respond = (url) => {
+    const start = Number(url.searchParams.get("X-Plex-Container-Start"));
+    if (start === 0) {
+      return mediaContainer([
+        { type: "movie", ratingKey: "1", viewedAt: 1_700_000_300 },
+        { type: "movie", ratingKey: "2" },
+        { type: "movie", ratingKey: "3", viewedAt: 1_700_000_200 },
+        { type: "movie", ratingKey: "4", viewedAt: 1_700_000_099 },
+        { type: "movie", ratingKey: "5", viewedAt: 1_700_000_500 },
+      ], { totalSize: 10 });
+    }
+    throw new Error("no second page: the stop ends the walk");
+  };
+  const h = await getPlexWatchHistory(S, "t", { stopBefore: new Date(1_700_000_100 * 1000) });
+  assert.equal(fetchCalls.length, 1);
+  assert.deepEqual(h.entries.map((e) => e.itemKey), ["1", "2", "3"]);
+  assert.equal(h.truncated, false);
+});
+
+// ── watch sync, Jellyfin → Plex: per-user token parsers (plex.ts) ─────────────
+const { parsePlexSharedServerTokens, parsePlexHomeSwitchToken } = await import("../src/lib/plex.ts");
+
+test("parsePlexSharedServerTokens: userID → accessToken per SharedServer; malformed ids/tokens are dropped", () => {
+  const xml = `<MediaContainer size="3">
+    <SharedServer id="1" username="a" userID="101" accessToken="tokA_123456"><Section key="1"/></SharedServer>
+    <SharedServer id="2" username="b" userID="abc" accessToken="tokB_123456"/>
+    <SharedServer id="3" username="c" userID="103" accessToken="bad token"/>
+  </MediaContainer>`;
+  assert.deepEqual([...parsePlexSharedServerTokens(xml)], [["101", "tokA_123456"]]);
+  assert.equal(parsePlexSharedServerTokens("<MediaContainer/>").size, 0);
+});
+
+test("parsePlexHomeSwitchToken: XML authenticationToken / authToken, or JSON authToken; anything else is null", () => {
+  assert.equal(parsePlexHomeSwitchToken(`<user id="9" authenticationToken="homeTok_1234"/>`), "homeTok_1234");
+  assert.equal(parsePlexHomeSwitchToken(`<user id="9" authToken="homeTok_5678"></user>`), "homeTok_5678");
+  assert.equal(parsePlexHomeSwitchToken(`{"authToken":"jsonTok_1234"}`), "jsonTok_1234");
+  assert.equal(parsePlexHomeSwitchToken(`<user id="9"/>`), null);
+  assert.equal(parsePlexHomeSwitchToken(`{"authToken":"x"}`), null, "too short to be a token");
+  assert.equal(parsePlexHomeSwitchToken("not xml"), null);
+});
+
+test("parsePlexInProgress: movies and episodes with a resume point; an up-next episode (no viewOffset) and junk are dropped", async () => {
+  const { parsePlexInProgress } = await import("../src/lib/plex.ts");
+  const out = parsePlexInProgress([
+    { type: "movie", ratingKey: "12", viewOffset: 720000, duration: 6000000, lastViewedAt: 1700000000, viewCount: 0 },
+    { type: "episode", ratingKey: 191, grandparentRatingKey: "19", parentIndex: 1, index: 2, viewOffset: "60000" },
+    { type: "episode", ratingKey: "192", grandparentRatingKey: "19", parentIndex: 1, index: 3 },
+    { type: "track", ratingKey: "5", viewOffset: 10 },
+    { type: "movie", ratingKey: "x1", viewOffset: 10 },
+  ]);
+  assert.deepEqual(out.map((i) => [i.kind, i.ratingKey, i.showKey, i.seasonNumber, i.episodeNumber, i.state.viewOffset]), [
+    ["movie", "12", null, null, null, 720000],
+    ["episode", "191", "19", 1, 2, 60000],
+  ]);
+  assert.deepEqual(out[0].state.lastViewedAt, new Date(1700000000 * 1000));
+});

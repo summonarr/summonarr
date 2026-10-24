@@ -22,6 +22,7 @@ import { exceedsCap } from "@/lib/content-rating";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 // The request chokepoint — everything POST /api/requests does once the caller is
 // authenticated, rate-limited and its body validated: instance resolution and
@@ -506,7 +507,7 @@ export async function createMediaRequest(
       return fail(429, t("apiUser.create.quota", { limit: resolvedQuota?.limit ?? 0, window: translateQuotaWindow(t, resolvedQuota?.windowLabel) }), "quota");
     }
 
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    if (isPrismaErrorCode(err, "P2002")) {
       return fail(409, t("apiUser.create.alreadyRequested"), "already-requested");
     }
     throw err;

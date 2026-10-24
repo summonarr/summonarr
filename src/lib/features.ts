@@ -247,6 +247,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     defaultEnabled: true,
   },
   {
+    key: "feature.admin.watchSync",
+    label: "Watch Sync page",
+    description: "Show the /admin/watch-sync page: pair a Plex account with a Jellyfin user and pick a direction, and what one server counts as watched is marked played on the other, including history from before the pair was made. Add-only: nothing is ever marked unplayed. Off by default.",
+    category: "admin",
+    defaultEnabled: false,
+  },
+  {
     key: "trashGuidesEnabled",
     label: "TRaSH Guides",
     description: "Enable the TRaSH Guides admin page and nightly sync.",

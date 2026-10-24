@@ -55,6 +55,10 @@ export interface PlexHistoryEntry {
   showKey: string | null;
   // Plex parentIndex for an episode (0 = specials); null when unknown.
   seasonNumber: number | null;
+  // Plex index (the episode number) for an episode; null for a movie or when
+  // unknown. Read only by watch sync (watch-sync.ts), which marks the SAME
+  // episode on Jellyfin by (season, episode).
+  episodeNumber: number | null;
   viewedAt: Date | null;
   accountId: string | null;
 }
@@ -67,6 +71,9 @@ export interface JellyfinPlayedItem {
   showKey: string | null;
   // ParentIndexNumber for an episode; null when unknown.
   seasonNumber: number | null;
+  // IndexNumber for an episode; null for a movie or when unknown. Read only by
+  // watch sync (watch-sync.ts), which marks the same episode on Plex.
+  episodeNumber: number | null;
   lastPlayedAt: Date | null;
   // UserData.PlayCount, at least 1: a resumable item with PlayCount 0 was still
   // started, which is one use.
@@ -168,6 +175,7 @@ export function parsePlexHistoryItem(raw: unknown): PlexHistoryEntry | null {
     itemKey,
     showKey: kind === "episode" ? plexKey(o.grandparentRatingKey) ?? plexKeyFromPath(o.grandparentKey) : null,
     seasonNumber: kind === "episode" ? nonNegativeInt(o.parentIndex) : null,
+    episodeNumber: kind === "episode" ? nonNegativeInt(o.index) : null,
     viewedAt: epochSecondsToDate(o.viewedAt),
     accountId,
   };
@@ -200,6 +208,7 @@ export function parseJellyfinPlayedItem(raw: unknown): JellyfinPlayedItem | null
     itemKey,
     showKey: kind === "episode" ? jellyfinKey(o.SeriesId) : null,
     seasonNumber: kind === "episode" ? nonNegativeInt(o.ParentIndexNumber) : null,
+    episodeNumber: kind === "episode" ? nonNegativeInt(o.IndexNumber) : null,
     lastPlayedAt: isoToDate(userData?.LastPlayedDate),
     playCount: Math.max(1, playCount),
   };

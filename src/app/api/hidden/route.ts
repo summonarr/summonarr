@@ -3,11 +3,12 @@ import { withAuth } from "@/lib/api-auth";
 import { parsePageParam } from "@/lib/pagination";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@/generated/prisma";
+import type { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 
 const PAGE_SIZE = 60;
 const SELECT = { tmdbId: true, mediaType: true, title: true, posterPath: true, createdAt: true } as const;
@@ -76,7 +77,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     });
     return NextResponse.json(item, { status: 201 });
   } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    if (isPrismaErrorCode(err, "P2002")) {
       return NextResponse.json({ error: t("apiUser.hidden.alreadyHidden") }, { status: 409 });
     }
     throw err;
