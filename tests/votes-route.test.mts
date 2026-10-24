@@ -229,7 +229,7 @@ let voteDeleteCount = 1; // deletionVote.deleteMany result (the caller's own vot
 let groupRows: Array<{ tmdbId: number; mediaType: string; _count: { id: number }; _max: { createdAt: Date } }> = [];
 let repRows: Array<{ tmdbId: number; mediaType: string; title: string; posterPath: string | null }> = [];
 let userVoteRows: Array<{ tmdbId: number; mediaType: string; id: string; reason: string | null }> = [];
-let otherReasonRows: Array<{ tmdbId: number; mediaType: string; reason: string | null }> = [];
+let otherReasonRows: Array<{ tmdbId: number; mediaType: string; id: string; reason: string | null }> = [];
 const deletionVoteModel = {
   create: async (args: { data: Record<string, unknown> }) => {
     rec("deletionVote.create", args);
@@ -863,12 +863,12 @@ test("GET groups votes with voteCount, the caller's own vote/reason, and others'
   ];
   userVoteRows = [{ tmdbId: 603, mediaType: "MOVIE", id: "vote-9", reason: "my own reason" }];
   otherReasonRows = [
-    { tmdbId: 603, mediaType: "MOVIE", reason: "bad encode" },
-    { tmdbId: 603, mediaType: "MOVIE", reason: "bad encode" }, // duplicate → deduped
-    { tmdbId: 603, mediaType: "MOVIE", reason: "   " }, // whitespace-only → dropped
-    { tmdbId: 603, mediaType: "MOVIE", reason: "wrong cut" },
-    { tmdbId: 603, mediaType: "MOVIE", reason: "nobody watches it" },
-    { tmdbId: 603, mediaType: "MOVIE", reason: "a fourth reason past the cap" },
+    { tmdbId: 603, mediaType: "MOVIE", id: "v-a", reason: "bad encode" },
+    { tmdbId: 603, mediaType: "MOVIE", id: "v-b", reason: "bad encode" }, // duplicate → deduped (keeps the newest, v-a)
+    { tmdbId: 603, mediaType: "MOVIE", id: "v-c", reason: "   " }, // whitespace-only → dropped
+    { tmdbId: 603, mediaType: "MOVIE", id: "v-d", reason: "wrong cut" },
+    { tmdbId: 603, mediaType: "MOVIE", id: "v-e", reason: "nobody watches it" },
+    { tmdbId: 603, mediaType: "MOVIE", id: "v-f", reason: "a fourth reason past the cap" },
   ];
 
   const { token } = await mintSession();
@@ -894,6 +894,13 @@ test("GET groups votes with voteCount, the caller's own vote/reason, and others'
     userVoted: true,
     userReason: "my own reason",
     reasons: ["bad encode", "wrong cut", "nobody watches it"],
+    // Same list with each reason's vote id — what POST /api/report
+    // `vote_reason` needs (it 404s anything that isn't a DeletionVote id).
+    reasonEntries: [
+      { id: "v-a", reason: "bad encode" },
+      { id: "v-d", reason: "wrong cut" },
+      { id: "v-e", reason: "nobody watches it" },
+    ],
   });
   assert.deepEqual(body.items[1], {
     tmdbId: 1399,
@@ -904,7 +911,13 @@ test("GET groups votes with voteCount, the caller's own vote/reason, and others'
     userVoted: false,
     userReason: null,
     reasons: [],
+    reasonEntries: [],
   });
+  // The other-reasons read must select the vote id, or the entries carry none.
+  const otherReasonsRead = opsOf("deletionVote.findMany").find(
+    (o) => (o.args as { where?: { reason?: unknown } }).where?.reason !== undefined,
+  );
+  assert.equal((otherReasonsRead?.args as { select?: { id?: boolean } })?.select?.id, true);
 });
 
 test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to the votes sort on junk", async () => {
