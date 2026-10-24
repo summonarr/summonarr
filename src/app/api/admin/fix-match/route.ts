@@ -441,12 +441,23 @@ async function fixPlexMatch(
   throw new Error(detail);
 }
 
-// Whether a Plex item currently carries `tmdbId` among its guids. A title's
-// `plexRatingKeys` also holds keys that merely ride along (a conflated item that
-// claims several titles, guardrail 37c) — remapping one of those would rewrite an
-// item that belongs to another title, so a copy is only touched when Plex itself
-// says it still carries the id being replaced. null = could not be read.
-async function plexCopyCarriesTmdb(instance: MediaInstanceKey, ratingKey: string, tmdbId: number): Promise<boolean | null> {
+function guidCarriesTmdb(item: { guid?: string; Guid?: Array<{ id: string }> }, tmdbId: number): boolean {
+  const id = String(tmdbId);
+  return (item.Guid ?? []).some((g) => g.id === `tmdb://${id}`) || new RegExp(`themoviedb://${id}(?![0-9])`).test(item.guid ?? "");
+}
+
+// Which title a Plex rating key currently claims. A row's `plexRatingKeys` also
+// holds keys that merely ride along (a conflated item, guardrail 37c).
+//   "old"     — still the id being replaced; safe to remap
+//   "correct" — already the destination id; join that row, don't remap again
+//   "other"   — a different title; leave that item alone
+//   null      — could not be read
+async function plexCopyClaim(
+  instance: MediaInstanceKey,
+  ratingKey: string,
+  oldTmdbId: number,
+  correctTmdbId: number,
+): Promise<"old" | "correct" | "other" | null> {
   const cfg = await getPlexConfig(instance);
   if (!cfg.url || !cfg.token) return null;
   const safeKey = String(parseInt(ratingKey, 10) || 0);
@@ -458,8 +469,9 @@ async function plexCopyCarriesTmdb(instance: MediaInstanceKey, ratingKey: string
   const json = await res.json().catch(() => null) as { MediaContainer?: { Metadata?: Array<{ guid?: string; Guid?: Array<{ id: string }> }> } } | null;
   const item = json?.MediaContainer?.Metadata?.[0];
   if (!item) return null;
-  const id = String(tmdbId);
-  return (item.Guid ?? []).some((g) => g.id === `tmdb://${id}`) || new RegExp(`themoviedb://${id}(?![0-9])`).test(item.guid ?? "");
+  if (guidCarriesTmdb(item, oldTmdbId)) return "old";
+  if (guidCarriesTmdb(item, correctTmdbId)) return "correct";
+  return "other";
 }
 
 type JellyfinVirtualFolder = {
@@ -887,18 +899,25 @@ async function runFixMatchOnce(input: FixMatchInput, actor: FixMatchActor, opts:
       // Every OTHER copy of the title (guardrail 37c) — the Plex twin of the
       // Jellyfin loop. Left on the old match, the next sync could elect an
       // unfixed copy and revert the correction. Serial, like Jellyfin's, and a
-      // copy is only touched if Plex says it still carries the old id.
+      // copy is only remapped if Plex says it still carries the old id.
+      // `movedKeys` join the corrected row and have their plays reattributed.
+      // `droppedKeys` only leave the old row: a key Plex says is a third title
+      // must not be merged onto the correction or its plays rewritten.
       const movedKeys = new Set<string>([plexRatingKey]);
+      const droppedKeys = new Set<string>([plexRatingKey]);
       const failedKeys: string[] = [];
       for (const [idx, key] of extraKeys.entries()) {
         try {
-          const carries = await plexCopyCarriesTmdb(serverInstance, key, tmdbId);
-          if (carries === null) { failedKeys.push(key); continue; }
-          // Not the old id: it belongs to another title — nothing to fix, and it
-          // keeps whatever row that title has.
-          if (!carries) { movedKeys.add(key); continue; }
-          await fixPlexMatch(key, correctTmdbId, mediaType, serverInstance, canonicalGuid, copyReport(idx + 2));
+          const claim = await plexCopyClaim(serverInstance, key, tmdbId, correctTmdbId);
+          if (claim === null) { failedKeys.push(key); continue; }
+          // A different title: drop it from this row and leave its own row,
+          // its Plex item, and its plays untouched.
+          if (claim === "other") { droppedKeys.add(key); continue; }
+          if (claim === "old") {
+            await fixPlexMatch(key, correctTmdbId, mediaType, serverInstance, canonicalGuid, copyReport(idx + 2));
+          }
           movedKeys.add(key);
+          droppedKeys.add(key);
         } catch (err) {
           console.error("[fix-match]", `plex copy ${key} failed:`, err instanceof Error ? err.message : err);
           failedKeys.push(key);
@@ -922,7 +941,7 @@ async function runFixMatchOnce(input: FixMatchInput, actor: FixMatchActor, opts:
         const targetWhere = { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } };
         const removed = await tx.plexLibraryItem.findUnique({ where: oldWhere });
         const target = await tx.plexLibraryItem.findUnique({ where: targetWhere });
-        const remainder = remainingOnOldRow(plexRatingKey, [plexRatingKey, ...extraKeys], movedKeys);
+        const remainder = remainingOnOldRow(plexRatingKey, [plexRatingKey, ...extraKeys], droppedKeys);
         if (remainder.delete) {
           // deleteMany, NOT delete: the confirmation poll above ran UNLOCKED for
           // up to minutes, so a library sync may already have reconciled this row

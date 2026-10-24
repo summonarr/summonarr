@@ -1826,7 +1826,12 @@ test("POST (plex): a rider key that does NOT carry the old id is left alone, not
   const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz" }, a.header), undefined);
   assert.equal(res.status, 200);
   assert.ok(!fetchCalls.some((c) => c.url.pathname === "/library/metadata/1002/unmatch"), "an item that belongs to another title is never unmatched");
-  assert.equal(opsOf("plexLibraryItem.deleteMany").length, 1);
+  assert.ok(!fetchCalls.some((c) => c.url.pathname === "/library/metadata/1002/match"), "and it is never rematched onto the correction");
+  assert.equal(opsOf("plexLibraryItem.deleteMany").length, 1, "the old row no longer lists a key that isn't this title");
+  const up = opsOf("plexLibraryItem.upsert")[0].args as { create: { plexRatingKeys: string[] } };
+  assert.deepEqual(up.create.plexRatingKeys, ["1001"], "the foreign key is not merged onto the corrected row");
+  const ph = opsOf("playHistory.updateMany")[0].args as { where: { sourceItemId: { in: string[] } } };
+  assert.deepEqual(ph.where.sourceItemId.in, ["1001"], "plays of the other title stay on that title");
 });
 
 test("POST (plex): a copy that fails stays on the OLD row and the result carries the partial warning", async () => {

@@ -95,6 +95,13 @@ test("bulk: the *arr-available cache short-circuits only for an auto-approver, l
   assert.doesNotMatch(CODE, /\|\| arrAvailSet\.has\(k\)\)/, "a bare arrAvailSet verdict is the old ungated shape");
 });
 
+test("bulk: an on-behalf create also clears the filer's deletion vote, not only the target's", () => {
+  assert.match(
+    CODE,
+    /userId: \{ in: isOnBehalf \? \[targetUserId, session\.user\.id\] : \[targetUserId\] \}/,
+  );
+});
+
 test("bulk: an on-behalf non-ADMIN filer must hold the named-instance request/auto-approve grants and sees only servers they can view", () => {
   assert.match(CODE, /const filerChecked = isOnBehalf && !hasPermission\(session\.user\.permissions, Permission\.ADMIN\)/);
   // Every instance gate the target passes also runs the filer's own check.

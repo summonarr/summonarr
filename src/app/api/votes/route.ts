@@ -236,11 +236,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const sanitizedReason = sanitizeOptional(reason);
 
-  // Bar any user who has ever requested this media (regardless of order). Earlier
-  // versions only checked the oldest requester via orderBy; a co-requester could
-  // then vote against a title they themselves had requested.
+  // Bar any user who has ever requested this media (regardless of order),
+  // including a title they filed on someone else's behalf. Earlier versions
+  // only checked the oldest requester via orderBy; a co-requester could then
+  // vote against a title they themselves had requested.
   const ownRequest = await prisma.mediaRequest.findFirst({
-    where: { tmdbId, mediaType, requestedBy: session.user.id },
+    where: {
+      tmdbId,
+      mediaType,
+      OR: [{ requestedBy: session.user.id }, { filedBy: session.user.id }],
+    },
     select: { id: true },
   });
   if (ownRequest) {

@@ -609,6 +609,11 @@ test("a user who ever requested the title cannot vote to delete it (403)", async
   assert.equal(res.status, 403);
   assert.deepEqual(await res.json(), { error: "Cannot vote to delete your own request" });
   assert.equal(opsOf("deletionVote.create").length, 0);
+  assert.deepEqual((opsOf("mediaRequest.findFirst")[0].args as { where: unknown }).where, {
+    tmdbId: 603,
+    mediaType: "MOVIE",
+    OR: [{ requestedBy: userId }, { filedBy: userId }],
+  });
 });
 
 // ── the vote insert itself + guardrail 23 ───────────────────────────────────

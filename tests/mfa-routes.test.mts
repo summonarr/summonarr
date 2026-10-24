@@ -1094,6 +1094,44 @@ test("W3: TOTP enable judges 'first factor' from the state read under the lock",
   assert.equal(JSON.parse(row!.details as string).firstFactor, false);
 });
 
+test("W3: a password-only cancel of a pending authenticator does not delete it if enable won the lock", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  totps.push({ userId: u.id, secret: generateTotpSecret(), enabledAt: null, lastUsedStep: null, updatedAt: new Date() });
+  onFirstLock(u.id as string, () => {
+    totps[0].enabledAt = new Date();
+  });
+  const res = await call(totpRoute.DELETE as never, "/api/profile/mfa/totp", { method: "DELETE", body: { password: PASSWORD }, headers: bearer(jwt) });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).secondFactorRequired, true);
+  assert.equal(totps.length, 1, "the row that became active stays");
+  assert.ok(totps[0].enabledAt instanceof Date);
+  assert.equal(rawSql[0], MFA_LOCK_SQL(u.id as string));
+});
+
+test("W3: a password-only cancel still removes a secret that is still pending", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  totps.push({ userId: u.id, secret: generateTotpSecret(), enabledAt: null, lastUsedStep: null, updatedAt: new Date() });
+  const res = await call(totpRoute.DELETE as never, "/api/profile/mfa/totp", { method: "DELETE", body: { password: PASSWORD }, headers: bearer(jwt) });
+  assert.equal(res.status, 200);
+  assert.equal(totps.length, 0);
+});
+
+test("W3: turning two-factor off on the password alone does not wipe a factor that landed under the lock", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  totps.push({ userId: u.id, secret: generateTotpSecret(), enabledAt: null, lastUsedStep: null, updatedAt: new Date() });
+  onFirstLock(u.id as string, () => {
+    totps[0].enabledAt = new Date();
+  });
+  const res = await call(profileMfa.DELETE as never, "/api/profile/mfa", { method: "DELETE", body: { password: PASSWORD }, headers: bearer(jwt) });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).secondFactorRequired, true);
+  assert.equal(totps.length, 1);
+  assert.ok(totps[0].enabledAt instanceof Date);
+});
+
 test("W3: a 404 never spends the proof — PATCH/DELETE of a missing passkey and DELETE of a missing authenticator", async () => {
   const u = await seedUser();
   const jwt = await sessionFor(u);

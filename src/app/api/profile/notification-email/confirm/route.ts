@@ -116,8 +116,13 @@ export async function POST(req: Request) {
     return resultPage(locale, t("apiAuth.emailConfirm.usedTitle"), t("apiAuth.emailConfirm.usedBody"), false);
   }
 
-  // Single-use: consume the token FIRST so a double-submit can't re-trigger the bind.
-  await prisma.verificationToken.delete({ where: { token: row.token } }).catch(() => {});
+  // Single-use: the delete's row count decides. Swallowing a miss used to bind
+  // anyway, so a confirm that lost the race to a password change, a sign-out,
+  // or a second click still wrote the address (guardrail 6g).
+  const removed = await prisma.verificationToken.deleteMany({ where: { token: row.token } });
+  if (removed.count !== 1) {
+    return resultPage(locale, t("apiAuth.emailConfirm.usedTitle"), t("apiAuth.emailConfirm.usedBody"), false);
+  }
 
   if (row.expires.getTime() < Date.now()) {
     return resultPage(locale, t("apiAuth.emailConfirm.expiredTitle"), t("apiAuth.emailConfirm.expiredBody"), false);

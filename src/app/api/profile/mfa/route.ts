@@ -5,8 +5,8 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
-import { clearMfaLockoutInTx, deleteAllMfaInTx, getMfaState } from "@/lib/mfa/mfa-store";
-import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { clearMfaLockoutInTx, deleteAllMfaInTx, getMfaState, lockUserMfaInTx } from "@/lib/mfa/mfa-store";
+import { mfaReauthStepUp, mfaSecondFactorStepUp, secondFactorRequiredResponse } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -52,10 +52,22 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (proof instanceof NextResponse) return proof;
 
   const before = proof.state;
-  await prisma.$transaction(async (tx) => {
+  const blocked = await prisma.$transaction(async (tx) => {
+    await lockUserMfaInTx(tx, user.id);
+    // Password-only (nothing was active when the step-up ran) must not remove
+    // a factor that became active after that read.
+    if (!proof.proved) {
+      const [totp, passkeys] = await Promise.all([
+        tx.userTotp.findUnique({ where: { userId: user.id }, select: { enabledAt: true } }),
+        tx.webAuthnCredential.count({ where: { userId: user.id } }),
+      ]);
+      if (totp?.enabledAt || passkeys > 0) return true;
+    }
     await deleteAllMfaInTx(tx, user.id);
     await clearMfaLockoutInTx(tx, user.id);
+    return false;
   });
+  if (blocked) return secondFactorRequiredResponse(t, await getMfaState(user.id));
   const revoked = before.enabled ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
   if (before.enabled) void notifyMfaSecurityEvent(user.id, "mfa-disabled");
 

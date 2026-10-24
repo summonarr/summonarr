@@ -235,7 +235,14 @@ shadowPrismaModel(prisma, "verificationToken", {
     verifyTokens = verifyTokens.filter((t) => t.token !== args.where.token);
     return {};
   },
-  deleteMany: async () => ({ count: 0 }), create: async () => ({}),
+  deleteMany: async (args: { where?: { token?: string } }) => {
+    rec("verificationToken.deleteMany", args);
+    const token = args.where?.token;
+    const before = verifyTokens.length;
+    if (typeof token === "string") verifyTokens = verifyTokens.filter((t) => t.token !== token);
+    return { count: before - verifyTokens.length };
+  },
+  create: async () => ({}),
 });
 
 const settings = new Map<string, string>();
@@ -817,7 +824,7 @@ test("GET does NOT consume the token — only POST binds", async () => {
   const raw = "abcdef0123456789";
   verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("u1", "new@example.com"), expires: new Date(Date.now() + 60_000) }];
   await confirmGet(`?token=${raw}`);
-  assert.equal(opsOf("verificationToken.delete").length, 0, "GET must not consume the token");
+  assert.equal(opsOf("verificationToken.deleteMany").length, 0, "GET must not consume the token");
   assert.equal(verifyTokens.length, 1);
 });
 
@@ -828,7 +835,7 @@ test("POST consumes the token FIRST so a double-submit can't re-trigger the bind
   const raw = "abcdef0123456789";
   verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier(userId, "new@example.com"), expires: new Date(Date.now() + 60_000) }];
   assert.equal((await confirmPost(`?token=${raw}`)).status, 200);
-  assert.ok(opsOf("verificationToken.delete").length > 0, "the token must be single-use");
+  assert.ok(opsOf("verificationToken.deleteMany").length > 0, "the token must be single-use");
   const second = await confirmPost(`?token=${raw}`);
   assert.equal(second.status, 400, "a replay is refused cleanly");
   assert.match(await second.text(), /expired or already used/i);

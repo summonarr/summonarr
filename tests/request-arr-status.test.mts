@@ -295,6 +295,9 @@ test("precedence: unmonitored → notReleased → failure since approval → wai
   assert.equal(judge({ failures: { ok: false, kind: "server" } }), "unreachable");
   // A non-failure event the arr returned anyway (an ignored eventType filter) never counts.
   assert.equal(judge({ failures: ok(projectHistoryRecords("radarr", "", [{ id: 6, movieId: 10, eventType: "grabbed", date: "2026-09-10T00:00:00Z" }])) }), "waiting");
+  // Admin "Mark failed" (Replace file) is not a stuck download — arr-watch
+  // already ignores this message; Why? must too.
+  assert.equal(judge({ failures: ok(projectHistoryRecords("radarr", "", [{ id: 7, movieId: 10, eventType: "downloadFailed", date: "2026-09-10T00:00:00Z", data: { message: "manually marked as failed" } }])) }), "waiting");
 });
 
 test("failures count DOWNLOADS: one failed 10-episode Sonarr pack is 1, not 10; the same id failing again hours later is 2", () => {

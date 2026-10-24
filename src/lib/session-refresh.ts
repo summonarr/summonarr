@@ -7,7 +7,7 @@ import {
   type SessionClaims,
   type SessionTransport,
 } from "@/lib/session-jwt";
-import { markSessionForceRevoked, shouldForceDbCheck } from "@/lib/session-revocation";
+import { cachedSessionCheckIsStale, markSessionForceRevoked, shouldForceDbCheck } from "@/lib/session-revocation";
 import { getCachedPlexAllowlist } from "@/lib/plex-membership";
 import {
   MANAGEMENT_MASK,
@@ -134,11 +134,16 @@ export async function verifyAndRefreshSession(
   // secret during a rotation, or the legacy raw secret) never takes the fast
   // path either: the slow path below re-signs it with the current key, so a
   // browser migrates on its very next request (guardrail 6h).
+  //
+  // A restore stamps a process-wide floor (invalidateCachedSessionChecks):
+  // every dbCheckedAt from before that moment misses this window, so a cookie
+  // checked in the last 10–60s cannot keep acting on the restored database.
   const skipDbCheck =
     typeof dbCheckedAt === "number" &&
     now - dbCheckedAt <= checkInterval &&
     verified.signedWithCurrentKey &&
-    !shouldForceDbCheck(claims.id, claims.sessionId);
+    !shouldForceDbCheck(claims.id, claims.sessionId) &&
+    !cachedSessionCheckIsStale(dbCheckedAt);
 
   if (skipDbCheck) {
     // The JWT's own exp (= the session deadline, re-signed that way on every

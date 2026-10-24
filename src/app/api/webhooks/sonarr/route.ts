@@ -337,6 +337,11 @@ export async function POST(req: NextRequest) {
           data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
         });
         await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId, arrInstance } });
+        // Sonarr CONFIRMED the series is complete (flipApprovedRequests only
+        // runs then): write the available cache in the same tx, matching Radarr's
+        // Download path. Without this, browse/arrHasInstance read "not in Sonarr"
+        // until the next sync even though the request is already AVAILABLE.
+        await tx.sonarrAvailableItem.createMany({ data: [{ tmdbId: safeMdbId, arrInstance }], skipDuplicates: true });
         // Backfill tvdbId on the matched request(s). A later Download webhook for the same
         // series may arrive with only tvdbId (Sonarr omits tmdbId on some events); without
         // this, that tvdbId-only path can't find the request to evict its wanted-cache row.
@@ -371,6 +376,7 @@ export async function POST(req: NextRequest) {
         });
         if (req && updated.count > 0) {
           await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, arrInstance } });
+          await tx.sonarrAvailableItem.createMany({ data: [{ tmdbId: req.tmdbId, arrInstance }], skipDuplicates: true });
           tvdbPathTmdbId = req.tmdbId;
         } else if (!req && updated.count > 0) {
           // No MediaRequest mapped this tvdbId; the wanted table is tmdbId-keyed, so
@@ -388,6 +394,7 @@ export async function POST(req: NextRequest) {
             const resolved = await resolveSingleTvdbToTmdb(safeVdbId!);
             if (resolved !== null) {
               await prisma.sonarrWantedItem.deleteMany({ where: { tmdbId: resolved, arrInstance } });
+              await prisma.sonarrAvailableItem.createMany({ data: [{ tmdbId: resolved, arrInstance }], skipDuplicates: true });
             } else {
               console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: unresolvable tvdbId ${sanitizeForLog(safeVdbId)}`);
             }

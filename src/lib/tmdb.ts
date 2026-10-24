@@ -545,11 +545,15 @@ export async function searchMulti(query: string): Promise<TmdbMedia[]> {
   });
 }
 
+function stillUpcoming(items: TmdbMedia[], today: string): TmdbMedia[] {
+  return items.filter((m) => m.releaseDate != null && m.releaseDate >= today);
+}
+
 export async function getUpcomingMovies(): Promise<TmdbMedia[]> {
   const key = "movies:upcoming";
   return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
+  if (cached?.length) return stillUpcoming(cached, new Date().toISOString().slice(0, 10));
 
   const pages = await settleLimit(
     Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
@@ -604,7 +608,7 @@ export async function getUpcomingTV(): Promise<TmdbMedia[]> {
   const key = "tv:upcoming";
   return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
+  if (cached?.length) return stillUpcoming(cached, new Date().toISOString().slice(0, 10));
 
   // /tv/on_the_air returns shows whose original first_air_date is often years past
   // (long-running shows currently airing new episodes). For "Upcoming" we want

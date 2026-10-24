@@ -365,9 +365,18 @@ const sonarrWantedStub = {
     return { count: 0 };
   },
 };
+const sonarrAvailableCreates: Record<string, unknown>[] = [];
+const sonarrAvailableStub = {
+  deleteMany: async () => ({ count: 0 }),
+  createMany: async (args: { data: Record<string, unknown>[] }) => {
+    sonarrAvailableCreates.push(...args.data);
+    return { count: args.data.length };
+  },
+};
 shadowPrismaModel(prisma, "radarrWantedItem", radarrWantedStub);
 shadowPrismaModel(prisma, "radarrAvailableItem", radarrAvailableStub);
 shadowPrismaModel(prisma, "sonarrWantedItem", sonarrWantedStub);
+shadowPrismaModel(prisma, "sonarrAvailableItem", sonarrAvailableStub);
 
 // IssueGrab table.
 type GrabRow = {
@@ -467,6 +476,7 @@ const txDelegates = {
   radarrWantedItem: radarrWantedStub,
   radarrAvailableItem: radarrAvailableStub,
   sonarrWantedItem: sonarrWantedStub,
+  sonarrAvailableItem: sonarrAvailableStub,
 };
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   if (typeof arg === "function") {
@@ -615,6 +625,7 @@ beforeEach(() => {
   grabUpdateManyCalls.length = 0;
   radarrWantedDeletes.length = 0;
   sonarrWantedDeletes.length = 0;
+  sonarrAvailableCreates.length = 0;
   deletionVoteDeletes.length = 0;
   executeRawCalls.length = 0;
   txError = null;
@@ -1317,6 +1328,7 @@ test("sonarr Download by tmdbId: instance-scoped flip + wanted eviction + tvdbId
 
   // Wanted eviction scoped to the firing instance, under the Sonarr lock (1001, 2).
   assert.deepEqual(sonarrWantedDeletes, [{ tmdbId: 888, arrInstance: "anime" }]);
+  assert.deepEqual(sonarrAvailableCreates, [{ tmdbId: 888, arrInstance: "anime" }], "a complete Download must write the available cache like Radarr");
   assert.ok(executeRawCalls.some((sql) => sql.includes("pg_advisory_xact_lock(1001, 2)")));
 
   // tvdbId is per-TITLE metadata (identical for the same series on every

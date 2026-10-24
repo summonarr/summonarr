@@ -187,6 +187,15 @@ test("messages: errorMessage first, statusMessages flattened, deduplicated, boun
   assert.deepEqual(row.messages, ["Import failed", "Not a valid movie file", "Title-only line"]);
 });
 
+test("queue messages mask an indexer apikey before they reach the browser", () => {
+  const [row] = foldQueueRecords("radarr", "", [{
+    id: 1,
+    errorMessage: "Grab failed https://idx.example/api?apikey=SECRET123&t=get",
+  }]);
+  assert.deepEqual(row.messages, ["Grab failed https://idx.example/api?apikey=••••••••&t=get"]);
+  assert.equal(JSON.stringify(row).includes("SECRET123"), false);
+});
+
 test("sortQueueItems: attention first, then pipeline stage, then title (never time left)", () => {
   const items = [
     ...foldQueueRecords("radarr", "", [{ id: 1, movie: { title: "B" }, status: "downloading", timeleft: "01:00:00" }]),
@@ -256,6 +265,16 @@ test("importCandidates: what the dialog shows — matched target, quality, rejec
     ["Show.S01E02.mkv", true, [2]],
   ]);
   assert.deepEqual(importCandidates("radarr", "not a list"), []);
+});
+
+test("import rejections mask an indexer apikey", () => {
+  const [c] = importCandidates("radarr", [{
+    path: "/downloads/Movie.mkv",
+    relativePath: "Movie.mkv",
+    rejections: [{ reason: "Not an upgrade apikey=SECRET123" }],
+    movie: { id: 1, title: "Movie", year: 2024 },
+  }]);
+  assert.deepEqual(c.rejections, ["Not an upgrade apikey=••••••••"]);
 });
 
 const pick = (paths: string[]) => new Map(paths.map((p) => [p, {}]));
@@ -419,6 +438,14 @@ test("normalizeHealthChecks: drops ok rows and blanks, errors first, wiki links 
     ["notice", "UpdateCheck", "https://wiki.servarr.com/radarr/system#update"],
   ]);
   assert.deepEqual(normalizeHealthChecks({ not: "a list" }), []);
+});
+
+test("health messages mask an indexer apikey and drop a line that is only whitespace", () => {
+  const [check] = normalizeHealthChecks([
+    { source: "IndexerStatusCheck", type: "error", message: "Indexer down apikey=SECRET123" },
+  ]);
+  assert.equal(check.message, "Indexer down apikey=••••••••");
+  assert.equal(check.message.includes("SECRET123"), false);
 });
 
 const hook = (over: Record<string, unknown> = {}, url = "http://summonarr:3000/api/webhooks/radarr?token=s3cret") => ({

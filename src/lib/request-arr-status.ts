@@ -68,6 +68,7 @@ import { arrDateMs, missingMovie } from "./arr-missing";
 import { safeMessage } from "./arr-parse";
 import type { QueueItem, QueuePhase } from "./arr-queue";
 import { projectTitle, type ArrService, type ArrTitle } from "./arr-title";
+import { isManualMark } from "./arr-watch";
 import { sonarrSeriesCompletion, type SonarrSeriesStatsRow } from "./sonarr-completion";
 
 export const ARR_STATUS_VERDICTS = [
@@ -416,6 +417,10 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
   if (!input.failures?.ok) return done("unreachable", { errorKind: kindOf(input.failures) });
   const recent = input.failures.value
     .filter((e) => e.kind === "failed")
+    // Replace file / queue "Mark failed" writes this history row on purpose.
+    // arr-watch already ignores it; treating it as downloadFailed showed
+    // delegates a false stuck-download after a replacement search.
+    .filter((e) => !isManualMark(e))
     .filter((e) => {
       const ms = arrDateMs(e.date);
       return ms !== null && ms >= input.sinceMs;

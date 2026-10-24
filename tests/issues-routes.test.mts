@@ -672,6 +672,10 @@ test("PATCH is withIssueAdmin-gated: a plain USER is 403, an ISSUE_ADMIN and an 
 });
 
 test("PATCH OPEN→RESOLVED: CAS updateMany, an issue:updated SSE, a resolved inbox row for the reporter, and an audit entry", async () => {
+  usersById.set("reporter-victim", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: null, notificationEmail: null,
+  });
   issueRow = { id: "issue-9", status: "OPEN", reportedBy: "reporter-victim", title: "Dune", mediaType: "MOVIE", tmdbId: 438631, resolution: null, posterPath: "/dune.jpg" };
   const admin = await mintSession({ role: "ISSUE_ADMIN" });
 
@@ -697,6 +701,18 @@ test("PATCH OPEN→RESOLVED: CAS updateMany, an issue:updated SSE, a resolved in
   assert.equal(note.data.userId, "reporter-victim");
   assert.equal(note.data.type, "ISSUE_RESOLVED");
   assert.equal(opsOf("auditLog.create").length, 1, "a status change is audited");
+});
+
+test("PATCH OPEN→RESOLVED writes no inbox row when the reporter is deactivated", async () => {
+  usersById.set("reporter-off", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: new Date("2026-01-01T00:00:00.000Z"), email: "off@example.com", notificationEmail: null,
+  });
+  issueRow = { id: "issue-off", status: "OPEN", reportedBy: "reporter-off", title: "Dune", mediaType: "MOVIE", tmdbId: 438631, resolution: null, posterPath: "/dune.jpg" };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const res = await patchIssue(admin.token, "issue-off", { status: "RESOLVED", resolution: "Re-downloaded." });
+  assert.equal(res.status, 200);
+  assert.equal(opsOf("notification.create").length, 0);
 });
 
 test("PATCH: an issue-admin resolving their OWN reported issue gets NO self-notification inbox row", async () => {
@@ -771,6 +787,10 @@ test("messages POST is ownership-gated: a non-reporter USER is 403; the reporter
 });
 
 test("messages POST (admin reply): creates a fromAdmin IssueMessage, notifies the reporter's inbox, and auto-promotes OPEN→IN_PROGRESS", async () => {
+  usersById.set("reporter-owner2", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: null, notificationEmail: null,
+  });
   issueRow = { id: "issue-t", status: "OPEN", reportedBy: "reporter-owner2", title: "Prisoners", mediaType: "MOVIE", tmdbId: 146233, posterPath: "/p.jpg", claimedBy: null };
   const admin = await mintSession({ role: "ISSUE_ADMIN" });
 
@@ -798,6 +818,18 @@ test("messages POST (admin reply): creates a fromAdmin IssueMessage, notifies th
 
   await flushMicrotasks();
   assert.equal(fetchCalls.length, 0, "unconfigured message-notify channels never reach the network");
+});
+
+test("messages POST writes no inbox row when the reporter is deactivated", async () => {
+  usersById.set("reporter-off2", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: new Date("2026-01-01T00:00:00.000Z"), email: "off2@example.com", notificationEmail: null,
+  });
+  issueRow = { id: "issue-off2", status: "OPEN", reportedBy: "reporter-off2", title: "Prisoners", mediaType: "MOVIE", tmdbId: 146233, posterPath: "/p.jpg", claimedBy: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const res = await postMessage(admin.token, "issue-off2", { body: "looking into it" });
+  assert.equal(res.status, 201);
+  assert.equal(opsOf("notification.create").length, 0);
 });
 
 test("messages POST body validation: a non-string body → 400, whitespace-only → 400, over-2000-chars → 400", async () => {

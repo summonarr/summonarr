@@ -1,6 +1,8 @@
 // Admin → Download Queue: the pure rules. Turns raw Radarr/Sonarr
 // /api/v3/queue records into one row per DOWNLOAD and decides which rows need an
-// admin's attention. Zero imports, zero I/O; the data half is arr-queue-data.ts.
+// admin's attention. No I/O; the data half is arr-queue-data.ts. The only import
+// is safeMessage, so a queue or import line can't carry an indexer apikey to
+// the browser (guardrail 5e).
 //
 //   • Sonarr reports one queue record PER EPISODE, so a season pack is N records
 //     sharing one downloadId. They fold into one row carrying every record id;
@@ -12,6 +14,8 @@
 //     status of warning/error, an import that is blocked or failed, or a queue
 //     status of failed/warning/client-unavailable. Nothing here guesses from
 //     progress or age; the arr already folds stalled torrents into a warning.
+
+import { safeMessage } from "@/lib/arr-parse";
 
 export type QueueService = "radarr" | "sonarr";
 
@@ -214,7 +218,7 @@ function messagesOf(r: QueueRecord): string[] {
   const seen = new Set<string>();
   const scan = MAX_MESSAGES * PROJECTION_SCAN_FACTOR;
   const push = (m: unknown) => {
-    const s = typeof m === "string" ? m.trim().slice(0, MAX_MESSAGE_LEN) : "";
+    const s = safeMessage(m, MAX_MESSAGE_LEN) ?? "";
     if (s && !seen.has(s)) {
       seen.add(s);
       out.push(s);
@@ -646,7 +650,7 @@ export function importCandidates(service: QueueService, raw: unknown): ImportCan
       .slice(0, 10);
     const rejections = Array.isArray(r.rejections)
       ? (r.rejections as Array<{ reason?: unknown } | null>)
-          .map((x) => (typeof x?.reason === "string" ? x.reason.slice(0, MAX_MESSAGE_LEN) : ""))
+          .map((x) => safeMessage(x?.reason, MAX_MESSAGE_LEN) ?? "")
           .filter(Boolean)
           .slice(0, MAX_MESSAGES)
       : [];
