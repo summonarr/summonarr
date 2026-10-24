@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.35.1 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.36.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -171,6 +171,21 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.36.0
+
+**Added**
+
+- **Watch sync** (Admin → Watch Sync, off by default): an admin pairs a Plex account with a Jellyfin account and watched items are marked played on the other server. Works both ways, never unmarks, and can optionally carry resume points. Each pair picks its direction.
+
+**Changed**
+
+- The image now runs on Node 26.12.1 (Alpine 3.23) and Next.js 16.4.2.
+
+**Fixed**
+
+- Settings API routes are now ADMIN-only at the proxy as well as in each route.
+- Duplicate-entry and "already gone" database errors are recognised correctly in development as well as production.
 
 ### v0.35.1
 
