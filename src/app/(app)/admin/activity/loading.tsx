@@ -38,7 +38,7 @@ export default function Loading() {
 
       <div
         className="resp-analytics"
-        style={{ display: "grid", gridTemplateColumns: "1.5fr 1.2fr 1fr", gap: 10, marginBottom: 22 }}
+        style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1fr)", gap: 10, marginBottom: 22 }}
       >
         {Array.from({ length: 3 }).map((_, i) => (
           <ActivityCardSkeleton key={i} h={250} />
@@ -47,7 +47,7 @@ export default function Loading() {
 
       <div
         className="resp-grid-2"
-        style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 22 }}
+        style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginBottom: 22 }}
       >
         <ActivityCardSkeleton h={300} />
         <ActivityCardSkeleton h={300} />

@@ -107,8 +107,8 @@ export function HiddenGrid({
                 )}
               </div>
               <div
-                className="ds-mono line-clamp-2 transition-colors group-hover:text-[var(--ds-fg)]"
-                style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", marginTop: 6, lineHeight: 1.3 }}
+                className="line-clamp-2 font-medium"
+                style={{ fontSize: 12.5, color: "var(--ds-fg)", marginTop: 8, lineHeight: 1.3 }}
               >
                 {it.title}
               </div>

@@ -11,7 +11,7 @@ export default function Loading() {
   return (
     <div className="animate-pulse">
       <SkeletonHeader subtitle subtitleLines={2} />
-      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <ControlRow w={340} />
         <div className="flex items-center gap-3">
           <ControlRow w={450} />

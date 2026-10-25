@@ -149,7 +149,7 @@ export default async function RequestsPage({
       <LiveRefresh on={["request:updated", "request:deleted"]} />
       <PageHeader title={t("requests.title")} subtitle={subtitle} />
 
-      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <FilterPills
           param="status"
           active={status ?? ""}
@@ -162,7 +162,7 @@ export default async function RequestsPage({
           ]}
           preserve={["sort", "q"]}
         />
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
           <FilterPills
             param="sort"
             active={sort === "newest" ? "" : sort}

@@ -8,9 +8,9 @@ export default function Loading() {
   return (
     <div className="animate-pulse">
       <SkeletonHeader subtitle />
-      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <ControlRow w={340} />
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
           <ControlRow w={130} />
           <Bar w={192} h={32} r={6} style={{ ...SKELETON_CARD, maxWidth: "100%" }} />
         </div>

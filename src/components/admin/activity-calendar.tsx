@@ -146,6 +146,15 @@ export function ActivityCalendar({
     }
   });
 
+  // A month whose first week sits right before the next month's (the partial
+  // week a 365-day window opens on) would print on top of its neighbour at
+  // 9.5px — "OctNov". Keep the later label; the dropped month is still the
+  // cells themselves.
+  const spacedMonthLabels = monthLabels.filter((m, i) => {
+    const next = monthLabels[i + 1];
+    return !next || next.weekIndex - m.weekIndex >= 3;
+  });
+
   return (
     <div>
       <p
@@ -177,7 +186,7 @@ export function ActivityCalendar({
               the disabled token is for "—" placeholders and chevrons only. */}
           <div style={{ display: "flex", marginLeft: 26, marginBottom: 6, gap: GAP }}>
             {weeks.map((_, wi) => {
-              const ml = monthLabels.find((m) => m.weekIndex === wi);
+              const ml = spacedMonthLabels.find((m) => m.weekIndex === wi);
               return (
                 <div
                   key={wi}

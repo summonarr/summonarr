@@ -78,7 +78,7 @@ export function TranscodePressure({ data, days }: { data: TranscodeOffenders; da
     <section style={{ marginBottom: 22 }}>
       <div
         className="resp-grid-2"
-        style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
+        style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}
       >
         <ActivityCard>
           <SectionHeader label={t("adminActivity.transcode.users")} sub={t("adminActivity.transcode.usersSub", { days })} />

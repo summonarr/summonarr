@@ -165,7 +165,7 @@ export default async function VotesPage({
         subtitle={t("personal.votes.subtitle")}
       />
 
-      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <FilterPills
           param="mine"
           active={mine ? "1" : ""}
@@ -175,7 +175,7 @@ export default async function VotesPage({
           ]}
           preserve={["sort", "q"]}
         />
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
           <FilterPills
             param="sort"
             active={sort === "votes" ? "" : sort}
