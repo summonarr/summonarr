@@ -399,6 +399,15 @@ export function RequestButton({
                 autoFocus
                 className="resize-none"
               />
+              {/* Directly under the textarea it counts, right-aligned like a
+                  form hint. It used to sit below the Request/Cancel row, where
+                  it read as a stray label. */}
+              <p
+                className="ds-mono text-right"
+                style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", margin: "-4px 2px 0 0" }}
+              >
+                {note.length}/500
+              </p>
               {profileSelect}
               <div className="flex items-center gap-2">
                 <DetailActionButton variant="primary" onClick={submitRequest}>
@@ -416,16 +425,6 @@ export function RequestButton({
                   {t("request.cancel")}
                 </DetailActionButton>
               </div>
-              <p
-                className="ds-mono"
-                style={{
-                  fontSize: 10.5,
-                  color: "var(--ds-fg-subtle)",
-                  margin: 0,
-                }}
-              >
-                {note.length}/500
-              </p>
             </div>
           )}
 
