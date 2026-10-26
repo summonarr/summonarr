@@ -50,6 +50,7 @@ let tmdbLookup: unknown[] = [];
 let tvdbLookup: (tvdbId: number) => unknown[] = () => [];
 let tmdbExternalIds: () => Response = () => json({ tvdb_id: null });
 let seriesLibrary: (tvdbId: string | null) => unknown[] = () => [];
+let sonarrQueue: unknown = { records: [], totalRecords: 0 };
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -67,6 +68,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   if (url.pathname === "/api/v3/series" && (init?.method ?? "GET") === "POST") return json({ id: 1 });
   if (url.pathname === "/api/v3/series") return json(seriesLibrary(url.searchParams.get("tvdbId")));
+  if (url.pathname === "/api/v3/queue") return json(sonarrQueue);
   throw new Error(`unexpected fetch ${url}`);
 }) as unknown as typeof fetch;
 
@@ -151,6 +153,7 @@ beforeEach(() => {
   tvdbLookup = () => [];
   tmdbExternalIds = () => json({ tvdb_id: null });
   seriesLibrary = () => [];
+  sonarrQueue = { records: [], totalRecords: 0 };
 });
 
 // ═══ pickSeriesByTvdbCrossRef ═══════════════════════════════════════════════
@@ -321,11 +324,16 @@ test("wanted: a PARTLY downloaded series is wanted — same guardrail-14a rule a
 });
 
 test("downloading: an UNRESOLVABLE series is unknown (null), never a confident 'not in queue'", async () => {
+  // The queue holds a series with no tmdbId (Sonarr v3, or one it never mapped),
+  // so the queue alone can't rule this title out and the lookup must decide. The
   // tmdb lookup misses, and TMDB's cross-reference is unavailable (no credential,
   // nothing cached) — callers must defer, not fire a "download pending" notify.
+  // Own URL: arr.ts caches each instance's queue for 15s.
+  settings.set("sonarrUrl", "http://10.0.0.31:8989");
+  sonarrQueue = { records: [{ series: { tvdbId: 1 } }], totalRecords: 1 };
   tmdbLookup = [];
   assert.equal(await isSeriesDownloadingInSonarr(TMDB), null);
-  assert.equal(calls.filter((c) => c.url.pathname === "/api/v3/queue").length, 0);
+  assert.equal(lookups("tmdb:").length, 1, "the lookup was consulted because the queue had an unmapped series");
 });
 
 // ═══ structure ══════════════════════════════════════════════════════════════

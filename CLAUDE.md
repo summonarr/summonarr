@@ -445,6 +445,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Every library-marking pass filters TV candidates through `sonarrIncompleteKeys` ([arr-availability.ts](src/lib/arr-availability.ts)) BEFORE the CAS
     - The webhook never transitions on an unverifiable verdict.
     - A tmdb lookup with no verified match falls back to TMDB's own TVDB cross-reference
+    - ALWAYS answer from Sonarr's own tmdbId (library row, queue record) before calling `series/lookup`
 14b. **A title an admin deleted through Library cleanup must NEVER be demoted and re-pushed. The demote's CAS carries `cleanedUpAt: null`, and nothing takes a TITLE off Radarr/Sonarr except the confirmed cleanup route and the title manager's confirmed Remove — both stamp before deleting.** (File deletes — the title manager's Files tab, an issue's Replace file — leave the title on the instance, so the arr's own search, not a re-push, is what follows them.)
 
     Detail and rationale: [docs/guardrails/14b.md](docs/guardrails/14b.md).

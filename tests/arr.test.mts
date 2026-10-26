@@ -234,12 +234,22 @@ test("the Sonarr download check holds EVERY id to a positive-integer contract, u
   const body = fn.slice(0, fn.indexOf("\n}\n"));
 
   const guards = body.match(/Number\.isInteger\(/g) ?? [];
-  assert.equal(guards.length, 3, "expected all three ids (tvdbId, tmdbId, and the resolved lookup) to be integer-guarded");
+  assert.equal(
+    guards.length,
+    4,
+    "expected all four ids (tvdbId, tmdbId, the resolved lookup, and the library row's own tmdbId) to be integer-guarded",
+  );
   assert.match(body, /Number\.isInteger\(rawResolved\)/, "the upstream lookup result must be validated before use");
+  assert.match(body, /Number\.isInteger\(match\.tmdbId\)/, "the library row's tmdbId is upstream data too and must be validated before use");
   assert.match(
     body,
     /Number\(tvdbId\), Number\(claimedTmdbId\), Number\(resolved\)/,
-    "the warn() ids must be numerically coerced at the call site",
+    "the lookup-path warn() ids must be numerically coerced at the call site",
+  );
+  assert.match(
+    body,
+    /Number\(tvdbId\), Number\(libraryTmdbId\), Number\(claimedTmdbId\)/,
+    "the library-path warn() ids must be numerically coerced at the call site",
   );
 });
 
