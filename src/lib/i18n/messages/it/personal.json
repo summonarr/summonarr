@@ -193,5 +193,7 @@
   "personal.common.trackingOff.description": "Non viene registrato nulla, quindi questa pagina non può riempirsi. Un amministratore può attivare il tracciamento della cronologia in Impostazioni → Funzionalità.",
   "personal.common.trackingOff.cta": "Apri impostazioni",
   "personal.common.showingMostRecent": "Vengono mostrati i tuoi {n} titoli più recenti. Quelli più vecchi non compaiono qui.",
+  "personal.common.cappedEmpty": "I {n} titoli più recenti sono stati rimossi. Ricarica per mostrare quelli più vecchi ancora in elenco.",
+  "personal.common.reload": "Ricarica",
   "personal.watchlist.removeError": "Impossibile rimuovere “{title}” da Da guardare. Riprova."
 }

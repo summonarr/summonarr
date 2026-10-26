@@ -426,9 +426,33 @@ shadowPrismaModel(prisma, "deletionVote", {
   },
 });
 
-// No push subscriptions: with the push feature flag defaulting ON and no VAPID
-// keys, the grab-completed outcome is "skipped-no-subs" (never a network send).
-shadowPrismaModel(prisma, "pushSubscription", { findMany: async () => [] });
+// Push subscriptions: empty by default so grab-completed is "skipped-no-subs"
+// (never a network send). A test that needs "failed" seeds an iOS row with no
+// deviceToken — sendApns refuses before any network call.
+type PushSubRow = {
+  userId: string;
+  platform: string;
+  endpoint: string;
+  p256dh: string | null;
+  auth: string | null;
+  deviceToken: string | null;
+  publicKey: string | null;
+  user: { locale: string | null };
+};
+const pushSubRows: PushSubRow[] = [];
+function seedFailedIosPush(userId = "user-1"): void {
+  pushSubRows.push({
+    userId,
+    platform: "ios",
+    endpoint: `apns:device/broken-${userId}`,
+    p256dh: null,
+    auth: null,
+    deviceToken: null,
+    publicKey: null,
+    user: { locale: null },
+  });
+}
+shadowPrismaModel(prisma, "pushSubscription", { findMany: async () => pushSubRows.map((s) => ({ ...s, user: { ...s.user } })) });
 
 // The deferred poll's fan-out (notifyAvailablePerServer → fanOutAvailableWinners):
 // the disabled-requester read + the channels' recipient reads (nobody disabled,
@@ -607,6 +631,22 @@ async function runTasks(tasks: AfterTask[]): Promise<void> {
 
 const drainMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
 
+async function waitForAgentPosts(n: number): Promise<void> {
+  for (let i = 0; i < 400 && agentPosts().length < n; i++) await drainMicrotasks();
+}
+
+// emitNotificationEvent posts to AGENT_URL through safeFetchAdminConfigured.
+// Compose over the current fetchHandler so arr-verify scripts keep working.
+function honourAgentUrl(): void {
+  const inner = fetchHandler;
+  fetchHandler = (raw) => {
+    if (raw === AGENT_URL) {
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return inner(raw);
+  };
+}
+
 beforeEach(() => {
   warns.length = 0;
   errors.length = 0;
@@ -632,6 +672,7 @@ beforeEach(() => {
   mediaRequestFindManyImpl = async () => [];
   notificationRows.length = 0;
   agentRows.length = 0;
+  pushSubRows.length = 0;
   invalidateAgentCache(); // notify-agents' 30s agent-list cache
   seedBaseSettings();
 });
@@ -1151,17 +1192,27 @@ test("radarr ManualInteractionRequired: admins alerted once per stuck item, keye
   assert.equal(dup.res.status, 200);
   assert.deepEqual(dup.body, { ok: true, manualInteraction: true });
   assert.equal(dup.tasks.length, 0, "a duplicate claim must not schedule another push");
+  const claimsAfterDup = settingCreateManyCalls.length;
+  assert.equal(claimsAfterDup, 2, "the duplicate still hits createMany (skipDuplicates, count 0)");
 
-  // No stable id (movie absent) ⇒ no gate: best-effort push fires every time.
-  const noId = await post(
-    radarrPOST,
-    webhookReq("radarr", {
-      token: RADARR_4K_SECRET,
-      body: { eventType: "ManualInteractionRequired", downloadClient: "sab" },
-    }),
-  );
-  assert.equal(noId.tasks.length, 1);
-  assert.equal(settingCreateManyCalls.length, 2, "no stable id ⇒ no one-shot claim row");
+  // No stable id (movie absent, or tmdbId 0/non-integer) ⇒ fail closed: no
+  // notify. Replay hashes the full payload, so queue-tick volatility would
+  // re-fire forever if shouldNotify stayed true.
+  agentRows.push(agentRow("arr.manual_interaction"));
+  honourAgentUrl();
+  for (const movie of [undefined, { tmdbId: 0, title: "Untitled" }, { tmdbId: 1.5, title: "Untitled" }]) {
+    const noId = await post(
+      radarrPOST,
+      webhookReq("radarr", {
+        token: RADARR_4K_SECRET,
+        body: { eventType: "ManualInteractionRequired", ...(movie ? { movie } : {}), downloadClient: `sab-${String(movie?.tmdbId ?? "none")}` },
+      }),
+    );
+    assert.equal(noId.tasks.length, 0, `no notify for movie=${JSON.stringify(movie)}`);
+  }
+  assert.equal(settingCreateManyCalls.length, claimsAfterDup, "no stable id ⇒ no one-shot claim row");
+  await waitForAgentPosts(1);
+  assert.equal(agentPosts().length, 0, "fail-closed: no arr.manual_interaction emit without a stable id");
 });
 
 test("radarr issue-grab completion: CAS-claimed, scoped to the firing instance; a skipped push stays claimed", async () => {
@@ -1185,9 +1236,48 @@ test("radarr issue-grab completion: CAS-claimed, scoped to the firing instance; 
   assert.deepEqual(grabUpdateManyCalls[0].where, { id: defaultGrab.id, notifiedAt: null });
 
   // Push has no subscriptions in this harness → "skipped-no-subs": logged, and
-  // notifiedAt stays SET (retrying wouldn't help; only "failed" resets it).
+  // notifiedAt stays SET (retrying wouldn't help; a failed push also leaves it
+  // set and records a grabPushRetry Setting instead of unclaiming).
   assert.ok(warns.some((w) => w.includes("grab push skipped (skipped-no-subs)")));
   assert.ok(defaultGrab.notifiedAt instanceof Date);
+});
+
+test("radarr issue-grab: a failed web push keeps notifiedAt set and does not re-emit arr.grab_completed", async () => {
+  const grab = seedGrab({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" });
+  agentRows.push(agentRow("arr.grab_completed"));
+  seedFailedIosPush(grab.triggeredById);
+  honourAgentUrl();
+
+  const first = await post(
+    radarrPOST,
+    webhookReq("radarr", {
+      token: RADARR_SECRET,
+      body: { eventType: "Download", movie: { tmdbId: 603, title: "The Matrix" }, downloadId: "dl-1" },
+    }),
+  );
+  assert.equal(first.res.status, 200);
+  await waitForAgentPosts(1);
+  assert.deepEqual(agentPosts().map((p) => p.event), ["arr.grab_completed"]);
+  assert.ok(grab.notifiedAt instanceof Date, "the emit claim stays set after a failed push");
+  assert.equal(settings.has(`grabPushRetry:${grab.id}`), true, "a push-only retry marker is recorded");
+  assert.ok(warns.some((w) => w.includes("grab notification failed, will retry push")));
+  assert.equal(grabUpdateManyCalls.length, 1, "exactly one CAS — failed push must not unclaim");
+
+  // A later Download for the same title (volatile downloadId ⇒ new replay digest)
+  // retries the web push but must not emit again.
+  const second = await post(
+    radarrPOST,
+    webhookReq("radarr", {
+      token: RADARR_SECRET,
+      body: { eventType: "Download", movie: { tmdbId: 603, title: "The Matrix" }, downloadId: "dl-2" },
+    }),
+  );
+  assert.equal(second.res.status, 200);
+  await waitForAgentPosts(2);
+  assert.equal(agentPosts().length, 1, "ntfy/Gotify/NotificationAgent fire once per grab, not once per push retry");
+  assert.ok(grab.notifiedAt instanceof Date);
+  assert.equal(grabUpdateManyCalls.length, 1, "the second delivery must not re-CAS notifiedAt");
+  assert.equal(settings.has(`grabPushRetry:${grab.id}`), true, "the retry marker is rewritten when push fails again");
 });
 
 // ── body caps, malformed JSON, rate limiting ────────────────────────────────
@@ -1441,6 +1531,34 @@ test("sonarr ManualInteractionRequired: stable key prefers tvdbId, falls back to
   assert.deepEqual(lastClaim.data.map((d) => d.key), ["manualInteractionNotified:sonarr::43"]);
 });
 
+test("sonarr ManualInteractionRequired: no usable tvdbId/tmdbId ⇒ fail closed, no emit", async () => {
+  agentRows.push(agentRow("arr.manual_interaction"));
+  honourAgentUrl();
+  const claimsBefore = settingCreateManyCalls.length;
+  for (const series of [
+    undefined,
+    { title: "Unknown" },
+    { tvdbId: 0, tmdbId: 0, title: "Unknown" },
+    { tvdbId: 1.5, title: "Unknown" },
+  ]) {
+    const noId = await post(
+      sonarrPOST,
+      webhookReq("sonarr", {
+        token: SONARR_SECRET,
+        body: {
+          eventType: "ManualInteractionRequired",
+          ...(series ? { series } : {}),
+          downloadClient: `sab-${String((series as { tvdbId?: number } | undefined)?.tvdbId ?? "none")}`,
+        },
+      }),
+    );
+    assert.equal(noId.tasks.length, 0, `no notify for series=${JSON.stringify(series)}`);
+  }
+  assert.equal(settingCreateManyCalls.length, claimsBefore, "no stable id ⇒ no one-shot claim row");
+  await waitForAgentPosts(1);
+  assert.equal(agentPosts().length, 0, "fail-closed: no arr.manual_interaction emit without a stable id");
+});
+
 test("sonarr grab completion is scoped to WHAT the Download delivered: an S03E02 import never claims an S01E05 EPISODE grab or an S01 SEASON grab, FULL matches any", async () => {
   configureSonarr("");
   // Still-incomplete series: the request flip is skipped (guardrail 14a) but the
@@ -1479,6 +1597,56 @@ test("sonarr grab completion is scoped to WHAT the Download delivered: an S03E02
   assert.ok(after(episodeGrab.id) instanceof Date, "the matching S01E05 delivery claims the EPISODE grab");
   assert.ok(after(seasonGrab.id) instanceof Date, "an S01 episode claims the S01 SEASON grab");
   assert.equal(grabUpdateManyCalls.length, 3);
+});
+
+test("sonarr issue-grab: a failed web push keeps notifiedAt set and does not re-emit arr.grab_completed", async () => {
+  configureSonarr("");
+  scriptSonarr({
+    series: () => [{ tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10)] }],
+  });
+  honourAgentUrl();
+  const grab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "FULL" });
+  agentRows.push(agentRow("arr.grab_completed"));
+  seedFailedIosPush(grab.triggeredById);
+
+  const first = await post(
+    sonarrPOST,
+    webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: {
+        eventType: "Download",
+        series: { tvdbId: 777, tmdbId: 888, title: "Frieren" },
+        episodes: [{ seasonNumber: 1, episodeNumber: 3 }],
+        downloadId: "dl-1",
+      },
+    }),
+  );
+  assert.equal(first.res.status, 200);
+  await waitForAgentPosts(1);
+  assert.deepEqual(agentPosts().map((p) => p.event), ["arr.grab_completed"]);
+  assert.ok(grab.notifiedAt instanceof Date, "the emit claim stays set after a failed push");
+  assert.equal(settings.has(`grabPushRetry:${grab.id}`), true);
+  assert.ok(warns.some((w) => w.includes("grab notification failed, will retry push")));
+  assert.equal(grabUpdateManyCalls.length, 1, "exactly one CAS — failed push must not unclaim");
+
+  const second = await post(
+    sonarrPOST,
+    webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: {
+        eventType: "Download",
+        series: { tvdbId: 777, tmdbId: 888, title: "Frieren" },
+        episodes: [{ seasonNumber: 1, episodeNumber: 3 }],
+        downloadId: "dl-2",
+      },
+    }),
+  );
+  assert.equal(second.res.status, 200);
+  await waitForAgentPosts(2);
+  assert.equal(agentPosts().length, 1, "ntfy/Gotify/NotificationAgent fire once per grab, not once per push retry");
+  assert.ok(grab.notifiedAt instanceof Date);
+  assert.equal(grabUpdateManyCalls.length, 1, "the second delivery must not re-CAS notifiedAt");
+  assert.equal(settings.has(`grabPushRetry:${grab.id}`), true);
 });
 
 test("sonarr: non-Download events and a Download without series are acknowledged skips with no writes", async () => {

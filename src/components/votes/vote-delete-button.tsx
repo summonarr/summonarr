@@ -27,6 +27,21 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   const t = useT();
   const [state, setState] = useState<"idle" | "reason" | "loading" | "voted">(alreadyVoted ? "voted" : "idle");
   const [reason, setReason] = useState("");
+  // Client nav reuses this instance across titles. `alreadyVoted` is live so a
+  // refresh after voting (this button already router.refresh()es) matches.
+  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
+  const [seenVoted, setSeenVoted] = useState(alreadyVoted);
+  const titleChanged = seenTmdbId !== tmdbId;
+  if (titleChanged) {
+    setSeenTmdbId(tmdbId);
+    setSeenVoted(alreadyVoted);
+    setState(alreadyVoted ? "voted" : "idle");
+    setReason("");
+  } else if (alreadyVoted !== seenVoted && state !== "loading" && state !== "reason") {
+    setSeenVoted(alreadyVoted);
+    setState(alreadyVoted ? "voted" : "idle");
+  }
+  const displayState = titleChanged ? (alreadyVoted ? "voted" : "idle") : state;
 
   async function handleVote() {
     setState("loading");
@@ -67,7 +82,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     }
   }
 
-  if (state === "voted") {
+  if (displayState === "voted") {
     return (
       <DetailActionButton
         variant="danger-soft"
@@ -81,7 +96,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     );
   }
 
-  if (state === "reason") {
+  if (displayState === "reason") {
     return (
       <div className="flex items-center gap-2 flex-wrap">
         <input
@@ -109,7 +124,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     );
   }
 
-  if (state === "loading") {
+  if (displayState === "loading") {
     return (
       <DetailActionButton variant="secondary" disabled busy aria-label={t("request.vote.updating")}>
         <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />

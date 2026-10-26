@@ -25,9 +25,11 @@ interface SearchResult {
 
 const rowKey = (tmdbId: number, mt: string) => `${tmdbId}:${mt}`;
 
-export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
+export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; total: number }) {
   const t = useT();
   const [items, setItems] = useState<BlacklistRow[]>(initial);
+  // Real blocked count (may exceed the page's slice). Adjusted locally on add/remove.
+  const [blockedTotal, setBlockedTotal] = useState(total);
   const [query, setQuery] = useState("");
   const [reason, setReason] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -121,6 +123,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
       // createdAt); fall back to local values if the body won't parse.
       const d = (await res.json().catch(() => ({}))) as { item?: Partial<BlacklistRow> | null };
       const item = d?.item ?? null;
+      const existed = items.some((i) => i.tmdbId === r.id && i.mediaType === mediaType);
       setItems((prev) => [
         {
           tmdbId: r.id,
@@ -131,6 +134,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         },
         ...prev.filter((i) => !(i.tmdbId === r.id && i.mediaType === mediaType)),
       ]);
+      if (!existed) setBlockedTotal((n) => n + 1);
       // The placeholder promises the reason is "saved with the NEXT title you
       // block" — one-shot — so it must not silently ride along onto a second,
       // unrelated title from the same result list.
@@ -157,6 +161,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         return;
       }
       setItems((prev) => prev.filter((i) => !(i.tmdbId === row.tmdbId && i.mediaType === row.mediaType)));
+      setBlockedTotal((n) => Math.max(0, n - 1));
     } catch {
       setError(t("shared.thread.networkError"));
     } finally {
@@ -244,7 +249,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
       {/* Blocked titles */}
       <div className="flex flex-col gap-2">
         <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>
-          {t("adminQueue.blacklist.blockedHeading", { count: items.length })}
+          {t("adminQueue.blacklist.blockedHeading", { count: blockedTotal })}
         </h2>
         {items.length === 0 ? (
           <p style={{ fontSize: 13, color: "var(--ds-fg-muted)", margin: 0 }}>

@@ -293,7 +293,7 @@ type Op = { model: string; method: string; args: unknown };
 type TxRecord = { ops: Op[]; timeout: number | undefined; failed: boolean };
 const transactions: TxRecord[] = [];
 const execRawOrder: string[] = []; // ordered advisory-lock $executeRaw SQL across ALL txs (sequencing pin)
-let failCreateManyOnModel: string | null = null;
+const failCreateManyOnModels = new Set<string>();
 
 function recordingDelegate(rec: TxRecord, model: string) {
   return {
@@ -303,7 +303,7 @@ function recordingDelegate(rec: TxRecord, model: string) {
     },
     createMany: async (args: { data: unknown[]; skipDuplicates?: boolean }) => {
       rec.ops.push({ model, method: "createMany", args });
-      if (failCreateManyOnModel === model) throw new Error(`${model} insert exploded (unit test)`);
+      if (failCreateManyOnModels.has(model)) throw new Error(`${model} insert exploded (unit test)`);
       return { count: args.data.length };
     },
   };
@@ -790,7 +790,7 @@ beforeEach(() => {
   usersById.clear();
   sessionRows.clear();
   settings.clear();
-  failCreateManyOnModel = null;
+  failCreateManyOnModels.clear();
   lockAcquire = (id) => id !== 2009; // 2009 busy ⇒ syncDownloadPolicies skipped
   respond = (url) => { throw new Error(`unexpected fetch ${url} — script a responder for this test`); };
   invalidateFeatureFlagCache(); // module-global 10s flag cache — reset between tests
@@ -1867,6 +1867,25 @@ test("multi-server PARTIAL failure: one instance's library fetch failing preserv
   assert.deepEqual(b.failedSources, ["plex"]);
 });
 
+test("multi-server PARTIAL failure still marks a request the HEALTHY instance holds — presence needs no complete union", async () => {
+  // plexSyncSucceeded is false on a partial run (above), but the healthy
+  // instance's rows DID land. Gating marking on that flag left every title on
+  // the healthy server unmarked for as long as the other server was down.
+  configurePlexMultiServer();
+  const defaultResponder = plexResponder([300]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? new Response("gone", { status: 404 }) : defaultResponder(url));
+  seedRequest({ id: "req-healthy", tmdbId: 300, mediaType: "MOVIE", requestedBy: "u-plex", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.deepEqual(b.failedSources, ["plex"], "the run is still reported degraded");
+  assert.equal(b.plexMarked, 1, "the healthy instance's title is marked");
+  assert.equal(requests.get("req-healthy")?.status, "AVAILABLE");
+});
+
 // Plex: one movie section (empty) + one show section. The type=2 walk lists
 // the shows (with tmdb guids); the type=4 walk lists their episodes, each
 // carrying an on-disk file — the data the skipShowFilePaths patch runs on.
@@ -2101,6 +2120,31 @@ test("a Plex fetch failure does NOT sink the Jellyfin pass (Promise.allSettled i
   assert.deepEqual(b.failedSources, ["plex"]);
   assert.equal(res.headers.get("x-cron-degraded"), "plex");
   assert.equal(requests.get("req-jf")?.status, "AVAILABLE");
+});
+
+test("a successful fetch whose library write throws does NOT mark or notify from that source's in-memory maps", async () => {
+  // Maps are filled BEFORE the staged swap. A write failure (here the swap's
+  // INSERT ... SELECT throwing inside the transaction — the P2028 shape) already
+  // skipped demotion and the last*SyncSucceededAt stamp; marking and the notify
+  // fallback must use the same "union is not authoritative" signal.
+  configureBothServers();
+  failSwapOnTables.add("PlexLibraryItem");
+  failSwapOnTables.add("JellyfinLibraryItem");
+  respond = bothServersRespond([100], [200]);
+  seedRequest({ id: "req-plex", tmdbId: 100, mediaType: "MOVIE", requestedBy: "u-plex", status: "PENDING" });
+  seedRequest({ id: "req-jf", tmdbId: 200, mediaType: "MOVIE", requestedBy: "u-jf", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(res.status, 200);
+  assert.equal(b.plexMarked, 0, "a rolled-back Plex write must not mark from the pre-tx map");
+  assert.equal(b.jellyfinMarked, 0, "a rolled-back Jellyfin write must not mark from the pre-tx map");
+  assert.equal(casCalls.length, 0, "claimAvailableNotifications must not run for a non-authoritative union");
+  assert.equal(requests.get("req-plex")?.status, "PENDING");
+  assert.equal(requests.get("req-jf")?.status, "PENDING");
+  assert.deepEqual(b.failedSources, ["plex", "jellyfin"]);
 });
 
 test("a Jellyfin fetch failure does NOT sink the Plex pass (symmetric isolation)", async () => {

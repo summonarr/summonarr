@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withPermission } from "@/lib/api-auth";
 import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
+import { clearSessionFootholdsInTx } from "@/lib/session-footholds";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
@@ -82,9 +83,18 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   // sign the user out of every device.
   if (body.all === true) {
     try {
-      await revokeAllUserSessions(id, (tx) =>
-        assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN)),
-      );
+      await revokeAllUserSessions(id, async (tx) => {
+        await assertTargetNotAdminInTx(tx, id, hasPermission(session.user.permissions, Permission.ADMIN));
+        // Same compromise-response set as POST /api/sessions/revoke-all
+        // (guardrail 6g). Not folded into revokeAllUserSessions — Jellyfin
+        // offboarding uses that helper without wanting to drop push / pending
+        // Discord / the calendar URL.
+        await clearSessionFootholdsInTx(tx, id);
+        await tx.user.update({
+          where: { id },
+          data: { calendarTokenHash: null, calendarTokenCreatedAt: null },
+        });
+      });
     } catch (err) {
       if (err instanceof TargetBecameAdminError) {
         return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });

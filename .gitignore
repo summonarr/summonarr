@@ -70,3 +70,5 @@ scripts/burn-*.ts
 
 # Scratch probe tests written by audit/agent runs — never part of the committed suite.
 tests/zz*.test.mts
+docs/plans/session-handoff-2026-10-24-bug-hunt.md
+SESSION_WRAPUP.md

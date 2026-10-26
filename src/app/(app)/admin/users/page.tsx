@@ -18,11 +18,16 @@ import { getWatchGradeSummaries } from "@/lib/watch-grade-data";
 
 export const dynamic = "force-dynamic";
 
+// Row budget for the table. When it is hit the UI says so rather than treating
+// the slice length as the registered total (the subtitle and the on-behalf
+// picker both used to). Auxiliary queries below are scoped to this page's ids.
+const USER_LIST_CAP = 1000;
+
 export default async function UsersPage() {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_USERS)) redirect("/");
 
-  const [users, localAuthRows, oidcAccountRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured, totpRows, passkeyRows] = await Promise.all([
+  const [users, userCount, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
     prisma.user.findMany({
       select: {
         id: true,
@@ -59,20 +64,9 @@ export default async function UsersPage() {
         _count: { select: { requests: true } },
       },
       orderBy: [{ name: "asc" }, { email: "asc" }],
-      take: 1000,
+      take: USER_LIST_CAP,
     }),
-    prisma.user.findMany({
-      where: { passwordHash: { not: null } },
-      select: { id: true },
-    }),
-    // The only Account rows this app writes are the OIDC bindings (auth.ts) —
-    // Plex/Jellyfin store their id on the User row instead. Without this list,
-    // deriveUserSource below would read an OIDC account (no passwordHash, IdP
-    // email) as "plex" and hide the server-access controls it actually needs.
-    prisma.account.findMany({
-      where: { provider: "oidc" },
-      select: { userId: true },
-    }),
+    prisma.user.count(),
     prisma.mediaServerUser.findMany({
       // Active users, PLUS departed (soft-deleted) ones that still hold play
       // history. A departed row's history outlives their removal from the server
@@ -102,17 +96,35 @@ export default async function UsersPage() {
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
     isArrConfigured("radarr", "4k"),
     isArrConfigured("sonarr", "4k"),
-    // Which accounts have an active second factor — drives the Reset two-factor
-    // action. Selects only userId: the TOTP secret never leaves the extension.
-    prisma.userTotp.findMany({ where: { enabledAt: { not: null } }, select: { userId: true } }),
-    prisma.webAuthnCredential.findMany({ distinct: ["userId"], select: { userId: true } }),
   ]);
+  const userIds = users.map((u) => u.id);
+  // Scoped to the listed slice — an unbounded related read of every local-auth /
+  // OIDC / 2FA row was the other half of the silent 1000 cap.
+  const [localAuthRows, oidcAccountRows, totpRows, passkeyRows, watchGrades] = userIds.length === 0
+    ? [[], [], [], [], await getWatchGradeSummaries([])]
+    : await Promise.all([
+      prisma.user.findMany({
+        where: { id: { in: userIds }, passwordHash: { not: null } },
+        select: { id: true },
+      }),
+      // The only Account rows this app writes are the OIDC bindings (auth.ts) —
+      // Plex/Jellyfin store their id on the User row instead. Without this list,
+      // deriveUserSource below would read an OIDC account (no passwordHash, IdP
+      // email) as "plex" and hide the server-access controls it actually needs.
+      prisma.account.findMany({
+        where: { provider: "oidc", userId: { in: userIds } },
+        select: { userId: true },
+      }),
+      // Which listed accounts have an active second factor — drives the Reset
+      // two-factor action. Selects only userId: the TOTP secret never leaves the
+      // extension.
+      prisma.userTotp.findMany({ where: { userId: { in: userIds }, enabledAt: { not: null } }, select: { userId: true } }),
+      prisma.webAuthnCredential.findMany({ where: { userId: { in: userIds } }, distinct: ["userId"], select: { userId: true } }),
+      getWatchGradeSummaries(userIds),
+    ]);
   const mfaUserIds = new Set([...totpRows, ...passkeyRows].map((r) => r.userId));
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
   const oidcAuthIds = new Set(oidcAccountRows.map((r) => r.userId));
-  // Request watch grades for every listed account (null when the feature or play
-  // history tracking is off). One batch, independent of the user count.
-  const watchGrades = await getWatchGradeSummaries(users.map((u) => u.id));
 
   const hasPlex = serverUsers.some((u) => u.source === "plex");
   const hasJellyfin = serverUsers.some((u) => u.source === "jellyfin");
@@ -162,7 +174,7 @@ export default async function UsersPage() {
     <div className="ds-page-enter">
       <PageHeader
         title={t("adminManage.users.title")}
-        subtitle={t("adminManage.users.registered", { count: users.length })}
+        subtitle={t("adminManage.users.registered", { count: userCount })}
         right={
           <div className="flex items-center gap-2">
             <CreateUserButton />
@@ -170,6 +182,16 @@ export default async function UsersPage() {
           </div>
         }
       />
+
+      {userCount > users.length && (
+        <p
+          role="status"
+          className="ds-mono"
+          style={{ fontSize: 11, color: "var(--ds-fg-subtle)", marginBottom: 10 }}
+        >
+          {t("adminManage.users.capped", { cap: USER_LIST_CAP, total: userCount })}
+        </p>
+      )}
 
       <div>
         <UserTable

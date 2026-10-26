@@ -477,6 +477,47 @@ export function removalIds(row: Pick<QueueItem, "ids">): number[] {
 }
 
 /**
+ * Posted queue record ids are names for downloads the instance currently
+ * holds — never forwarded blindly (guardrail 5e). Match any overlap with a
+ * folded row's ids (a Sonarr pack is one download), then send ONE id per
+ * download (`removalIds`) so Sonarr v3 blocklists once (guardrail 5c). An id
+ * the live read does not have is dropped; an empty result means everything
+ * posted is already gone.
+ */
+export function liveRemovalIds(rows: readonly QueueItem[], requested: readonly number[]): number[] {
+  return selectLiveIds(rows, requested, () => true);
+}
+
+/**
+ * Same selection as `liveRemovalIds`, restricted to releases the arr is still
+ * HOLDING (`pending`). Grab is the arr's bulk POST on those rows; a downloading
+ * or imported id the page still has must not be forwarded.
+ */
+export function liveGrabIds(rows: readonly QueueItem[], requested: readonly number[]): number[] {
+  return selectLiveIds(rows, requested, (row) => row.pending);
+}
+
+function selectLiveIds(
+  rows: readonly QueueItem[],
+  requested: readonly number[],
+  eligible: (row: QueueItem) => boolean,
+): number[] {
+  const want = new Set(requested);
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const row of rows) {
+    if (!eligible(row)) continue;
+    if (!row.ids.some((id) => want.has(id))) continue;
+    const [id] = removalIds(row);
+    if (id !== undefined && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+  return out;
+}
+
+/**
  * Whether a "Blocklist" (skipRedownload=true) on this instance can promise "no
  * new search". Sonarr v3 reads only removeFromClient and blocklist
  * (skipRedownload and changeCategory are ignored), so a blocklist there always

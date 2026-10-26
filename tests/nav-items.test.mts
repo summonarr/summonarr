@@ -484,6 +484,12 @@ test("every item has a label, an icon and an absolute href", () => {
   }
 });
 
+test("every admin nav item has an i18nKey so the sidebar is not hardcoded English", () => {
+  for (const item of adminNavItems) {
+    assert.ok(item.i18nKey && item.i18nKey.length > 0, `${item.href} (${item.label}) has no i18nKey`);
+  }
+});
+
 test("every admin item is section 'admin'; user items are browse or personal", () => {
   for (const item of adminNavItems) assert.equal(item.section, "admin", `${item.href} is misfiled`);
   for (const item of userNavItems) {

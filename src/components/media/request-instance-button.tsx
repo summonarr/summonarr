@@ -48,6 +48,17 @@ export function RequestInstanceButton({
   // handling as Request4kButton: show "Available", not a
   // "Requested" state for a request that does not exist.
   const [foundAvailable, setFoundAvailable] = useState(false);
+  // Client nav reuses this instance across titles (the parent key used to be
+  // the slug alone). `requested` is live so a refresh on this title flips
+  // the status without a remount.
+  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
+  const titleChanged = seenTmdbId !== tmdbId;
+  if (titleChanged) {
+    setSeenTmdbId(tmdbId);
+    setState(requested ? "requested" : "idle");
+    setMsg("");
+    setFoundAvailable(false);
+  }
 
   async function submit() {
     setState("loading");
@@ -85,7 +96,7 @@ export function RequestInstanceButton({
   }
 
   // Availability wins over request state — once the copy is fetched there's nothing to request.
-  if (available || foundAvailable) {
+  if (available || (!titleChanged && foundAvailable)) {
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
@@ -94,7 +105,7 @@ export function RequestInstanceButton({
     );
   }
 
-  if (state === "requested") {
+  if ((titleChanged ? !!requested : state === "requested" || requested)) {
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
@@ -120,17 +131,17 @@ export function RequestInstanceButton({
       <DetailActionButton
         variant="secondary"
         onClick={submit}
-        disabled={state === "loading"}
-        busy={state === "loading"}
+        disabled={!titleChanged && state === "loading"}
+        busy={!titleChanged && state === "loading"}
       >
-        {state === "loading" ? (
+        {!titleChanged && state === "loading" ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
         ) : (
           <Plus style={{ width: 14, height: 14 }} />
         )}
         {t("request.requestOn", { instance: instanceName })}
       </DetailActionButton>
-      {state === "error" && msg && (
+      {!titleChanged && state === "error" && msg && (
         <p
           className="ds-mono max-w-sm"
           role="alert"

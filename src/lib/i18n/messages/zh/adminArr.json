@@ -273,6 +273,7 @@
   "adminArr.calendar.nothingToSearch": "没有可搜索的内容——可能已下载。请重新加载查看最新状态。",
   "adminArr.calendar.footnote": "播出时间以你的时区显示。“缺失”表示某集已播出完毕或家庭版发行日期已过、作品受监控，且尚无文件或下载。特别篇从不计为缺失。",
   "adminArr.system.title": "Arr 系统",
+  "adminArr.trash.title": "TRaSH Guides",
   "adminArr.system.subtitle": "无需打开 Radarr 和 Sonarr，即可查看它们的任务、索引器、下载客户端和存储。",
   "adminArr.system.tab.tasks": "任务",
   "adminArr.system.tab.providers": "索引器和客户端",

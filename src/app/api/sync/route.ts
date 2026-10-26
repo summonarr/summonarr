@@ -845,6 +845,13 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
         } catch (err) {
           console.error("[sync] Plex library write failed:", err);
           libraryWriteSucceeded = false;
+          // This run's union is not authoritative (the same signal demotion
+          // already keys off). Drop the in-memory maps so a later reader
+          // cannot treat a rolled-back write as library presence.
+          plexMovieIds.clear();
+          plexTvIds.clear();
+          plexMovieSlugs.clear();
+          plexTvSlugs.clear();
         }
       }
 
@@ -1003,6 +1010,10 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
         } catch (err) {
           console.error("[sync] Jellyfin library write failed:", err);
           libraryWriteSucceeded = false;
+          jfMovieIds.clear();
+          jfTvIds.clear();
+          jfMovieSlugs.clear();
+          jfTvSlugs.clear();
         }
       }
 
@@ -1551,6 +1562,13 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
     return toMark.length;
   };
 
+  // A source whose library WRITE failed has empty maps here: each arm clears
+  // them in its catch, because they were filled BEFORE the transaction and a
+  // rolled-back replace must not flip requests AVAILABLE against rows that
+  // never landed. Do NOT gate this on plexSyncSucceeded / jellyfinSyncSucceeded:
+  // those are also false when ONE of several servers failed its fetch, and the
+  // healthy servers' rows did land — presence there is still proof (only
+  // ABSENCE needs a complete union, which is what demotion checks).
   if (plexMovieIds.size > 0 || plexTvIds.size > 0) {
     plexMarked = await markLibraryRequests(plexMovieIds, plexTvIds, "plex");
   }
@@ -1632,6 +1650,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       // toNotify, and only that array reaches claimAvailableNotificationWinners,
       // so a gated row's claim is never burned and the next run re-offers it.
       // With nothing restricted this is exactly the union `.has()` it replaced.
+      // A failed library write left that source's maps empty (cleared in its
+      // arm), so presence below is never read from a rolled-back write.
       const inPlex = presentForRequester(req, "plex", requesters);
       const inJellyfin = presentForRequester(req, "jellyfin", requesters);
       // "Unusable" = this source cannot prove presence either way: not configured/enabled

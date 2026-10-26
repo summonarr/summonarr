@@ -17,6 +17,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { AlertTriangle, Calendar } from "@/components/icons";
 import Link from "next/link";
 import { getTranslator } from "@/lib/i18n/server";
+import { canRequest } from "@/lib/permissions";
 
 // One screenful, matching POPULAR_PER_PAGE. See the note at the slice below for
 // why this page needed bounding at all.
@@ -72,6 +73,8 @@ export default async function UpcomingPage({
     plex: plexEnabled,
     jellyfin: jellyfinEnabled,
   });
+  const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
+  const canRequestTv = canRequest(session.user.permissions, "TV", false);
   const raw: TmdbMedia[] = [];
   let loadFailed = false;
   try {
@@ -223,6 +226,7 @@ export default async function UpcomingPage({
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 size="md"
+                canRequest={media.mediaType === "movie" ? canRequestMovie : canRequestTv}
               />
             ))}
           </div>

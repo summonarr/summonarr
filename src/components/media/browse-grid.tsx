@@ -31,6 +31,8 @@ interface BrowseGridProps {
   // unfiltered grid on a configured instance (a bookmarked `?page=N` past the
   // end, an empty upstream page) must not blame the token.
   tokenMissing?: boolean;
+  // HD request overlay on each card — same gate as the detail-page CTA.
+  canRequest?: boolean;
 }
 
 
@@ -45,6 +47,7 @@ export function BrowseGrid({
   maxYear,
   failed,
   tokenMissing,
+  canRequest,
 }: BrowseGridProps) {
   const searchParams = useSearchParams();
   const pathname = usePathname();
@@ -179,6 +182,7 @@ export function BrowseGrid({
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 size="md"
+                canRequest={canRequest}
                 // LCP (the page's main paint): preload the first row's
                 // posters. Same value on the server and at hydration, so no
                 // mismatch.

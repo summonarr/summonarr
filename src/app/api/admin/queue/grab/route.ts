@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
-import { grabPending, QueueInstanceError } from "@/lib/arr-queue-data";
+import { grabPending, QueueGoneError, QueueInstanceError } from "@/lib/arr-queue-data";
 import { serviceGate } from "@/lib/arr-queue-http";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
@@ -12,9 +12,10 @@ const MAX_IDS = 500;
 
 // Admin → Download Queue, "Grab now" on a release Radarr/Sonarr are HOLDING
 // (a delay profile, an unavailable client, a fallback) — the arr's own Grab on
-// a pending queue item, one bulk call. 409 when the release is no longer
-// pending (grabbed or dropped meanwhile). Audited ARR_RELEASE_GRAB after the
-// arr accepted it (guardrail 26).
+// a pending queue item, one bulk call. Posted ids NAME live pending records
+// (guardrail 5e); a downloading or vanished id is dropped. 409 when nothing
+// posted is still pending. Audited ARR_RELEASE_GRAB after the arr accepted it
+// (guardrail 26), with the ids SENT.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
@@ -28,13 +29,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const uniqueIds = [...new Set(ids as number[])];
   const label = target.service === "radarr" ? "Radarr" : "Sonarr";
+  let sentIds: number[];
   try {
-    await grabPending(target.service, target.instance, uniqueIds);
+    sentIds = await grabPending(target.service, target.instance, uniqueIds);
   } catch (err) {
     if (err instanceof QueueInstanceError) {
       return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service: label }) }, { status: 404 });
     }
-    if (err instanceof ArrResponseError && err.status === 404) {
+    if (err instanceof QueueGoneError || (err instanceof ArrResponseError && err.status === 404)) {
       return NextResponse.json({ error: t("apiAdmin.queue.notPending") }, { status: 409 });
     }
     console.warn(`[queue] ${target.service} instance "${sanitizeForLog(target.instance)}" grab failed:`, arrErrorMessage(err));
@@ -45,7 +47,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     userName: session.user.name ?? session.user.email ?? null,
     action: "ARR_RELEASE_GRAB",
     target: `${target.service}:${target.instance}`,
-    details: { service: target.service, instance: target.instance, ids: uniqueIds, source: "queue" },
+    details: { service: target.service, instance: target.instance, ids: sentIds, source: "queue" },
     ...auditContext(req, session),
   });
   return NextResponse.json({ ok: true });

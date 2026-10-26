@@ -193,5 +193,7 @@
   "personal.common.trackingOff.description": "No se está registrando nada, así que esta página no puede llenarse. Un administrador puede activar el seguimiento del historial en Ajustes → Funciones.",
   "personal.common.trackingOff.cta": "Abrir ajustes",
   "personal.common.showingMostRecent": "Se muestran tus {n} títulos más recientes. Los más antiguos no aparecen aquí.",
+  "personal.common.cappedEmpty": "Se quitaron tus {n} títulos más recientes. Recarga para ver los más antiguos que siguen en la lista.",
+  "personal.common.reload": "Recargar",
   "personal.watchlist.removeError": "No se pudo quitar “{title}” de Mi lista. Inténtalo de nuevo."
 }

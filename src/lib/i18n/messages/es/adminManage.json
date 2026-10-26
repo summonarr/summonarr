@@ -421,6 +421,7 @@
   "adminManage.users.title": "Usuarios",
   "adminManage.users.registered_one": "{count} usuario registrado",
   "adminManage.users.registered_other": "{count} usuarios registrados",
+  "adminManage.users.capped": "Se muestran {cap} de {total} usuarios registrados.",
   "adminManage.serverUsers.title": "Usuarios de servidores multimedia",
   "adminManage.serverUsers.subtitle": "Todas las cuentas de Plex y Jellyfin. Los permisos de descarga de Jellyfin se sincronizan y se aplican en cada ejecución; los permisos de Plex deben gestionarse en Plex.",
   "adminManage.users.role.ADMIN": "Administrador",

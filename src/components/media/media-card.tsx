@@ -49,6 +49,10 @@ interface MediaCardProps {
       a node rather than a boolean flag so this component never learns about the
       hidden-items API. */
   overlayAction?: React.ReactNode;
+  /** When false, hide the HD Request overlay (the viewer cannot request this
+      media type on the default instance). View / Blocked still render — those
+      are not the request CTA. Same gate as the detail-page HD button. */
+  canRequest?: boolean;
 }
 
 type RequestState = "idle" | "confirm" | "loading" | "requested" | "available" | "error";
@@ -64,6 +68,7 @@ function MediaCardImpl({
   requestToken,
   caption,
   overlayAction,
+  canRequest = true,
 }: MediaCardProps) {
   const router = useRouter();
   const { toast } = useToast();
@@ -71,6 +76,16 @@ function MediaCardImpl({
   const poster = posterUrl(media.posterPath, "w342");
   const [reqState, setReqState] = useState<RequestState>("idle");
   const [liveRatings, setLiveRatings] = useState<LiveRatings | null>(null);
+  // Grids key cards by id, but a reused instance (person filmography filter,
+  // a parent that forgets the key) must not keep the previous title's request
+  // overlay. Ratings live-state is title-scoped too.
+  const [seenId, setSeenId] = useState(media.id);
+  const titleChanged = seenId !== media.id;
+  if (titleChanged) {
+    setSeenId(media.id);
+    setReqState("idle");
+    setLiveRatings(null);
+  }
 
   useEffect(() => {
     if (media.imdbRating !== undefined || media.rottenTomatoes !== undefined) return;
@@ -86,12 +101,23 @@ function MediaCardImpl({
   const isAvailable = !!(
     (showPlex && media.plexAvailable) ||
     (showJellyfin && media.jellyfinAvailable)
-  ) || reqState === "available";
+  ) || (!titleChanged && reqState === "available");
   // Only the viewer's OWN request blocks re-requesting. A title queued by
   // someone else (arrPending) stays requestable — the server mirrors the
   // approved status so this user gets the "now available" notification.
-  const isRequested = !!media.requestedByMe || reqState === "requested";
+  const uiReqState = titleChanged ? "idle" : reqState;
+  const isRequested = !!media.requestedByMe || uiReqState === "requested";
   const blacklisted = !!media.blacklisted;
+  // Hide the Request overlay when the viewer cannot request this type. Keep
+  // View / Blocked / in-flight confirm — "already requested" is not the CTA.
+  const showRequestOverlay =
+    canRequest ||
+    isAvailable ||
+    isRequested ||
+    blacklisted ||
+    uiReqState === "confirm" ||
+    uiReqState === "loading" ||
+    uiReqState === "error";
 
   const detailPath =
     media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
@@ -162,6 +188,8 @@ function MediaCardImpl({
     }
     if (isAvailable || isRequested || blacklisted) {
       router.push(detailPath);
+    } else if (!canRequest) {
+      return;
     } else if (reqState === "idle" || reqState === "error") {
       setReqState("confirm");
     } else if (reqState === "confirm") {
@@ -180,8 +208,8 @@ function MediaCardImpl({
     if (isAvailable || isRequested) return t("media.card.viewLabel", { title: media.title });
     // The button navigates (router.push), so name the action, not a status.
     if (blacklisted) return t("media.card.viewBlockedLabel", { title: media.title });
-    if (reqState === "loading") return t("media.card.requestingLabel", { title: media.title });
-    if (reqState === "error") return t("media.card.retryLabel", { title: media.title });
+    if (uiReqState === "loading") return t("media.card.requestingLabel", { title: media.title });
+    if (uiReqState === "error") return t("media.card.retryLabel", { title: media.title });
     return t("media.card.requestLabel", { title: media.title });
   };
 
@@ -207,8 +235,8 @@ function MediaCardImpl({
           {t("media.card.blocked")}
         </span>
       );
-    if (reqState === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
-    if (reqState === "error") return <span>{t("media.card.retry")}</span>;
+    if (uiReqState === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
+    if (uiReqState === "error") return <span>{t("media.card.retry")}</span>;
     return (
       <span className="flex items-center gap-1">
         <Plus className="w-3.5 h-3.5" />
@@ -268,10 +296,11 @@ function MediaCardImpl({
         )}
 
         {/* Hover / confirm overlay */}
+        {showRequestOverlay && (
         <div
           className={cn(
             "absolute inset-0 flex items-end justify-center pointer-events-none transition-opacity",
-            reqState === "confirm"
+            uiReqState === "confirm"
               ? "opacity-100"
               : "opacity-0 group-hover:opacity-100 focus-within:opacity-100",
           )}
@@ -282,7 +311,7 @@ function MediaCardImpl({
             padding: 10,
           }}
         >
-          {reqState === "confirm" ? (
+          {uiReqState === "confirm" ? (
             <div className="pointer-events-auto flex flex-col items-center gap-2 px-3 pb-2">
               <span
                 className="text-center leading-tight font-semibold"
@@ -361,6 +390,7 @@ function MediaCardImpl({
             </button>
           )}
         </div>
+        )}
 
         {/* Top-left: availability chips. `data-media-chips` lets a caller that
             puts its own overlay in this corner shift them clear — /popular's
@@ -451,16 +481,16 @@ function MediaCardImpl({
             revealed for the same reason — the two share the poster's bottom
             edge — and stays hidden while the confirm prompt is up. */}
         {!isAvailable &&
-          ((media.requested || reqState === "requested") || (!isRequested && blacklisted)) && (
+          ((media.requested || uiReqState === "requested") || (!isRequested && blacklisted)) && (
           <div
             className={cn(
               "absolute bottom-1.5 left-1.5 flex flex-col items-start gap-1 pointer-events-none transition-opacity",
-              reqState === "confirm"
+              uiReqState === "confirm"
                 ? "opacity-0"
                 : "group-hover:opacity-0 group-focus-within:opacity-0",
             )}
           >
-            {(media.requested || reqState === "requested") && (
+            {(media.requested || uiReqState === "requested") && (
               <span
                 className="ds-chip ds-chip-accent"
                 style={{ paddingLeft: 5, paddingRight: 6 }}

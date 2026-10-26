@@ -186,13 +186,16 @@ export async function POST(req: NextRequest) {
     // once per stuck series. Key on the STABLE series id (tvdbId, falling back to
     // tmdbId) + service, never the volatile queue id/progress. ISO value lets the
     // marker be pruned later.
+    // No usable tvdbId/tmdbId → fail closed (no notify). A shouldNotify=true
+    // fallback re-fires on every queue tick: replay hashes the whole payload,
+    // and these events change queue id/progress each time.
     const stableSeriesId =
       Number.isInteger(payload.series?.tvdbId) && (payload.series!.tvdbId as number) > 0
         ? payload.series!.tvdbId
         : Number.isInteger(payload.series?.tmdbId) && (payload.series!.tmdbId as number) > 0
         ? payload.series!.tmdbId
         : null;
-    let shouldNotify = true;
+    let shouldNotify = false;
     if (stableSeriesId !== null) {
       const manualKey = `manualInteractionNotified:sonarr:${arrInstance}:${stableSeriesId}`;
       const claim = await prisma.setting.createMany({
@@ -499,7 +502,7 @@ export async function POST(req: NextRequest) {
   ];
   // A RESOLVED issue's grab is never claimed (CLAIMABLE_GRAB_ISSUE — the Radarr twin).
   const grabWhere = grabIdFilters.length > 0
-    ? { OR: grabIdFilters, mediaType: "TV" as const, arrInstance, notifiedAt: null, issue: CLAIMABLE_GRAB_ISSUE }
+    ? { OR: grabIdFilters, mediaType: "TV" as const, arrInstance, issue: CLAIMABLE_GRAB_ISSUE }
     : null;
   if (grabWhere) {
     const candidateGrabs = await prisma.issueGrab.findMany({ where: grabWhere });
@@ -509,7 +512,8 @@ export async function POST(req: NextRequest) {
     // S03E02 import claimed an EPISODE grab fired for S01E05 (or a SEASON grab
     // for S01): the admin was pushed "grab completed" for a file that had not
     // landed, and when it finally did there was no notification left to send
-    // (notifiedAt is reset only on a push "failed"). EPISODE needs a delivered
+    // (notifiedAt is the emit claim and is never reset; a failed push retries
+    // via a grabPushRetry Setting). EPISODE needs a delivered
     // episode matching season AND episode; SEASON needs a matching season; FULL
     // matches any delivery. A grab with no season/episode to match on (not a
     // shape the releases route writes) keeps the old any-delivery behaviour
@@ -527,24 +531,32 @@ export async function POST(req: NextRequest) {
       }
       return true;
     };
-    const pendingGrabs = candidateGrabs.filter(matchesDelivery);
-    if (pendingGrabs.length > 0) {
+    const matchingGrabs = candidateGrabs.filter(matchesDelivery);
+    if (matchingGrabs.length > 0) {
       const now = new Date();
       await Promise.all(
-        pendingGrabs.map(async (grab) => {
+        matchingGrabs.map(async (grab) => {
+          const retryKey = `grabPushRetry:${grab.id}`;
+          if (grab.notifiedAt !== null) {
+            // Already emitted. Consume the push-retry marker (CAS): a 0 count
+            // means no pending retry, or another delivery already took it.
+            const taken = await prisma.setting.deleteMany({ where: { key: { in: [retryKey] } } });
+            if (taken.count === 0) return;
+          } else {
+            // CAS: ensure only one concurrent webhook fires the notification for this grab
+            const claimed = await prisma.issueGrab.updateMany({
+              where: { id: grab.id, notifiedAt: null },
+              data: { notifiedAt: now },
+            });
+            if (claimed.count === 0) return;
 
-          // CAS: ensure only one concurrent webhook fires the notification for this grab
-          const claimed = await prisma.issueGrab.updateMany({
-            where: { id: grab.id, notifiedAt: null },
-            data: { notifiedAt: now },
-          });
-          if (claimed.count === 0) return;
+            emitNotificationEvent({
+              event: "arr.grab_completed",
+              media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
+              request: { instance: grab.arrInstance },
+            });
+          }
 
-          emitNotificationEvent({
-            event: "arr.grab_completed",
-            media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
-            request: { instance: grab.arrInstance },
-          });
           const outcome = await notifyAdminGrabCompletedPush({
             userId: grab.triggeredById,
             title: grab.title,
@@ -555,15 +567,15 @@ export async function POST(req: NextRequest) {
             episodeNumber: grab.episodeNumber,
             issueId: grab.issueId,
           });
-          // "failed" → reset notifiedAt for retry. "skipped-no-subs" /
-          // "skipped-no-keys" → leave notifiedAt set, but log so an operator
-          // can wire up email/Discord backstop notification.
+          // "failed" → keep notifiedAt (emit stays claimed) and record a push-only
+          // retry. "skipped-no-subs" / "skipped-no-keys" → leave notifiedAt set,
+          // but log so an operator can wire up email/Discord backstop notification.
           if (outcome === "failed") {
-            await prisma.issueGrab.update({
-              where: { id: grab.id, notifiedAt: now },
-              data: { notifiedAt: null },
-            }).catch(() => {});
-            console.warn("[webhook/sonarr] grab notification failed, reset for retry");
+            await prisma.setting.createMany({
+              data: [{ key: retryKey, value: now.toISOString() }],
+              skipDuplicates: true,
+            });
+            console.warn("[webhook/sonarr] grab notification failed, will retry push");
           } else if (outcome === "skipped-no-subs" || outcome === "skipped-no-keys") {
             console.warn(`[webhook/sonarr] grab push skipped (${outcome}) for user=${grab.triggeredById} issue=${grab.issueId}`);
           }

@@ -65,6 +65,12 @@ interface RequestButtonProps {
   // When true, the title is admin-blacklisted: show an "unavailable to request"
   // state instead of the request CTA. The request POST 403s regardless.
   blacklisted?: boolean;
+
+  // When false, hide the HD request CTA (the viewer cannot request this media
+  // type on the default instance). Availability / queued / already-requested
+  // status still renders — those are not the CTA. Default true so a missed
+  // callsite cannot silently strip the button from someone who CAN request.
+  canRequest?: boolean;
 }
 
 // Per-item outcome → status line for the on-behalf flow. The keys mirror the
@@ -123,6 +129,7 @@ export function RequestButton({
   canRequestOnBehalf = false,
   canChooseProfile = false,
   blacklisted = false,
+  canRequest = true,
 }: RequestButtonProps) {
   const { toast } = useToast();
   const t = useT();
@@ -147,6 +154,26 @@ export function RequestButton({
   // auto-approvers, already downloaded by Radarr/Sonarr). Same handling as
   // Request4kButton: show it as available, not as a request that doesn't exist.
   const [foundAvailable, setFoundAvailable] = useState(false);
+  // Client nav /movie/A → /movie/B reuses this instance. Reset local UI when
+  // the title changes; `requested` is also live (OR'd into isDone below) so a
+  // router.refresh after watchlist auto-request flips the CTA without a remount.
+  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
+  const titleChanged = seenTmdbId !== tmdbId;
+  if (titleChanged) {
+    setSeenTmdbId(tmdbId);
+    setState(requested ? "duplicate" : "idle");
+    setNote("");
+    setErrorMsg("");
+    setObUsers([]);
+    setObUserId("");
+    setObMsg("");
+    setObMsgError(false);
+    setObUsersState("idle");
+    setObSubmitting(false);
+    setProfiles(null);
+    setProfileId("");
+    setFoundAvailable(false);
+  }
 
   function loadProfiles() {
     if (!canChooseProfile || profiles !== null) return;
@@ -252,8 +279,16 @@ export function RequestButton({
   }
 
   const isAvailable =
-    (showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable) || foundAvailable;
-  const isDone = state === "requested" || state === "duplicate";
+    (showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable) || (titleChanged ? false : foundAvailable);
+  // `requested` is live — MediaCard ORs media.requestedByMe every render. A
+  // mount-only useState left the next title (or a post-auto-request refresh)
+  // stuck on the previous title's "View Request" / idle CTA. On a title
+  // change this render still holds the previous `state`, so prefer the live
+  // prop until the reset lands.
+  const isDone = titleChanged
+    ? !!requested
+    : state === "requested" || state === "duplicate" || !!requested;
+  const uiState: State = titleChanged ? (requested ? "duplicate" : "idle") : state;
   // Only the viewer's OWN request replaces the CTA. A title queued by someone
   // else (arrPending) stays requestable: the server mirrors the approved status
   // so this user is tracked for the "now available" notification. The queue
@@ -337,9 +372,9 @@ export function RequestButton({
         </DetailActionStatus>
       )}
 
-      {!isAvailable && !showViewRequest && !blacklisted && (
+      {!isAvailable && !showViewRequest && !blacklisted && canRequest && (
         <>
-          {state === "confirm" && (
+          {uiState === "confirm" && (
             <div className="flex flex-col gap-2 w-full max-w-sm">
               <div
                 className="flex items-center"
@@ -388,7 +423,7 @@ export function RequestButton({
             </div>
           )}
 
-          {state === "note" && (
+          {uiState === "note" && (
             <div className="flex flex-col gap-2 w-full max-w-sm">
               <Textarea
                 value={note}
@@ -428,7 +463,7 @@ export function RequestButton({
             </div>
           )}
 
-          {state === "onbehalf" && (
+          {uiState === "onbehalf" && (
             <div className="flex flex-col gap-2 w-full max-w-sm">
               {obUsersState === "error" ? (
                 <p className="ds-mono" role="alert" style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}>
@@ -494,15 +529,15 @@ export function RequestButton({
             </div>
           )}
 
-          {state !== "note" && state !== "confirm" && state !== "onbehalf" && (
+          {uiState !== "note" && uiState !== "confirm" && uiState !== "onbehalf" && (
             <div className="flex items-center gap-2 flex-wrap">
               <DetailActionButton
                 variant="primary"
                 onClick={() => { loadProfiles(); setState("confirm"); }}
-                disabled={state === "loading"}
-                busy={state === "loading"}
+                disabled={uiState === "loading"}
+                busy={uiState === "loading"}
               >
-                {state === "loading" ? (
+                {uiState === "loading" ? (
                   <Loader2
                     className="animate-spin"
                     style={{ width: 14, height: 14 }}
@@ -510,10 +545,10 @@ export function RequestButton({
                 ) : (
                   <Plus style={{ width: 14, height: 14 }} />
                 )}
-                {state === "loading" ? t("request.submitting") : requestLabel}
+                {uiState === "loading" ? t("request.submitting") : requestLabel}
               </DetailActionButton>
 
-              {(state === "idle" || state === "error") && (
+              {(uiState === "idle" || uiState === "error") && (
                 <>
                   <DetailActionButton
                     variant="secondary"
@@ -538,7 +573,7 @@ export function RequestButton({
             </div>
           )}
 
-          {state === "error" && (
+          {uiState === "error" && (
             <p
               className="ds-mono max-w-sm"
               role="alert"

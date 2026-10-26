@@ -273,6 +273,7 @@
   "adminArr.calendar.nothingToSearch": "Non resta niente da cercare — potrebbe essere già stato scaricato. Ricarica per vedere lo stato più recente.",
   "adminArr.calendar.footnote": "Gli orari di messa in onda sono nel tuo fuso orario. Mancante significa che un episodio è già andato in onda o che una data di uscita home video è passata, che il titolo è monitorato e che non c'è ancora un file né un download. Gli speciali non contano mai come mancanti.",
   "adminArr.system.title": "Sistema Arr",
+  "adminArr.trash.title": "TRaSH Guides",
   "adminArr.system.subtitle": "Attività, indexer, client di download e spazio di archiviazione di Radarr e Sonarr — senza aprirli.",
   "adminArr.system.tab.tasks": "Attività",
   "adminArr.system.tab.providers": "Indexer e client",

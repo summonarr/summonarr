@@ -111,6 +111,8 @@ let settings = new Map<string, string>();
 let audit: Row[] = [];
 let sessionWrites = 0;
 let seq = 0;
+let callbackTxCount = 0;
+let sessionDeleteBoom = false;
 
 // Applies Prisma update data, including atomic { increment } operations.
 function applyData(row: Row, data: Row): void {
@@ -223,6 +225,7 @@ shadowPrismaModel(prisma, "authSession", {
   },
   update: async () => ({}),
   deleteMany: async ({ where }: { where: Where }) => {
+    if (sessionDeleteBoom) throw new Error("AuthSession deleteMany exploded (unit test)");
     const before = sessions.length;
     sessions = sessions.filter((s) => !matches(s, where));
     return { count: before - sessions.length };
@@ -240,8 +243,51 @@ shadowPrismaModel(prisma, "auditLog", {
     return data;
   },
 });
-shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
-  Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
+// Guardrail 6g footholds — the admin reset clears them in the revoke tx.
+type FootholdOp = { model: string; args: unknown };
+let footholdOps: FootholdOp[] = [];
+const recFoothold = (model: string) => async (args: unknown) => {
+  footholdOps.push({ model, args });
+  return { count: 0 };
+};
+shadowPrismaModel(prisma, "pushSubscription", { deleteMany: recFoothold("pushSubscription") });
+shadowPrismaModel(prisma, "discordLinkToken", { deleteMany: recFoothold("discordLinkToken") });
+shadowPrismaModel(prisma, "discordMergeCode", { deleteMany: recFoothold("discordMergeCode") });
+shadowPrismaModel(prisma, "verificationToken", { deleteMany: recFoothold("verificationToken") });
+// Interactive $transaction: snapshot the MFA/session/user rows and restore them
+// on throw so a failed revoke cannot leave factors deleted (the residual this
+// file pins). Array-form transactions are Promise.all of already-issued writes
+// and are left as they are.
+function restoreUserRows(current: Row[], snap: Row[]): void {
+  const byId = new Map(snap.map((r) => [r.id, r]));
+  for (const u of current) {
+    const s = byId.get(u.id);
+    if (!s) continue;
+    for (const k of Object.keys(u)) delete u[k];
+    Object.assign(u, s);
+  }
+}
+shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
+  if (Array.isArray(arg)) return Promise.all(arg);
+  callbackTxCount++;
+  const snap = {
+    totps: totps.slice(),
+    codes: codes.slice(),
+    passkeys: passkeys.slice(),
+    sessions: sessions.slice(),
+    users: users.map((u) => ({ ...u })),
+  };
+  try {
+    return await (arg as (tx: unknown) => Promise<unknown>)(prisma);
+  } catch (err) {
+    totps = snap.totps.slice();
+    codes = snap.codes.slice();
+    passkeys = snap.passkeys.slice();
+    sessions = snap.sessions.slice();
+    restoreUserRows(users, snap.users);
+    throw err;
+  }
+});
 // Raw statements are recorded; a test can hook them (e.g. to land a concurrent
 // write "while" the advisory lock is being acquired).
 let rawSql: string[] = [];
@@ -364,6 +410,9 @@ const bearer = (jwt: string) => ({ authorization: `Bearer ${jwt}` });
 
 beforeEach(() => {
   users = []; totps = []; codes = []; passkeys = []; sessions = []; audit = []; rawSql = []; onRaw = null; onUserRead = null;
+  footholdOps = [];
+  callbackTxCount = 0;
+  sessionDeleteBoom = false;
   settings = new Map([["setup_completed_at", "2026-01-01T00:00:00.000Z"]]);
   sessionWrites = 0;
   errors.length = 0;
@@ -1434,7 +1483,7 @@ test("GET /api/profile/mfa reports status and never a secret", async () => {
 
 test("admin reset: removes every factor, signs the target out everywhere, audits MFA_RESET", async () => {
   const admin = await seedUser({ role: "ADMIN" });
-  const target = await seedUser();
+  const target = await seedUser({ calendarTokenHash: "feed", calendarTokenCreatedAt: new Date() });
   const adminJwt = await sessionFor(admin);
   await sessionFor(target);
   seedTotp(target.id as string);
@@ -1443,9 +1492,20 @@ test("admin reset: removes every factor, signs the target out everywhere, audits
     method: "DELETE", headers: bearer(adminJwt), ctx: { params: Promise.resolve({ id: target.id }) },
   });
   assert.equal(res.status, 200);
+  assert.equal(callbackTxCount, 1, "factor delete, revoke, footholds and calendar land in ONE transaction");
   assert.deepEqual([totps.length, codes.length], [0, 0]);
   assert.equal(sessions.filter((s) => s.userId === target.id).length, 0);
   assert.ok((target.sessionsRevokedAt as Date) instanceof Date, "cutoff stamped (revokeAllUserSessions)");
+  for (const model of ["pushSubscription", "discordLinkToken", "discordMergeCode"]) {
+    const calls = footholdOps.filter((o) => o.model === model);
+    assert.equal(calls.length, 1, `${model}.deleteMany runs once in the revoke tx`);
+    assert.deepEqual(calls[0].args, { where: { userId: target.id } });
+  }
+  const pendingEmail = footholdOps.filter((o) => o.model === "verificationToken");
+  assert.equal(pendingEmail.length, 1);
+  assert.deepEqual(pendingEmail[0].args, { where: { identifier: { startsWith: `notif-email:${target.id}:` } } });
+  assert.equal(target.calendarTokenHash, null);
+  assert.equal(target.calendarTokenCreatedAt, null);
   await new Promise((r) => setImmediate(r));
   assert.ok(audit.some((a) => a.action === "MFA_RESET" && a.target === `user:${target.id}`));
   assert.equal((await credentialsSignInStep(target)).status, 200, "next sign-in is password-only");
@@ -1491,6 +1551,27 @@ test("L2: a target promoted to ADMIN while the reset is in flight is refused —
   assert.equal(res.status, 403);
   assert.ok(rawSql.includes("SELECT pg_advisory_xact_lock(42)"));
   assert.equal(totps.length, 1, "the admin's factor survives");
+});
+
+test("admin reset: a failed revoke rolls the factor delete back — they share one transaction", async () => {
+  const admin = await seedUser({ role: "ADMIN" });
+  const target = await seedUser({ calendarTokenHash: "feed", calendarTokenCreatedAt: new Date() });
+  const adminJwt = await sessionFor(admin);
+  await sessionFor(target);
+  seedTotp(target.id as string);
+  seedRecoveryCodes(target.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+  sessionDeleteBoom = true;
+  await assert.rejects(
+    () => call(adminReset.DELETE as never, `/api/admin/users/${target.id}/mfa`, {
+      method: "DELETE", headers: bearer(adminJwt), ctx: { params: Promise.resolve({ id: target.id }) },
+    }),
+    /AuthSession deleteMany exploded/,
+  );
+  assert.equal(totps.length, 1, "factors survive a revoke that never committed");
+  assert.equal(codes.length, 1, "recovery codes survive too");
+  assert.equal(sessions.filter((s) => s.userId === target.id).length, 1, "sessions remain");
+  assert.equal(target.calendarTokenHash, "feed", "calendar URL remains");
+  assert.equal(target.sessionsRevokedAt, null, "cutoff is not stamped");
 });
 
 test("admin reset also clears a persistent code lockout (the lost-phone case)", async () => {

@@ -193,5 +193,7 @@
   "personal.common.trackingOff.description": "Nothing is being recorded, so this page can't fill in. An administrator can turn on play history tracking in Settings → Features.",
   "personal.common.trackingOff.cta": "Open settings",
   "personal.common.showingMostRecent": "Showing your {n} most recent titles. Older ones aren't listed here.",
+  "personal.common.cappedEmpty": "The {n} most recent titles were cleared. Reload to show older ones that are still listed.",
+  "personal.common.reload": "Reload",
   "personal.watchlist.removeError": "Couldn't remove “{title}” from your watchlist. Please try again."
 }

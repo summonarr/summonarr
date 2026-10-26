@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { revokeAllUserSessions } from "@/lib/auth";
+import { clearSessionFootholdsInTx } from "@/lib/session-footholds";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
@@ -58,8 +59,16 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   }
 
   const before = await getMfaState(id);
+  // Factor delete, session revoke, foothold clear and calendar-token null must
+  // commit together: a reset that dropped 2FA and then failed to revoke would
+  // leave sessions and planted footholds on an account that now signs in with
+  // the password alone. Folded into revokeAllUserSessions' own transaction
+  // (the same shape as admin revoke-all) rather than a prior tx. Not folded
+  // into the helper itself — Jellyfin offboarding uses it without wanting to
+  // drop factors or footholds. Guardrail 23: this catch is OUTSIDE the tx and
+  // only maps the in-tx admin-target refusal; a failed write propagates.
   try {
-    await prisma.$transaction(async (tx) => {
+    await revokeAllUserSessions(id, async (tx) => {
       // The role read above is stale by the time the tx opens: a promotion to
       // ADMIN landing in between would let a delegated MANAGE_USERS holder strip
       // an admin's second factor. Re-resolve it under advisory lock 42 — the lock
@@ -73,6 +82,11 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       await deleteAllMfaInTx(tx, id);
       // A lost phone is exactly when an owner locks themselves out guessing.
       await clearMfaLockoutInTx(tx, id);
+      await clearSessionFootholdsInTx(tx, id);
+      await tx.user.update({
+        where: { id },
+        data: { calendarTokenHash: null, calendarTokenCreatedAt: null },
+      });
     });
   } catch (err) {
     if (err instanceof TargetBecameAdminError) {
@@ -80,9 +94,6 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     }
     throw err;
   }
-  // Every device of the target — a reset is a security event, and whoever lost
-  // the factor may not be the only one holding a session.
-  await revokeAllUserSessions(id);
   if (before.enabled) void notifyMfaSecurityEvent(id, "mfa-reset");
 
   // Committed — a failed audit write must not 500 it (guardrail 26). The target

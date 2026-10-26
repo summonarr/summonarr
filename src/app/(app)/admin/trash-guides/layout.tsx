@@ -43,7 +43,7 @@ export default async function TrashGuidesLayout({ children }: { children: React.
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="TRaSH Guides"
+        title={t("adminArr.trash.title")}
         subtitle={
           <>
             {introBefore}

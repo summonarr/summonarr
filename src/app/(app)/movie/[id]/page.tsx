@@ -390,6 +390,7 @@ export default async function MovieDetailPage({
               style={{ gap: 10, marginTop: 6 }}
             >
               <RequestButton
+                key={media.id}
                 tmdbId={media.id}
                 mediaType="MOVIE"
                 title={media.title}
@@ -405,9 +406,11 @@ export default async function MovieDetailPage({
                 canRequestOnBehalf={canOnBehalf}
                 canChooseProfile={canChooseProfile}
                 blacklisted={blacklisted}
+                canRequest={canRequestMovies}
               />
               {has4k && canRequest4k && (
                 <Request4kButton
+                  key={`4k-${media.id}`}
                   tmdbId={media.id}
                   mediaType="MOVIE"
                   requestToken={generateRequestToken(media.id, "MOVIE", session.user.id)}
@@ -418,7 +421,7 @@ export default async function MovieDetailPage({
               )}
               {namedTargets.map((t) => (
                 <RequestInstanceButton
-                  key={t.slug}
+                  key={`${media.id}:${t.slug}`}
                   tmdbId={media.id}
                   mediaType="MOVIE"
                   instance={t.slug}
@@ -429,8 +432,9 @@ export default async function MovieDetailPage({
                   blacklisted={blacklisted}
                 />
               ))}
-              <WatchlistButton tmdbId={media.id} mediaType="MOVIE" initialOnWatchlist={onWatchlist} />
+              <WatchlistButton key={`watchlist-${media.id}`} tmdbId={media.id} mediaType="MOVIE" initialOnWatchlist={onWatchlist} />
               <HideButton
+                key={`hide-${media.id}`}
                 tmdbId={media.id}
                 mediaType="MOVIE"
                 title={media.title}
@@ -447,6 +451,7 @@ export default async function MovieDetailPage({
               )}
               {votesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <VoteDeleteButton
+                  key={`vote-${media.id}`}
                   tmdbId={media.id}
                   mediaType="MOVIE"
                   requestToken={generateRequestToken(media.id, "MOVIE", session.user.id)}
@@ -509,7 +514,7 @@ export default async function MovieDetailPage({
         />
       )}
 
-      <SimilarRow items={suggestions} showPlex={showPlex} showJellyfin={showJellyfin} />
+      <SimilarRow items={suggestions} showPlex={showPlex} showJellyfin={showJellyfin} canRequest={canRequestMovies} />
     </div>
   );
 }

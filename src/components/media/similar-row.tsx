@@ -7,10 +7,12 @@ interface SimilarRowProps {
   items: TmdbMedia[];
   showPlex?: boolean;
   showJellyfin?: boolean;
+  /** HD request overlay on each card — same gate as the detail-page CTA. */
+  canRequest?: boolean;
 }
 
 // "More Like This" grid of recommended/similar titles on a detail page.
-export async function SimilarRow({ items, showPlex, showJellyfin }: SimilarRowProps) {
+export async function SimilarRow({ items, showPlex, showJellyfin, canRequest }: SimilarRowProps) {
   if (items.length === 0) return null;
   const t = await getTranslator();
   return (
@@ -26,6 +28,7 @@ export async function SimilarRow({ items, showPlex, showJellyfin }: SimilarRowPr
             size="md"
             showPlex={showPlex}
             showJellyfin={showJellyfin}
+            canRequest={canRequest}
           />
         ))}
       </div>

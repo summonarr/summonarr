@@ -273,6 +273,7 @@
   "adminArr.calendar.nothingToSearch": "Nichts mehr zu suchen — vielleicht ist es schon heruntergeladen. Für den aktuellen Stand neu laden.",
   "adminArr.calendar.footnote": "Ausstrahlungszeiten sind in lokaler Zeit angegeben. Fehlend heißt: Eine Folge ist fertig ausgestrahlt oder der Termin der Heimkino-Veröffentlichung ist verstrichen, der Titel wird überwacht, und es gibt noch keine Datei und keinen Download. Specials zählen nie als fehlend.",
   "adminArr.system.title": "Arr-System",
+  "adminArr.trash.title": "TRaSH Guides",
   "adminArr.system.subtitle": "Aufgaben, Indexer, Download-Clients und Speicher von Radarr und Sonarr — ohne sie öffnen zu müssen.",
   "adminArr.system.tab.tasks": "Aufgaben",
   "adminArr.system.tab.providers": "Indexer & Clients",
