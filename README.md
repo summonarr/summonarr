@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.36.1 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.36.2 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -171,6 +171,33 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.36.2
+
+**Changed**
+
+- The image now runs on Next.js 16.4.3 (Node stays on 26.12.1).
+
+**Fixed**
+
+- Full Plex/Jellyfin library syncs no longer time out and roll back on large libraries (seen at ~9,000 titles), and a slow sync no longer holds up play history and the other background jobs. The new staging tables are created automatically at startup.
+- If a library write fails, requests are no longer marked available or announced from the data that was rolled back.
+- Download Queue: Remove and Grab act on the instance's live queue, one entry per download, and skip items that have already gone.
+- A failed grab notification from a Radarr/Sonarr webhook no longer re-sends ntfy, Gotify and webhook alerts. It is retried on the next delivery instead. Downloads that need manual interaction no longer notify on every queue check.
+- Indexer API keys never appear in queue messages, import rejections or health warnings on the admin pages.
+- **Why?** no longer reports a stuck download after an admin's own Mark failed. The Sonarr webhook now records a completed series as available, as Radarr already did.
+- When an admin signs a user out everywhere or resets their two-factor, the user's push registrations, pending Discord links, pending notification-email confirmations and calendar URL are cleared too.
+- After a backup restore, every session is re-checked against the restored database straight away.
+- Fixed races in turning off two-factor and in confirming a notification email.
+- The Users and Request Blacklist pages show the real total and say when the list is capped at 1,000.
+- Fix match on Plex no longer moves a copy that Plex says belongs to a third title.
+- Watch sync (Jellyfin → Plex) never writes with the admin token when plex.tv can't say who owns the server. Undated Jellyfin plays no longer hide newer ones.
+- Someone who filed a request on another user's behalf can no longer vote to delete that title.
+- Issue notifications go only to reporters whose accounts are active.
+- Upcoming lists no longer show already-released titles from cache, and the calendar feed no longer drops a show's next episode because of a stale date.
+- Vote reasons can be reported from the iOS app again.
+- Detail pages reset their buttons when you move to another title, and a failed Hide or Watchlist toggle is undone. The Request button is hidden when you can't request that media type.
+- Phone layout: activity tables no longer stretch past the screen on long titles, the Statistics page no longer scrolls sideways, and filter rows wrap. Heatmap month labels no longer overlap, and the request note counter sits under its text box.
 
 ### v0.36.1
 
