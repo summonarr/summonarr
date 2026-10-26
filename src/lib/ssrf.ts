@@ -88,6 +88,24 @@ export function unwrapEmbeddedV4(addr: string): string | null {
   return null;
 }
 
+// True only for THIS host's loopback, in every spelling Node/dns.lookup actually
+// hands over. IPv4 127/8, ::1 (any hextet padding), and IPv4-mapped IPv6 of a
+// 127/8 address (`::ffff:127.0.0.1`, `::ffff:7f00:1`, `0:0:0:0:0:ffff:7f00:1`).
+// NAT64/SIIT/IPv4-compatible embeddings of 127.x are NOT this host — a
+// plaintext-AUTH carve-out that used unwrapEmbeddedV4 wholesale would send
+// AUTH PLAIN to a translator. email.ts keys that carve-out off this.
+export function isLoopbackAddress(addr: string): boolean {
+  if (/^127\./.test(addr)) return true;
+  if (/^::1$/.test(addr)) return true;
+  if (!addr.includes(":")) return false;
+  const v = ipv6ToBigInt(addr);
+  if (v === null) return false;
+  if (v === 1n) return true;
+  const prefix96 = v >> 32n;
+  if (prefix96 !== 0xffffn) return false;
+  return ((v & 0xffffffffn) >> 24n) === 127n;
+}
+
 // Detect the IPv6 unspecified address (`::`) in any of its valid notations:
 // `::`, the fully-expanded `0:0:0:0:0:0:0:0`, the zero-padded
 // `0000:…:0000`, and mixed notation with embedded IPv4 (`::0.0.0.0`,

@@ -425,6 +425,16 @@ test("Jellyfin → Plex: a managed HOME user gets the home-switch token; the OWN
   assert.ok(scrobbled.length > 0 && scrobbled.every((s) => s.token === ADMIN_TOKEN));
 });
 
+test("Jellyfin → Plex: an unknown owner is not scrobbled with the admin token, even if isServerAdmin stuck on", async () => {
+  pairs = [pair("toPlex")];
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "555", isServerAdmin: true };
+  jfPlayed = JF_PLAYED.slice(0, 1);
+  respond = (url, method, token) => (url.hostname === "plex.tv" ? new Response("", { status: 503 }) : defaultRespond(url, method, token));
+  const r = await runWatchSync();
+  assert.match(r.pairs[0].toPlex?.error ?? "", /owner/);
+  assert.deepEqual(scrobbled, [], "a sticky admin flag must not borrow the current admin token");
+});
+
 test("Jellyfin → Plex: no token for the account ⇒ the direction errors and NOTHING is scrobbled (never the admin token instead)", async () => {
   pairs = [pair("toPlex")];
   plexUser = { source: "plex", serverInstance: "", sourceUserId: "999", isServerAdmin: false };

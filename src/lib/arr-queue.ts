@@ -1,6 +1,8 @@
 // Admin → Download Queue: the pure rules. Turns raw Radarr/Sonarr
 // /api/v3/queue records into one row per DOWNLOAD and decides which rows need an
-// admin's attention. Zero imports, zero I/O; the data half is arr-queue-data.ts.
+// admin's attention. No I/O; the data half is arr-queue-data.ts. The only import
+// is safeMessage, so a queue or import line can't carry an indexer apikey to
+// the browser (guardrail 5e).
 //
 //   • Sonarr reports one queue record PER EPISODE, so a season pack is N records
 //     sharing one downloadId. They fold into one row carrying every record id;
@@ -12,6 +14,8 @@
 //     status of warning/error, an import that is blocked or failed, or a queue
 //     status of failed/warning/client-unavailable. Nothing here guesses from
 //     progress or age; the arr already folds stalled torrents into a warning.
+
+import { safeMessage } from "@/lib/arr-parse";
 
 export type QueueService = "radarr" | "sonarr";
 
@@ -214,7 +218,7 @@ function messagesOf(r: QueueRecord): string[] {
   const seen = new Set<string>();
   const scan = MAX_MESSAGES * PROJECTION_SCAN_FACTOR;
   const push = (m: unknown) => {
-    const s = typeof m === "string" ? m.trim().slice(0, MAX_MESSAGE_LEN) : "";
+    const s = safeMessage(m, MAX_MESSAGE_LEN) ?? "";
     if (s && !seen.has(s)) {
       seen.add(s);
       out.push(s);
@@ -473,6 +477,47 @@ export function removalIds(row: Pick<QueueItem, "ids">): number[] {
 }
 
 /**
+ * Posted queue record ids are names for downloads the instance currently
+ * holds — never forwarded blindly (guardrail 5e). Match any overlap with a
+ * folded row's ids (a Sonarr pack is one download), then send ONE id per
+ * download (`removalIds`) so Sonarr v3 blocklists once (guardrail 5c). An id
+ * the live read does not have is dropped; an empty result means everything
+ * posted is already gone.
+ */
+export function liveRemovalIds(rows: readonly QueueItem[], requested: readonly number[]): number[] {
+  return selectLiveIds(rows, requested, () => true);
+}
+
+/**
+ * Same selection as `liveRemovalIds`, restricted to releases the arr is still
+ * HOLDING (`pending`). Grab is the arr's bulk POST on those rows; a downloading
+ * or imported id the page still has must not be forwarded.
+ */
+export function liveGrabIds(rows: readonly QueueItem[], requested: readonly number[]): number[] {
+  return selectLiveIds(rows, requested, (row) => row.pending);
+}
+
+function selectLiveIds(
+  rows: readonly QueueItem[],
+  requested: readonly number[],
+  eligible: (row: QueueItem) => boolean,
+): number[] {
+  const want = new Set(requested);
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const row of rows) {
+    if (!eligible(row)) continue;
+    if (!row.ids.some((id) => want.has(id))) continue;
+    const [id] = removalIds(row);
+    if (id !== undefined && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+  return out;
+}
+
+/**
  * Whether a "Blocklist" (skipRedownload=true) on this instance can promise "no
  * new search". Sonarr v3 reads only removeFromClient and blocklist
  * (skipRedownload and changeCategory are ignored), so a blocklist there always
@@ -646,7 +691,7 @@ export function importCandidates(service: QueueService, raw: unknown): ImportCan
       .slice(0, 10);
     const rejections = Array.isArray(r.rejections)
       ? (r.rejections as Array<{ reason?: unknown } | null>)
-          .map((x) => (typeof x?.reason === "string" ? x.reason.slice(0, MAX_MESSAGE_LEN) : ""))
+          .map((x) => safeMessage(x?.reason, MAX_MESSAGE_LEN) ?? "")
           .filter(Boolean)
           .slice(0, MAX_MESSAGES)
       : [];

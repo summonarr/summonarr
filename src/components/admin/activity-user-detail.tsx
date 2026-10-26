@@ -160,7 +160,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         className="resp-grid-3"
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(5, 1fr)",
+          gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
           gap: 10,
           marginBottom: 22,
         }}
@@ -209,7 +209,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         className="resp-grid-2"
         style={{
           display: "grid",
-          gridTemplateColumns: "1.2fr 1fr",
+          gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 1fr)",
           gap: 10,
           marginBottom: 22,
         }}
@@ -236,7 +236,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         className="resp-grid-2"
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(2, 1fr)",
+          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
           gap: 10,
           marginBottom: 22,
         }}
@@ -421,7 +421,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         className="resp-grid-2"
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr",
+          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
           gap: 10,
           marginBottom: 22,
         }}

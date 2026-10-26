@@ -273,6 +273,7 @@
   "adminArr.calendar.nothingToSearch": "Não há mais nada para buscar — talvez já tenha sido baixado. Recarregue para ver o mais recente.",
   "adminArr.calendar.footnote": "Os horários de exibição estão no seu fuso horário. “Em falta” significa que um episódio já terminou de ser exibido ou que a data de lançamento doméstico já passou, que o título está monitorado e que ainda não há arquivo nem download. Especiais nunca contam como em falta.",
   "adminArr.system.title": "Sistema do Arr",
+  "adminArr.trash.title": "TRaSH Guides",
   "adminArr.system.subtitle": "Tarefas, indexadores, clientes de download e armazenamento do Radarr e do Sonarr — sem precisar abri-los.",
   "adminArr.system.tab.tasks": "Tarefas",
   "adminArr.system.tab.providers": "Indexadores e clientes",

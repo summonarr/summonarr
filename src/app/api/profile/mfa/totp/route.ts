@@ -5,8 +5,8 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
-import { dropRecoveryCodesIfNoFactorInTx, getMfaState } from "@/lib/mfa/mfa-store";
-import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { dropRecoveryCodesIfNoFactorInTx, getMfaState, lockUserMfaInTx } from "@/lib/mfa/mfa-store";
+import { mfaReauthStepUp, mfaSecondFactorStepUp, secondFactorRequiredResponse } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -33,10 +33,18 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   const before = proof.state;
 
   const outcome = await prisma.$transaction(async (tx) => {
-    const res = await tx.userTotp.deleteMany({ where: { userId: user.id } });
+    // Same lock as enable. A password-only cancel of a PENDING secret must not
+    // delete a row that was confirmed after this request read "pending".
+    await lockUserMfaInTx(tx, user.id);
+    const fresh = await tx.userTotp.findUnique({ where: { userId: user.id }, select: { enabledAt: true } });
+    if (!proof.proved && fresh?.enabledAt) return { removed: 0, needsFactor: true as const, noneLeft: false };
+    const res = await tx.userTotp.deleteMany({
+      where: proof.proved ? { userId: user.id } : { userId: user.id, enabledAt: null },
+    });
     const noneLeft = await dropRecoveryCodesIfNoFactorInTx(tx, user.id);
-    return { removed: res.count, noneLeft };
+    return { removed: res.count, needsFactor: false as const, noneLeft };
   });
+  if (outcome.needsFactor) return secondFactorRequiredResponse(t, await getMfaState(user.id));
   if (outcome.removed === 0) return NextResponse.json({ error: t("apiAuth.mfa.noTotp") }, { status: 404 });
 
   // The last factor went: the account is password-only from now on, so any

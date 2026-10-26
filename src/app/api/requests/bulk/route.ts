@@ -711,15 +711,21 @@ export const POST = withPermission([
       throw err;
     }
 
-    // Clear the target user's own delete-votes for the titles they just requested —
-    // a request and a deletion vote are contradictory, and the vote route already
-    // blocks the reverse direction.
+    // Clear delete-votes for the titles just requested — a request and a
+    // deletion vote are contradictory, and the vote route already blocks the
+    // reverse direction. On behalf, that includes the filer: they requested it
+    // too (filedBy), so their vote must go with the target's.
     // .catch is required, not decorative: this is detached after the response is
     // sent, so an unhandled rejection (pool timeout under a concurrent sync) has no
     // request context to surface in and escapes as a process-level unhandledRejection.
     // Every other fire-and-forget call in this route already terminates in a catch.
     void prisma.deletionVote
-      .deleteMany({ where: { userId: targetUserId, OR: pairs } })
+      .deleteMany({
+        where: {
+          userId: { in: isOnBehalf ? [targetUserId, session.user.id] : [targetUserId] },
+          OR: pairs,
+        },
+      })
       .catch((err) =>
         console.error(
           `[requests/bulk] deletionVote cleanup failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,

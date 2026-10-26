@@ -273,6 +273,7 @@
   "adminArr.calendar.nothingToSearch": "Nothing left to search — it may already be downloaded. Reload to see the latest.",
   "adminArr.calendar.footnote": "Air times are in your time zone. Missing means an episode has finished airing or a home release date has passed, the title is monitored, and there is no file or download yet. Specials never count as missing.",
   "adminArr.system.title": "Arr System",
+  "adminArr.trash.title": "TRaSH Guides",
   "adminArr.system.subtitle": "Radarr's and Sonarr's tasks, indexers, download clients and storage — without opening them.",
   "adminArr.system.tab.tasks": "Tasks",
   "adminArr.system.tab.providers": "Indexers & clients",

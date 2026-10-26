@@ -20,6 +20,7 @@ import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
 import { AlertTriangle, Filter, Film, Tv, type IconComponent } from "@/components/icons";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
+import { canRequest } from "@/lib/permissions";
 
 const PER_PAGE = 36;
 
@@ -179,6 +180,8 @@ export default async function TopRatedPage({
     plex: plexEnabled,
     jellyfin: jellyfinEnabled,
   });
+  const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
+  const canRequestTv = canRequest(session.user.permissions, "TV", false);
 
   const filterOpts = { hideAvailable, showPlex, showJellyfin, minImdb, minVotes, fromYear, toYear };
   const hasFilters = !!(hideAvailable || minImdb || minVotes || fromYear || toYear);
@@ -329,6 +332,7 @@ export default async function TopRatedPage({
                     showPlex={showPlex}
                     showJellyfin={showJellyfin}
                     size="md"
+                    canRequest={canRequestMovie}
                   />
                 ))}
               </div>
@@ -356,6 +360,7 @@ export default async function TopRatedPage({
                     showPlex={showPlex}
                     showJellyfin={showJellyfin}
                     size="md"
+                    canRequest={canRequestTv}
                   />
                 ))}
               </div>

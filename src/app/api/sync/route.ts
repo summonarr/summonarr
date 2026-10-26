@@ -16,7 +16,7 @@ import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/li
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { runDownloadCheck } from "@/lib/download-check";
 import { logAudit } from "@/lib/audit";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, replacePlexLibraryForInstances, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type PlexLibraryRow, type JellyfinLibraryRow } from "@/lib/cron-auth";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
@@ -832,22 +832,26 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
             for (const tmdbId of droppedMovieIds) removePresence(plexMovieSlugs, plexMovieIds, tmdbId, slug);
             for (const tmdbId of droppedTvIds)    removePresence(plexTvSlugs,    plexTvIds,    tmdbId, slug);
           }
-          // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the
-          // same write. Per-instance scoped delete (mirrors the Jellyfin arm below) so one
-          // instance's rewrite never touches another's rows; only instances whose fetch
-          // succeeded are touched at all (guardrail 13 — a failed instance's existing rows are
-          // left intact, never wiped).
-          await prisma.$transaction(async (tx) => {
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
-            for (const { slug, finalMovieRows, finalTvRows } of rowsByInstance) {
-              await tx.plexLibraryItem.deleteMany({ where: { serverInstance: slug } });
-              if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
-              if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
-            }
-          }, { timeout: BATCH_TX_TIMEOUT });
+          // Staged swap (replacePlexLibraryForInstances): the rows are bulk-loaded
+          // into PlexLibraryItemStaging OUTSIDE any transaction, then swapped across
+          // under advisory lock 2001,1 (shared with /api/sync/plex so the two callers
+          // can't race the same write) in a transaction that holds only the
+          // per-instance scoped deletes and one INSERT ... SELECT. Only instances
+          // whose fetch succeeded are touched at all (guardrail 13 — a failed
+          // instance's existing rows are left intact, never wiped).
+          await replacePlexLibraryForInstances(
+            rowsByInstance.map(({ slug, finalMovieRows, finalTvRows }) => ({ slug, rows: (finalMovieRows as PlexLibraryRow[]).concat(finalTvRows) })),
+          );
         } catch (err) {
           console.error("[sync] Plex library write failed:", err);
           libraryWriteSucceeded = false;
+          // This run's union is not authoritative (the same signal demotion
+          // already keys off). Drop the in-memory maps so a later reader
+          // cannot treat a rolled-back write as library presence.
+          plexMovieIds.clear();
+          plexTvIds.clear();
+          plexMovieSlugs.clear();
+          plexTvSlugs.clear();
         }
       }
 
@@ -989,24 +993,27 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       let libraryWriteSucceeded = true;
       if (writable.length > 0) {
         try {
-          // Advisory lock 2001,2 — matches /api/sync/jellyfin. Per-instance scoped delete
-          // (mirrors the arr side's per-slug scoping above) so one instance's rewrite
-          // never touches another's rows; only instances whose fetch succeeded are
-          // touched at all (guardrail 13 — a failed instance's existing rows are left
-          // intact, never wiped).
-          await prisma.$transaction(async (tx) => {
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
-            for (const { slug, movieIds, tvIds } of writable) {
+          // Staged swap (replaceJellyfinLibraryForInstances): rows bulk-loaded into
+          // JellyfinLibraryItemStaging OUTSIDE any transaction, then swapped across
+          // under advisory lock 2001,2 (shared with /api/sync/jellyfin) in a
+          // transaction holding only the per-instance scoped deletes (mirrors the arr
+          // side's per-slug scoping above) and one INSERT ... SELECT. Only instances
+          // whose fetch succeeded are touched at all (guardrail 13 — a failed
+          // instance's existing rows are left intact, never wiped).
+          await replaceJellyfinLibraryForInstances(
+            writable.map(({ slug, movieIds, tvIds }) => {
               const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, jellyfinItemId: d.itemId, jellyfinItemIds: libraryItemIds(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
               const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, jellyfinItemId: d.itemId, jellyfinItemIds: libraryItemIds(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-              await tx.jellyfinLibraryItem.deleteMany({ where: { serverInstance: slug } });
-              if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
-              if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
-            }
-          }, { timeout: BATCH_TX_TIMEOUT });
+              return { slug, rows: (movieRows as JellyfinLibraryRow[]).concat(tvRows) };
+            }),
+          );
         } catch (err) {
           console.error("[sync] Jellyfin library write failed:", err);
           libraryWriteSucceeded = false;
+          jfMovieIds.clear();
+          jfTvIds.clear();
+          jfMovieSlugs.clear();
+          jfTvSlugs.clear();
         }
       }
 
@@ -1555,6 +1562,13 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
     return toMark.length;
   };
 
+  // A source whose library WRITE failed has empty maps here: each arm clears
+  // them in its catch, because they were filled BEFORE the transaction and a
+  // rolled-back replace must not flip requests AVAILABLE against rows that
+  // never landed. Do NOT gate this on plexSyncSucceeded / jellyfinSyncSucceeded:
+  // those are also false when ONE of several servers failed its fetch, and the
+  // healthy servers' rows did land — presence there is still proof (only
+  // ABSENCE needs a complete union, which is what demotion checks).
   if (plexMovieIds.size > 0 || plexTvIds.size > 0) {
     plexMarked = await markLibraryRequests(plexMovieIds, plexTvIds, "plex");
   }
@@ -1636,6 +1650,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       // toNotify, and only that array reaches claimAvailableNotificationWinners,
       // so a gated row's claim is never burned and the next run re-offers it.
       // With nothing restricted this is exactly the union `.has()` it replaced.
+      // A failed library write left that source's maps empty (cleared in its
+      // arm), so presence below is never read from a rolled-back write.
       const inPlex = presentForRequester(req, "plex", requesters);
       const inJellyfin = presentForRequester(req, "jellyfin", requesters);
       // "Unusable" = this source cannot prove presence either way: not configured/enabled

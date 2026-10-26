@@ -30,6 +30,7 @@ import { Filter, Sparkles } from "@/components/icons";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
+import { canRequest } from "@/lib/permissions";
 
 const PER_PAGE = 100;
 
@@ -84,6 +85,8 @@ export default async function ForYouPage({
     plex: plexEnabled,
     jellyfin: jellyfinEnabled,
   });
+  const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
+  const canRequestTv = canRequest(session.user.permissions, "TV", false);
 
   const [recommendations, computedAt, show4k] = await Promise.all([
     // includeSeeds: this page renders the per-pick seed list (the "+N more of
@@ -284,6 +287,7 @@ export default async function ForYouPage({
               showPlex={showPlex}
               showJellyfin={showJellyfin}
               size="md"
+              canRequest={media.mediaType === "movie" ? canRequestMovie : canRequestTv}
               caption={<RecommendationReason t={t} media={media} rankedOrder={sort === "match"} />}
               overlayAction={
                 <NotInterestedButton

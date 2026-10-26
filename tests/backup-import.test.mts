@@ -117,6 +117,8 @@ const { processBackupImport, MAX_PLAINTEXT_BYTES, MAX_CIPHERTEXT_BYTES } =
 const { wrapEncryptStream, ENCRYPTED_MAGIC } = await import("../src/lib/backup-crypto.ts");
 const { BACKUP_TABLES, computeSchemaFingerprint } = await import("../src/lib/backup-schema.ts");
 const { tokenEncryptionKeyFingerprint } = await import("../src/lib/token-crypto.ts");
+const { cachedSessionCheckIsStale, invalidateCachedSessionChecks } =
+  await import("../src/lib/session-revocation.ts");
 
 // ── stream helpers ──────────────────────────────────────────────────────────
 function streamFrom(chunks: Uint8Array[], onCancel?: () => void): ReadableStream<Uint8Array> {
@@ -267,6 +269,7 @@ beforeEach(() => {
   errors.length = 0;
   delete process.env.TRUST_PROXY;
   delete process.env.SUMMONARR_ALLOW_SETUP_RESTORE;
+  invalidateCachedSessionChecks(0); // a restore's session-check floor is process-wide
 });
 
 // ── caps ────────────────────────────────────────────────────────────────────
@@ -534,6 +537,29 @@ test("happy path: exact op order (lock → full TRUNCATE → dump order), ON CON
   // warning is that everyone was signed out.
   assert.match(res.warning ?? "", /^Every account was signed out by the restore/);
   assert.deepEqual(errors, []);
+});
+
+test("a committed restore sets the session-check floor, so a cookie checked before it goes back to the DB", async () => {
+  // The restore deletes every AuthSession row, but a cookie whose dbCheckedAt
+  // is still inside its 10s/60s window would skip that lookup. The floor is
+  // what closes the window (session-refresh.ts reads it).
+  const before = Math.floor(Date.now() / 1000) - 5;
+  assert.equal(cachedSessionCheckIsStale(before), false, "no floor before the restore");
+  expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)]));
+  assert.equal(cachedSessionCheckIsStale(before), true, "a check from before the restore must be redone");
+  assert.equal(cachedSessionCheckIsStale(Math.floor(Date.now() / 1000) + 60), false, "a later check is not");
+});
+
+test("a refused or rolled-back restore leaves the session-check floor alone", async () => {
+  const before = Math.floor(Date.now() / 1000) - 5;
+  // Refused before the database is touched.
+  expectFailure(await runImport([new Uint8Array(COMMENTS_ONLY_ENC)]));
+  assert.equal(cachedSessionCheckIsStale(before), false, "nothing changed, so no session needs re-checking");
+  // Rolled back mid-import: the old sessions are still valid.
+  failOnSqlIncludes = "'siteUrl'";
+  expectFailure(await runImport([new Uint8Array(HAPPY_ENC)]));
+  assert.equal(txRejections, 1);
+  assert.equal(cachedSessionCheckIsStale(before), false, "the floor is set only after the transaction commits");
 });
 
 test("conflict-skipped rows (0 affected) are attributed per table and surface as a warning", async () => {

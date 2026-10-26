@@ -193,5 +193,7 @@
   "personal.common.trackingOff.description": "Rien n'est enregistré, cette page ne peut donc pas se remplir. Un administrateur peut activer le suivi de l'historique dans Paramètres → Fonctionnalités.",
   "personal.common.trackingOff.cta": "Ouvrir les paramètres",
   "personal.common.showingMostRecent": "Affichage de vos {n} titres les plus récents. Les plus anciens ne figurent pas ici.",
+  "personal.common.cappedEmpty": "Les {n} titres les plus récents ont été retirés. Rechargez pour afficher les plus anciens encore listés.",
+  "personal.common.reload": "Recharger",
   "personal.watchlist.removeError": "Impossible de retirer « {title} » de votre liste de suivi. Veuillez réessayer."
 }

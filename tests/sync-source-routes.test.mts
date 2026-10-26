@@ -207,6 +207,8 @@ for (const m of [
   // swapping them across inside one. Unstubbed it reaches the real client and
   // blocks forever, exactly like the auditLog case documented below.
   "tVEpisodeCacheStaging",
+  // The library twins (replacePlexLibraryForInstances / replaceJellyfinLibraryForInstances).
+  "plexLibraryItemStaging", "jellyfinLibraryItemStaging",
   "upcomingCacheItem", "tmdbCache", "tmdbMediaCore",
   "plexLibraryItem", "jellyfinLibraryItem", "mediaRequest", "user", "authSession",
   // sync/upcoming also runs the calendar-feed cache warm, which reads every

@@ -9,6 +9,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
 import { getTranslator } from "@/lib/i18n/server";
+import { canRequest } from "@/lib/permissions";
 
 // Tab / bookmark / history title — the nav label, in the viewer's language.
 export async function generateMetadata(): Promise<Metadata> {
@@ -96,6 +97,7 @@ export default async function TVPage({
         maxYear={new Date().getUTCFullYear() + 1}
         failed={failed}
         tokenMissing={tmdbAuth() === null}
+        canRequest={canRequest(session.user.permissions, "TV", false)}
       />
     </div>
   );

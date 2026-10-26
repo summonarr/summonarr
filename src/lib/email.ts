@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
-import { isSafeAddrForAdmin } from "@/lib/ssrf";
+import { isLoopbackAddress, isSafeAddrForAdmin } from "@/lib/ssrf";
 import { sendMail, type SmtpConfig } from "@/lib/smtp";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 import { settleLimit } from "@/lib/concurrency";
@@ -150,8 +150,7 @@ async function buildSmtpConfig(cfg: EmailConfig): Promise<SmtpConfig> {
   // an /etc/hosts entry or a resolver search domain can make "localhost" resolve
   // off-box; a name-based check would then hand `AUTH PLAIN <base64>` to a remote
   // relay over an unencrypted socket. Anything we can't prove is loopback keeps TLS.
-  const connectAddr = resolved.address.replace(/^::ffff:/i, "");
-  const isLoopback = connectAddr === "::1" || /^127\./.test(connectAddr);
+  const isLoopback = isLoopbackAddress(resolved.address);
   return {
     // Hand TLS the original hostname for SNI + certificate-name validation, while the TCP layer
     // connects to the validated IP. This closes the DNS-rebind window between resolveSafeSmtpHost

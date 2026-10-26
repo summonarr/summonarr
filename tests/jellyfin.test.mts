@@ -1583,7 +1583,7 @@ test("listJellyfinMatchEntries lists every item ungrouped — copies and items w
 // (10.9+) first, the legacy Users/{uid}/PlayedItems/{id} (≤10.8, still on
 // master as an [Obsolete] wrapper) on a 404/405. A 404 on BOTH is "missing".
 
-const { markJellyfinPlayed, getJellyfinEpisodeIds } = await import("../src/lib/jellyfin.ts");
+const { markJellyfinPlayed, getJellyfinEpisodeIds, getJellyfinPlayedSince } = await import("../src/lib/jellyfin.ts");
 
 test("markJellyfinPlayed: POSTs the 10.9+ route with the user, item and ISO datePlayed, admin auth; 2xx is marked (catches: wrong route/params, GET)", async () => {
   const B = nextBase();
@@ -1611,6 +1611,41 @@ test("markJellyfinPlayed: 404 on BOTH routes is 'missing' (terminal); any other 
   respond = () => new Response("", { status: 500 });
   await assert.rejects(markJellyfinPlayed(B, "k", "u", "i", null), /status=500/);
   assert.equal(sent.length, 1, "a 500 on the new route is not a 'no such route' — no legacy retry");
+});
+
+test("getJellyfinPlayedSince: DatePlayed-desc query; a full read keeps undated items", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { Type: "Movie", Id: "m-new", UserData: { PlayCount: 1, LastPlayedDate: "2025-06-01T00:00:00.0000000Z" } },
+      { Type: "Movie", Id: "m-undated", UserData: { PlayCount: 1 } },
+    ],
+    TotalRecordCount: 2,
+  });
+  const all = await getJellyfinPlayedSince(B, "k", "u");
+  const q = new URL(sent[0].url);
+  assert.equal(q.searchParams.get("SortBy"), "DatePlayed,SortName");
+  assert.equal(q.searchParams.get("SortOrder"), "Descending");
+  assert.deepEqual(all.map((i) => i.itemKey), ["m-new", "m-undated"]);
+});
+
+test("getJellyfinPlayedSince: an incremental read skips undated items and does not stop the walk on them", async () => {
+  // The walk used to treat lastPlayedAt === null as "before the bound", so a
+  // page that led with an undated row (or mixed one in) ended immediately and
+  // dropped every newer dated play behind it. Plex's history reader never lets
+  // an undated record end the walk; this must match.
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { Type: "Movie", Id: "m-undated", UserData: { PlayCount: 1 } },
+      { Type: "Movie", Id: "m-new", UserData: { PlayCount: 1, LastPlayedDate: "2025-06-01T00:00:00.0000000Z" } },
+      { Type: "Movie", Id: "m-old", UserData: { PlayCount: 1, LastPlayedDate: "2025-01-01T00:00:00.0000000Z" } },
+    ],
+    TotalRecordCount: 3,
+  });
+  const since = new Date("2025-03-01T00:00:00.000Z");
+  const items = await getJellyfinPlayedSince(B, "k", "u", { since });
+  assert.deepEqual(items.map((i) => i.itemKey), ["m-new"], "undated skipped, newer kept, older ends the walk");
 });
 
 test("getJellyfinEpisodeIds: keeps each episode's Id, season (specials included) and a multi-episode IndexNumberEnd; drops malformed rows", async () => {

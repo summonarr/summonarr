@@ -193,5 +193,7 @@
   "personal.common.trackingOff.description": "Es wird nichts aufgezeichnet, daher kann sich diese Seite nicht füllen. Ein Administrator kann die Erfassung des Wiedergabeverlaufs unter Einstellungen → Funktionen aktivieren.",
   "personal.common.trackingOff.cta": "Einstellungen öffnen",
   "personal.common.showingMostRecent": "Es werden Ihre {n} neuesten Titel angezeigt. Ältere sind hier nicht aufgeführt.",
+  "personal.common.cappedEmpty": "Die {n} neuesten Titel wurden entfernt. Laden Sie neu, um ältere noch vorhandene Titel anzuzeigen.",
+  "personal.common.reload": "Neu laden",
   "personal.watchlist.removeError": "„{title}“ konnte nicht von der Merkliste entfernt werden. Bitte versuchen Sie es erneut."
 }

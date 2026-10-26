@@ -193,5 +193,7 @@
   "personal.common.trackingOff.description": "Nada está sendo registrado, então esta página não pode ser preenchida. Um administrador pode ativar o rastreamento do histórico em Configurações → Recursos.",
   "personal.common.trackingOff.cta": "Abrir configurações",
   "personal.common.showingMostRecent": "Mostrando seus {n} títulos mais recentes. Os mais antigos não aparecem aqui.",
+  "personal.common.cappedEmpty": "Os {n} títulos mais recentes foram removidos. Recarregue para mostrar os mais antigos que ainda estão na lista.",
+  "personal.common.reload": "Recarregar",
   "personal.watchlist.removeError": "Não foi possível remover “{title}” da sua lista. Tente novamente."
 }

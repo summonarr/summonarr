@@ -203,9 +203,12 @@ export function buildCalendarEvents(
     for (const ep of episodes) {
       if (ep.seasonNumber <= 0) continue; // specials never carry a dependable date
       seasonsWithEpisodes.add(ep.seasonNumber);
-      episodeCodes.add(`${ep.seasonNumber}:${ep.episodeNumber}`);
       const day = toDay(ep.airDate);
       if (!inWindow(day, w)) continue;
+      // Only in-window rows "cover" a nextEpisode SxxEyy. A stale cached
+      // airDate outside the window emits nothing — treating it as covered
+      // dropped the upcoming fallback and the episode vanished from the feed.
+      episodeCodes.add(`${ep.seasonNumber}:${ep.episodeNumber}`);
       episodeDays.add(day);
       const code = `S${pad2(ep.seasonNumber)}E${pad2(ep.episodeNumber)}`;
       const suffix = isPlaceholderName(ep.name, ep.episodeNumber) ? "" : ` – ${ep.name!.trim()}`;
@@ -234,9 +237,9 @@ export function buildCalendarEvents(
       });
     }
 
-    // The next episode, when the episode lists don't already carry it — by its
-    // SxxEyy when known (the list's own date wins), otherwise by date. One
-    // stable UID, so a date change updates the event instead of adding one.
+    // The next episode, when the episode lists don't already emit it — by its
+    // SxxEyy when known (an in-window list row's own date wins), otherwise by
+    // date. One stable UID, so a date change updates the event instead of adding one.
     const next = info.nextEpisode;
     const nextDay = toDay(next?.airDate);
     if (next && inWindow(nextDay, w)) {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Bookmark, BookmarkCheck, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
@@ -22,14 +23,29 @@ export function WatchlistButton({
 }) {
   const { toast } = useToast();
   const t = useT();
-  const [on, setOn] = useState(initialOnWatchlist);
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
+  // Local override until the parent catches up (router.refresh after a toggle
+  // that also auto-requested). `initialOnWatchlist` is otherwise live — a
+  // mount-only useState painted the next title with this title's bookmark.
+  const [override, setOverride] = useState<boolean | null>(null);
+  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
+  const titleChanged = seenTmdbId !== tmdbId;
+  if (titleChanged) {
+    setSeenTmdbId(tmdbId);
+    setOverride(null);
+    setLoading(false);
+    setMsg("");
+  } else if (override !== null && override === initialOnWatchlist) {
+    setOverride(null);
+  }
+  const on = titleChanged ? initialOnWatchlist : (override ?? initialOnWatchlist);
 
   async function toggle() {
     if (loading) return;
     const next = !on;
-    setOn(next); // optimistic
+    setOverride(next); // optimistic
     setLoading(true);
     setMsg("");
     try {
@@ -45,7 +61,9 @@ export function WatchlistButton({
       // 409 on add means it's already there — the desired end state is still "on".
       if (!res.ok && res.status !== 409) {
         const data = await res.json().catch(() => ({}));
-        setOn(!next); // rollback
+        // Roll back to the pre-click state, NOT the prop: after an earlier
+        // successful toggle the prop is stale until something refreshes it.
+        setOverride(!next);
         setMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
       } else {
         toast({ title: next ? t("detail.watchlist.added") : t("detail.watchlist.removed"), variant: "success" });
@@ -59,13 +77,16 @@ export function WatchlistButton({
           const ar = data.autoRequest;
           if (ar?.requested) {
             toast({ title: t("detail.watchlist.autoRequested", { message: ar.message ?? t("detail.watchlist.requested") }), variant: "success" });
+            // The HD RequestButton ORs the live `requested` prop — refresh so
+            // it re-reads and does not stay on "Request" (a second click 409s).
+            router.refresh();
           } else if (ar && ar.outcome !== "already-requested" && ar.outcome !== "already-available") {
             toast({ title: t("detail.watchlist.notAutoRequested", { message: ar.message ?? t("request.somethingWrong") }) });
           }
         }
       }
     } catch {
-      setOn(!next); // rollback
+      setOverride(!next); // rollback to the pre-click state
       setMsg(t("request.networkError"));
     } finally {
       setLoading(false);
@@ -79,12 +100,12 @@ export function WatchlistButton({
       <DetailActionButton
         variant={on ? "accent-soft" : "secondary"}
         onClick={toggle}
-        disabled={loading}
-        busy={loading}
+        disabled={loading && !titleChanged}
+        busy={loading && !titleChanged}
         aria-pressed={on}
         aria-label={on ? t("detail.watchlist.removeLabel") : t("detail.watchlist.addLabel")}
       >
-        {loading ? (
+        {loading && !titleChanged ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
         ) : on ? (
           <BookmarkCheck style={{ width: 14, height: 14 }} />
@@ -93,7 +114,7 @@ export function WatchlistButton({
         )}
         {on ? t("detail.watchlist.on") : t("detail.watchlist.add")}
       </DetailActionButton>
-      {msg && (
+      {!titleChanged && msg && (
         <p
           className="ds-mono max-w-sm"
           role="alert"

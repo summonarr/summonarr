@@ -12,8 +12,11 @@
 //   2. EVERY configured instance is read, each on its own URL (guardrail 32);
 //      a failed one is named, never read as "empty"; a slug that names no
 //      configured instance is refused BEFORE any upstream call.
-//   3. Removal is ONE bulk DELETE on the row's own instance carrying every id
-//      and every flag explicitly; it is audited only after the arr accepted it.
+//   3. Removal re-reads that instance's live queue (posted ids NAME downloads,
+//      they are never forwarded blindly — guardrail 5e), then ONE bulk DELETE
+//      carrying ONE record id per matched download and every flag explicitly
+//      (guardrail 5c); the audit records the ids SENT, after the arr accepted.
+//      Grab is the same contract on pending rows: re-read, ONE bulk POST.
 //   3b. Import corrections name IDS only: every movie, series, episode,
 //      quality and language object in the command comes from the instance's
 //      own catalogs, and an id it lacks is 400 with nothing sent (guardrail 5d).
@@ -220,6 +223,8 @@ const call = (handler: unknown, token: string | null, path: string, init: { meth
 const idCtx = (id: string) => ({ params: Promise.resolve({ id }) });
 const drain = async () => { for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
 const arrCalls = () => calls.filter((c) => c.origin !== "http://localhost:3000");
+const bulkDeletes = () => arrCalls().filter((c) => c.method === "DELETE" && c.path === "/api/v3/queue/bulk");
+const bulkGrabs = () => arrCalls().filter((c) => c.method === "POST" && c.path === "/api/v3/queue/grab/bulk");
 
 // ── fixture ──────────────────────────────────────────────────────────────────
 const RADARR_SECRET = "radarr-hook-secret";
@@ -281,6 +286,27 @@ const sonarrPackRecord = (id: number, ep: number) => ({
   series: { title: "Show", tmdbId: 300, tvdbId: 3000 }, episode: { seasonNumber: 2, episodeNumber: ep },
   size: 6e9, sizeleft: 3e9, status: "downloading", trackedDownloadStatus: "ok", trackedDownloadState: "downloading",
 });
+const radarrRecord = (id: number) => ({
+  id, movieId: 10 + id, movie: { title: "Movie", tmdbId: 100 + id },
+  size: 1, sizeleft: 0, status: "downloading",
+});
+/** Serve a paged `/api/v3/queue` listing and (unless `onWrite` is set) accept the bulk DELETE and grab. */
+function liveQueue(records: unknown[], onWrite?: () => Response): Responder {
+  return (c) => {
+    if (c.path === "/api/v3/queue") {
+      const page = Number(c.query.get("page") ?? "1");
+      const pageSize = Number(c.query.get("pageSize") ?? "250");
+      const start = (page - 1) * pageSize;
+      return json({ totalRecords: records.length, records: records.slice(start, start + pageSize) });
+    }
+    if (c.method === "DELETE" && c.path === "/api/v3/queue/bulk") return onWrite ? onWrite() : json({});
+    if (c.method === "POST" && c.path === "/api/v3/queue/grab/bulk") return onWrite ? onWrite() : json({});
+    return undefined;
+  };
+}
+const pendingRecord = (id: number, status = "delay") => ({
+  id, movieId: 10 + id, movie: { title: "Held" }, status,
+});
 
 test("the queue reads EVERY configured instance on its own URL, folds a Sonarr pack, names a failed instance, and attaches requesters per instance", async () => {
   requests = [
@@ -336,14 +362,14 @@ test("an integration switched off reads none of its instances", async () => {
 });
 
 test("remove: ONE bulk DELETE on the row's own instance with every id and every flag explicit, audited after", async () => {
-  responder = (c) => (c.method === "DELETE" && c.path === "/api/v3/queue/bulk" ? json({}) : undefined);
+  responder = liveQueue([radarrRecord(7), radarrRecord(8)]);
   const token = await mintSession();
   const res = await call(removeRoute.POST, token, "/admin/queue/remove", {
     method: "POST",
     body: { service: "radarr", instance: "4k", ids: [7, 8, 7], action: "blocklistSearch", removeFromClient: false },
   });
   assert.equal(res.status, 200);
-  const sent = arrCalls();
+  const sent = bulkDeletes();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].origin, RADARR_4K);
   assert.deepEqual(sent[0].body, { ids: [7, 8] });
@@ -357,12 +383,12 @@ test("remove: ONE bulk DELETE on the row's own instance with every id and every 
 });
 
 test("remove: the removal METHOD — change category and ignore leave the download in the client; an older body without one removes it", async () => {
-  responder = (c) => (c.method === "DELETE" && c.path === "/api/v3/queue/bulk" ? json({}) : undefined);
+  responder = liveQueue([sonarrPackRecord(4, 1)]);
   const token = await mintSession();
   const sent = async (body: Record<string, unknown>) => {
     calls = [];
     assert.equal((await call(removeRoute.POST, token, "/admin/queue/remove", { method: "POST", body: { service: "sonarr", ids: [4], ...body } })).status, 200, JSON.stringify(body));
-    return Object.fromEntries(arrCalls()[0].query);
+    return Object.fromEntries(bulkDeletes()[0].query);
   };
   assert.deepEqual(await sent({ action: "blocklist", method: "changeCategory" }), { removeFromClient: "false", blocklist: "true", skipRedownload: "true", changeCategory: "true" });
   assert.deepEqual(await sent({ action: "remove", method: "ignore" }), { removeFromClient: "false", blocklist: "false", skipRedownload: "true", changeCategory: "false" });
@@ -372,13 +398,30 @@ test("remove: the removal METHOD — change category and ignore leave the downlo
   assert.deepEqual(audits.map((a) => JSON.parse(String(a.details)).method), ["changeCategory", "ignore", "removeFromClient", "ignore"]);
 });
 
-test("a complete-series pack (thousands of per-episode records) is removed in ONE call", async () => {
-  responder = (c) => (c.method === "DELETE" && c.path === "/api/v3/queue/bulk" ? json({}) : undefined);
-  const ids = Array.from({ length: 1_200 }, (_, i) => i + 1);
+test("a complete-series pack (thousands of per-episode records) is removed in ONE call with ONE id", async () => {
+  const records = Array.from({ length: 1_200 }, (_, i) => sonarrPackRecord(i + 1, i + 1));
+  responder = liveQueue(records);
+  const ids = records.map((r) => r.id);
   const res = await call(removeRoute.POST, await mintSession(), "/admin/queue/remove", { method: "POST", body: { service: "sonarr", ids, action: "blocklist" } });
   assert.equal(res.status, 200);
-  assert.equal(arrCalls().length, 1);
-  assert.equal((arrCalls()[0].body as { ids: number[] }).ids.length, 1_200);
+  assert.equal(bulkDeletes().length, 1);
+  assert.deepEqual((bulkDeletes()[0].body as { ids: number[] }).ids, [1], "any episode id of the pack selects the download once");
+});
+
+test("remove drops a posted id the live queue does not hold, and 409s without a DELETE when nothing posted is live", async () => {
+  responder = liveQueue([radarrRecord(7)]);
+  const token = await mintSession();
+  const res = await call(removeRoute.POST, token, "/admin/queue/remove", {
+    method: "POST",
+    body: { service: "radarr", instance: "4k", ids: [7, 999], action: "remove" },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual((bulkDeletes()[0].body as { ids: number[] }).ids, [7], "an unknown posted id is dropped, not forwarded");
+
+  calls = [];
+  responder = liveQueue([]);
+  assert.equal((await call(removeRoute.POST, token, "/admin/queue/remove", { method: "POST", body: { service: "radarr", ids: [1], action: "remove" } })).status, 409);
+  assert.equal(bulkDeletes().length, 0, "an empty live queue must not send a DELETE");
 });
 
 test("remove refuses a bad body or an unconfigured slug before any upstream call; a vanished download is 409 and not audited", async () => {
@@ -395,7 +438,7 @@ test("remove refuses a bad body or an unconfigured slug before any upstream call
   }
   assert.equal((await call(removeRoute.POST, token, "/admin/queue/remove", { method: "POST", body: { service: "radarr", instance: "anime", ids: [1], action: "remove" } })).status, 404);
   assert.deepEqual(arrCalls(), []);
-  responder = (c) => (c.path === "/api/v3/queue/bulk" ? new Response("gone", { status: 404 }) : undefined);
+  responder = liveQueue([radarrRecord(1)], () => new Response("gone", { status: 404 }));
   assert.equal((await call(removeRoute.POST, token, "/admin/queue/remove", { method: "POST", body: { service: "radarr", ids: [1], action: "remove" } })).status, 409);
   await drain();
   assert.deepEqual(audits, []);
@@ -693,27 +736,40 @@ test("episode picker: one Sonarr series' episodes in order; a bad id is 400 and 
   assert.deepEqual(arrCalls(), []);
 });
 
-test("grab now: ONE bulk grab on the row's own instance, audited after; a release no longer held is 409 and not audited", async () => {
-  responder = (c) => (c.method === "POST" && c.path === "/api/v3/queue/grab/bulk" ? json({}) : undefined);
+test("grab now: re-reads live pending ids, ONE bulk grab, audited after; a posted id the instance is not holding is dropped", async () => {
+  responder = liveQueue([pendingRecord(5), pendingRecord(6, "fallback"), radarrRecord(7)]);
   const token = await mintSession();
-  const res = await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", instance: "4k", ids: [5, 5, 6] } });
+  const res = await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", instance: "4k", ids: [5, 5, 6, 7, 99] } });
   assert.equal(res.status, 200);
-  assert.deepEqual(arrCalls().map((c) => [c.origin, c.body]), [[RADARR_4K, { ids: [5, 6] }]]);
+  assert.ok(arrCalls().some((c) => c.origin === RADARR_4K && c.path === "/api/v3/queue"), "posted ids NAME live records — the instance is re-read first");
+  assert.equal(bulkGrabs().length, 1);
+  assert.deepEqual([bulkGrabs()[0].origin, bulkGrabs()[0].body], [RADARR_4K, { ids: [5, 6] }], "a downloading id and an unknown id are dropped, not forwarded");
   await drain();
   assert.deepEqual(audits.map((a) => [a.action, a.target, JSON.parse(String(a.details))]), [
     ["ARR_RELEASE_GRAB", "radarr:4k", { service: "radarr", instance: "4k", ids: [5, 6], source: "queue" }],
-  ]);
-  audits = [];
-  responder = (c) => (c.path === "/api/v3/queue/grab/bulk" ? new Response("not pending", { status: 404 }) : undefined);
+  ], "the audit records the ids SENT");
+});
+
+test("grab now: 409 without a grab when nothing posted is still pending; a vanished grab is 409 and not audited", async () => {
+  const token = await mintSession();
+  responder = liveQueue([radarrRecord(5)]);
   assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", ids: [5] } })).status, 409);
+  assert.equal(bulkGrabs().length, 0, "a downloading row must not be grabbed");
+  calls = [];
+  responder = liveQueue([]);
+  assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", ids: [5] } })).status, 409);
+  assert.equal(bulkGrabs().length, 0, "an empty live queue must not send a grab");
+  calls = [];
+  responder = liveQueue([pendingRecord(5)], () => new Response("not pending", { status: 404 }));
+  assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", ids: [5] } })).status, 409);
+  await drain();
+  assert.deepEqual(audits, []);
   calls = [];
   for (const body of [{ service: "radarr", ids: [] }, { service: "radarr", ids: [0] }, { service: "radarr" }, { service: "lidarr", ids: [1] }]) {
     assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body })).status, 400, JSON.stringify(body));
   }
   assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", instance: "anime", ids: [1] } })).status, 404);
   assert.deepEqual(arrCalls(), []);
-  await drain();
-  assert.deepEqual(audits, []);
 });
 
 test("re-check: RefreshMonitoredDownloads on EVERY enabled instance, a refusing one named; rate-limited per admin", async () => {

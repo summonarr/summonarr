@@ -346,8 +346,8 @@ const after = (ms: number, id: number, c: { ms: number; id: number }) => ms > c.
  * it) but never announced or counted. An arr wording it differently is simply
  * announced, as before.
  */
-const ARR_MANUAL_FAIL_MESSAGE = "manually marked as failed";
-const isManualMark = (r: ArrHistoryEvent): boolean => r.message?.trim().toLowerCase() === ARR_MANUAL_FAIL_MESSAGE;
+export const ARR_MANUAL_FAIL_MESSAGE = "manually marked as failed";
+export const isManualMark = (r: ArrHistoryEvent): boolean => r.message?.trim().toLowerCase() === ARR_MANUAL_FAIL_MESSAGE;
 
 /**
  * The failures past the cursor, folded by downloadId, oldest first, at most

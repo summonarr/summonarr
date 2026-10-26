@@ -94,8 +94,20 @@ test("group headers are translated from literal catalog keys", () => {
 // ── 2: the rename ────────────────────────────────────────────────────────────
 
 test("Summonarr's own Blacklist reads 'Request Blacklist', never a bare 'Blacklist'", () => {
-  assert.equal(adminNavItems.find((i) => i.href === "/admin/blacklist")?.label, "Request Blacklist");
+  const item = adminNavItems.find((i) => i.href === "/admin/blacklist");
+  assert.equal(item?.label, "Request Blacklist");
+  assert.equal(item?.i18nKey, "adminQueue.blacklist.title");
   assert.ok(!adminNavItems.some((i) => i.label === "Blacklist"));
+  const queue = JSON.parse(readFileSync(resolve(HERE, "../src/lib/i18n/messages/en/adminQueue.json"), "utf8")) as Record<string, string>;
+  assert.equal(queue["adminQueue.blacklist.title"], "Request Blacklist");
+});
+
+test("TRaSH Guides nav and page title share one catalog string", () => {
+  const item = adminNavItems.find((i) => i.href === "/admin/trash-guides");
+  assert.equal(item?.label, "TRaSH Guides");
+  assert.equal(item?.i18nKey, "adminArr.trash.title");
+  const arr = JSON.parse(readFileSync(resolve(HERE, "../src/lib/i18n/messages/en/adminArr.json"), "utf8")) as Record<string, string>;
+  assert.equal(arr["adminArr.trash.title"], "TRaSH Guides");
 });
 
 // ── 3: the any-of Radarr/Sonarr gate ─────────────────────────────────────────

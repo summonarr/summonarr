@@ -1170,9 +1170,13 @@ export async function getJellyfinUserPlayedItems(
 }
 
 // Watch sync, Jellyfin → Plex (watch-sync.ts): one user's PLAYED items, newest
-// play first. With `since`, the walk ends at the first item played before it —
-// nothing older is kept — so a routine run reads one page. Undated items sort
-// last and are only taken by a full read (no `since`). Same query as
+// play first. With `since`, the walk ends at the first DATED item played before
+// it — nothing older is kept — so a routine run reads one page. Undated items
+// never end the walk (the Plex history reader is the same): a null
+// LastPlayedDate in the page, first or last, is skipped on an incremental read
+// and taken only by a full read (no `since`). Treating null as "before the
+// bound" stopped the walk at the first undated row, so a page that led with
+// one dropped every newer dated play behind it. Same query as
 // getJellyfinUserPlayedItems apart from the sort (IndexNumber, the episode
 // number, is a default field).
 export async function getJellyfinPlayedSince(
@@ -1193,9 +1197,14 @@ export async function getJellyfinPlayedSince(
     for (const raw of batch) {
       const item = parseJellyfinPlayedItem(raw);
       if (!item) continue;
-      if (bound !== undefined && (item.lastPlayedAt === null || item.lastPlayedAt.getTime() < bound)) {
-        reached = true;
-        break;
+      if (bound !== undefined) {
+        // Undated: cannot be placed in the window. Skip on an incremental run;
+        // never treat as "older than bound" or a leading null ends the walk.
+        if (item.lastPlayedAt === null) continue;
+        if (item.lastPlayedAt.getTime() < bound) {
+          reached = true;
+          break;
+        }
       }
       out.push(item);
     }

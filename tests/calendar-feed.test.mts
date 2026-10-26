@@ -445,8 +445,15 @@ test("tv: next episode is suppressed only when the lists already carry THAT epis
       W,
       null,
     ).map((e) => e.uid);
-  // Listed episode (any date) ⇒ the list's event only.
+  // In-window listed episode ⇒ the list's event only (its date wins).
   assert.deepEqual(run([{ seasonNumber: 1, episodeNumber: 2, airDate: "2026-10-17" }], { airDate: "2026-10-18", seasonNumber: 1, episodeNumber: 2 }), ["tv-9-s1e2@summonarr"]);
+  // A listed row for that SxxEyy whose date is OUTSIDE the window never emitted,
+  // so it must not suppress nextEpisode — otherwise a stale season cache hides
+  // the upcoming air date entirely.
+  assert.deepEqual(
+    run([{ seasonNumber: 2, episodeNumber: 5, airDate: "2025-01-01" }], { airDate: "2026-11-01", seasonNumber: 2, episodeNumber: 5 }),
+    ["tv-9-next@summonarr"],
+  );
   // A stale list that lacks the next episode ⇒ the next episode still shows.
   assert.deepEqual(
     run([{ seasonNumber: 1, episodeNumber: 1, airDate: "2026-10-10" }], { airDate: "2026-10-17", seasonNumber: 1, episodeNumber: 2 }),

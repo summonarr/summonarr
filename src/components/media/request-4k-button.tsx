@@ -42,6 +42,16 @@ export function Request4kButton({
   // only) — reading that as "requested" showed "4K Requested" for a request
   // that does not exist.
   const [foundAvailable, setFoundAvailable] = useState(false);
+  // Client nav reuses this instance across titles; `requested` is live so a
+  // refresh after a request on this title flips the status without a remount.
+  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
+  const titleChanged = seenTmdbId !== tmdbId;
+  if (titleChanged) {
+    setSeenTmdbId(tmdbId);
+    setState(requested ? "requested" : "idle");
+    setMsg("");
+    setFoundAvailable(false);
+  }
 
   async function submit() {
     setState("loading");
@@ -79,7 +89,7 @@ export function Request4kButton({
   }
 
   // Availability wins over request state — once the 4K copy is fetched there's nothing to request.
-  if (available || foundAvailable) {
+  if (available || (!titleChanged && foundAvailable)) {
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
@@ -88,7 +98,7 @@ export function Request4kButton({
     );
   }
 
-  if (state === "requested") {
+  if ((titleChanged ? !!requested : state === "requested" || requested)) {
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
@@ -118,17 +128,17 @@ export function Request4kButton({
       <DetailActionButton
         variant="secondary"
         onClick={submit}
-        disabled={state === "loading"}
-        busy={state === "loading"}
+        disabled={!titleChanged && state === "loading"}
+        busy={!titleChanged && state === "loading"}
       >
-        {state === "loading" ? (
+        {!titleChanged && state === "loading" ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
         ) : (
           <Plus style={{ width: 14, height: 14 }} />
         )}
         {t("request.requestIn4k")}
       </DetailActionButton>
-      {state === "error" && msg && (
+      {!titleChanged && state === "error" && msg && (
         <p
           className="ds-mono max-w-sm"
           role="alert"

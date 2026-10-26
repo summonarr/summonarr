@@ -1,9 +1,11 @@
 // Admin → Download Queue: the data half. One live, paged /api/v3/queue read per
 // configured Radarr and Sonarr instance (guardrail 32 — every instance, by its
-// slug), folded and judged by the pure rules in arr-queue.ts, plus the one
-// mutation the page offers: removing a download through Radarr/Sonarr's own
-// bulk queue DELETE. Every call goes through arrFetch (guardrail 5). Nothing is
-// cached, and nothing in Summonarr is written except the audit row the route adds.
+// slug), folded and judged by the pure rules in arr-queue.ts, plus the mutations
+// the page offers: removing a download (bulk DELETE) and grabbing a pending
+// release (bulk POST). Posted ids NAME live records; they are never forwarded
+// blindly (guardrail 5e). Every call goes through arrFetch (guardrail 5).
+// Nothing is cached, and nothing in Summonarr is written except the audit row
+// the route adds.
 import { ArrResponseError, arrErrorKind, arrErrorMessage, arrFetch, arrFetchNoContent, getArrCfg, type ArrCfg } from "./arr";
 import type { ArrErrorKind } from "./arr-error-kind";
 import { getSyncableArrInstances } from "./arr-instance-registry";
@@ -16,6 +18,8 @@ import {
   foldQueueRecords,
   importCandidates,
   ImportOverrideError,
+  liveGrabIds,
+  liveRemovalIds,
   manualImportFiles,
   mergeReprocessed,
   overrideNeeds,
@@ -181,6 +185,8 @@ export async function loadDownloadQueue(): Promise<QueueReport> {
 }
 
 export class QueueInstanceError extends Error {}
+/** Posted ids matched nothing (still pending, for a grab) on a fresh read of that instance's queue. */
+export class QueueGoneError extends Error {}
 
 // The instance must be a CONFIGURED one: a slug is never turned into a
 // Setting-key read for an instance the registry doesn't list.
@@ -194,11 +200,12 @@ async function configuredCfg(service: QueueService, instance: string) {
 
 /**
  * Remove downloads from one instance's queue through Radarr/Sonarr's bulk
- * DELETE — ONE call. The page sends one record id per download
- * (`removalIds`): any record of a Sonarr season pack resolves the whole
- * download, and Sonarr v3 blocklists once per id sent, so the pack is removed,
- * and blocklisted, exactly once (guardrail 5c). Several ids (several
- * downloads, from an API caller) still go in the one call.
+ * DELETE — ONE call. Posted ids are names for downloads the instance currently
+ * reports: a fresh `readQueuePages` is folded and intersected first, then
+ * ONE record id per matched download is sent (`liveRemovalIds` / 5c). An API
+ * caller that posts every episode id of a Sonarr pack still blocklists once.
+ * Throws `QueueGoneError` when nothing posted is still in the queue, so the
+ * route 409s without sending a DELETE.
  */
 export async function removeFromQueue(
   service: QueueService,
@@ -206,22 +213,33 @@ export async function removeFromQueue(
   ids: readonly number[],
   action: QueueRemoveAction,
   method: QueueRemoveMethod,
-): Promise<void> {
+): Promise<number[]> {
   const cfg = await configuredCfg(service, instance);
+  const rows = foldQueueRecords(service, instance, await readQueuePages(service, instance));
+  const idsToSend = liveRemovalIds(rows, ids);
+  if (idsToSend.length === 0) throw new QueueGoneError();
   await arrFetchNoContent(cfg, `/api/v3/queue/bulk?${queueRemoveQuery(action, method)}`, {
     method: "DELETE",
-    body: JSON.stringify({ ids: [...ids] }),
+    body: JSON.stringify({ ids: idsToSend }),
   });
+  return idsToSend;
 }
 
 /**
- * Send releases Radarr/Sonarr are HOLDING (a delay profile, …) to the download
- * client now — the arr's own "Grab" on a pending queue item. One bulk call; the
- * arr 404s an id that is no longer pending.
+ * Send releases Radarr/Sonarr are HOLDING (a delay profile, an unavailable
+ * client, a fallback) to the download client now — the arr's own "Grab" on a
+ * pending queue item. Posted ids are names: a fresh `readQueuePages` is folded
+ * and intersected first (`liveGrabIds` — only still-pending rows, ONE id per
+ * download), then ONE bulk POST. Throws `QueueGoneError` when nothing posted is
+ * still pending, so the route 409s without sending a grab.
  */
-export async function grabPending(service: QueueService, instance: string, ids: readonly number[]): Promise<void> {
+export async function grabPending(service: QueueService, instance: string, ids: readonly number[]): Promise<number[]> {
   const cfg = await configuredCfg(service, instance);
-  await arrFetchNoContent(cfg, "/api/v3/queue/grab/bulk", { method: "POST", body: JSON.stringify({ ids: [...ids] }) });
+  const rows = foldQueueRecords(service, instance, await readQueuePages(service, instance));
+  const idsToSend = liveGrabIds(rows, ids);
+  if (idsToSend.length === 0) throw new QueueGoneError();
+  await arrFetchNoContent(cfg, "/api/v3/queue/grab/bulk", { method: "POST", body: JSON.stringify({ ids: idsToSend }) });
+  return idsToSend;
 }
 
 /**

@@ -445,6 +445,15 @@ test("ipBucketKey keys a v4-mapped IPv6 literal on the embedded IPv4", () => {
   // ::ffff:203.0.113.7 is really an IPv4 client — collapsing it to an all-zero
   // /64 would make every mapped-v4 client share one bucket.
   assert.equal(ipBucketKey("::ffff:203.0.113.7"), "203.0.113.7");
+  // Hex-pair and expanded spellings are the same address (Node accepts all
+  // three). The old dotted-only regex left these on 0000:0000:0000:0000, which
+  // is also ::1's /64 — every hex-mapped client shared one limiter with each
+  // other and with IPv6 loopback.
+  assert.equal(ipBucketKey("::ffff:cb00:7107"), "203.0.113.7");
+  assert.equal(ipBucketKey("0:0:0:0:0:ffff:cb00:7107"), "203.0.113.7");
+  assert.equal(ipBucketKey("::ffff:808:808"), "8.8.8.8");
+  assert.notEqual(ipBucketKey("::ffff:cb00:7107"), ipBucketKey("::1"));
+  assert.notEqual(ipBucketKey("::ffff:cb00:7107"), ipBucketKey("::ffff:808:808"));
 });
 
 test("ipBucketKey strips an IPv6 zone index before prefixing", () => {

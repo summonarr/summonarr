@@ -8,7 +8,7 @@ import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, isVa
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheForSource, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type JellyfinLibraryRow } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { fanOutAvailableWinners } from "@/lib/request-notifications";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
@@ -234,16 +234,12 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
       if (newTvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, newTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });
   } else {
-    // Advisory lock 2001,2 — see comment in the recentOnly branch above. Full replace of
-    // THIS instance's rows only (guardrail 13) — an unscoped deleteMany here would wipe
-    // every other server's rows and repopulate only this one's (availability flicker
-    // until the next orchestrator run).
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
-      await tx.jellyfinLibraryItem.deleteMany({ where: { serverInstance: instance } });
-      if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
-      if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
-    }, { timeout: BATCH_TX_TIMEOUT });
+    // Full replace of THIS instance's rows only (guardrail 13) — an unscoped delete
+    // would wipe every other server's rows and repopulate only this one's
+    // (availability flicker until the next orchestrator run). The shared staged swap
+    // takes advisory lock 2001,2 (see the recentOnly branch above) inside its own
+    // short transaction — the same helper the orchestrator's Jellyfin arm uses.
+    await replaceJellyfinLibraryForInstances([{ slug: instance, rows: (movieRows as JellyfinLibraryRow[]).concat(tvRows) }]);
   }
 
   // Stamp last-success so the orchestrator's 24h-stale fallback (sync/route.ts

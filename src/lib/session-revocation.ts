@@ -54,3 +54,18 @@ export function markSessionForceRevoked(sessionId: string): void {
 export function shouldForceDbCheck(userId: string, sessionId: string): boolean {
   return forceRevokeSessions.has(sessionId) || forceRevalidateUserIds.has(userId);
 }
+
+// A restore deletes every AuthSession and stamps sessionsRevokedAt, but a
+// browser cookie re-signed in the last 10s (admin) or 60s (everyone else)
+// skips that lookup. The per-user mark set holds 1024 ids, so it cannot name
+// every account on a large restore. This floor forces every cached check from
+// before the restore onto the slow path. Pass 0 only to clear it (tests).
+const cachedCheckFloor = processSingleton("session-revocation:floor", () => ({ sec: 0 }));
+
+export function invalidateCachedSessionChecks(atSec = Math.floor(Date.now() / 1000)): void {
+  cachedCheckFloor.sec = atSec;
+}
+
+export function cachedSessionCheckIsStale(dbCheckedAt: number): boolean {
+  return cachedCheckFloor.sec > 0 && dbCheckedAt <= cachedCheckFloor.sec;
+}

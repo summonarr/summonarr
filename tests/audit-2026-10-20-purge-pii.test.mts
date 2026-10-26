@@ -101,6 +101,12 @@ shadowPrismaModel(prisma, "auditLog", {
   create: async (args: { data: Written }) => { written.push(args.data); return args.data; },
 });
 shadowPrismaModel(prisma, "setting", { findUnique: async () => null, findMany: async () => [] });
+// Guardrail 6g: admin revoke-all clears session footholds in the same tx.
+const noopDeleteMany = async () => ({ count: 0 });
+shadowPrismaModel(prisma, "pushSubscription", { deleteMany: noopDeleteMany });
+shadowPrismaModel(prisma, "discordLinkToken", { deleteMany: noopDeleteMany });
+shadowPrismaModel(prisma, "discordMergeCode", { deleteMany: noopDeleteMany });
+shadowPrismaModel(prisma, "verificationToken", { deleteMany: noopDeleteMany });
 // The revoke helpers run their reads and deletes in a $transaction, behind the
 // lock-42 role re-read: the tx is the shadowed client itself.
 shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async () => 0);

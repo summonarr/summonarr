@@ -178,8 +178,11 @@ export async function POST(req: NextRequest) {
     // the replay digest hashes the full payload so each one passes — push exactly
     // once per stuck item. Key on the STABLE tmdbId + service, never the volatile
     // queue id/progress. ISO value lets the marker be pruned later.
+    // No usable tmdbId → fail closed (no notify). A shouldNotify=true fallback
+    // re-fires on every queue tick: replay hashes the whole payload, and these
+    // events change queue id/progress each time.
     const stableTmdbId = payload.movie?.tmdbId;
-    let shouldNotify = true;
+    let shouldNotify = false;
     if (isTmdbIdInRange(stableTmdbId as number)) {
       const manualKey = `manualInteractionNotified:radarr:${arrInstance}:${stableTmdbId}`;
       const claim = await prisma.setting.createMany({
@@ -358,26 +361,39 @@ export async function POST(req: NextRequest) {
   // a grab that was fired at a sibling instance. A RESOLVED issue's grab is never
   // claimed: a replacement that found nothing would otherwise be announced by an
   // unrelated import months later (CLAIMABLE_GRAB_ISSUE).
-  const pendingGrabs = await prisma.issueGrab.findMany({
-    where: { tmdbId, mediaType: "MOVIE", arrInstance, notifiedAt: null, issue: CLAIMABLE_GRAB_ISSUE },
+  //
+  // notifiedAt is the outbound-emit claim and is NEVER reset: ntfy/Gotify/
+  // NotificationAgent fire once per grab. Web push may still fail after that; a
+  // Setting `grabPushRetry:<id>` lets the next Download retry the push without
+  // re-opening the emit (unclaiming notifiedAt used to re-fire the agents).
+  const candidateGrabs = await prisma.issueGrab.findMany({
+    where: { tmdbId, mediaType: "MOVIE", arrInstance, issue: CLAIMABLE_GRAB_ISSUE },
   });
-  if (pendingGrabs.length > 0) {
+  if (candidateGrabs.length > 0) {
     const now = new Date();
     await Promise.all(
-      pendingGrabs.map(async (grab) => {
+      candidateGrabs.map(async (grab) => {
+        const retryKey = `grabPushRetry:${grab.id}`;
+        if (grab.notifiedAt !== null) {
+          // Already emitted. Consume the push-retry marker (CAS): a 0 count
+          // means no pending retry, or another delivery already took it.
+          const taken = await prisma.setting.deleteMany({ where: { key: { in: [retryKey] } } });
+          if (taken.count === 0) return;
+        } else {
+          // CAS: ensure only one concurrent webhook fires the notification for this grab
+          const claimed = await prisma.issueGrab.updateMany({
+            where: { id: grab.id, notifiedAt: null },
+            data: { notifiedAt: now },
+          });
+          if (claimed.count === 0) return;
 
-        // CAS: ensure only one concurrent webhook fires the notification for this grab
-        const claimed = await prisma.issueGrab.updateMany({
-          where: { id: grab.id, notifiedAt: null },
-          data: { notifiedAt: now },
-        });
-        if (claimed.count === 0) return;
+          emitNotificationEvent({
+            event: "arr.grab_completed",
+            media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
+            request: { instance: grab.arrInstance },
+          });
+        }
 
-        emitNotificationEvent({
-          event: "arr.grab_completed",
-          media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
-          request: { instance: grab.arrInstance },
-        });
         const outcome = await notifyAdminGrabCompletedPush({
           userId: grab.triggeredById,
           title: grab.title,
@@ -388,16 +404,16 @@ export async function POST(req: NextRequest) {
           episodeNumber: grab.episodeNumber,
           issueId: grab.issueId,
         });
-        // "failed" → reset notifiedAt for retry on the next webhook tick.
-        // "skipped-no-subs" / "skipped-no-keys" → leave notifiedAt set
+        // "failed" → keep notifiedAt (emit stays claimed) and record a push-only
+        // retry. "skipped-no-subs" / "skipped-no-keys" → leave notifiedAt set
         // (retrying won't help: the admin has no push subscription or keys set
         // up), but log so an operator can wire up an email/Discord backstop.
         if (outcome === "failed") {
-          await prisma.issueGrab.update({
-            where: { id: grab.id, notifiedAt: now },
-            data: { notifiedAt: null },
-          }).catch(() => {});
-          console.warn("[webhook/radarr] grab notification failed, reset for retry");
+          await prisma.setting.createMany({
+            data: [{ key: retryKey, value: now.toISOString() }],
+            skipDuplicates: true,
+          });
+          console.warn("[webhook/radarr] grab notification failed, will retry push");
         } else if (outcome === "skipped-no-subs" || outcome === "skipped-no-keys") {
           console.warn(`[webhook/radarr] grab push skipped (${outcome}) for user=${grab.triggeredById} issue=${grab.issueId}`);
         }

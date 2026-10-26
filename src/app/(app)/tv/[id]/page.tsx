@@ -217,6 +217,7 @@ export default async function TVDetailPage({
   const canOnBehalf = hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF);
   const canChooseProfile = hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED);
   const requested4k = !!userRequest4k;
+  const canRequestTv = canRequest(session.user.permissions, "TV", false);
   const canRequest4k = canRequest(session.user.permissions, "TV", true, request4kAllRow?.value === "true");
   // Only surface 4K availability to viewers who can request 4K (instance configured + permission).
   const show4k = has4k && canRequest4k;
@@ -434,6 +435,7 @@ export default async function TVDetailPage({
               style={{ gap: 10, marginTop: 6 }}
             >
               <RequestButton
+                key={media.id}
                 tmdbId={media.id}
                 mediaType="TV"
                 title={media.title}
@@ -449,9 +451,11 @@ export default async function TVDetailPage({
                 canRequestOnBehalf={canOnBehalf}
                 canChooseProfile={canChooseProfile}
                 blacklisted={blacklisted}
+                canRequest={canRequestTv}
               />
               {has4k && canRequest4k && (
                 <Request4kButton
+                  key={`4k-${media.id}`}
                   tmdbId={media.id}
                   mediaType="TV"
                   requestToken={generateRequestToken(media.id, "TV", session.user.id)}
@@ -462,7 +466,7 @@ export default async function TVDetailPage({
               )}
               {namedTargets.map((t) => (
                 <RequestInstanceButton
-                  key={t.slug}
+                  key={`${media.id}:${t.slug}`}
                   tmdbId={media.id}
                   mediaType="TV"
                   instance={t.slug}
@@ -473,8 +477,9 @@ export default async function TVDetailPage({
                   blacklisted={blacklisted}
                 />
               ))}
-              <WatchlistButton tmdbId={media.id} mediaType="TV" initialOnWatchlist={onWatchlist} />
+              <WatchlistButton key={`watchlist-${media.id}`} tmdbId={media.id} mediaType="TV" initialOnWatchlist={onWatchlist} />
               <HideButton
+                key={`hide-${media.id}`}
                 tmdbId={media.id}
                 mediaType="TV"
                 title={media.title}
@@ -492,6 +497,7 @@ export default async function TVDetailPage({
               )}
               {votesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <VoteDeleteButton
+                  key={`vote-${media.id}`}
                   tmdbId={media.id}
                   mediaType="TV"
                   requestToken={generateRequestToken(media.id, "TV", session.user.id)}
@@ -547,7 +553,7 @@ export default async function TVDetailPage({
         <TVSeasons tmdbId={media.id} seasons={media.seasons} ownedBySeason={ownedBySeason} />
       )}
 
-      <SimilarRow items={suggestions} showPlex={showPlex} showJellyfin={showJellyfin} />
+      <SimilarRow items={suggestions} showPlex={showPlex} showJellyfin={showJellyfin} canRequest={canRequestTv} />
     </div>
   );
 }

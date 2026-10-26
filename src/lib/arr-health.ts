@@ -1,5 +1,6 @@
 // Radarr/Sonarr health + the Summonarr webhook connection: the pure rules.
-// Zero imports, zero I/O; the data half is arr-health-data.ts.
+// No I/O; the data half is arr-health-data.ts. safeMessage is the only import,
+// so a health line can't carry an indexer apikey to the browser (guardrail 5e).
 //
 //   • HEALTH is Radarr/Sonarr's own /api/v3/health list (indexers down, a
 //     download client unreachable, a missing root folder, …), reported as-is.
@@ -13,6 +14,8 @@
 //     (/api/v3/notification/schema), so whatever fields and event flags this
 //     Radarr/Sonarr version has are the ones sent. Only the events Summonarr
 //     handles are switched on; an existing entry keeps every other setting.
+
+import { safeMessage } from "@/lib/arr-parse";
 
 export type ArrHealthService = "radarr" | "sonarr";
 
@@ -48,7 +51,7 @@ export function normalizeHealthChecks(raw: unknown): ArrHealthCheck[] {
     if (!r || typeof r !== "object") continue;
     const type = typeof r.type === "string" ? r.type.toLowerCase() : "";
     if (type !== "notice" && type !== "warning" && type !== "error") continue;
-    const message = str(r.message).trim();
+    const message = safeMessage(r.message, MAX_TEXT);
     if (!message) continue;
     out.push({ source: str(r.source, 200), level: type, message, wikiUrl: httpsUrlOrNull(r.wikiUrl) });
   }

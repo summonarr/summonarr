@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { posterUrl } from "@/lib/tmdb-types";
@@ -32,6 +33,24 @@ export function WatchlistGrid({
   const [error, setError] = useState<string | null>(null);
   const t = useT();
   const locale = useLocale();
+  const router = useRouter();
+  const [isPending, startTransition] = useTransition();
+  const [reloadRequested, setReloadRequested] = useState(false);
+  // After router.refresh(), adopt the new server slice when the user asked
+  // for it (or when the visible list is already empty). Do not clobber an
+  // in-progress optimistic remove of a non-empty grid.
+  const [seenInitial, setSeenInitial] = useState(initialItems);
+  let visible = items;
+  if (initialItems !== seenInitial) {
+    setSeenInitial(initialItems);
+    if (reloadRequested || items.length === 0) {
+      setItems(initialItems);
+      setReloadRequested(false);
+      setError(null);
+      visible = initialItems;
+    }
+  }
+  const capped = cap != null && initialItems.length >= cap;
 
   async function remove(it: WatchlistGridItem) {
     const key = `${it.tmdbId}:${it.mediaType}`;
@@ -67,7 +86,59 @@ export function WatchlistGrid({
     }
   }
 
-  if (items.length === 0) {
+  if (visible.length === 0) {
+    // A drained capped slice is NOT a true empty list — older rows remain
+    // and this page is the only bulk remove UI. Match the Library/Issues
+    // cap-banner tone and offer a reload so the next slice can appear.
+    if (capped && cap != null) {
+      return (
+        <>
+          {error && (
+            <p role="alert" className="text-red-400" style={{ fontSize: 13, marginBottom: 12 }}>
+              {error}
+            </p>
+          )}
+          <div
+            role="status"
+            style={{
+              marginBottom: 16,
+              padding: "10px 14px",
+              borderRadius: 8,
+              background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+              border: "1px solid color-mix(in oklab, var(--ds-warning) 30%, transparent)",
+              color: "var(--ds-warning)",
+              fontSize: 12.5,
+            }}
+          >
+            <p className="m-0">{t("personal.common.cappedEmpty", { n: cap.toLocaleString(locale) })}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setReloadRequested(true);
+                startTransition(() => {
+                  router.refresh();
+                });
+              }}
+              disabled={isPending}
+              className="ds-hover-tint"
+              style={{
+                marginTop: 10,
+                padding: "6px 12px",
+                borderRadius: 6,
+                border: "1px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
+                background: "color-mix(in oklab, var(--ds-warning) 8%, transparent)",
+                color: "var(--ds-warning)",
+                fontSize: 12.5,
+                fontWeight: 500,
+                cursor: isPending ? "progress" : undefined,
+              }}
+            >
+              {isPending ? t("personal.common.loading") : t("personal.common.reload")}
+            </button>
+          </div>
+        </>
+      );
+    }
     return (
       <EmptyState
         icon={Bookmark}
@@ -78,8 +149,6 @@ export function WatchlistGrid({
     );
   }
 
-  const capped = cap != null && initialItems.length >= cap;
-
   return (
     <>
     {error && (
@@ -88,7 +157,7 @@ export function WatchlistGrid({
       </p>
     )}
     <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
-      {items.map((it) => {
+      {visible.map((it) => {
         const key = `${it.tmdbId}:${it.mediaType}`;
         const href = it.mediaType === "MOVIE" ? `/movie/${it.tmdbId}` : `/tv/${it.tmdbId}`;
         const poster = posterUrl(it.posterPath, "w342");
@@ -108,8 +177,8 @@ export function WatchlistGrid({
                 )}
               </div>
               <div
-                className="ds-mono line-clamp-2 transition-colors group-hover:text-[var(--ds-fg)]"
-                style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", marginTop: 6, lineHeight: 1.3 }}
+                className="line-clamp-2 font-medium"
+                style={{ fontSize: 12.5, color: "var(--ds-fg)", marginTop: 8, lineHeight: 1.3 }}
               >
                 {it.title}
               </div>

@@ -79,10 +79,14 @@ export function PersonView({
   person,
   showPlex,
   showJellyfin,
+  canRequestMovie,
+  canRequestTv,
 }: {
   person: PersonDetails;
   showPlex: boolean;
   showJellyfin: boolean;
+  canRequestMovie?: boolean;
+  canRequestTv?: boolean;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -221,6 +225,7 @@ export function PersonView({
                 requestToken={c.requestToken}
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
+                canRequest={c.mediaType === "movie" ? canRequestMovie : canRequestTv}
               />
             ))}
           </div>

@@ -505,6 +505,18 @@ test("upcoming movies: region-pinned pages; already-released and dateless rows a
   assert.equal(cacheUpserts[0]?.key, "movies:upcoming");
 });
 
+test("upcoming cache hits are re-filtered against today so yesterday's titles leave the home rail", async () => {
+  const cached = [
+    { id: 1, mediaType: "movie" as const, title: "Out Yesterday", overview: "", posterPath: null, backdropPath: null, releaseDate: "2001-01-01", releaseYear: "2001", voteAverage: 0, voteCount: 0 },
+    { id: 2, mediaType: "movie" as const, title: "Still Upcoming", overview: "", posterPath: null, backdropPath: null, releaseDate: "2999-06-01", releaseYear: "2999", voteAverage: 0, voteCount: 0 },
+  ];
+  seedCache("movies:upcoming", cached);
+  seedCache("tv:upcoming", cached.map((m) => ({ ...m, mediaType: "tv" as const })));
+  assert.deepEqual((await getUpcomingMovies()).map((m) => m.id), [2]);
+  assert.deepEqual((await getUpcomingTV()).map((m) => m.id), [2]);
+  assert.equal(fetchCalls.length, 0, "a cache hit must not refetch");
+});
+
 test("a 429 is retried (Retry-After honored) instead of failing the fetch outright", async () => {
   // One throttled page used to reject the whole helper call — and the
   // all-fulfilled cache gates then converted that into a full re-fan-out on

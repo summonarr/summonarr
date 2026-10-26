@@ -216,7 +216,10 @@ function makeTx() {
         const u = usersById.get(args.where.id);
         // purgeUserDataInTx re-reads the lifecycle state inside the tx to enforce
         // its "already disabled" precondition; the revoke path reads the cutoff.
-        return u ? { sessionsRevokedAt: u.sessionsRevokedAt, deactivatedAt: u.deactivatedAt, purgedAt: u.purgedAt } : null;
+        return u ? {
+          sessionsRevokedAt: u.sessionsRevokedAt, deactivatedAt: u.deactivatedAt, purgedAt: u.purgedAt,
+          role: u.role, permissions: u.permissions,
+        } : null;
       },
       update: rec("user.update"),
       // The manual link's admin re-check reads the current and the new owner.
@@ -771,6 +774,22 @@ test("revoke all: happy path → 200 {revoked:'all'}, the whole-user mark is set
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true, revoked: "all" });
   assert.equal(shouldForceDbCheck(targetId, "any-session-of-this-user"), true, "revoke-all force-revalidates every session of the user");
+  // Same compromise-response set as POST /api/sessions/revoke-all (guardrail 6g),
+  // in the SAME transaction as the session delete — not folded into
+  // revokeAllUserSessions (Jellyfin offboarding uses that helper without this).
+  for (const op of ["pushSubscription.deleteMany", "discordLinkToken.deleteMany", "discordMergeCode.deleteMany"]) {
+    const calls = txOps.filter((o) => o.op === op);
+    assert.equal(calls.length, 1, `${op} runs once in the revoke tx`);
+    assert.deepEqual(calls[0].args, { where: { userId: targetId } });
+  }
+  const pendingEmail = txOps.filter((o) => o.op === "verificationToken.deleteMany");
+  assert.equal(pendingEmail.length, 1, "pending notification-email verifications are cleared");
+  assert.deepEqual(pendingEmail[0].args, { where: { identifier: { startsWith: `notif-email:${targetId}:` } } });
+  const userWrites = txOps.filter((o) => o.op === "user.update").map((o) => (o.args as { data: Record<string, unknown> }).data);
+  assert.ok(
+    userWrites.some((d) => d.calendarTokenHash === null && d.calendarTokenCreatedAt === null),
+    "the calendar feed URL is revoked too",
+  );
   await flush();
   assert.equal(auditRows.length, 1);
   assert.equal(auditRows[0].action, "SESSION_REVOKE");
@@ -1752,4 +1771,28 @@ test("user-target audit rows (permissions, both grant maps, reactivate, 2FA rese
     await flush();
     assert.deepEqual(onlyRow("USER_REACTIVATE"), { targetUserId: disabledId, ...named, role: "USER" }, "no targetEmail either");
   }
+});
+
+test("admin 2FA reset: factors, sessions, footholds and calendar land in ONE transaction", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  authSessionsById.set(`mfa-sess-${seq}`, { userId: targetId, deviceLabel: "phone", createdAt: new Date() });
+  const res = await userMfaReset(
+    req(`http://localhost:3000/api/admin/users/${targetId}/mfa`, { method: "DELETE", headers: admin.header }),
+    ctxFor(targetId),
+  );
+  assert.equal(res.status, 200);
+  assert.equal(txOptsSeen.length, 1, "factor delete must not commit before the revoke");
+  for (const op of [
+    "userTotp.deleteMany", "webAuthnCredential.deleteMany", "mfaRecoveryCode.deleteMany",
+    "authSession.deleteMany",
+    "pushSubscription.deleteMany", "discordLinkToken.deleteMany", "discordMergeCode.deleteMany",
+    "verificationToken.deleteMany",
+  ]) {
+    assert.ok(txOps.some((o) => o.op === op), op);
+  }
+  assert.ok(
+    txOps.some((o) => o.op === "user.update" && JSON.stringify(o.args).includes("calendarTokenHash")),
+    "calendar token cleared in the same tx",
+  );
 });

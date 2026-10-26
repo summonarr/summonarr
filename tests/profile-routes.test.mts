@@ -236,6 +236,8 @@ shadowPrismaModel(prisma, "auditLog", { create: async (a: unknown) => { rec("aud
 // (an in-memory table the confirm tests seed directly).
 type VerifyRow = { token: string; identifier: string; expires: Date };
 let verifyTokens: VerifyRow[] = [];
+// Simulates a confirm that lost the delete race (password change / second click).
+let consumeMiss = false;
 const verificationTokenModel = {
   findUnique: async (args: { where: { token: string } }) =>
     verifyTokens.find((r) => r.token === args.where.token) ?? null,
@@ -244,9 +246,21 @@ const verificationTokenModel = {
     verifyTokens = verifyTokens.filter((r) => r.token !== args.where.token);
     return {};
   },
-  deleteMany: async (args: unknown) => {
+  deleteMany: async (args: { where?: { token?: string; identifier?: { startsWith?: string } } }) => {
     rec("verificationToken.deleteMany", args);
-    return { count: 0 };
+    if (consumeMiss) {
+      consumeMiss = false;
+      return { count: 0 };
+    }
+    const token = args.where?.token;
+    const prefix = args.where?.identifier?.startsWith;
+    const before = verifyTokens.length;
+    verifyTokens = verifyTokens.filter((r) => {
+      if (typeof token === "string" && r.token === token) return false;
+      if (typeof prefix === "string" && r.identifier.startsWith(prefix)) return false;
+      return true;
+    });
+    return { count: before - verifyTokens.length };
   },
   create: async (args: { data: Record<string, unknown> }) => {
     rec("verificationToken.create", args);
@@ -1066,7 +1080,7 @@ test("confirm POST renders the ERROR page, not success, when the scoped bind mat
   assert.match(html, /Something went wrong/);
   assert.doesNotMatch(html, /Email verified/);
   assert.equal(opsOf("user.updateMany").length, 1, "the (refused) bind was attempted exactly once");
-  assert.equal(opsOf("verificationToken.delete").length, 1, "the token is still consumed first");
+  assert.equal(opsOf("verificationToken.deleteMany").length, 1, "the token is still consumed first");
   await settleAudits();
   assert.equal(opsOf("auditLog.create").length, 0, "nothing was bound, so nothing is audited as bound");
 });
@@ -1089,4 +1103,15 @@ test("confirm POST on a live account binds, says so, and audits notification-ema
   assert.equal(rows[0].target, `user:${userId}`);
   assert.deepEqual(JSON.parse(rows[0].details), { kind: "notification-email-verified" });
   assert.ok(!JSON.stringify(rows).includes("new@example.com"), "the address is not recorded in the audit row");
+});
+
+test("confirm POST does not bind when the token was already consumed (lost the delete race)", async () => {
+  const { userId } = await mintSession({ provider: "jellyfin" });
+  const raw = "fedcba9876543210";
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier(userId, "hijack@example.com"), expires: new Date(Date.now() + 60_000) }];
+  consumeMiss = true;
+  const res = await confirmPost(`?token=${raw}`);
+  assert.equal(res.status, 400);
+  assert.match(await res.text(), /expired or already used/i);
+  assert.equal(opsOf("user.updateMany").length, 0, "a delete that matched nothing must not write the address");
 });

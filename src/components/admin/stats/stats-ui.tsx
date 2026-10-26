@@ -350,7 +350,12 @@ export function MonthChart({
           </ul>
         </figcaption>
       )}
-      <table className="sr-only">
+      {/* The sr-only wrapper is a div, not the table: a table ignores the 1px
+          width sr-only sets and lays out at its content width (~500px), and as
+          an absolutely positioned box that widened the whole document, so
+          /admin/stats scrolled sideways on a phone. */}
+      <div className="sr-only">
+      <table>
         <caption>{ariaLabel}</caption>
         <thead>
           <tr>
@@ -367,6 +372,7 @@ export function MonthChart({
           ))}
         </tbody>
       </table>
+      </div>
     </figure>
   );
 }

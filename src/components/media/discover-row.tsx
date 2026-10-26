@@ -18,6 +18,10 @@ interface DiscoverRowProps {
       otherwise collapse to a lone header. Any OTHER empty rail (a failed TMDB
       call, no For You shelf yet) still disappears: the message would be false. */
   allAvailable?: boolean;
+  /** HD request overlay, scoped by the card's media type. Same gate as the
+      detail-page CTA. Omitted → overlay stays (fail open for a missed callsite). */
+  canRequestMovie?: boolean;
+  canRequestTv?: boolean;
 }
 
 // Server component (async for the request translator); only the home page renders it.
@@ -29,6 +33,8 @@ export async function DiscoverRow({
   subtitle,
   seeAllHref,
   allAvailable,
+  canRequestMovie,
+  canRequestTv,
 }: DiscoverRowProps) {
   if (items.length === 0 && !allAvailable) return null;
   const t = await getTranslator();
@@ -72,6 +78,7 @@ export async function DiscoverRow({
               showPlex={showPlex}
               showJellyfin={showJellyfin}
               size="md"
+              canRequest={media.mediaType === "movie" ? canRequestMovie : canRequestTv}
             />
           ))}
         </div>

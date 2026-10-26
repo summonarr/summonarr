@@ -209,7 +209,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
         className="resp-grid-3"
         style={{
           display: "grid",
-          gridTemplateColumns: "1.4fr 1fr 1fr",
+          gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr)",
           gap: 10,
           marginBottom: 22,
         }}
@@ -349,7 +349,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
         className="resp-grid-2"
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr",
+          gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
           gap: 10,
           marginBottom: 22,
         }}

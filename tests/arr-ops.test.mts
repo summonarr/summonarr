@@ -41,6 +41,9 @@ const {
   defaultImportSelection,
   isDownloadId,
   isImportMode,
+  liveRemovalIds,
+  liveGrabIds,
+  removalIds,
 } = await import("../src/lib/arr-queue.ts");
 const {
   arrValidationMessage,
@@ -187,6 +190,15 @@ test("messages: errorMessage first, statusMessages flattened, deduplicated, boun
   assert.deepEqual(row.messages, ["Import failed", "Not a valid movie file", "Title-only line"]);
 });
 
+test("queue messages mask an indexer apikey before they reach the browser", () => {
+  const [row] = foldQueueRecords("radarr", "", [{
+    id: 1,
+    errorMessage: "Grab failed https://idx.example/api?apikey=SECRET123&t=get",
+  }]);
+  assert.deepEqual(row.messages, ["Grab failed https://idx.example/api?apikey=••••••••&t=get"]);
+  assert.equal(JSON.stringify(row).includes("SECRET123"), false);
+});
+
 test("sortQueueItems: attention first, then pipeline stage, then title (never time left)", () => {
   const items = [
     ...foldQueueRecords("radarr", "", [{ id: 1, movie: { title: "B" }, status: "downloading", timeleft: "01:00:00" }]),
@@ -195,6 +207,30 @@ test("sortQueueItems: attention first, then pipeline stage, then title (never ti
     ...foldQueueRecords("radarr", "", [{ id: 4, movie: { title: "D" }, status: "completed", trackedDownloadState: "importBlocked", trackedDownloadStatus: "warning" }]),
   ];
   assert.deepEqual(sortQueueItems(items).map((i) => i.ids[0]), [4, 2, 1, 3]);
+});
+
+test("liveRemovalIds: posted ids name live downloads; a Sonarr pack collapses to ONE id", () => {
+  const pack = foldQueueRecords("sonarr", "", [packRecord(11, 2), packRecord(10, 1), packRecord(12, 3)]);
+  const other = foldQueueRecords("sonarr", "", [packRecord(30, 1, { downloadId: "other", seriesId: 8 })]);
+  const rows = [...pack, ...other];
+  assert.deepEqual(removalIds(pack[0]), [11]);
+  assert.deepEqual(liveRemovalIds(rows, [12, 30, 12, 999]), [11, 30], "any pack episode id selects the download once; unknown ids drop");
+  assert.deepEqual(liveRemovalIds(rows, [999, 0]), []);
+});
+
+test("liveGrabIds: posted ids name live PENDING downloads only; a pending pack collapses to ONE id", () => {
+  const held = foldQueueRecords("radarr", "", [{ id: 5, movie: { title: "A" }, status: "delay" }]);
+  const live = foldQueueRecords("radarr", "", [{ id: 7, movie: { title: "C" }, status: "downloading" }]);
+  const pack = foldQueueRecords("sonarr", "", [
+    { id: 11, downloadId: "held-pack", title: "Show.S01", seriesId: 1, series: { title: "S" }, episode: { seasonNumber: 1, episodeNumber: 1 }, status: "delay" },
+    { id: 12, downloadId: "held-pack", title: "Show.S01", seriesId: 1, series: { title: "S" }, episode: { seasonNumber: 1, episodeNumber: 2 }, status: "delay" },
+  ]);
+  const rows = [...held, ...live, ...pack];
+  assert.equal(held[0].pending, true);
+  assert.equal(live[0].pending, false);
+  assert.equal(pack[0].pending, true);
+  assert.deepEqual(liveGrabIds(rows, [5, 7, 12, 99]), [5, 11], "non-pending and unknown drop; any pack episode id selects the download once");
+  assert.deepEqual(liveGrabIds(rows, [7, 99]), []);
 });
 
 test("the removal query sends EVERY flag explicitly — the arr defaults removeFromClient to true", () => {
@@ -256,6 +292,16 @@ test("importCandidates: what the dialog shows — matched target, quality, rejec
     ["Show.S01E02.mkv", true, [2]],
   ]);
   assert.deepEqual(importCandidates("radarr", "not a list"), []);
+});
+
+test("import rejections mask an indexer apikey", () => {
+  const [c] = importCandidates("radarr", [{
+    path: "/downloads/Movie.mkv",
+    relativePath: "Movie.mkv",
+    rejections: [{ reason: "Not an upgrade apikey=SECRET123" }],
+    movie: { id: 1, title: "Movie", year: 2024 },
+  }]);
+  assert.deepEqual(c.rejections, ["Not an upgrade apikey=••••••••"]);
 });
 
 const pick = (paths: string[]) => new Map(paths.map((p) => [p, {}]));
@@ -419,6 +465,14 @@ test("normalizeHealthChecks: drops ok rows and blanks, errors first, wiki links 
     ["notice", "UpdateCheck", "https://wiki.servarr.com/radarr/system#update"],
   ]);
   assert.deepEqual(normalizeHealthChecks({ not: "a list" }), []);
+});
+
+test("health messages mask an indexer apikey and drop a line that is only whitespace", () => {
+  const [check] = normalizeHealthChecks([
+    { source: "IndexerStatusCheck", type: "error", message: "Indexer down apikey=SECRET123" },
+  ]);
+  assert.equal(check.message, "Indexer down apikey=••••••••");
+  assert.equal(check.message.includes("SECRET123"), false);
 });
 
 const hook = (over: Record<string, unknown> = {}, url = "http://summonarr:3000/api/webhooks/radarr?token=s3cret") => ({

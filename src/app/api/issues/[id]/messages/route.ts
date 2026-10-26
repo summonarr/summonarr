@@ -170,23 +170,21 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     const selfAction = issue.reportedBy === session.user.id;
 
     // The same read gives both the deactivatedAt check and the email preferences.
+    // Fails CLOSED — a null row (missing, or a failed read) means no notification,
+    // including the inbox. A deactivated reporter keeps a live email, Discord
+    // link and push subscription; the bell row would otherwise be waiting when
+    // the account is turned back on.
     const reporter = selfAction
-      ? Promise.resolve(null)
-      : prisma.user
+      ? null
+      : await prisma.user
           .findUnique({
             where: { id: issue.reportedBy },
             select: { deactivatedAt: true, email: true, notificationEmail: true, notifyOnIssue: true, locale: true },
           })
           .catch(() => null);
-    // Fails CLOSED — a null row (missing, or a failed read) means no notification.
-    const reporterActive = reporter.then((u) => !!u && u.deactivatedAt == null);
-
-    void reporterActive.then((active) => {
-      if (!active) return;
+    if (reporter && reporter.deactivatedAt == null) {
       void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text, { tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
       void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, body: text, issueId: id }).catch(() => {});
-    });
-    if (!selfAction) {
       createInAppNotification(issue.reportedBy, {
         type: "ISSUE_REPLY",
         title: issue.title,
@@ -197,16 +195,13 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         // Re-rendered in the reader's language at read time (notification-render.ts).
         data: { v: 1, author: authorName, text: text.slice(0, 400) },
       });
-    }
-    void reporter
-      .then(async (reporter) => {
-        if (!reporter?.notifyOnIssue) return;
-        if (!(await reporterActive)) return; // same chokepoint as above
+      if (reporter.notifyOnIssue) {
         const toEmail = resolveUserNotificationEmail(reporter);
-        if (!toEmail) return;
-        return notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, authorName, body: text, locale: reporter.locale });
-      })
-      .catch(() => {});
+        if (toEmail) {
+          void notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, authorName, body: text, locale: reporter.locale }).catch(() => {});
+        }
+      }
+    }
     void notifyAdminsIssueMessage(issue.title, authorName, text, { ...adminOpts, tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
     void notifyAdminsIssueMessagePush({ title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
     void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});

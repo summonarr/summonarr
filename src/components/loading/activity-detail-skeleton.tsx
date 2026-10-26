@@ -89,7 +89,7 @@ export function TitleDetailSkeleton() {
       </div>
       <div
         className="resp-grid-3"
-        style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr", gap: 10, marginBottom: 22 }}
+        style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr)", gap: 10, marginBottom: 22 }}
       >
         {Array.from({ length: 3 }).map((_, i) => (
           <Card key={i} h={220} />
@@ -97,7 +97,7 @@ export function TitleDetailSkeleton() {
       </div>
       <div
         className="resp-grid-2"
-        style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 22 }}
+        style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginBottom: 22 }}
       >
         <Card h={180} />
         <Card h={180} />
@@ -113,7 +113,7 @@ export function UserDetailSkeleton() {
       <DetailHeaderSkeleton leading="avatar" />
       <div
         className="resp-grid-3"
-        style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginBottom: 22 }}
+        style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 10, marginBottom: 22 }}
       >
         {Array.from({ length: 5 }).map((_, i) => (
           <Card key={i} h={80} />
@@ -126,7 +126,7 @@ export function UserDetailSkeleton() {
       </div>
       <div
         className="resp-grid-2"
-        style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 10, marginBottom: 22 }}
+        style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 1fr)", gap: 10, marginBottom: 22 }}
       >
         <Card h={200} />
         <Card h={200} />

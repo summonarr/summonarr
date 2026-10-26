@@ -94,7 +94,7 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { verifyAndRefreshSession } = await import("../src/lib/session-refresh.ts");
-const { markSessionForceRevoked } = await import("../src/lib/session-revocation.ts");
+const { invalidateCachedSessionChecks, markSessionForceRevoked } = await import("../src/lib/session-revocation.ts");
 const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 const { Permission, PRESETS } = await import("../src/lib/permissions.ts");
 
@@ -466,6 +466,20 @@ test("the cache window is deliberately blind to a revocation — and markSession
   const after = await verifyAndRefreshSession(token, COOKIE);
   assert.equal(after, null, "a locally-marked session must be re-checked and rejected");
   assert.ok(dbReads > 0, "the mark must force the DB read despite the fresh dbCheckedAt");
+});
+
+test("a restore's check floor closes the dbCheckedAt window for every cookie, not one user", async () => {
+  const now0 = nowSec();
+  const { sessionId, token } = await mint({ dbCheckedAt: now0 - 5 });
+  sessionRows.delete(sessionId);
+  invalidateCachedSessionChecks();
+  try {
+    const after = await verifyAndRefreshSession(token, COOKIE);
+    assert.equal(after, null, "a cookie checked before the restore must be re-read and rejected");
+    assert.ok(dbReads > 0, "the floor must force the DB read despite the fresh dbCheckedAt");
+  } finally {
+    invalidateCachedSessionChecks(0);
+  }
 });
 
 test("an 8-day-old ADMIN session with a live exp passes the fast path untouched — there is no 7d ceiling", async () => {

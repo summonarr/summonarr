@@ -244,11 +244,12 @@ export const PATCH = withIssueAdmin(async (
       .catch(() => false);
 
     // An issue admin resolving their OWN reported issue must not be notified about it
-    // (on a single-admin instance that is the common case). This covers Discord, push
-    // and the in-app inbox row below.
+    // (on a single-admin instance that is the common case). A deactivated reporter
+    // is the same gate: Discord, push, and the inbox all wait on reporterActive.
     const selfAction = issue.reportedBy === session.user.id;
-    void reporterActive.then((active) => {
-      if (!active || selfAction) return;
+    const active = await reporterActive;
+    const res = (sanitizedResolution ?? issue.resolution) ?? "";
+    if (active && !selfAction) {
       notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, sanitizedResolution ?? issue.resolution, issue.tmdbId).catch(() => {});
       notifyUserIssueResolvedPush({
         userId: issue.reportedBy,
@@ -258,9 +259,6 @@ export const PATCH = withIssueAdmin(async (
         resolution: sanitizedResolution ?? issue.resolution,
         issueId: id,
       }).catch(() => {});
-    });
-    const res = (sanitizedResolution ?? issue.resolution) ?? "";
-    if (!selfAction) {
       createInAppNotification(issue.reportedBy, {
         type: "ISSUE_RESOLVED",
         title: issue.title,

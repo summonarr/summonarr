@@ -738,7 +738,15 @@ class PlexServer {
     const cfg = await this.config();
     if (!cfg) return null;
     const owner = await this.ownerId();
-    if (plexAccountId === owner || (owner === null && isServerAdmin)) return cfg.token;
+    // The owner's token is the admin token only once plex.tv has named them.
+    // `isServerAdmin` is set-only (a token rotation never clears it), and the
+    // read path already holds when the owner can't be identified. Using the
+    // admin token for every sticky admin flag would scrobble a former owner's
+    // pending marks onto whoever holds the token now (guardrail 19e).
+    if (owner === null && isServerAdmin) {
+      throw new Error("Couldn't identify the Plex server owner this run; will retry");
+    }
+    if (owner !== null && plexAccountId === owner) return cfg.token;
     if (!this.sharedP) {
       this.sharedP = (async () => {
         const machineId = await getPlexMachineId(cfg.url, cfg.token);

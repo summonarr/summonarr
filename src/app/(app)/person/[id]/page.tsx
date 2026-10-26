@@ -7,6 +7,7 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { isFeatureEnabled } from "@/lib/features";
 import { PersonView } from "@/components/media/person-view";
 import { DetailTitle } from "@/components/layout/detail-title";
+import { canRequest } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -66,7 +67,13 @@ export default async function PersonPage({
       {/* Renders nothing — publishes the name so the header breadcrumb can
           read it, the same way the movie/tv pages publish their title. */}
       <DetailTitle title={person.name} />
-      <PersonView person={person} showPlex={showPlex} showJellyfin={showJellyfin} />
+      <PersonView
+        person={person}
+        showPlex={showPlex}
+        showJellyfin={showJellyfin}
+        canRequestMovie={canRequest(session.user.permissions, "MOVIE", false)}
+        canRequestTv={canRequest(session.user.permissions, "TV", false)}
+      />
     </>
   );
 }

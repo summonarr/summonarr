@@ -21,6 +21,7 @@ import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
 import { TrendingUp, Film } from "@/components/icons";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
+import { canRequest } from "@/lib/permissions";
 
 type EnrichedMedia = TmdbMedia & {
   // 1-based position in the SERVER-WIDE ranking (page offset included), taken
@@ -75,6 +76,8 @@ export default async function PopularOnServerPage({
     plex: plexEnabled,
     jellyfin: jellyfinEnabled,
   });
+  const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
+  const canRequestTv = canRequest(session.user.permissions, "TV", false);
   const [show4k, playHistoryEnabled] = await Promise.all([
     getShow4kVisibility(session),
     isPlayHistoryEnabled(),
@@ -338,6 +341,7 @@ export default async function PopularOnServerPage({
                 showJellyfin={showJellyfin}
                 sort={sort}
                 t={t}
+                canRequest={canRequestMovie}
               />
             </section>
           )}
@@ -354,6 +358,7 @@ export default async function PopularOnServerPage({
                 showJellyfin={showJellyfin}
                 sort={sort}
                 t={t}
+                canRequest={canRequestTv}
               />
             </section>
           )}
@@ -373,12 +378,14 @@ function MediaGrid({
   showJellyfin,
   sort,
   t,
+  canRequest,
 }: {
   items: EnrichedMedia[];
   showPlex: boolean;
   showJellyfin: boolean;
   sort: PopularSort;
   t: Translator;
+  canRequest?: boolean;
 }) {
   return (
     <div className="ds-media-grid">
@@ -409,6 +416,7 @@ function MediaGrid({
             showJellyfin={showJellyfin}
             size="md"
             className="grow"
+            canRequest={canRequest}
           />
           <div
             className="ds-mono flex flex-wrap items-center"

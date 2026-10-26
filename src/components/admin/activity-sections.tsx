@@ -199,7 +199,7 @@ export function AnalyticsRow({
         className="resp-analytics"
         style={{
           display: "grid",
-          gridTemplateColumns: "1.5fr 1.2fr 1fr",
+          gridTemplateColumns: "minmax(0, 1.5fr) minmax(0, 1.2fr) minmax(0, 1fr)",
           gap: 10,
         }}
       >
@@ -333,7 +333,7 @@ export function Leaderboards({
     <section style={{ marginBottom: 22 }}>
       <div
         className="resp-grid-2"
-        style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
+        style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}
       >
         <ActivityCard>
           <SectionHeader

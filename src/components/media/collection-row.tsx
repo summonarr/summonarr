@@ -38,6 +38,7 @@ export function CollectionRow({
             size="md"
             showPlex={showPlex}
             showJellyfin={showJellyfin}
+            canRequest={canRequest}
           />
         ))}
       </div>

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
 import { isQueueRemoveAction, isQueueRemoveMethod, type QueueRemoveMethod } from "@/lib/arr-queue";
-import { parseQueueService, QueueInstanceError, removeFromQueue } from "@/lib/arr-queue-data";
+import { parseQueueService, QueueGoneError, QueueInstanceError, removeFromQueue } from "@/lib/arr-queue-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { isFeatureEnabled } from "@/lib/features";
@@ -11,9 +11,10 @@ import { sanitizeForLog } from "@/lib/sanitize";
 
 const MAX_BODY_BYTES = 64 * 1024;
 // The page sends ONE record id per download (`removalIds` — any record of a
-// Sonarr pack resolves the whole download, and Sonarr v3 blocklists once per
-// id sent); an API caller may still send several, and they all go in ONE bulk
-// call (guardrail 5c). The bound only keeps a body from being absurd.
+// Sonarr pack resolves the whole download). An API caller may still send
+// several; they name downloads, and a fresh queue read selects ONE live id
+// per matched download in ONE bulk call (guardrail 5c / 5e). The bound only
+// keeps a body from being absurd.
 const MAX_IDS = 5_000;
 const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 
@@ -58,13 +59,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.missing.integrationDisabled", { service: label }) }, { status: 404 });
   }
   const uniqueIds = [...new Set(ids as number[])];
+  let sentIds: number[];
   try {
-    await removeFromQueue(service, instance, uniqueIds, action, method as QueueRemoveMethod);
+    sentIds = await removeFromQueue(service, instance, uniqueIds, action, method as QueueRemoveMethod);
   } catch (err) {
     if (err instanceof QueueInstanceError) {
       return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service: label }) }, { status: 404 });
     }
-    if (err instanceof ArrResponseError && err.status === 404) {
+    if (err instanceof QueueGoneError || (err instanceof ArrResponseError && err.status === 404)) {
       return NextResponse.json({ error: t("apiAdmin.queue.gone") }, { status: 409 });
     }
     console.warn(`[queue] ${service} instance "${sanitizeForLog(instance)}" remove failed:`, arrErrorMessage(err));
@@ -75,7 +77,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     userName: session.user.name ?? session.user.email ?? null,
     action: "ARR_QUEUE_REMOVE",
     target: `${service}:${instance}`,
-    details: { service, instance, ids: uniqueIds, action, method },
+    details: { service, instance, ids: sentIds, action, method },
     ...auditContext(req, session),
   });
   return NextResponse.json({ ok: true });

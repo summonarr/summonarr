@@ -40,6 +40,11 @@ export const BACKUP_TABLES = [
   // reads this same list), not because its contents matter: the rewrite helper
   // clears its own rows in a finally block, so it is empty except during a run.
   "TVEpisodeCacheStaging",
+  // The library twins of that buffer (replacePlexLibraryForInstances /
+  // replaceJellyfinLibraryForInstances) — listed for the same reason, and
+  // likewise empty except during a run.
+  "PlexLibraryItemStaging",
+  "JellyfinLibraryItemStaging",
   "RadarrWantedItem",
   "RadarrAvailableItem",
   "SonarrWantedItem",

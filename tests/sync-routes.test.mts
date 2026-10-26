@@ -145,6 +145,40 @@ function recordingDelegate(rec: TxRecord, model: string) {
 // cleanup). Both happen outside the swap transaction by design.
 const episodeStagingLoads: number[] = [];
 const episodeStagingDeletes: (Record<string, unknown> | undefined)[] = [];
+// The library twins (replacePlexLibraryForInstances / replaceJellyfinLibraryForInstances),
+// which the full-mode branch of both routes now goes through: every staged load
+// with its rows, and every staging deleteMany (stale sweep + this run's cleanup).
+// Both run OUTSIDE the swap transaction by design — the transaction holds only
+// the scoped delete and one INSERT ... SELECT (tests/library-swap.test.mts pins
+// the helper itself; here the pins are what each ROUTE hands it).
+type LibraryStagingModel = "plexLibraryItemStaging" | "jellyfinLibraryItemStaging";
+const libraryStagingLoads: Array<{ model: LibraryStagingModel; data: Array<Record<string, unknown>> }> = [];
+const libraryStagingDeletes: Array<{ model: LibraryStagingModel; where: Record<string, unknown> | undefined }> = [];
+// Live tables whose swap INSERT ... SELECT throws inside the transaction.
+const failSwapOnTables = new Set<string>();
+function stagingDelegate(model: LibraryStagingModel) {
+  return {
+    createMany: async (args: { data: Array<Record<string, unknown>> }) => {
+      libraryStagingLoads.push({ model, data: args.data });
+      return { count: args.data.length };
+    },
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      libraryStagingDeletes.push({ model, where: args?.where });
+      return { count: 0 };
+    },
+  };
+}
+/** Every row staged for one library table across the run, minus the per-call runId. */
+function stagedLibraryRows<T = Record<string, unknown>>(model: LibraryStagingModel): T[] {
+  return libraryStagingLoads
+    .filter((l) => l.model === model)
+    .flatMap((l) => l.data.map(({ runId: _runId, ...row }) => row as T));
+}
+/** The swap's server-side repopulate, as the tx recorder sees it. */
+const SWAP_INSERT = {
+  PlexLibraryItem: /^INSERT INTO "PlexLibraryItem" \(.*\) SELECT .* FROM "PlexLibraryItemStaging" WHERE "runId" = \?$/,
+  JellyfinLibraryItem: /^INSERT INTO "JellyfinLibraryItem" \(.*\) SELECT .* FROM "JellyfinLibraryItemStaging" WHERE "runId" = \?$/,
+};
 
 const fakePrisma = {
   // No outbound notification channels configured (notify-agents.ts).
@@ -260,6 +294,8 @@ const fakePrisma = {
     rawStatements.push({ sql: query.sql, values: query.values ?? [] });
     return 0;
   },
+  plexLibraryItemStaging: stagingDelegate("plexLibraryItemStaging"),
+  jellyfinLibraryItemStaging: stagingDelegate("jellyfinLibraryItemStaging"),
   // Whole-table episode rewrites (replaceEpisodeCacheForSource) stage their rows
   // here OUTSIDE any transaction, then swap them across inside one. Unstubbed,
   // these calls reach the real Prisma client and block forever on a DB that does
@@ -280,7 +316,11 @@ const fakePrisma = {
       transactions.push(rec);
       const tx = {
         $executeRaw: async (strings: TemplateStringsArray, ..._values: unknown[]) => {
-          rec.ops.push({ model: "$executeRaw", method: "raw", args: strings.join("?") });
+          const sqlText = strings.join("?").replace(/\s+/g, " ").trim();
+          rec.ops.push({ model: "$executeRaw", method: "raw", args: sqlText });
+          for (const table of failSwapOnTables) {
+            if (sqlText.startsWith(`INSERT INTO "${table}"`)) throw new Error(`${table} swap insert exploded (unit test)`);
+          }
           return 0;
         },
         plexLibraryItem: recordingDelegate(rec, "plexLibraryItem"),
@@ -510,6 +550,9 @@ beforeEach(() => {
   existingJellyfinByType.clear();
   plexFindManyWheres.length = 0;
   failCreateManyOn = null;
+  failSwapOnTables.clear();
+  libraryStagingLoads.length = 0;
+  libraryStagingDeletes.length = 0;
   pendingRequests = [];
   requesterRows = [];
   sonarrWantedRows.length = 0;
@@ -629,21 +672,21 @@ test("plex { full: true } → /all fetch and a full replace: deleteMany + repopu
   const tx = libraryTx("plexLibraryItem");
   assert.equal(tx.timeout, BATCH_TX_TIMEOUT, "library-sized writes must pass BATCH_TX_TIMEOUT (guardrail 4)");
   assert.equal(BATCH_TX_TIMEOUT, 30_000);
-  assert.deepEqual(tx.ops, [
+  assert.deepEqual(tx.ops.slice(0, 2), [
     { model: "$executeRaw", method: "raw", args: "SELECT pg_advisory_xact_lock(2001, 1)" },
     // Scoped to the instance being resynced — the default ("") here, since the
     // body names no instance. An unscoped delete would also wipe every named
     // server's rows.
-    { model: "plexLibraryItem", method: "deleteMany", args: { where: { mediaType: "MOVIE", serverInstance: "" } } },
-    { model: "plexLibraryItem", method: "deleteMany", args: { where: { mediaType: "TV", serverInstance: "" } } },
-    {
-      model: "plexLibraryItem",
-      method: "createMany",
-      // Field mapping pinned: tmdb guid → tmdbId, sanitizeStr strips <>, year
-      // stringified, addedAt epoch-seconds → Date, absent fields → null.
-      args: { data: [PLEX_ROW_603, PLEX_ROW_604], skipDuplicates: true },
-    },
+    { model: "plexLibraryItem", method: "deleteMany", args: { where: { serverInstance: "" } } },
   ]);
+  // The repopulate is the staged swap's server-side INSERT ... SELECT — the
+  // transaction never carries row data (tests/library-swap.test.mts).
+  assert.equal(tx.ops.length, 3, "lock, one scoped delete, one swap insert — nothing else in the transaction");
+  assert.match(String(tx.ops[2].args), SWAP_INSERT.PlexLibraryItem);
+  // Field mapping pinned on the STAGED rows (loaded outside the transaction):
+  // tmdb guid → tmdbId, sanitizeStr strips <>, year stringified, addedAt
+  // epoch-seconds → Date, absent fields → null.
+  assert.deepEqual(stagedLibraryRows("plexLibraryItemStaging"), [PLEX_ROW_603, PLEX_ROW_604]);
 
   assert.ok(settings.has("lastPlexSyncSucceededAt"), "success must stamp the orchestrator-staleness marker");
   assert.equal(ledgerFor("plex-sync")?.ok, true);
@@ -720,12 +763,10 @@ test("a named instance resyncs ITS OWN rows: config, selection and every delete 
   // re-created under the schema default "", relocating its entire library onto the
   // DEFAULT server — which un-restricts a restricted server (slug "" is visible to
   // everyone) and drops its server-local ratingKeys into the default's namespace.
-  const creates = opsFor("plexLibraryItem", "createMany");
-  assert.ok(creates.length > 0, "a full resync must repopulate");
-  for (const c of creates) {
-    for (const row of (c.args as { data: Array<{ serverInstance?: unknown }> }).data) {
-      assert.equal(row.serverInstance, "remote", `an inserted row escaped the instance scope: ${JSON.stringify(row)}`);
-    }
+  const staged = stagedLibraryRows<{ serverInstance?: unknown }>("plexLibraryItemStaging");
+  assert.ok(staged.length > 0, "a full resync must repopulate");
+  for (const row of staged) {
+    assert.equal(row.serverInstance, "remote", `an inserted row escaped the instance scope: ${JSON.stringify(row)}`);
   }
 });
 
@@ -769,7 +810,7 @@ test("a NAMED instance's full resync does NOT stamp last-success — the stamp i
   const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true, instance: "remote" }) }));
   assert.equal(res.status, 200);
   await settleFireAndForget();
-  assert.ok(opsFor("plexLibraryItem", "createMany").length > 0, "control: the named server WAS resynced");
+  assert.ok(stagedLibraryRows("plexLibraryItemStaging").length > 0, "control: the named server WAS resynced");
   assert.ok(!settings.has("lastPlexSyncSucceededAt"), "a healthy named server says nothing about the default one");
 });
 
@@ -857,8 +898,7 @@ test("plex { full: true } show file-path patch: ONE VALUES-joined UPDATE for eve
 
   // The full replace wrote the show rows pathless (skipShowFilePaths on the
   // lone-server full path) …
-  const tvRows = opsFor("plexLibraryItem", "createMany")
-    .flatMap((o) => (o.args as { data: Array<{ mediaType: string; plexRatingKey: string; filePath: string | null }> }).data)
+  const tvRows = stagedLibraryRows<{ mediaType: string; plexRatingKey: string; filePath: string | null }>("plexLibraryItemStaging")
     .filter((r) => r.mediaType === "TV");
   assert.deepEqual(tvRows.map((r) => [r.plexRatingKey, r.filePath]).sort(), [["show-a", null], ["show-b", null]]);
   // … and the patch that follows the episode walk is ONE statement, not a
@@ -1084,8 +1124,7 @@ test("guardrail 37: a title in two Jellyfin libraries writes ONE row carrying BO
   assert.equal(res.status, 200);
   await settleFireAndForget();
 
-  const rows = opsFor("jellyfinLibraryItem", "createMany")
-    .flatMap((c) => (c.args as { data: Array<Record<string, unknown>> }).data);
+  const rows = stagedLibraryRows("jellyfinLibraryItemStaging");
   assert.equal(rows.length, 1, "one row per (tmdbId, mediaType, serverInstance) — the collapse itself is correct");
   assert.equal(rows[0].jellyfinItemId, "jf-dup-new", "the newest copy is the canonical stored id");
   assert.deepEqual(
@@ -1115,19 +1154,17 @@ test("jellyfin { full: true } → NO MinDateLastSaved; wholesale deleteMany + re
 
   const tx = libraryTx("jellyfinLibraryItem");
   assert.equal(tx.timeout, BATCH_TX_TIMEOUT);
-  assert.deepEqual(tx.ops, [
+  assert.deepEqual(tx.ops.slice(0, 2), [
     { model: "$executeRaw", method: "raw", args: "SELECT pg_advisory_xact_lock(2001, 2)" },
     // Scoped to the instance being resynced — the default ("") here, since the
     // body names no instance. An unscoped delete would wipe every named server's
     // rows and repopulate only this one's. It still deletes ALL of this
     // instance's rows, inside the same transaction as the repopulate.
     { model: "jellyfinLibraryItem", method: "deleteMany", args: { where: { serverInstance: "" } } },
-    {
-      model: "jellyfinLibraryItem",
-      method: "createMany",
-      args: { data: [JF_ROW_550, JF_ROW_551], skipDuplicates: true },
-    },
   ]);
+  assert.equal(tx.ops.length, 3, "lock, one scoped delete, one swap insert — nothing else in the transaction");
+  assert.match(String(tx.ops[2].args), SWAP_INSERT.JellyfinLibraryItem);
+  assert.deepEqual(stagedLibraryRows("jellyfinLibraryItemStaging"), [JF_ROW_550, JF_ROW_551]);
   assert.ok(settings.has("lastJellyfinSyncSucceededAt"));
   assert.equal(ledgerFor("jellyfin-sync")?.ok, true);
 });
@@ -1166,28 +1203,39 @@ test("an unreachable source → 502, the library untouched (zero transactions), 
 test("a failed full-replace insert propagates out of the SHARED transaction (rollback covers the delete) and records ok:false", async () => {
   configureJellyfin();
   respond = jellyfinMovieResponder([JF_ITEM_MIN]);
-  failCreateManyOn = "jellyfinLibraryItem";
+  failSwapOnTables.add("JellyfinLibraryItem");
 
   // The throw must escape the route (withCronRunRecording rethrows after the
   // ledger write) — swallowing it inside the tx would commit the delete with
   // nothing repopulated (guardrail 23's failure mode).
   await assert.rejects(
     postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) })),
-    /jellyfinLibraryItem insert exploded/,
+    /JellyfinLibraryItem swap insert exploded/,
   );
   await settleFireAndForget();
 
   // Code-structure pin for guardrail 13's atomicity leg: the wholesale delete
-  // and the failed repopulate sit in the SAME transaction callback, so the
-  // real Postgres rollback discards the delete when the insert throws.
+  // and the failed repopulate (the swap's INSERT ... SELECT) sit in the SAME
+  // transaction callback, so the real Postgres rollback discards the delete
+  // when the insert throws.
   const tx = libraryTx("jellyfinLibraryItem");
   assert.equal(tx.failed, true);
-  const methods = tx.ops.filter((o) => o.model === "jellyfinLibraryItem").map((o) => o.method);
+  const steps = tx.ops.map((o) =>
+    o.model === "$executeRaw" ? (String(o.args).startsWith("INSERT INTO") ? "swapInsert" : "lock") : `${o.model}.${o.method}`,
+  );
   assert.deepEqual(
-    methods,
-    ["deleteMany", "createMany"],
-    "the deleteMany and the failing createMany must share one $transaction callback — " +
+    steps,
+    ["lock", "jellyfinLibraryItem.deleteMany", "swapInsert"],
+    "the deleteMany and the failing swap insert must share one $transaction callback — " +
       "splitting them would leave the library deleted with nothing repopulated",
+  );
+  // The staged copy of the library does not outlive the failed swap.
+  const staged = libraryStagingLoads.filter((l) => l.model === "jellyfinLibraryItemStaging");
+  assert.equal(staged.length, 1, "control: the rows were staged (outside the transaction) before the swap");
+  const runId = staged[0].data[0].runId;
+  assert.ok(
+    libraryStagingDeletes.some((d) => d.model === "jellyfinLibraryItemStaging" && d.where?.runId === runId),
+    "a failed swap must drop its runId's staged rows",
   );
   assert.equal(ledgerFor("jellyfin-sync")?.ok, false);
 });
@@ -1243,12 +1291,7 @@ test("multi-server safety: the plex dedupe clone's prior-mapping lookup is defau
       "and wrongly drop this server's row",
   );
   // No prior mapping ⇒ the order-independent tiebreak: only tmdb 601 is inserted.
-  const creates = opsFor("plexLibraryItem", "createMany");
-  assert.equal(creates.length, 1);
-  assert.deepEqual(
-    (creates[0].args as { data: Array<{ tmdbId: number }> }).data.map((r) => r.tmdbId),
-    [601],
-  );
+  assert.deepEqual(stagedLibraryRows<{ tmdbId: number }>("plexLibraryItemStaging").map((r) => r.tmdbId), [601]);
 });
 
 // ── restricted-server visibility gate (guardrail 35) ────────────────────────

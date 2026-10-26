@@ -273,6 +273,7 @@
   "adminArr.calendar.nothingToSearch": "Plus rien à rechercher — il est peut-être déjà téléchargé. Rechargez pour voir l'état à jour.",
   "adminArr.calendar.footnote": "Les heures de diffusion sont dans votre fuseau horaire. Manquant signifie qu'un épisode a fini d'être diffusé ou que la date de sortie physique ou numérique est passée, que le titre est surveillé et qu'il n'y a encore ni fichier ni téléchargement. Les épisodes spéciaux ne comptent jamais comme manquants.",
   "adminArr.system.title": "Système Arr",
+  "adminArr.trash.title": "TRaSH Guides",
   "adminArr.system.subtitle": "Les tâches, indexeurs, clients de téléchargement et le stockage de Radarr et Sonarr — sans avoir à les ouvrir.",
   "adminArr.system.tab.tasks": "Tâches",
   "adminArr.system.tab.providers": "Indexeurs et clients",

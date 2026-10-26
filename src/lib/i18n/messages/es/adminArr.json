@@ -273,6 +273,7 @@
   "adminArr.calendar.nothingToSearch": "No queda nada que buscar — puede que ya esté descargado. Recarga para ver lo más reciente.",
   "adminArr.calendar.footnote": "Las horas de emisión están en tu zona horaria. «Falta» significa que un episodio ya se ha emitido o que ha pasado la fecha de estreno físico o digital, que el título está monitorizado y que aún no hay archivo ni descarga. Los especiales nunca cuentan como faltantes.",
   "adminArr.system.title": "Sistema Arr",
+  "adminArr.trash.title": "TRaSH Guides",
   "adminArr.system.subtitle": "Las tareas, los indexadores, los clientes de descarga y el almacenamiento de Radarr y Sonarr — sin tener que abrirlos.",
   "adminArr.system.tab.tasks": "Tareas",
   "adminArr.system.tab.providers": "Indexadores y clientes",

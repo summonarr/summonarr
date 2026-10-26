@@ -26,6 +26,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { AlertTriangle } from "@/components/icons";
 import { getTranslator } from "@/lib/i18n/server";
+import { canRequest } from "@/lib/permissions";
 
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
@@ -129,6 +130,8 @@ export default async function DiscoverPage({
     jellyfin: flags["feature.integration.jellyfin"],
   });
   const vis = { showPlex, showJellyfin };
+  const canRequestMovie = canRequest(session.user.permissions, "MOVIE", false);
+  const canRequestTv = canRequest(session.user.permissions, "TV", false);
   const upcomingEnabled = flags["feature.page.upcoming"];
   const topEnabled = flags["feature.page.top"];
   const forYouEnabled = flags["feature.page.forYou"];
@@ -315,6 +318,8 @@ export default async function DiscoverPage({
             showPlex={showPlex}
             showJellyfin={showJellyfin}
             allAvailable={trendingAllAvailable}
+            canRequestMovie={canRequestMovie}
+            canRequestTv={canRequestTv}
           />
         </>
       )}
@@ -329,6 +334,8 @@ export default async function DiscoverPage({
           showPlex={showPlex}
           showJellyfin={showJellyfin}
           allAvailable={rail.allAvailable}
+          canRequestMovie={canRequestMovie}
+          canRequestTv={canRequestTv}
         />
       ))}
     </div>

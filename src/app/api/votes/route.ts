@@ -116,7 +116,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
         userId: { not: session.user.id },
         reason: { not: null },
       },
-      select: { tmdbId: true, mediaType: true, reason: true },
+      select: { tmdbId: true, mediaType: true, id: true, reason: true },
       orderBy: { createdAt: "desc" },
       take: PAGE_SIZE * 6,
     }),
@@ -137,14 +137,19 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const userVoteMap = new Map(userVotes.map((v) => [`${v.tmdbId}:${v.mediaType}`, v]));
 
   // Build up to 3 deduped, non-empty reasons per title from other users'.
-  const reasonsMap = new Map<string, string[]>();
+  // Each keeps the id of the (newest) vote it came from, so a client can
+  // report that reason: POST /api/report `vote_reason` takes a DeletionVote id
+  // and 404s anything else. Without the ids the iOS app could only send a
+  // synthetic "MOVIE:603" key, so every vote-reason report failed — the App
+  // Store 1.2 report path for this UGC surface.
+  const reasonsMap = new Map<string, Array<{ id: string; reason: string }>>();
   for (const r of otherReasons) {
     const reason = r.reason?.trim();
     if (!reason) continue;
     const key = `${r.tmdbId}:${r.mediaType}`;
     const list = reasonsMap.get(key) ?? [];
-    if (list.length >= 3 || list.includes(reason)) continue;
-    list.push(reason);
+    if (list.length >= 3 || list.some((e) => e.reason === reason)) continue;
+    list.push({ id: r.id, reason });
     reasonsMap.set(key, list);
   }
 
@@ -152,6 +157,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
     const key = `${g.tmdbId}:${g.mediaType}`;
     const rep = repMap.get(key);
     const userVote = userVoteMap.get(key);
+    const reasonEntries = reasonsMap.get(key) ?? [];
     return {
       tmdbId: g.tmdbId,
       mediaType: g.mediaType,
@@ -160,7 +166,10 @@ export const GET = withAuth(async (req, _ctx, session) => {
       voteCount: mineCountMap.get(key) ?? g._count.id,
       userVoted: !!userVote,
       userReason: userVote?.reason ?? null,
-      reasons: reasonsMap.get(key) ?? [],
+      // `reasons` stays a plain string list for the web page and shipped
+      // clients; `reasonEntries` is the same list, in the same order, with ids.
+      reasons: reasonEntries.map((e) => e.reason),
+      reasonEntries,
     };
   });
 
@@ -236,11 +245,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const sanitizedReason = sanitizeOptional(reason);
 
-  // Bar any user who has ever requested this media (regardless of order). Earlier
-  // versions only checked the oldest requester via orderBy; a co-requester could
-  // then vote against a title they themselves had requested.
+  // Bar any user who has ever requested this media (regardless of order),
+  // including a title they filed on someone else's behalf. Earlier versions
+  // only checked the oldest requester via orderBy; a co-requester could then
+  // vote against a title they themselves had requested.
   const ownRequest = await prisma.mediaRequest.findFirst({
-    where: { tmdbId, mediaType, requestedBy: session.user.id },
+    where: {
+      tmdbId,
+      mediaType,
+      OR: [{ requestedBy: session.user.id }, { filedBy: session.user.id }],
+    },
     select: { id: true },
   });
   if (ownRequest) {

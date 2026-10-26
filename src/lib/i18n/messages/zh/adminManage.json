@@ -421,6 +421,7 @@
   "adminManage.users.title": "用户",
   "adminManage.users.registered_one": "{count} 位注册用户",
   "adminManage.users.registered_other": "{count} 位注册用户",
+  "adminManage.users.capped": "显示 {total} 位注册用户中的 {cap} 位。",
   "adminManage.serverUsers.title": "媒体服务器用户",
   "adminManage.serverUsers.subtitle": "所有 Plex 和 Jellyfin 账户。Jellyfin 下载权限每次运行都会同步并强制执行；Plex 权限必须在 Plex 中管理。",
   "adminManage.users.role.ADMIN": "管理员",

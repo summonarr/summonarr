@@ -158,8 +158,9 @@ const ADMIN_UI = ["src/components/admin/", "src/components/settings/", "src/app/
 // is a claim — read the call site before adding one.
 const ADMIN_AREA_ALLOWED: Record<string, string[]> = {
   // Labels for the admin nav section; the sidebar renders that section only for
-  // a session with an admin permission.
-  "src/lib/nav-items.ts": ["adminArr", "adminManage"],
+  // a session with an admin permission. Requested / Request Blacklist live in
+  // adminQueue so the page title and the nav share one string.
+  "src/lib/nav-items.ts": ["adminArr", "adminManage", "adminQueue"],
 };
 
 // Modules the admin UI imports for constants and pure helpers, which also hold a

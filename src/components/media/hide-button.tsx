@@ -26,14 +26,27 @@ export function HideButton({
 }) {
   const { toast } = useToast();
   const t = useT();
-  const [hidden, setHidden] = useState(initialHidden);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
+  // Local override until the parent catches up. `initialHidden` is otherwise
+  // live — a mount-only useState painted the next title as already hidden.
+  const [override, setOverride] = useState<boolean | null>(null);
+  const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
+  const titleChanged = seenTmdbId !== tmdbId;
+  if (titleChanged) {
+    setSeenTmdbId(tmdbId);
+    setOverride(null);
+    setLoading(false);
+    setMsg("");
+  } else if (override !== null && override === initialHidden) {
+    setOverride(null);
+  }
+  const hidden = titleChanged ? initialHidden : (override ?? initialHidden);
 
   async function toggle() {
     if (loading) return;
     const next = !hidden;
-    setHidden(next); // optimistic
+    setOverride(next); // optimistic
     setLoading(true);
     setMsg("");
     try {
@@ -49,13 +62,15 @@ export function HideButton({
       // 409 on hide means it's already hidden — desired end state is still "hidden".
       if (!res.ok && res.status !== 409) {
         const data = await res.json().catch(() => ({}));
-        setHidden(!next); // rollback
+        // Roll back to the pre-click state, NOT the prop: after an earlier
+        // successful toggle the prop is stale (nothing refreshes it here).
+        setOverride(!next);
         setMsg(rateLimitMessage(res, t) ?? data.error ?? t("request.somethingWrong"));
       } else {
         toast({ title: next ? t("detail.hide.hiddenToast") : t("detail.hide.shownToast"), variant: "success" });
       }
     } catch {
-      setHidden(!next); // rollback
+      setOverride(!next); // rollback to the pre-click state
       setMsg(t("request.networkError"));
     } finally {
       setLoading(false);
@@ -69,22 +84,22 @@ export function HideButton({
       <DetailActionButton
         variant={hidden ? "muted" : "secondary"}
         onClick={toggle}
-        disabled={loading}
-        busy={loading}
+        disabled={loading && !titleChanged}
+        busy={loading && !titleChanged}
         aria-pressed={hidden}
         aria-label={hidden ? t("detail.hide.showLabel") : t("detail.hide.hideLabel")}
         title={hidden ? t("detail.hide.hiddenTitle") : t("detail.hide.hideTitle")}
         // The hidden state sits one surface deeper than the idle one.
         style={hidden ? { background: "var(--ds-bg-3)" } : undefined}
       >
-        {loading ? (
+        {loading && !titleChanged ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
         ) : (
           <EyeOff style={{ width: 14, height: 14 }} />
         )}
         {hidden ? t("detail.hide.hidden") : t("detail.hide.notInterested")}
       </DetailActionButton>
-      {msg && (
+      {!titleChanged && msg && (
         <p
           className="ds-mono max-w-sm"
           role="alert"

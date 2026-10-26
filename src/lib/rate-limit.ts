@@ -337,18 +337,22 @@ export function getClientIpKey(headers: Headers): string {
 export function ipBucketKey(ip: string): string {
   if (isIP(ip) !== 6) return ip; // IPv4 and the "unknown:" UA bucket pass through
   // A v4-mapped literal is really an IPv4 client — key on the embedded
-  // address, or every mapped-v4 client would share one all-zero /64 bucket.
-  const mapped = ip.toLowerCase().match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
-  if (mapped) return mapped[1];
-  const prefix = ipv6Prefix64(ip);
-  return prefix ? `v6:${prefix}` : ip;
+  // address, or every mapped-v4 client would share one all-zero /64 bucket
+  // (the same /64 as ::1). Dotted `::ffff:a.b.c.d`, hex-pair `::ffff:cb00:7107`,
+  // and the expanded `0:0:0:0:0:ffff:…` form are the same address.
+  const groups = expandIpv6Groups(ip);
+  if (groups) {
+    const embedded = ipv4FromMappedGroups(groups);
+    if (embedded) return embedded;
+    return `v6:${groups.slice(0, 4).map((g) => g.padStart(4, "0")).join(":")}`;
+  }
+  return ip;
 }
 
-// The first four groups (the /64 prefix, "xxxx:xxxx:xxxx:xxxx") of an IPv6
-// address, written out in full. Returns null if the address can't be expanded;
-// the caller then uses the full address, which can only make buckets narrower,
-// never wider.
-function ipv6Prefix64(ip: string): string | null {
+// Eight hextets, or null if the address can't be expanded. Shared by the /64
+// prefix and the v4-mapped unwrap so the two spellings of one address cannot
+// disagree.
+function expandIpv6Groups(ip: string): string[] | null {
   const pct = ip.indexOf("%"); // zone index (fe80::1%eth0)
   let s = (pct === -1 ? ip : ip.slice(0, pct)).toLowerCase();
   // Embedded dotted-quad tail (64:ff9b::1.2.3.4) → two hextets
@@ -369,7 +373,16 @@ function ipv6Prefix64(ip: string): string | null {
       ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail]
       : head;
   if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
-  return groups.slice(0, 4).map((g) => g.padStart(4, "0")).join(":");
+  return groups;
+}
+
+// IPv4-mapped IPv6 (::ffff:a.b.c.d / ::ffff:aabb:ccdd): 80 bits of zero, then
+// 0xffff, then the IPv4 address. SIIT (::ffff:0:a.b.c.d) is a different
+// prefix and is not folded here — it still gets a /64 key.
+function ipv4FromMappedGroups(groups: string[]): string | null {
+  const n = groups.map((g) => parseInt(g, 16));
+  if (n[0] !== 0 || n[1] !== 0 || n[2] !== 0 || n[3] !== 0 || n[4] !== 0 || n[5] !== 0xffff) return null;
+  return `${(n[6] >> 8) & 255}.${n[6] & 255}.${(n[7] >> 8) & 255}.${n[7] & 255}`;
 }
 
 export function parseRateLimit(value: string | null | undefined, defaultLimit: number): number {

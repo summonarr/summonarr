@@ -38,9 +38,9 @@ import { hasPermission, Permission, effectivePermissions, parsePermissions, type
 
 export interface NavItem {
   href: string;
-  // English label. User-facing items — and the Radarr/Sonarr admin pages,
-  // which reuse their page-title keys — also carry an i18nKey that renderers
-  // translate through navItemLabel; the other admin items are English-only.
+  // English label. Renderers translate through navItemLabel when i18nKey is
+  // set (every item has one; admin items reuse the page-title key except where
+  // the nav wording must stay distinct, e.g. Request Blacklist).
   label: string;
   i18nKey?: string;
   icon: IconComponent;
@@ -210,28 +210,29 @@ export const userNavItems: NavItem[] = [
 // In group order (ADMIN_NAV_GROUPS) — the mobile tab bar opens the FIRST item a
 // viewer can see, so the request queue stays first.
 export const adminNavItems: NavItem[] = [
-  { href: "/admin", label: "Requested", icon: ShieldCheck, exact: true, section: "admin", group: "requests" },
-  { href: "/admin/issues", label: "Issues", icon: AlertTriangle, section: "admin", group: "requests" },
-  { href: "/admin/users", label: "Users", icon: Users, section: "admin", group: "requests" },
+  { href: "/admin", label: "Requested", i18nKey: "adminQueue.page.title", icon: ShieldCheck, exact: true, section: "admin", group: "requests" },
+  { href: "/admin/issues", label: "Issues", i18nKey: "nav.tab.issues", icon: AlertTriangle, section: "admin", group: "requests" },
+  { href: "/admin/users", label: "Users", i18nKey: "adminManage.users.title", icon: Users, section: "admin", group: "requests" },
   // Summonarr's own list of titles nobody may request — not Radarr/Sonarr's
-  // release Blocklist (Download History), hence the longer name.
-  { href: "/admin/blacklist", label: "Request Blacklist", icon: Ban, section: "admin", group: "requests" },
+  // release Blocklist (Download History), hence the longer name. The page
+  // title uses this same key so the two cannot drift back to a bare "Blacklist".
+  { href: "/admin/blacklist", label: "Request Blacklist", i18nKey: "adminQueue.blacklist.title", icon: Ban, section: "admin", group: "requests" },
   { href: "/admin/queue", label: "Download Queue", i18nKey: "adminManage.queue.title", icon: Download, section: "admin", group: "downloads" },
   { href: "/admin/missing", label: "Missing", i18nKey: "adminManage.missing.title", icon: CircleDashed, section: "admin", group: "downloads" },
   { href: "/admin/arr-calendar", label: "Arr Calendar", i18nKey: "adminArr.calendar.title", icon: CalendarDays, section: "admin", group: "downloads" },
   { href: "/admin/arr-history", label: "Download History", i18nKey: "adminArr.historyPage.title", icon: Clock, section: "admin", group: "downloads" },
   { href: "/admin/arr-system", label: "Arr System", i18nKey: "adminArr.system.title", icon: Server, section: "admin", group: "downloads" },
-  { href: "/admin/trash-guides", label: "TRaSH Guides", icon: Sparkles, section: "admin", group: "downloads" },
-  { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin", group: "library" },
-  { href: "/admin/never-watched", label: "Never Watched", icon: EyeOff, section: "admin", group: "library" },
-  { href: "/admin/cleanup", label: "Library Cleanup", icon: FileX, section: "admin", group: "library" },
+  { href: "/admin/trash-guides", label: "TRaSH Guides", i18nKey: "adminArr.trash.title", icon: Sparkles, section: "admin", group: "downloads" },
+  { href: "/admin/library", label: "Library Diff", i18nKey: "adminManage.library.title", icon: Library, section: "admin", group: "library" },
+  { href: "/admin/never-watched", label: "Never Watched", i18nKey: "adminManage.neverWatched.title", icon: EyeOff, section: "admin", group: "library" },
+  { href: "/admin/cleanup", label: "Library Cleanup", i18nKey: "adminManage.cleanup.title", icon: FileX, section: "admin", group: "library" },
   { href: "/admin/watch-sync", label: "Watch Sync", i18nKey: "adminManage.watchSync.title", icon: RefreshCw, section: "admin", group: "library" },
-  { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin", group: "insights" },
-  { href: "/admin/activity", label: "Activity", icon: Activity, section: "admin", group: "insights" },
-  { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin", group: "insights" },
-  { href: "/admin/backup", label: "Backup", icon: HardDrive, section: "admin", group: "system" },
-  { href: "/admin/api-docs", label: "API Docs", icon: FileText, section: "admin", group: "system" },
-  { href: "/settings", label: "Settings", icon: Settings, section: "admin", group: "system" },
+  { href: "/admin/stats", label: "Statistics", i18nKey: "adminManage.stats.title", icon: BarChart3, section: "admin", group: "insights" },
+  { href: "/admin/activity", label: "Activity", i18nKey: "adminActivity.title", icon: Activity, section: "admin", group: "insights" },
+  { href: "/admin/audit-log", label: "Audit Log", i18nKey: "adminManage.audit.title", icon: ScrollText, section: "admin", group: "insights" },
+  { href: "/admin/backup", label: "Backup & Restore", i18nKey: "adminManage.backup.title", icon: HardDrive, section: "admin", group: "system" },
+  { href: "/admin/api-docs", label: "API Docs", i18nKey: "adminManage.apiDocs.title", icon: FileText, section: "admin", group: "system" },
+  { href: "/settings", label: "Settings", i18nKey: "nav.settings", icon: Settings, section: "admin", group: "system" },
 ];
 
 // The permission each admin destination ACTUALLY requires, mirroring the gate on

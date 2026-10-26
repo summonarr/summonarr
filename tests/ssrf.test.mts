@@ -10,6 +10,7 @@ import {
   resolveToSafeUrlWithAddrs,
   verifyResolvedHost,
   isSafeAddrForAdmin,
+  isLoopbackAddress,
 } from "../src/lib/ssrf.ts";
 
 test("public IPv4 literals pass; the URL is normalized (bare trailing slash stripped)", async () => {
@@ -33,6 +34,24 @@ test("every spelling of IPv6 loopback is blocked (user policy), not just ::1", a
   // is the path that actually exercises the non-canonical spellings.
   for (const host of ["0:0:0:0:0:0:0:1", "0000:0000:0000:0000:0000:0000:0000:0001", "0::1", "::0001", "[0:0:0:0:0:0:0:1]"]) {
     assert.equal(await verifyResolvedHost(host), false, `${host} must be blocked`);
+  }
+});
+
+test("isLoopbackAddress: this host only — 127/8, ::1, IPv4-mapped 127; not NAT64/SIIT of 127", () => {
+  // email.ts keys plaintext AUTH off this. Stripping a leading `::ffff:` left
+  // `7f00:1` which failed `/^127\./`, so a hex-mapped loopback lost the carve-out.
+  for (const addr of [
+    "127.0.0.1", "127.0.0.2", "::1", "0:0:0:0:0:0:0:1", "::0001",
+    "::ffff:127.0.0.1", "::ffff:7f00:1", "0:0:0:0:0:ffff:7f00:1", "::FFFF:7F00:1",
+  ]) {
+    assert.equal(isLoopbackAddress(addr), true, addr);
+  }
+  for (const addr of [
+    "8.8.8.8", "192.168.1.1", "::ffff:8.8.8.8", "::ffff:808:808",
+    "64:ff9b::127.0.0.1", "64:ff9b::7f00:1", "::ffff:0:7f00:1", "::127.0.0.1",
+    "fe80::1", "::", "0.0.0.0",
+  ]) {
+    assert.equal(isLoopbackAddress(addr), false, addr);
   }
 });
 

@@ -354,7 +354,7 @@ export function ActivityStatsRedesign({
 
       {/* Trends 2×2 */}
       <section style={{ marginBottom: 22 }}>
-        <div className="resp-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div className="resp-grid-2" style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
           {trends.map((tr) => {
             const peak = Math.max(...tr.data, 0);
             // Per 24 hours of the window. The series has days + 1 entries (the
@@ -414,7 +414,7 @@ export function ActivityStatsRedesign({
 
       {/* Top of the chart */}
       <section style={{ marginBottom: 22 }}>
-        <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 }}>
           <ActivityCard>
             <SectionHeader
               label={t("adminActivity.stats.topViewers")}
@@ -510,7 +510,7 @@ export function ActivityStatsRedesign({
         {/* One single-series chart per card; the ramp (--ds-chart-1..4) is
             walked in card order so neighbours differ. HorizontalBars' default
             colour is the accent, i.e. --ds-chart-1. */}
-        <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 }}>
           <ActivityCard>
             <SectionHeader label={t("adminActivity.popover.resolution")} />
             <HorizontalBars
@@ -582,7 +582,7 @@ export function ActivityStatsRedesign({
           className="resp-grid-2"
           style={{
             display: "grid",
-            gridTemplateColumns: "1.2fr 1fr",
+            gridTemplateColumns: "minmax(0, 1.2fr) minmax(0, 1fr)",
             gap: 10,
           }}
         >
@@ -717,7 +717,7 @@ export function ActivityStatsRedesign({
           className="resp-grid-2"
           style={{
             display: "grid",
-            gridTemplateColumns: "1fr 1.4fr",
+            gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr)",
             gap: 10,
           }}
         >
@@ -776,7 +776,7 @@ export function ActivityStatsRedesign({
 
       {/* Audience composition */}
       <section style={{ marginBottom: 22 }}>
-        <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 }}>
           <ActivityCard>
             <SectionHeader
               label={t("adminActivity.title.platforms")}
