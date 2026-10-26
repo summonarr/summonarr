@@ -14,6 +14,8 @@ const EXPECTED: Record<string, string[]> = {
   JellyfinLibraryItem: ["tmdbId","mediaType","serverInstance","filePath","jellyfinItemId","jellyfinItemIds","title","year","overview"],
   TVEpisodeCache:      ["source","tmdbId","seasonNumber","episodeNumber","addedAt"],
   TVEpisodeCacheStaging: ["runId","source","tmdbId","seasonNumber","episodeNumber","addedAt"],
+  PlexLibraryItemStaging:     ["runId","tmdbId","mediaType","serverInstance","plexRatingKey","plexRatingKeys","addedAt"],
+  JellyfinLibraryItemStaging: ["runId","tmdbId","mediaType","serverInstance","jellyfinItemId","jellyfinItemIds","addedAt"],
   PlayHistory:         ["id","source","serverInstance","tmdbId","mediaType","title","year","posterPath","startedAt","watched","sourceShowId"],
   MediaRequest:        ["id","tmdbId","mediaType","arrInstance","title","posterPath","status","requestedBy"],
   TmdbCache:           ["key","data","expiresAt"],

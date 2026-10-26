@@ -604,6 +604,58 @@ model TVEpisodeCacheStaging {
   @@index([createdAt])
 }
 
+// Transient staging buffers for the whole-library PlexLibraryItem /
+// JellyfinLibraryItem rewrites (replacePlexLibraryForInstances /
+// replaceJellyfinLibraryForInstances in src/lib/cron-auth.ts) — the library
+// twins of TVEpisodeCacheStaging. The bulk load lands here OUTSIDE any
+// transaction; the swap transaction then holds only the per-instance delete and
+// one server-side INSERT ... SELECT, so its duration no longer grows with the
+// library (the inline delete + chunked createMany exceeded BATCH_TX_TIMEOUT on
+// a ~9k-title library while the pool was busy — Prisma P2028, and every later
+// run failed at the same size). Same column set as the live table plus runId
+// (scopes one call's rows) and createdAt (the crashed-run sweep). Empty except
+// during a run: the helper drops its own rows in a finally block.
+model PlexLibraryItemStaging {
+  runId          String
+  tmdbId         Int
+  mediaType      MediaType
+  serverInstance String
+  filePath       String?
+  plexRatingKey  String?
+  plexRatingKeys String[]  @default([])
+  title          String?
+  year           String?
+  overview       String?
+  contentRating  String?
+  addedAt        DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@id([runId, tmdbId, mediaType, serverInstance])
+  @@index([createdAt])
+}
+
+model JellyfinLibraryItemStaging {
+  runId           String
+  tmdbId          Int
+  mediaType       MediaType
+  serverInstance  String
+  filePath        String?
+  jellyfinItemId  String?
+  jellyfinItemIds String[]  @default([])
+  title           String?
+  year            String?
+  overview        String?
+  contentRating   String?
+  communityRating Float?
+  addedAt         DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@id([runId, tmdbId, mediaType, serverInstance])
+  @@index([createdAt])
+}
+
 // ─── Radarr Wanted Cache ──────────────────────────────────────────────────────
 // Movies in Radarr that have no file yet (monitored/unmonitored, not downloaded).
 // Populated by /api/sync/radarr; cleared per-movie by the Radarr webhook on Download.

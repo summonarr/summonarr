@@ -314,6 +314,35 @@ function recordingDelegate(rec: TxRecord, model: string) {
 // cleanup). Both happen outside the swap transaction by design.
 const episodeStagingLoads: number[] = [];
 const episodeStagingDeletes: (Record<string, unknown> | undefined)[] = [];
+// The library twins (replacePlexLibraryForInstances / replaceJellyfinLibraryForInstances):
+// every staged load with its rows, and every staging deleteMany (stale sweep +
+// this run's cleanup). Both run OUTSIDE the swap transaction by design — the
+// transaction holds only the scoped deletes and one INSERT ... SELECT, so a row
+// payload inside it is the regression (tests/library-swap.test.mts pins the helper).
+type LibraryStagingModel = "plexLibraryItemStaging" | "jellyfinLibraryItemStaging";
+const libraryStagingLoads: Array<{ model: LibraryStagingModel; data: Array<Record<string, unknown>> }> = [];
+const libraryStagingDeletes: Array<{ model: LibraryStagingModel; where: Record<string, unknown> | undefined }> = [];
+// Live tables whose swap INSERT ... SELECT throws inside the transaction (the
+// P2028 shape the staged swap exists for: the delete rolls back with it).
+const failSwapOnTables = new Set<string>();
+function stagingDelegate(model: LibraryStagingModel) {
+  return {
+    createMany: async (args: { data: Array<Record<string, unknown>> }) => {
+      libraryStagingLoads.push({ model, data: args.data });
+      return { count: args.data.length };
+    },
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      libraryStagingDeletes.push({ model, where: args?.where });
+      return { count: 0 };
+    },
+  };
+}
+/** Every row staged for one library table across the run, minus the per-call runId. */
+function stagedLibraryRows<T = Record<string, unknown>>(model: LibraryStagingModel): T[] {
+  return libraryStagingLoads
+    .filter((l) => l.model === model)
+    .flatMap((l) => l.data.map(({ runId: _runId, ...row }) => row as T));
+}
 
 const fakePrisma = {
   mediaRequest: {
@@ -521,6 +550,8 @@ const fakePrisma = {
   tmdbCache: {
     deleteMany: async (args: unknown) => { tmdbCacheDeleteManyCalls.push(args); return { count: 0 }; },
   },
+  plexLibraryItemStaging: stagingDelegate("plexLibraryItemStaging"),
+  jellyfinLibraryItemStaging: stagingDelegate("jellyfinLibraryItemStaging"),
   // Whole-table episode rewrites (replaceEpisodeCacheForSource) stage their rows
   // here OUTSIDE any transaction, then swap them across inside one. Unstubbed,
   // these calls reach the real Prisma client and block forever on a DB that does
@@ -548,9 +579,12 @@ const fakePrisma = {
       transactions.push(rec);
       const tx = {
         $executeRaw: async (strings: TemplateStringsArray) => {
-          const sqlText = strings.join("?");
+          const sqlText = strings.join("?").replace(/\s+/g, " ").trim();
           rec.ops.push({ model: "$executeRaw", method: "raw", args: sqlText });
           execRawOrder.push(sqlText);
+          for (const table of failSwapOnTables) {
+            if (sqlText.startsWith(`INSERT INTO "${table}"`)) throw new Error(`${table} swap insert exploded (unit test)`);
+          }
           return 0;
         },
         radarrWantedItem: recordingDelegate(rec, "radarrWantedItem"),
@@ -720,6 +754,9 @@ function notifiedTmdbIds(): number[] {
 
 beforeEach(() => {
   fetchCalls.length = 0;
+  failSwapOnTables.clear();
+  libraryStagingLoads.length = 0;
+  libraryStagingDeletes.length = 0;
   warns.length = 0;
   errors.length = 0;
   transactions.length = 0;
@@ -867,9 +904,10 @@ test("guardrail 13: a { recentOnly } / { full:false } / empty body never downgra
       [{ where: { serverInstance: "" } }],
       `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional (per-instance-scoped) Jellyfin library replace`,
     );
-    // And it repopulates inside the SAME transaction (full-replace atomicity).
-    assert.ok(plexTx[0].ops.some((o) => o.model === "plexLibraryItem" && o.method === "createMany"));
-    assert.ok(jfTx[0].ops.some((o) => o.model === "jellyfinLibraryItem" && o.method === "createMany"));
+    // And it repopulates inside the SAME transaction (full-replace atomicity):
+    // the staged swap's server-side INSERT ... SELECT, never a row payload.
+    assert.ok(plexTx[0].ops.some((o) => o.model === "$executeRaw" && String(o.args).startsWith('INSERT INTO "PlexLibraryItem"')));
+    assert.ok(jfTx[0].ops.some((o) => o.model === "$executeRaw" && String(o.args).startsWith('INSERT INTO "JellyfinLibraryItem"')));
   }
 });
 
@@ -1182,18 +1220,18 @@ test("multi-server: two configured Jellyfin instances each get their OWN serverI
     "each delete is scoped to its OWN instance slug",
   );
 
-  const creates = jfTx[0].ops.filter((o) => o.model === "jellyfinLibraryItem" && o.method === "createMany");
-  assert.equal(creates.length, 2, "one createMany batch per configured instance");
+  const creates = libraryStagingLoads.filter((l) => l.model === "jellyfinLibraryItemStaging");
+  assert.equal(creates.length, 2, "one staged load per configured instance");
   for (const c of creates) {
-    const rows = (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data;
+    const rows = c.data as Array<{ serverInstance: string; tmdbId: number }>;
     assert.ok(rows.length > 0);
     assert.equal(
       new Set(rows.map((r) => r.serverInstance)).size,
       1,
-      "every row within ONE instance's createMany batch carries that SAME instance's slug — never a mix",
+      "every row within ONE instance's staged load carries that SAME instance's slug — never a mix",
     );
   }
-  const allCreatedRows = creates.flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data);
+  const allCreatedRows = creates.flatMap((c) => c.data as Array<{ serverInstance: string; tmdbId: number }>);
   assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId), [300], "the default instance's row carries ITS OWN library's tmdbId");
   assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId), [400], "the named instance's row carries ITS OWN library's tmdbId, never the default's");
 });
@@ -1370,18 +1408,18 @@ test("multi-server: two configured Plex instances each get their OWN serverInsta
     "each delete is scoped to its OWN instance slug",
   );
 
-  const creates = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "createMany");
-  assert.equal(creates.length, 2, "one createMany batch per configured instance");
+  const creates = libraryStagingLoads.filter((l) => l.model === "plexLibraryItemStaging");
+  assert.equal(creates.length, 2, "one staged load per configured instance");
   for (const c of creates) {
-    const rows = (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data;
+    const rows = c.data as Array<{ serverInstance: string; tmdbId: number }>;
     assert.ok(rows.length > 0);
     assert.equal(
       new Set(rows.map((r) => r.serverInstance)).size,
       1,
-      "every row within ONE instance's createMany batch carries that SAME instance's slug — never a mix",
+      "every row within ONE instance's staged load carries that SAME instance's slug — never a mix",
     );
   }
-  const allCreatedRows = creates.flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data);
+  const allCreatedRows = creates.flatMap((c) => c.data as Array<{ serverInstance: string; tmdbId: number }>);
   assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId), [300], "the default instance's row carries ITS OWN library's tmdbId");
   assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId), [400], "the named instance's row carries ITS OWN library's tmdbId, never the default's");
 });
@@ -1422,9 +1460,7 @@ test("multi-server: the conflated-ratingKey dedupe is instance-scoped — the pr
   // survived untouched.
   const plexTx = txTouching("plexLibraryItem");
   assert.equal(plexTx.length, 1);
-  const allCreatedRows = plexTx[0].ops
-    .filter((o) => o.model === "plexLibraryItem" && o.method === "createMany")
-    .flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number; plexRatingKey: string | null }> }).data);
+  const allCreatedRows = stagedLibraryRows<{ serverInstance: string; tmdbId: number; plexRatingKey: string | null }>("plexLibraryItemStaging");
   assert.deepEqual(
     allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId),
     [601],
@@ -1878,9 +1914,7 @@ test("show file-path patch: ONE VALUES-joined UPDATE per instance (never one upd
   // The library write landed first, with the show rows pathless (skipShowFilePaths).
   const plexTx = txTouching("plexLibraryItem");
   assert.equal(plexTx.length, 1);
-  const tvRows = plexTx[0].ops
-    .filter((o) => o.model === "plexLibraryItem" && o.method === "createMany")
-    .flatMap((o) => (o.args as { data: Array<{ mediaType: string; plexRatingKey: string; filePath: string | null }> }).data)
+  const tvRows = stagedLibraryRows<{ mediaType: string; plexRatingKey: string; filePath: string | null }>("plexLibraryItemStaging")
     .filter((r) => r.mediaType === "TV");
   assert.deepEqual(tvRows.map((r) => [r.plexRatingKey, r.filePath]).sort(), [["show-a", null], ["show-b", null]]);
 

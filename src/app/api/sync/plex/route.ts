@@ -8,7 +8,7 @@ import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, isValidM
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, replacePlexLibraryForInstances, withCronRunRecording, type CronActor, type PlexLibraryRow } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { fanOutAvailableWinners } from "@/lib/request-notifications";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
@@ -230,15 +230,11 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
     }, { timeout: BATCH_TX_TIMEOUT });
   } else {
 
-    // Advisory lock 2001,1 — see comment in the recentOnly branch above. Full replace of
-    // the rows belonging to `instance` ONLY; every other server's rows survive untouched.
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
-      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE", serverInstance: instance } });
-      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "TV", serverInstance: instance } });
-      if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
-      if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
-    }, { timeout: BATCH_TX_TIMEOUT });
+    // Full replace of the rows belonging to `instance` ONLY; every other server's
+    // rows survive untouched. The shared staged swap takes advisory lock 2001,1
+    // (see the recentOnly branch above) inside its own short transaction — the
+    // same helper the orchestrator's Plex arm uses, so the two can never disagree.
+    await replacePlexLibraryForInstances([{ slug: instance, rows: (finalMovieRows as PlexLibraryRow[]).concat(finalTvRows) }]);
   }
 
   // Patch the show file paths the TV fetch skipped (skipShowFilePaths) onto the
