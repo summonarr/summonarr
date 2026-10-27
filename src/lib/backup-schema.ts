@@ -77,6 +77,9 @@ export const BACKUP_TABLES = [
   // TOKEN_ENCRYPTION_KEY — a mismatch just means the user reconnects Trakt.
   "TraktConnection",
   "TraktWatchedItem",
+  // The user's own Trakt ratings, imported beside the history (same switch,
+  // same deletions).
+  "TraktRating",
   "Notification",
   "UserRecommendation",
   // The server-wide "For You" graph (recommendation-graph.ts). Derived data —
@@ -85,12 +88,22 @@ export const BACKUP_TABLES = [
   // import's TRUNCATE step reads this same list), so both are listed.
   "RecommendationTitle",
   "TitleSuggestion",
+  // The server's private co-watch edges (guardrail 40c) — derived, rebuilt
+  // whole by every warm-recommendations run, listed for the same reason.
+  "CoWatchSuggestion",
   "BlacklistItem",
   "CleanupProtection",
   // Snapshot of each media server's own watch records (never-watched report).
   // Derived — the next upstream-watch refresh rebuilds it — but listed because
   // BACKUP_TABLES must cover every model.
   "UpstreamWatchEvidence",
+  // Each server identity's titles read from the media server's own history and
+  // favorites (For You only), and how far each identity has been read. Unlike
+  // the derived tables above, a server's pre-Summonarr history can't always be
+  // rebuilt (servers prune it), so it travels with the backup. Children of
+  // MediaServerUser, which is listed earlier.
+  "ServerWatchedTitle",
+  "ServerWatchCursor",
 ] as const;
 
 export const BACKUP_ENUMS = [

@@ -1282,6 +1282,58 @@ export async function getJellyfinInProgress(baseUrl: string, apiKey: string, use
   return out;
 }
 
+// ── Favorites (For You taste, server-watch-history-data.ts) ─────────────────
+// One user's favorited movies and SERIES (the heart in Jellyfin's UI) — read
+// only, for "For You" seeds. A series is favorited on the series item, never an
+// episode, so episodes are not listed. CollapseBoxSetItems=false like every
+// /Items query that can list a Movie or a Series (guardrail 37d): with an API
+// key a favorited film inside a collection would otherwise come back as its
+// BoxSet and be lost.
+
+export interface JellyfinFavorite {
+  kind: "movie" | "series";
+  itemId: string;
+}
+
+export const JELLYFIN_FAVORITES_MAX = 2_000;
+
+export function parseJellyfinFavorite(raw: unknown): JellyfinFavorite | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const kind = o.Type === "Movie" ? "movie" : o.Type === "Series" ? "series" : null;
+  if (!kind || typeof o.Id !== "string" || o.Id.length === 0 || o.Id.length > 256) return null;
+  // Belt and braces: the filter already asks for favorites only, but a server
+  // that ignored it must not turn its whole library into "loved".
+  const ud = o.UserData && typeof o.UserData === "object" ? (o.UserData as Record<string, unknown>) : null;
+  if (ud && ud.IsFavorite === false) return null;
+  return { kind, itemId: o.Id };
+}
+
+export async function getJellyfinFavorites(
+  baseUrl: string,
+  apiKey: string,
+  userId: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<JellyfinFavorite[]> {
+  if (opts.signal?.aborted) return [];
+  const base = baseUrl.replace(/\/+$/, "");
+  const out: JellyfinFavorite[] = [];
+  await fetchJellyfinPagesSequential<unknown>(
+    `${base}/Items?userId=${encodeURIComponent(userId)}&Recursive=true&IncludeItemTypes=Movie,Series&${JELLYFIN_NO_COLLECTION_GROUPING}&Filters=IsFavorite` +
+      "&EnableUserData=true&EnableImages=false&SortBy=SortName&SortOrder=Ascending",
+    apiKey,
+    (batch) => {
+      for (const raw of batch) {
+        if (out.length >= JELLYFIN_FAVORITES_MAX) return true;
+        const f = parseJellyfinFavorite(raw);
+        if (f) out.push(f);
+      }
+      return out.length >= JELLYFIN_FAVORITES_MAX || opts.signal?.aborted === true;
+    },
+  );
+  return out;
+}
+
 const JELLYFIN_IDS_CHUNK = 100;
 
 /** itemId → that item's progress AS SEEN BY the user; absent = gone. */

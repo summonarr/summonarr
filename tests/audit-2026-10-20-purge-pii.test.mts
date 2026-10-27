@@ -309,6 +309,7 @@ const purgeTx = {
   notification: { deleteMany: record("notification.deleteMany") },
   userRecommendation: { deleteMany: record("userRecommendation.deleteMany") },
   traktWatchedItem: { deleteMany: record("traktWatchedItem.deleteMany") },
+  traktRating: { deleteMany: record("traktRating.deleteMany") },
   traktConnection: { deleteMany: record("traktConnection.deleteMany") },
   verificationToken: { deleteMany: record("verificationToken.deleteMany") },
   mediaRequest: {

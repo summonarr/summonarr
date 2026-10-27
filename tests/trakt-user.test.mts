@@ -189,9 +189,27 @@ const watchedModel = {
     return { count: args.data.length };
   },
 };
+// The user's own ratings (guardrail 40c): replaced beside the history, deleted
+// with it.
+type RatingRow = { userId: string; tmdbId: number; mediaType: "MOVIE" | "TV"; title: string; rating: number; ratedAt: Date };
+let ratings: RatingRow[] = [];
+const ratingModel = {
+  deleteMany: async (args: { where: { userId: string } }) => {
+    rec("traktRating.deleteMany", args.where);
+    const before = ratings.length;
+    ratings = ratings.filter((r) => r.userId !== args.where.userId);
+    return { count: before - ratings.length };
+  },
+  createMany: async (args: { data: RatingRow[] }) => {
+    rec("traktRating.createMany", args.data.length);
+    ratings.push(...args.data);
+    return { count: args.data.length };
+  },
+};
 shadowPrismaModel(prisma, "account", accountModel);
 shadowPrismaModel(prisma, "traktConnection", connModel);
 shadowPrismaModel(prisma, "traktWatchedItem", watchedModel);
+shadowPrismaModel(prisma, "traktRating", ratingModel);
 shadowPrismaModel(prisma, "autoRequestLedger", {
   findMany: async (args: { where: { userId: string; tmdbId: { in: number[] } } }) =>
     ledger.filter((r) => r.userId === args.where.userId && args.where.tmdbId.in.includes(r.tmdbId)),
@@ -206,7 +224,7 @@ const queryRawInTx = async () => {
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   rec("$transaction");
   if (Array.isArray(arg)) return Promise.all(arg);
-  return (arg as (tx: unknown) => Promise<unknown>)({ account: accountModel, traktConnection: connModel, traktWatchedItem: watchedModel, $queryRaw: queryRawInTx, $executeRaw: async (strings: TemplateStringsArray) => { rec(`lock:${strings.join("?")}`); return 1; } });
+  return (arg as (tx: unknown) => Promise<unknown>)({ account: accountModel, traktConnection: connModel, traktWatchedItem: watchedModel, traktRating: ratingModel, $queryRaw: queryRawInTx, $executeRaw: async (strings: TemplateStringsArray) => { rec(`lock:${strings.join("?")}`); return 1; } });
 });
 
 const trakt = await import("../src/lib/trakt-user.ts");
@@ -252,6 +270,7 @@ beforeEach(() => {
   accounts = [];
   conns = [];
   watched = [];
+  ratings = [];
   users = [];
   ledger = [];
   lockedReads = 0;
@@ -455,6 +474,7 @@ test("disconnect deletes the grant, the connection and the imported history, the
   addUser("u1");
   connect("u1");
   watched.push({ userId: "u1", tmdbId: 1, mediaType: "MOVIE", title: "x", plays: 1, lastWatchedAt: new Date() });
+  ratings.push({ userId: "u1", tmdbId: 1, mediaType: "MOVIE", title: "x", rating: 9, ratedAt: new Date() });
   respond = (c) => {
     if (c.path === "/oauth/revoke") return new Response(null, { status: 500 });
     throw new Error(`unexpected ${c.path}`);
@@ -463,6 +483,7 @@ test("disconnect deletes the grant, the connection and the imported history, the
   assert.equal(accounts.length, 0);
   assert.equal(conns.length, 0);
   assert.equal(watched.length, 0);
+  assert.equal(ratings.length, 0, "the imported ratings go with the history (guardrail 40c)");
   // The revoke is fire-and-forget: let it reach the scripted endpoint.
   for (let i = 0; i < 50 && !warns.some((w) => w.includes("revoke")); i++) await new Promise((r) => setImmediate(r));
   assert.equal(calls.filter((c) => c.path === "/oauth/revoke").length, 1);
@@ -520,6 +541,8 @@ test("sync: a REFUSED refresh ends the connection (credential + history deleted,
   connect("u2", { expires_at: 0, refresh_token: "refresh-flaky" });
   watched.push({ userId: "u1", tmdbId: 1, mediaType: "MOVIE", title: "x", plays: 1, lastWatchedAt: new Date() });
   watched.push({ userId: "u2", tmdbId: 2, mediaType: "MOVIE", title: "y", plays: 1, lastWatchedAt: new Date() });
+  ratings.push({ userId: "u1", tmdbId: 1, mediaType: "MOVIE", title: "x", rating: 9, ratedAt: new Date() });
+  ratings.push({ userId: "u2", tmdbId: 2, mediaType: "MOVIE", title: "y", rating: 9, ratedAt: new Date() });
   respond = (c) => {
     // u1's grant is refused (400 invalid_grant); u2 hits a Trakt outage.
     if (c.path === "/oauth/token") {
@@ -534,10 +557,12 @@ test("sync: a REFUSED refresh ends the connection (credential + history deleted,
   // u1: refused — the grant and the history are gone, the row says why.
   assert.equal(accounts.some((a) => a.userId === "u1"), false);
   assert.equal(watched.some((w) => w.userId === "u1"), false);
+  assert.equal(ratings.some((r) => r.userId === "u1"), false, "and the ratings it imported (guardrail 40c)");
   assert.equal(conns.find((c) => c.userId === "u1")!.status, "reauth");
   // u2: transient — nothing deleted.
   assert.equal(accounts.some((a) => a.userId === "u2"), true);
   assert.equal(watched.some((w) => w.userId === "u2"), true);
+  assert.equal(ratings.some((r) => r.userId === "u2"), true);
   assert.equal(conns.find((c) => c.userId === "u2")!.status, "error");
 });
 
@@ -575,16 +600,29 @@ test("sync: history is imported on a moved stamp, skipped on an unchanged one, a
   addUser("u1");
   connect("u1");
   let stamp = "2026-10-08T10:00:00.000Z";
+  let ratedStamp = "2026-01-01T00:00:00.000Z";
   respond = (c) => {
-    if (c.path === "/sync/last_activities") return json({ movies: { watched_at: stamp }, episodes: { watched_at: "2026-01-01T00:00:00.000Z" } });
+    if (c.path === "/sync/last_activities") {
+      return json({ movies: { watched_at: stamp, rated_at: ratedStamp }, episodes: { watched_at: "2026-01-01T00:00:00.000Z" }, shows: { rated_at: "2026-01-01T00:00:00.000Z" } });
+    }
     if (c.path === "/sync/watched/movies") return json([{ plays: 2, last_watched_at: "2026-10-01T00:00:00Z", movie: { title: "M", ids: { tmdb: 1 } } }]);
     if (c.path === "/sync/watched/shows?extended=noseasons") return json([{ plays: 30, last_watched_at: "2026-10-02T00:00:00Z", show: { title: "S", ids: { tmdb: 2 } } }]);
+    // Ratings (guardrail 40c): a movie and a show; an episode rating and an
+    // out-of-range value are dropped by the parser.
+    if (c.path === "/sync/ratings/movies") {
+      return json([
+        { rating: 9, rated_at: "2026-10-01T00:00:00Z", type: "movie", movie: { title: "M", ids: { tmdb: 1 } } },
+        { rating: 11, rated_at: "2026-10-01T00:00:00Z", type: "movie", movie: { title: "Bad", ids: { tmdb: 5 } } },
+      ]);
+    }
+    if (c.path === "/sync/ratings/shows") return json([{ rating: 3, rated_at: "2026-10-03T00:00:00Z", type: "show", show: { title: "S", ids: { tmdb: 2 } } }]);
     throw new Error(`unexpected ${c.path}`);
   };
 
   const first = await trakt.syncTraktUsers();
   assert.equal(first.historyImported, 1);
   assert.deepEqual(watched.map((w) => [w.tmdbId, w.mediaType, w.plays]).sort(), [[1, "MOVIE", 2], [2, "TV", 30]]);
+  assert.deepEqual(ratings.map((r) => [r.tmdbId, r.mediaType, r.rating]).sort(), [[1, "MOVIE", 9], [2, "TV", 3]]);
   assert.equal(conns[0].historyActivityAt!.toISOString(), stamp);
 
   // Inside the spacing window: not even the activity probe is called.
@@ -603,7 +641,42 @@ test("sync: history is imported on a moved stamp, skipped on an unchanged one, a
   stamp = "2026-10-09T10:00:00.000Z";
   assert.equal((await trakt.syncTraktUsers()).historyImported, 1);
   assert.equal(watched.length, 2, "replaced, not appended");
+  assert.equal(ratings.length, 2, "ratings replaced, not appended");
   assert.equal(opsOf("traktWatchedItem.deleteMany").length, 2);
+  assert.equal(opsOf("traktRating.deleteMany").length, 2);
+
+  // A new RATING alone (nothing watched) also re-imports: rated_at is part of
+  // the stamp, so a rating never waits for the next watch to count.
+  mock.timers.tick(trakt.TRAKT_HISTORY_MIN_INTERVAL_MS + 1000);
+  ratedStamp = "2026-10-10T08:00:00.000Z";
+  assert.equal((await trakt.syncTraktUsers()).historyImported, 1);
+  assert.equal(conns[0].historyActivityAt!.toISOString(), ratedStamp);
+});
+
+test("traktHistoryActivityStamp is the latest of watched_at AND rated_at; parseTraktRatingEntry keeps 1–10 integers only", () => {
+  const stamp = trakt.traktHistoryActivityStamp({
+    movies: { watched_at: "2026-10-01T00:00:00Z", rated_at: "2026-10-05T00:00:00Z" },
+    episodes: { watched_at: "2026-10-02T00:00:00Z" },
+    shows: { rated_at: "2026-10-03T00:00:00Z" },
+  });
+  assert.equal(stamp!.toISOString(), "2026-10-05T00:00:00.000Z");
+  assert.equal(
+    trakt.traktHistoryActivityStamp({ movies: { watched_at: "2026-10-01T00:00:00Z" }, shows: { rated_at: "2026-10-09T00:00:00Z" } })!.toISOString(),
+    "2026-10-09T00:00:00.000Z",
+    "a show rating moves the stamp too",
+  );
+  const ok = trakt.parseTraktRatingEntry({ rating: 8, rated_at: "2026-10-01T00:00:00Z", movie: { title: "M", ids: { tmdb: 7 } } }, "MOVIE");
+  assert.deepEqual(ok && [ok.tmdbId, ok.rating, ok.mediaType], [7, 8, "MOVIE"]);
+  for (const rating of [0, 11, 7.5, "8", null]) {
+    assert.equal(trakt.parseTraktRatingEntry({ rating, rated_at: "2026-10-01T00:00:00Z", movie: { ids: { tmdb: 7 } } }, "MOVIE"), null, `rating ${String(rating)}`);
+  }
+  assert.equal(trakt.parseTraktRatingEntry({ rating: 8, rated_at: "2026-10-01T00:00:00Z", movie: { ids: {} } }, "MOVIE"), null, "no TMDB id");
+  // Newest rating wins a duplicate.
+  const rows = trakt.selectTraktRatingRows([
+    { tmdbId: 1, mediaType: "MOVIE", title: "a", rating: 4, ratedAt: new Date("2026-01-01") },
+    { tmdbId: 1, mediaType: "MOVIE", title: "a", rating: 9, ratedAt: new Date("2026-06-01") },
+  ]);
+  assert.deepEqual(rows.map((r) => r.rating), [9]);
 });
 
 test("sync: an opted-out user, a deactivated user and a user without the permission cost no Trakt call", async () => {
@@ -688,12 +761,15 @@ test("sync: history switched OFF while it was being read writes nothing and reco
       conns[0].historySeeds = false;
       return json([]);
     }
+    if (c.path === "/sync/ratings/movies") return json([{ rating: 9, rated_at: "2026-10-01T00:00:00Z", movie: { title: "M", ids: { tmdb: 1 } } }]);
+    if (c.path === "/sync/ratings/shows") return json([]);
     throw new Error(`unexpected ${c.path}`);
   };
   const result = await trakt.syncTraktUsers();
   assert.equal(lockedReads, 1, "the write path re-read the toggle under the row lock");
   assert.equal(result.historyImported, 0);
   assert.equal(watched.length, 0, "nothing re-inserted after the user asked for deletion");
+  assert.equal(ratings.length, 0, "no rating re-inserted either");
   assert.equal(conns[0].historyImportedAt, null);
 });
 

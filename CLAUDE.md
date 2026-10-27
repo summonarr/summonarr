@@ -79,7 +79,7 @@ The unit suite (`npm test`, Node's built-in `node:test`, files in [tests/](tests
 - `recordCompletedSession()` ingests when an `ActiveSession` completes and writes a `PlayHistory` row with full playback metrics (duration, pause, codec, resolution, bitrate, device, IP, etc).
 - `getActivityCalendarUncached()` (~line 1892) backs the GitHub-style 365-day heatmap in [src/components/admin/activity-calendar.tsx](src/components/admin/activity-calendar.tsx). A `$1` placeholder offset bug in its filtered-query path was fixed — the dynamic SQL builder starts parameters at `$1`, not `$2`.
 
-**"For You" recommendations** — [src/lib/recommendations.ts](src/lib/recommendations.ts) + [src/lib/recommendation-graph.ts](src/lib/recommendation-graph.ts) + [src/lib/recommendation-quality.ts](src/lib/recommendation-quality.ts)
+**"For You" recommendations** — [src/lib/recommendations.ts](src/lib/recommendations.ts) + [src/lib/recommendation-graph.ts](src/lib/recommendation-graph.ts) + [src/lib/recommendation-quality.ts](src/lib/recommendation-quality.ts) + [src/lib/server-watch-history-data.ts](src/lib/server-watch-history-data.ts) (the servers' own history + favorites, phase 0 of the warm run). Built from the viewer's own records; cross-viewer co-watching is opt-in (`feature.behavior.forYouCoWatch`, default OFF) — guardrail 40c.
 
 Detail: [docs/architecture/for-you-recommendations.md](docs/architecture/for-you-recommendations.md).
 
@@ -962,6 +962,22 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - `SERVER_ONLY_AREAS` (`apiAdmin`/`apiAuth`/`apiUser`) are never sent; `ADMIN_ONLY_AREAS` (admin queue/arr/manage, settings, trash) go only to a session passing the admin layout's gate (computed in the root layout from the session claims). A new area is sent to everyone unless it is added to one of those lists.
     - NEVER read a server-only key from a module a client component imports, and NEVER read an admin-only key from non-admin client code: the key renders as the raw string. `tests/i18n-client-catalog.test.mts` walks the client import graph to prove both; a file-level false positive is allowlisted there WITH a reason (and a check that no client calls the server-only function).
     - Admin client UI belongs under `components/admin|settings` or `app/(app)/admin|settings`; a shared component that must show in non-admin views (`activity-ui`) keeps its area in the sent set (`adminActivity` is).
+
+40c. **"For You" is built from the VIEWER'S OWN records: the media servers' own history and Jellyfin favorites (`ServerWatchedTitle`), Trakt history and ratings, watchlist and requests. Cross-viewer co-watching (`CoWatchSuggestion`) is OPT-IN behind `feature.behavior.forYouCoWatch`, default OFF — and NEVER a play: nothing here writes or is read as `PlayHistory`.** [server-watch-history.ts](src/lib/server-watch-history.ts) (pure) + [server-watch-history-data.ts](src/lib/server-watch-history-data.ts) (phase 0 of the warm-recommendations run), taste and quit-show rules in [recommendations.ts](src/lib/recommendations.ts), co-watch build in [recommendation-graph.ts](src/lib/recommendation-graph.ts).
+
+    Detail and rationale: [docs/guardrails/40c.md](docs/guardrails/40c.md).
+
+    Why:
+    - PlayHistory starts the day Summonarr was installed (guardrail 19), so For You seeded from a sliver of a viewer's taste and recommended films they had watched years before.
+    - "Watched" is not "liked": a 3/10 seeded "Because you watched…", and two episodes of a 60-episode show read as a fan.
+
+    Rules:
+    - The import is INCREMENTAL and per identity: Plex is walked back only to the oldest identity's read point (`ServerWatchCursor`), each Jellyfin user is asked only what they played since theirs. An identity's rows and read point commit in ONE transaction, and a read point counts strictly AFTER itself — never at — so no play counts twice. A Jellyfin incremental read adds ONE play per item, never its lifetime `PlayCount`. An aborted walk writes nothing. Owner unknown ⇒ the owner's read point HOLDS (19e's rule).
+    - A rating ≤ 4 removes ONLY its own seed — never fanned out to similar titles (the 2026-08 audit rejected anti-seed neighbourhoods). Ratings ride the Trakt "use my history" switch and are deleted wherever the history is (switch off, disconnect, revoked grant, purge).
+    - Every seed keeps one of the three wire labels (`WATCH_HISTORY`/`WATCHLIST`/`REQUEST`); a loved-pool seed is `WATCH_HISTORY`. NEVER add a `RecommendationSeed` value for these — the iOS app decodes the enum.
+    - Co-watch OFF ⇒ the per-viewer pass reads no edge, the build DELETES any left, and the import reads and stores only identities LINKED to an account (an unlinked one costs no request). ON ⇒ every active identity is imported, since co-watching is built from everyone's viewing. ON ⇒ an edge needs ≥ 3 distinct people (an account counts once) who watched both, ≥ 2 people who did not, ≥ 5 people with history, and it never counts toward seed coverage (`conclusive` stays TMDB-only). Its picks wear the viewer's own "Because you watched X" line.
+    - `ServerWatchedTitle`/`ServerWatchCursor` FK `MediaServerUser` with `onDelete: Restrict` (28) and are deleted with a de-registered instance (35).
+    - `tests/server-watch-history.test.mts`, `tests/recommendations.test.mts` (the `40c` block) and `tests/trakt-user.test.mts` pin it; 20 of 21 mutations fail a named test (the survivor removes a redundant abort check). The co-watch SQL's floors were run against a real Postgres 17.
 
 41. **A `withAdvisoryLock` callback that can run for minutes MUST observe its AbortSignal.**
 

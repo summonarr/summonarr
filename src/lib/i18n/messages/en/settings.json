@@ -78,6 +78,8 @@
   "settings.featureDesc.behavior_watchGrades": "Grade each user A–F on whether they watch what they request, shown to admins on the Users page and the request queue. Display only — never blocks a request. Needs play history tracking; tune it in Media → Watch Grades.",
   "settings.featureLabel.behavior_watchlistAutoRequest": "Watchlist auto-request",
   "settings.featureDesc.behavior_watchlistAutoRequest": "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. A Plex watchlist is read with the user's own Plex sign-in (once after this is enabled) or, when Settings → Media → Plex Watchlist allows it, through your Plex server owner's account for Plex friends who opt in. Users can also connect Trakt on their profile to auto-request from their Trakt watchlist (polled by the sync-trakt cron).",
+  "settings.featureLabel.behavior_forYouCoWatch": "For You: shared viewing",
+  "settings.featureDesc.behavior_forYouCoWatch": "Also suggest titles other people on this server watched alongside the same titles (\"people here who watched X also watched Y\"). Off: For You uses only each viewer's own history, ratings, favorites, watchlist and requests. When on, a suggestion needs at least 3 people who watched both titles, never names anyone, and looks exactly like any other suggestion.",
   "settings.featureLabel.integration_plex": "Plex",
   "settings.featureDesc.integration_plex": "Enable Plex sign-in, library sync, and availability badges.",
   "settings.featureLabel.integration_jellyfin": "Jellyfin",

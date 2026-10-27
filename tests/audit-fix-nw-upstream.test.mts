@@ -107,6 +107,10 @@ function makeClient(txId: number | null) {
       },
     },
     upstreamWatchEvidence: rows("upstreamWatchEvidence", () => evidence, (r) => { evidence = r; }),
+    // For You's copy of the server's own history (guardrail 40c), also removed
+    // with the server — pinned in tests/media-instances-route.test.mts.
+    serverWatchedTitle: rows("serverWatchedTitle", () => [] as Record<string, unknown>[], () => {}),
+    serverWatchCursor: rows("serverWatchCursor", () => [] as Record<string, unknown>[], () => {}),
     plexLibraryItem: rows("plexLibraryItem", () => plexLibrary, (r) => { plexLibrary = r; }),
     jellyfinLibraryItem: rows("jellyfinLibraryItem", () => jellyfinLibrary, (r) => { jellyfinLibrary = r; }),
     activeSession: rows("activeSession", () => activeSessions, (r) => { activeSessions = r; }),

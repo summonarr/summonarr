@@ -159,10 +159,14 @@ for (const model of [
   // An unstubbed model here does not fail — it tries to open a real connection
   // and the suite hangs.
   "userRecommendation", "watchlistItem", "titleSuggestion", "recommendationTitle",
+  // …and the guardrail-40c inputs: the servers' own history and its read
+  // points, the co-watch edges (cleared while the switch is off), Trakt
+  // ratings, and the episode counts the quit-show rule reads.
+  "serverWatchedTitle", "serverWatchCursor", "coWatchSuggestion", "tVEpisodeCache",
   // sync-plex-watchlists: stored Plex tokens + the auto-request ledger.
   "account", "autoRequestLedger",
-  // sync-trakt: the per-user Trakt connection and its imported history.
-  "traktConnection", "traktWatchedItem",
+  // sync-trakt: the per-user Trakt connection and its imported history+ratings.
+  "traktConnection", "traktWatchedItem", "traktRating",
   // refresh-upstream-watch: the media servers' own watch-record snapshot.
   "upstreamWatchEvidence",
   // watch-sync: the admin-made pairs and their per-pair ledger.
@@ -197,6 +201,7 @@ shadowPrismaModel(prisma, "setting", {
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => { rec("$queryRawUnsafe"); return []; });
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => { rec("$queryRaw"); return []; });
 shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async () => { rec("$executeRawUnsafe"); return 0; });
+shadowPrismaClientMethod(prisma, "$executeRaw", async () => { rec("$executeRaw"); return 0; });
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   rec("$transaction");
   if (Array.isArray(arg)) return Promise.all(arg);

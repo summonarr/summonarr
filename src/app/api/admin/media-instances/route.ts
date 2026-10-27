@@ -343,6 +343,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       // The server's own watch-record snapshot: derived rows its next refresh
       // would rebuild, but nothing ever refreshes a de-registered slug again.
       await tx.upstreamWatchEvidence.deleteMany({ where: { source: service, serverInstance: slug } });
+      // Each identity's titles read from this server's own history for For You
+      // (guardrail 40c), and how far they were read. Derived from a server that
+      // is gone; a server later re-added under this slug starts a fresh import
+      // instead of adding its whole history on top of the old rows.
+      await tx.serverWatchedTitle.deleteMany({ where: { mediaServerUser: { source: service, serverInstance: slug } } });
+      await tx.serverWatchCursor.deleteMany({ where: { mediaServerUser: { source: service, serverInstance: slug } } });
 
       // Library rows: a pure derived cache, rebuilt from scratch if the server is
       // ever re-added. Leaving them is the headline bug this cleanup exists for.
