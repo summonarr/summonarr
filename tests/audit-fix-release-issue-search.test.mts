@@ -88,6 +88,8 @@ const { HeadersAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapt
 
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
+// These suites script a dead arr and assert ONE attempt: no retry backoff.
+(await import("../src/lib/arr.ts")).arrReadRetry.delaysMs = [];
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");

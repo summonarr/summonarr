@@ -15,7 +15,9 @@ import {
   arrErrorMessage,
   pickSeriesByTmdbId,
   resolveSingleTvdbToTmdb,
+  retryTransientRead,
 } from "../src/lib/arr.ts";
+import { SafeFetchError } from "../src/lib/safe-fetch.ts";
 
 // arr.ts imports @/lib/prisma (client constructed at load, connections/queries
 // are lazy) and @/lib/token-crypto (key read lazily). Set the env so an
@@ -379,4 +381,59 @@ test("every Sonarr series/lookup caller routes through the shared picker", () =>
   );
   assert.doesNotMatch(source, /lookup\[0\]/, "no direct lookup[0] indexing may remain");
   assert.doesNotMatch(source, /results\[0\]\?\.(tvdbId|firstAired)/, "no direct results[0] field access may remain");
+});
+
+// ---------------------------------------------------------------------------
+// retryTransientRead — a reset/refused READ is retried, nothing else is
+// ---------------------------------------------------------------------------
+
+const noSleep = async () => {};
+const netErr = () => new SafeFetchError("network", "http://arr.test/x", "fetch failed (read ECONNRESET)");
+
+test("retryTransientRead: recovers when a reset clears within the retries", async () => {
+  let calls = 0;
+  const out = await retryTransientRead(async () => {
+    if (++calls < 3) throw netErr();
+    return "ok";
+  }, { sleep: noSleep });
+  assert.equal(out, "ok");
+  assert.equal(calls, 3);
+});
+
+test("retryTransientRead: gives up after the last delay and rethrows the original error", async () => {
+  let calls = 0;
+  const slept: number[] = [];
+  await assert.rejects(
+    retryTransientRead(async () => { calls++; throw netErr(); }, { delaysMs: [5, 10], sleep: async (ms) => { slept.push(ms); } }),
+    (e: unknown) => e instanceof SafeFetchError && e.reason === "network",
+  );
+  assert.equal(calls, 3);
+  assert.deepEqual(slept, [5, 10]);
+});
+
+test("retryTransientRead: timeouts, SSRF refusals and arr answers are never retried", async () => {
+  for (const err of [
+    new SafeFetchError("timeout", "http://arr.test/x", "timed out"),
+    new SafeFetchError("ssrf-blocked", "http://arr.test/x", "blocked"),
+    new ArrResponseError(500, "boom"),
+  ]) {
+    let calls = 0;
+    await assert.rejects(retryTransientRead(async () => { calls++; throw err; }, { sleep: noSleep }));
+    assert.equal(calls, 1);
+  }
+});
+
+test("retryTransientRead: an aborted caller stops the retries", async () => {
+  const ac = new AbortController();
+  let calls = 0;
+  await assert.rejects(
+    retryTransientRead(async () => { calls++; ac.abort(); throw netErr(); }, { signal: ac.signal, sleep: noSleep }),
+  );
+  assert.equal(calls, 1);
+});
+
+test("arrRequest retries only reads: writes bypass retryTransientRead", () => {
+  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  assert.match(source, /isRetryableRead\(options\) \? await retryTransientRead\(send, \{ signal \}\) : await send\(\)/);
+  assert.match(source, /method === "GET" \|\| method === "HEAD"/);
 });

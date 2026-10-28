@@ -404,17 +404,71 @@ export async function arrFetchNoContent(cfg: ArrCfg, path: string, options: ArrF
   await res.text().catch(() => "");
 }
 
+// A reset or refused connection on a READ is usually a blip: the arr restarting,
+// a Tailscale/VPN path re-keying or switching routes, or a pooled keep-alive
+// socket the far end already closed. Two quick retries ride those out; anything
+// longer is the next cron tick's job. Delays are short on purpose — arr-watch
+// fires three reads at once and each waits out its own retries.
+// An object so a unit suite that scripts a dead arr can set `delaysMs = []` and
+// see ONE attempt instead of sleeping through the backoff.
+export const arrReadRetry: { delaysMs: readonly number[] } = { delaysMs: [300, 1_000] };
+
+function isRetryableRead(options: ArrFetchOptions): boolean {
+  const method = (options.method ?? "GET").toUpperCase();
+  return method === "GET" || method === "HEAD";
+}
+
+function sleepUnlessAborted(ms: number, signal?: AbortSignal | null): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+/**
+ * Run an idempotent read, retrying ONLY a transport failure (`network`: reset,
+ * refused, unreachable). Never a timeout (the caller already waited the full
+ * budget), an SSRF/size/redirect refusal, an HTTP answer from the arr, or a
+ * write — a write that threw may have landed (see arrWriteOutcomeUnknown), so
+ * re-sending it could double-apply. A caller's abort stops the retries.
+ */
+export async function retryTransientRead<T>(
+  run: () => Promise<T>,
+  opts: { signal?: AbortSignal | null; delaysMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<T> {
+  const delays = opts.delaysMs ?? arrReadRetry.delaysMs;
+  const sleep = opts.sleep ?? ((ms: number) => sleepUnlessAborted(ms, opts.signal));
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (err) {
+      const retryable = err instanceof SafeFetchError && err.reason === "network";
+      if (!retryable || attempt >= delays.length || opts.signal?.aborted) throw err;
+      await sleep(delays[attempt]);
+      if (opts.signal?.aborted) throw err;
+    }
+  }
+}
+
 async function arrRequest(cfg: ArrCfg, path: string, options: ArrFetchOptions): Promise<Response> {
   const { signal, method, body } = options;
-  const res = await safeFetchAdminConfigured(`${cfg.url}${path}`, {
-    method,
-    body,
-    ...(signal ? { signal } : {}),
-    cache: "no-store",
-    timeoutMs: options.timeoutMs ?? ARR_FETCH_TIMEOUT_MS,
-    maxResponseBytes: ARR_FETCH_MAX_BYTES,
-    headers: { "X-Api-Key": cfg.apiKey, "Content-Type": "application/json", ...(options.headers ?? {}) },
-  });
+  const send = () =>
+    safeFetchAdminConfigured(`${cfg.url}${path}`, {
+      method,
+      body,
+      ...(signal ? { signal } : {}),
+      cache: "no-store",
+      timeoutMs: options.timeoutMs ?? ARR_FETCH_TIMEOUT_MS,
+      maxResponseBytes: ARR_FETCH_MAX_BYTES,
+      headers: { "X-Api-Key": cfg.apiKey, "Content-Type": "application/json", ...(options.headers ?? {}) },
+    });
+  const res = isRetryableRead(options) ? await retryTransientRead(send, { signal }) : await send();
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     if (!options.quietErrors) console.error(`[arr] ${sanitizeForLog(path)} → ${res.status}`);
