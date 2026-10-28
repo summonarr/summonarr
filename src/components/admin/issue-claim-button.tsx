@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Loader2, UserCheck, UserX, X } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
+import { requestPageRefresh } from "@/lib/client/refresh-hold";
 
 interface IssueClaimButtonProps {
   issueId: string;
@@ -44,10 +45,11 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
         setError(data.message ?? data.error ?? t("adminQueue.claim.failed"));
         // 409 means these props are stale: pull the real state so the button
         // re-renders as "Take over from <name>" instead of "Claim".
-        if (res.status === 409) router.refresh();
+        if (res.status === 409) requestPageRefresh(() => router.refresh());
         return;
       }
-      router.refresh();
+      // The claim is announced over SSE too; the shared refresh makes the two one.
+      requestPageRefresh(() => router.refresh());
     } catch {
       setError(t("adminQueue.claim.networkError"));
     } finally {

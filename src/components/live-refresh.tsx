@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import type { LiveEvent } from "@/hooks/use-live-events";
-import { runOrDefer } from "@/lib/client/refresh-hold";
+import { cancelPageRefresh, requestPageRefresh } from "@/lib/client/refresh-hold";
 
 export function LiveRefresh({
   on,
@@ -18,9 +18,6 @@ export function LiveRefresh({
   updatedStatuses?: string[];
 }) {
   const router = useRouter();
-  // Debounced ~500ms so an event burst (a sync flipping several requests at
-  // once) coalesces into one refresh — mirrors activity-live-refresher.tsx.
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useLiveEvents((event) => {
     if (!(on as string[]).includes(event.type)) return;
@@ -31,15 +28,16 @@ export function LiveRefresh({
     ) {
       return;
     }
-    if (timerRef.current) clearTimeout(timerRef.current);
-    // Deferred while a dialog holds the page (refresh-hold.ts): the refresh
-    // would drop an issue the dialog is still showing the result for.
-    timerRef.current = setTimeout(() => runOrDefer(() => router.refresh()), 500);
+    // Debounced ~500ms so an event burst (a sync flipping several requests at
+    // once) coalesces into one refresh — and through the page's ONE refresh
+    // timer (refresh-hold.ts), so the event announcing a button's own change
+    // joins the refresh that button asked for instead of adding a second.
+    // Deferred while a dialog holds the page: the refresh would drop an issue
+    // the dialog is still showing the result for.
+    requestPageRefresh(() => router.refresh());
   });
 
-  useEffect(() => () => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-  }, []);
+  useEffect(() => () => cancelPageRefresh(), []);
 
   return null;
 }

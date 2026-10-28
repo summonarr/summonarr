@@ -460,19 +460,24 @@ test("client: once isAlive turns false (superseded, or the dialog closed) it sto
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (p: string) => readFileSync(join(here, "..", p), "utf8");
 
-test("structural (C024): the issue Replace panel searches through the background job, superseded by a newer search or a close", () => {
+test("structural (C024): the Fix file window's release list searches through the background job, superseded by a newer search, Back or a close", () => {
   const src = read("src/components/admin/issue-actions.tsx");
-  const load = src.slice(src.indexOf("async function loadReleases("), src.indexOf("async function openReplacePicker("));
+  const load = functionBody(src, "async function loadReleases(");
   assert.match(load, /runReleaseSearchJob\(\s*fetch,\s*withBasePath\(`\/api\/issues\/\$\{issueId\}\/releases\?instance=/);
   assert.match(load, /isAlive: \(\) => reqId === releaseReqRef\.current/);
-  assert.doesNotMatch(load, /await fetch\(/, "no synchronous search left in the panel");
-  assert.match(src, /function closeReplacePicker\(\) \{\s*releaseReqRef\.current\+\+;/);
-  assert.match(src, /onOpenChange=\{\(o\) => \{ if \(!o && loading !== "grab"\) closeReplacePicker\(\); \}\}/);
+  assert.doesNotMatch(load, /await fetch\(/, "no synchronous search left in the window");
+  assert.match(src, /function stopReleaseSearch\(\) \{\s*releaseReqRef\.current\+\+;/);
+  assert.match(functionBody(src, "function close("), /stopReleaseSearch\(\);\s*onClose\(\);/, "closing supersedes the search");
+  assert.match(functionBody(src, "function backToOptions("), /stopReleaseSearch\(\)/, "Back supersedes the search");
+  assert.match(functionBody(src, "function pickInstance("), /stopReleaseSearch\(\)/, "an instance switch supersedes the search");
+  // No close while a write runs (the delete, the search, the grab).
+  assert.match(src, /onOpenChange=\{\(o\) => \{ if \(!o && !working\) close\(\); \}\}/);
 });
 
-test("structural (C112): the Replace release button is offered only for a searchable TV scope", () => {
+test("structural (C112): the release list is offered only for a searchable TV scope", () => {
   const src = read("src/components/admin/issue-actions.tsx");
-  assert.match(src, /const canReplace = mediaType === "MOVIE"\s*\|\| \(seriesReleaseScopeSearchable\(scope, seasonNumber, episodeNumber\)/);
+  assert.match(src, /const canPickRelease = mediaType === "MOVIE"\s*\|\| \(seriesReleaseScopeSearchable\(scope, seasonNumber, episodeNumber\)/);
+  assert.match(src, /c === "pick" \? canPickRelease/, "the window drops the choice without it");
 });
 
 test("structural (C024): ReleaseSearchDialog runs the same shared loop", () => {

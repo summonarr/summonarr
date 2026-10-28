@@ -6,18 +6,23 @@
 // with its result, the "may stay unmonitored" warning, a 410/409 refusal —
 // was unmounted mid-request. A dialog now holds the refresh until it closes.
 //
+// One refresh per click: an issue button refreshed the page itself AND the
+// change it made was announced over SSE, so LiveRefresh refreshed it again
+// ~500 ms later — two full server renders per click. Both now go through
+// requestPageRefresh, one debounced timer for the page.
+//
 // Also pinned structurally (no .tsx harness): LiveRefresh refreshes through
-// runOrDefer, both dialogs take a hold released by an effect cleanup, their
-// own post-success refreshes are deferred, and the Replace-release dialog
-// renders a refused grab INSIDE itself (the column copy sits under the
-// dialog's backdrop) with a Search again that re-runs the search.
-import { test } from "node:test";
+// requestPageRefresh, the Fix file window takes a hold released by an effect
+// cleanup, its own post-success refreshes go through the shared timer, the
+// issue page's buttons never call a bare router.refresh(), and the window
+// renders a refused grab INSIDE itself with a Search again.
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const { holdLiveRefresh, runOrDefer } = await import("../src/lib/client/refresh-hold.ts");
+const { holdLiveRefresh, runOrDefer, requestPageRefresh, cancelPageRefresh, PAGE_REFRESH_DEBOUNCE_MS } = await import("../src/lib/client/refresh-hold.ts");
 const { functionBody } = await import("./audit-fix2-R8b-tests-vacuous-source.mts");
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -65,39 +70,87 @@ test("a release with nothing pending runs nothing", () => {
   assert.equal(runs, 1);
 });
 
-test("structural: LiveRefresh refreshes through runOrDefer, never a bare router.refresh in its timer", () => {
-  const src = read("src/components/live-refresh.tsx");
-  assert.match(src, /setTimeout\(\(\) => runOrDefer\(\(\) => router\.refresh\(\)\), 500\)/);
-  assert.doesNotMatch(src, /setTimeout\(\(\) => router\.refresh\(\)/);
+test("a click and the live event announcing it make ONE refresh", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let runs = 0;
+    requestPageRefresh(() => { runs++; }); // the button's own request
+    mock.timers.tick(PAGE_REFRESH_DEBOUNCE_MS - 100);
+    requestPageRefresh(() => { runs++; }); // the SSE event, a moment later
+    mock.timers.tick(PAGE_REFRESH_DEBOUNCE_MS - 1);
+    assert.equal(runs, 0, "each request restarts the wait");
+    mock.timers.tick(1);
+    assert.equal(runs, 1, "one refresh for the burst");
+    mock.timers.tick(PAGE_REFRESH_DEBOUNCE_MS * 4);
+    assert.equal(runs, 1, "nothing left behind");
+    requestPageRefresh(() => { runs++; });
+    mock.timers.tick(PAGE_REFRESH_DEBOUNCE_MS);
+    assert.equal(runs, 2, "a later change refreshes again");
+  } finally {
+    mock.timers.reset();
+  }
 });
 
-test("structural: both issue dialogs hold the refresh while open and defer their own post-success refresh", () => {
+test("the shared refresh waits for an open dialog, and a cancel drops it", () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let runs = 0;
+    const release = holdLiveRefresh();
+    requestPageRefresh(() => { runs++; });
+    mock.timers.tick(PAGE_REFRESH_DEBOUNCE_MS);
+    assert.equal(runs, 0, "held while the dialog is open");
+    release();
+    assert.equal(runs, 1, "runs once the dialog closes");
+
+    requestPageRefresh(() => { runs++; });
+    cancelPageRefresh();
+    mock.timers.tick(PAGE_REFRESH_DEBOUNCE_MS * 2);
+    assert.equal(runs, 1, "the page went away: nothing runs");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("structural: LiveRefresh refreshes through the shared timer, never its own", () => {
+  const src = read("src/components/live-refresh.tsx");
+  assert.match(src, /requestPageRefresh\(\(\) => router\.refresh\(\)\);/);
+  assert.match(src, /useEffect\(\(\) => \(\) => cancelPageRefresh\(\), \[\]\);/);
+  assert.doesNotMatch(src, /setTimeout\(/, "no private debounce timer");
+  assert.doesNotMatch(src, /\n\s*router\.refresh\(\);/, "no bare refresh");
+});
+
+test("structural: the issue page's buttons refresh only through the shared timer", () => {
+  for (const file of [
+    "src/components/admin/issue-actions.tsx",
+    "src/components/admin/issue-claim-button.tsx",
+    "src/components/admin/issue-fix-match-button.tsx",
+  ]) {
+    const src = read(file);
+    const bare = src.match(/(?<!=> )router\.refresh\(\)/g) ?? [];
+    assert.deepEqual(bare, [], `${file}: every refresh is requestPageRefresh(() => router.refresh())`);
+    assert.match(src, /requestPageRefresh\(\(\) => router\.refresh\(\)\)/, file);
+  }
+});
+
+test("structural: the Fix file window holds the refresh while open, and its writes refresh through the shared timer", () => {
   const src = read("src/components/admin/issue-actions.tsx");
-  assert.match(src, /useEffect\(\(\) => \(panel === "replace" \? holdLiveRefresh\(\) : undefined\), \[panel\]\);/, "the Replace-release dialog");
-  const dialog = src.slice(src.indexOf("function ReplaceFileDialog("));
-  assert.ok(dialog.length > 0);
-  assert.match(dialog, /useEffect\(\(\) => holdLiveRefresh\(\), \[\]\);/, "ReplaceFileDialog — released on unmount");
-  // Each function cut at its own closing brace, never a fixed window: a
-  // window stops short as the function grows (the tail goes unchecked) or
-  // runs into the next function (a match there is not this function's).
-  const grab = functionBody(src, "async function grabRelease(");
-  assert.match(grab, /setGrabOk\(true\);[\s\S]*?runOrDefer\(\(\) => router\.refresh\(\)\)/);
-  assert.doesNotMatch(grab, /\n\s*router\.refresh\(\);/, "no bare refresh after a grab");
+  const dialog = src.slice(src.indexOf("function FixFileDialog("));
+  assert.ok(src.includes("function FixFileDialog("));
+  assert.match(dialog, /useEffect\(\(\) => holdLiveRefresh\(\), \[\]\);/, "released on unmount");
+  // Each function cut at its own closing brace, never a fixed window.
+  const grab = functionBody(dialog, "async function grabRelease(");
+  assert.match(grab, /setGrabOk\(true\);[\s\S]*?requestPageRefresh\(\(\) => router\.refresh\(\)\)/);
+  const search = functionBody(dialog, "async function searchNow(");
+  assert.match(search, /setSearched\(true\);[\s\S]*?requestPageRefresh\(\(\) => router\.refresh\(\)\)/);
   const replaceFn = functionBody(dialog, "async function replace(");
   assert.match(replaceFn, /void load\(instance\);\s*\}\s*$/, "the cut reaches the function's own tail");
-  assert.match(replaceFn, /setSelected\(new Set\(\)\);\s*\/\/[^\n]*\n\s*runOrDefer\(\(\) => router\.refresh\(\)\);/);
-  assert.doesNotMatch(replaceFn, /\n\s*router\.refresh\(\);/, "no bare refresh under the result");
+  assert.match(replaceFn, /setSelected\(new Set\(\)\);\s*\/\/[^\n]*\n\s*requestPageRefresh\(\(\) => router\.refresh\(\)\);/);
 });
 
-test("structural: a refused grab is shown INSIDE the Replace-release dialog, with Search again", () => {
+test("structural: a refused grab is shown INSIDE the Fix file window, with Search again", () => {
   const src = read("src/components/admin/issue-actions.tsx");
-  const open = src.indexOf('<Dialog open={panel === "replace"}');
-  const close = src.indexOf("</Dialog>", open);
-  assert.ok(open > 0 && close > open);
-  const popup = src.slice(open, close);
-  assert.match(popup, /\{arrError && \(\s*<div role="alert"/, "the error renders inside the dialog");
-  assert.match(popup, /onClick=\{\(\) => void loadReleases\(instance\)\}\s*disabled=\{loading !== null\}/, "Search again, disabled during a grab");
-  assert.match(popup, /t\("adminQueue\.issueActions\.searchAgain"\)/);
-  // The column copy is not drawn a second time under the backdrop.
-  assert.match(src.slice(close), /\{arrError && panel !== "replace" && \(/);
+  const dialog = src.slice(src.indexOf("function FixFileDialog("));
+  assert.match(dialog, /\{releaseError && \(\s*<div role="alert"/, "the error renders inside the window");
+  assert.match(dialog, /onClick=\{\(\) => void loadReleases\(instance\)\}\s*disabled=\{working\}/, "Search again, disabled during a write");
+  assert.match(dialog, /t\("adminQueue\.issueActions\.searchAgain"\)/);
 });

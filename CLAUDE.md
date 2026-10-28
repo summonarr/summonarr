@@ -119,7 +119,7 @@ Detail: [docs/architecture/request-pick-release.md](docs/architecture/request-pi
 
 Detail: [docs/architecture/request-why-status.md](docs/architecture/request-why-status.md).
 
-**Issue "Replace file"** — `GET/POST /api/issues/[id]/files` (ADMIN — deleting files is ADMIN-only; ISSUE_ADMIN keeps Refetch and Replace-release), rules in [issue-replace.ts](src/lib/issue-replace.ts), panel in [issue-actions.tsx](src/components/admin/issue-actions.tsx).
+**Issue "Fix file" / Replace file** — one "Fix file" window ([issue-actions.tsx](src/components/admin/issue-actions.tsx), rules in [issue-fix.ts](src/lib/issue-fix.ts)) in place of the old Refetch / Replace / Replace file buttons: it reads the files on disk (ADMIN), then leads with the fix that can work — delete and get a new copy (`GET/POST /api/issues/[id]/files`, ADMIN-only; rules in [issue-replace.ts](src/lib/issue-replace.ts)), search automatically (`PATCH { refetch }`) or pick a release (`/api/issues/[id]/releases`). ISSUE_ADMIN keeps the search and the release list. The routes and their iOS wire contracts are unchanged.
 
 Detail: [docs/architecture/issue-replace-file.md](docs/architecture/issue-replace-file.md).
 

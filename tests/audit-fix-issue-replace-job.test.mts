@@ -95,10 +95,11 @@ test("the dialog unmounting stops the loop", async () => {
   assert.equal(s.seen.length, 2, "no poll after unmount");
 });
 
-test("structural: the Replace file dialog runs the replace through the job, and stops polling on unmount", () => {
+test("structural: the Fix file window runs the delete through the job, and stops polling on unmount", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(join(here, "../src/components/admin/issue-actions.tsx"), "utf8");
-  const dialog = src.slice(src.indexOf("function ReplaceFileDialog("));
+  assert.ok(src.includes("function FixFileDialog("));
+  const dialog = src.slice(src.indexOf("function FixFileDialog("));
   // The WHOLE function, cut at its closing brace — a fixed window stopped short
   // of the !res.ok branch, the catch and the reload tail, so a synchronous
   // POST added there passed the doesNotMatch below unseen.
