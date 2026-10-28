@@ -55,7 +55,7 @@ The unit suite (`npm test`, Node's built-in `node:test`, files in [tests/](tests
 - **recentOnly** (default for Jellyfin) — incremental insert-only, bounded by a 2-hour `MinDateLastSaved` window (`RECENT_WINDOW_MS`). Intentionally wider than `SYNC_INTERVAL=3600s` so one missed run is survivable.
 
 **Batch writes** — [src/lib/cron-auth.ts](src/lib/cron-auth.ts)
-- `batchCreateMany(tx, rows)` chunks inserts into `CREATE_MANY_BATCH = 5_000`.
+- `batchCreateMany(tx, rows)` chunks inserts into at most `CREATE_MANY_BATCH = 5_000` rows, fewer for wide rows: `createManyBatchSize` keeps each call under Postgres's 32,766 bind parameters so it stays ONE INSERT (guardrail 23c).
 - `BATCH_TX_TIMEOUT = 30_000` — always pass this to `prisma.$transaction(..., { timeout: BATCH_TX_TIMEOUT })` for library-sized writes.
 
 **`isCronAuthorized`** — same file. Accepts an admin session *or* `Authorization: Bearer ${CRON_SECRET}`. Every sync/cron route funnels through this — touch carefully.
@@ -625,12 +625,13 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
     Why:
     - An interactive transaction is ONE pooled pg connection, and pg runs one query at a time per connection. The parallel form saves nothing: Prisma's adapter (7.10) hands every query straight to that connection's queue, and Prisma's own transaction queue serializes only BEGIN/COMMIT/ROLLBACK.
-    - From the third queued query, pg 8.x prints `DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0`. Seen in production 2026-10-28 from the 2FA enrollment routes, which read `getMfaState` (three parallel reads) on the tx. pg@9 removes that queueing, so the pattern breaks on that upgrade.
+    - From the third queued query, pg 8.x prints `DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0`. pg@9 removes that queueing, so the pattern breaks on that upgrade. Two sources, both 2026-10-28: the 2FA enrollment routes read `getMfaState` (three parallel reads) on the tx, and EVERY boot sync hit it from Prisma's own split of an oversized `createMany` (below) — found only with `NODE_OPTIONS=--trace-deprecation`, after static scans of app code came back clean.
 
     Rules:
     - A helper that runs on the pool AND in a transaction comes as a pair: the pool version may fan out, the `…InTx(tx, …)` version reads sequentially (`getMfaState` / `getMfaStateInTx`, [mfa-store.ts](src/lib/mfa/mfa-store.ts)). Never one function with a `db = prisma` default that fans out on whatever it's given.
     - Separate transactions in parallel are fine (`settleLimit(users, N, (u) => prisma.$transaction(…))`): each holds its own connection.
     - Prisma itself also fans out inside a transaction: it loads each `include`d relation as its own query and runs sibling relations in parallel (no `relationJoins`). Today no transaction query loads a relation; keep includes of several relations out of `tx` reads, or read them in separate awaited calls.
+    - A `createMany` past 32,766 bind parameters (rows × columns, plus Prisma's own `@default(now())`/`@updatedAt` values) is split by Prisma into several INSERTs that run IN PARALLEL inside an internal transaction on one connection — with or without a `$transaction` around it. The Jellyfin staging load (5,000 rows × 14 parameters) split three ways on every boot sync. ALWAYS insert library-sized data through `batchCreateMany`, which sizes each call under the limit (`createManyBatchSize`, [cron-auth.ts](src/lib/cron-auth.ts)); `tests/cron-auth.test.mts` pins it, measured shapes included.
     - `tests/tx-sequential-queries.test.mts` scans `src` (TypeScript AST: `$transaction` callbacks, `tx`-named or `…Tx`/`…TxClient`/`TransactionClient`/`typeof prisma`-alias-typed params) and pins `getMfaStateInTx` / `dropRecoveryCodesIfNoFactorInTx` to one query in flight. Reverting any of the four fixed files fails it; a caller passing `tx` to `getMfaState` fails typecheck.
 24. **The native-client version gate (426) fails SOFT and is NEVER an authz input.**
 

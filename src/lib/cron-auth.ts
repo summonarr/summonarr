@@ -197,12 +197,33 @@ export async function setBatchTxTimeouts(
 // Raw createMany on library-sized datasets blows transaction timeouts; this chunk size keeps each batch safe
 const CREATE_MANY_BATCH = 5_000;
 
+// Postgres takes at most 32,766 bind parameters per statement (Prisma's own
+// limit for postgres). A createMany past it is split by Prisma into several
+// INSERTs that run IN PARALLEL inside an internal transaction on ONE
+// connection; pg queues them and, from the third, logs "Calling client.query()
+// when the client is already executing a query is deprecated" (pg@9 removes
+// the queue). The Jellyfin staging load did exactly that at boot: 5,000 rows ×
+// 14 parameters = 70,000, three INSERTs at once. Sizing every call under the
+// limit keeps each createMany ONE statement.
+export const POSTGRES_MAX_BIND_PARAMS = 32_766;
+// Parameters Prisma adds per row beyond the keys passed: an @default(now())
+// column (measured: the staging tables' createdAt) and an @updatedAt column.
+const IMPLICIT_PARAMS_PER_ROW = 2;
+
+export function createManyBatchSize(rows: readonly Record<string, unknown>[]): number {
+  const columns = new Set<string>();
+  for (const row of rows) for (const key of Object.keys(row)) columns.add(key);
+  const perRow = columns.size + IMPLICIT_PARAMS_PER_ROW;
+  return Math.max(1, Math.min(CREATE_MANY_BATCH, Math.floor(POSTGRES_MAX_BIND_PARAMS / perRow)));
+}
+
 export async function batchCreateMany<T extends Record<string, unknown>>(
   tx: { createMany: (args: { data: T[]; skipDuplicates?: boolean }) => Promise<unknown> },
   rows: T[],
 ): Promise<void> {
-  for (let i = 0; i < rows.length; i += CREATE_MANY_BATCH) {
-    await tx.createMany({ data: rows.slice(i, i + CREATE_MANY_BATCH), skipDuplicates: true });
+  const size = createManyBatchSize(rows);
+  for (let i = 0; i < rows.length; i += size) {
+    await tx.createMany({ data: rows.slice(i, i + size), skipDuplicates: true });
   }
 }
 

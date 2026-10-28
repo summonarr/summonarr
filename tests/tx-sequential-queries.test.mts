@@ -7,7 +7,10 @@
 // queue, and from a third queued query on pg 8.x prints "Calling
 // client.query() when the client is already executing a query is deprecated
 // and will be removed in pg@9.0" — seen in production from the 2FA enrollment
-// routes, which read getMfaState (three parallel reads) on the tx.
+// routes, which read getMfaState (three parallel reads) on the tx. (The other
+// production source was Prisma splitting an oversized createMany into parallel
+// INSERTs, which no source scan can see; batchCreateMany's sizing covers that,
+// pinned in tests/cron-auth.test.mts.)
 //
 // Static and conservative. A name is a transaction client inside a function
 // when it is the first parameter of a `$transaction(…)` callback, a parameter
