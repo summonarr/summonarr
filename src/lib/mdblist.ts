@@ -1,9 +1,30 @@
 import "server-only";
 import { prisma } from "./prisma";
 import { getCache, getCacheStale, setCache, libraryDetailsTtl, TTL } from "./tmdb-cache";
-import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
+import { safeFetchTrusted, SafeFetchError, type SafeFetchOptions } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit, coalesce } from "./concurrency";
+import { processSingleton } from "./process-singleton";
+import { warnOnChange } from "./log-dedup";
+import {
+  MDBLIST_PLAN_SETTING_KEY,
+  budgetAllows,
+  emptyUsage,
+  mdblistBudget,
+  mdblistLimitKind,
+  mdblistPauseUntil,
+  parseMdblistPlanSetting,
+  parseUsageHeaders,
+  planForDailyLimit,
+  recordReport,
+  recordSent,
+  utcDayStart,
+  DEFAULT_PAUSE_MS,
+  type MdblistBudget,
+  type MdblistPlanId,
+  type MdblistPlanSetting,
+  type MdblistUsage,
+} from "./mdblist-plan";
 
 // How many cache writes one batch page runs at once. A full page has up to 200
 // rows; writing them one by one is slow, and writing all at once would swamp
@@ -76,18 +97,244 @@ export type MdblistResult =
 
 const mdblistRevalidating = new Set<string>();
 
-// In-memory lockout for the current process lifetime — does not survive restarts, but avoids
-// burning through the daily MDBList quota after a 429 or quota error body.
-let quotaLockoutUntil = 0;
-const QUOTA_LOCKOUT_MS = 60 * 60 * 1000;
-
-export function isMdblistQuotaLocked(): boolean {
-  return Date.now() < quotaLockoutUntil;
+// Who is asking. A background job (pre-warm, ratings sync, For You) stops at the
+// reserve so pages people open keep part of the day's limit (mdblist-plan.ts).
+// Everything else is a page someone opened.
+export interface MdblistCallOptions {
+  background?: boolean;
 }
 
-function tripQuotaLockout(reason: string) {
-  quotaLockoutUntil = Date.now() + QUOTA_LOCKOUT_MS;
-  console.warn(`[mdblist] Quota lockout tripped (${sanitizeForLog(reason)}) — suspending calls for ${QUOTA_LOCKOUT_MS / 60000} min`);
+// ── Process-wide state ─────────────────────────────────────────────────────
+// One copy for the whole server (guardrail 27a): Turbopack gives every server
+// chunk its own copy of a module-level `let`, so a pause tripped by a cron route
+// was invisible to the page renders, which kept calling.
+interface MdblistRuntime {
+  // MDBList calls are paused until this time (ms).
+  pausedUntil: number;
+  pauseReason: string | null;
+  // Requests in a row that got no answer at all (see noteTransportFailure).
+  transportFailures: number;
+  usage: MdblistUsage;
+  // The admin's plan choice, memoized like the API key.
+  plan: { value: MdblistPlanSetting; at: number } | null;
+  planInflight: Promise<MdblistPlanSetting> | null;
+}
+
+const runtime = processSingleton<MdblistRuntime>("mdblist:runtime", () => ({
+  pausedUntil: 0,
+  pauseReason: null,
+  transportFailures: 0,
+  usage: emptyUsage(Date.now()),
+  plan: null,
+  planInflight: null,
+}));
+
+const PLAN_TTL_MS = 30_000;
+
+async function getPlanSetting(): Promise<MdblistPlanSetting> {
+  const memo = runtime.plan;
+  if (memo && Date.now() - memo.at < PLAN_TTL_MS) return memo.value;
+  if (runtime.planInflight) return runtime.planInflight;
+  const p = (async () => {
+    try {
+      const row = await prisma.setting.findUnique({ where: { key: MDBLIST_PLAN_SETTING_KEY } });
+      const value = parseMdblistPlanSetting(row?.value);
+      runtime.plan = { value, at: Date.now() };
+      return value;
+    } catch {
+      // An unreadable choice must not stop ratings: keep the last one known.
+      return runtime.plan?.value ?? "auto";
+    }
+  })();
+  runtime.planInflight = p;
+  p.finally(() => { runtime.planInflight = null; }).catch(() => {});
+  return p;
+}
+
+// The settings route calls this after a save so the new plan applies at once.
+export function invalidateMdblistPlanCache(): void {
+  runtime.plan = null;
+}
+
+function currentBudget(): MdblistBudget {
+  return mdblistBudget(runtime.plan?.value ?? "auto", runtime.usage, Date.now());
+}
+
+// Why MDBList must not be called right now, or null when it may be:
+// - "locked": a limit error or the transport breaker paused every call;
+// - "budget": the day's limit is spent;
+// - "reserve": only for background callers, the part kept for pages is all that's left.
+export type MdblistPause = "locked" | "budget" | "reserve";
+
+export function mdblistPause(opts: MdblistCallOptions = {}): MdblistPause | null {
+  if (Date.now() < runtime.pausedUntil) return "locked";
+  const budget = currentBudget();
+  if (!budgetAllows(budget, false)) return "budget";
+  if (opts.background && !budgetAllows(budget, true)) return "reserve";
+  return null;
+}
+
+// Every caller already asks "should I skip MDBList right now", and paused,
+// spent and (for a background caller) down to the reserve are the same answer.
+// Reads the last-known plan; checkMdblistPause re-reads it first.
+export function isMdblistQuotaLocked(opts: MdblistCallOptions = {}): boolean {
+  return mdblistPause(opts) !== null;
+}
+
+// The same question, with the plan choice refreshed first. For a job's own
+// before-it-starts check; every call path below does this itself.
+export async function checkMdblistPause(opts: MdblistCallOptions = {}): Promise<MdblistPause | null> {
+  await getPlanSetting();
+  const pause = mdblistPause(opts);
+  if (pause === "budget" || pause === "reserve") noteBudgetStop(pause);
+  return pause;
+}
+
+// One line per day per stop (guardrail 7b): every call refused for the rest of
+// the day would otherwise restate it.
+function noteBudgetStop(pause: "budget" | "reserve"): void {
+  const budget = currentBudget();
+  const day = utcDayStart(Date.now());
+  if (pause === "budget") {
+    warnOnChange(
+      "mdblist:budget",
+      String(day),
+      `[mdblist] today's limit of ${budget.limit ?? "?"} requests is used up — no MDBList calls until 00:00 UTC`,
+    );
+  } else {
+    warnOnChange(
+      "mdblist:reserve",
+      String(day),
+      `[mdblist] ${budget.remaining ?? "?"} of today's ${budget.limit ?? "?"} requests left — background jobs stop until 00:00 UTC so pages keep the last ${budget.reserve}`,
+    );
+  }
+}
+
+// Pause every MDBList call until `until`. A longer pause already running wins.
+function pauseMdblist(until: number, reason: string): void {
+  if (until <= runtime.pausedUntil) return;
+  const safeReason = sanitizeForLog(reason);
+  runtime.pausedUntil = until;
+  runtime.pauseReason = safeReason;
+  const minutes = Math.max(1, Math.ceil((until - Date.now()) / 60_000));
+  console.warn(`[mdblist] Quota lockout tripped (${safeReason}) — suspending calls for ${minutes} min`);
+}
+
+// A limit answer (a 429, or an error body naming a limit). MDBList says how long
+// to wait — Retry-After, or the error text plus X-RateLimit-Reset — so the pause
+// lasts exactly that: until the 5-minute window ends, or until midnight UTC for
+// the daily limit. With no hint at all it is the old hour.
+function pauseForLimit(headers: Headers, errorText: string | null, context: string): void {
+  pauseMdblist(
+    mdblistPauseUntil({
+      kind: mdblistLimitKind(errorText),
+      retryAfter: headers.get("retry-after"),
+      reset: headers.get("x-ratelimit-reset"),
+      now: Date.now(),
+    }),
+    errorText ? `${errorText} ${context}` : context,
+  );
+}
+
+// ── Transport circuit breaker ──────────────────────────────────────────────
+// The omdb.ts breaker, for MDBList. Every pause above needs a RESPONSE, so a
+// run of timeouts paused nothing: each page of every job waited out its full
+// timeout, and For You read MDBList as answering and saved week-long "no
+// ratings" verdicts. Seen live 2026-10-28, when MDBList's servers were slow and
+// every batch POST timed out while TMDB and OMDb answered normally.
+//
+// Threshold rather than one strike: a single timeout is a blip. Five in a row,
+// across every MDBList call, is a reachability verdict. Any response at all —
+// a 4xx or 5xx included — proves the host is up and clears the count.
+const TRANSPORT_FAILURE_LIMIT = 5;
+
+function noteTransportFailure(reason: string): void {
+  runtime.transportFailures++;
+  if (runtime.transportFailures < TRANSPORT_FAILURE_LIMIT) return;
+  runtime.transportFailures = 0;
+  pauseMdblist(Date.now() + DEFAULT_PAUSE_MS, `${TRANSPORT_FAILURE_LIMIT} consecutive transport failures (${reason})`);
+}
+
+// "No response arrived", as opposed to "the answer was no". ssrf-blocked,
+// redirect and size are verdicts about a host that did answer.
+function isTransportFailure(err: unknown): boolean {
+  return err instanceof SafeFetchError && (err.reason === "timeout" || err.reason === "network");
+}
+
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+
+// Every MDBList request goes through here: it is counted against the day, the
+// body is read inside the same timeout (so a reply that stalls mid-body counts
+// as a failure too), the breaker is fed, and MDBList's own usage report is kept.
+// The returned Response is buffered, so reading it can no longer time out.
+async function mdblistRequest(url: string, init: SafeFetchOptions = {}): Promise<Response> {
+  runtime.usage = recordSent(runtime.usage, Date.now());
+  let res: Response;
+  let body: string;
+  try {
+    res = await safeFetchTrusted(url, { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS, ...init });
+    body = await res.text();
+  } catch (err) {
+    if (isTransportFailure(err)) noteTransportFailure((err as SafeFetchError).reason);
+    throw err;
+  }
+  runtime.transportFailures = 0;
+  const report = parseUsageHeaders((name) => res.headers.get(name), Date.now());
+  if (report) runtime.usage = recordReport(runtime.usage, report, Date.now());
+  return new Response(NULL_BODY_STATUSES.has(res.status) ? null : body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
+}
+
+// The `error` text of a JSON error body, or null.
+async function errorTextOf(res: Response): Promise<string | null> {
+  const data = (await res.json().catch(() => null)) as { error?: unknown; message?: unknown } | null;
+  if (!data || typeof data !== "object") return null;
+  if (typeof data.error === "string") return data.error;
+  if (data.error === true && typeof data.message === "string") return data.message;
+  return null;
+}
+
+// What the settings page and the debug route show.
+export interface MdblistUsageSnapshot {
+  plan: MdblistPlanSetting;
+  // The account's daily limit as MDBList last reported it, and the plan it matches.
+  reportedLimit: number | null;
+  reportedPlan: MdblistPlanId | null;
+  // Account-wide requests used today by MDBList's own count; null when no reply
+  // has reported today yet.
+  usedToday: number | null;
+  // What Summonarr budgets against (see mdblistBudget).
+  limit: number | null;
+  remaining: number | null;
+  reserve: number;
+  backgroundStopped: boolean;
+  pausedUntil: string | null;
+  pauseReason: string | null;
+}
+
+export async function getMdblistUsageSnapshot(): Promise<MdblistUsageSnapshot> {
+  const plan = await getPlanSetting();
+  const now = Date.now();
+  const usage = runtime.usage;
+  const budget = mdblistBudget(plan, usage, now);
+  const report = usage.report;
+  const current = report !== null && now < report.resetAt ? report : null;
+  const paused = now < runtime.pausedUntil;
+  return {
+    plan,
+    reportedLimit: report?.limit ?? null,
+    reportedPlan: planForDailyLimit(report?.limit ?? null),
+    usedToday: current ? current.limit - current.remaining + usage.sentSinceReport : null,
+    limit: budget.limit,
+    remaining: budget.remaining,
+    reserve: budget.reserve,
+    backgroundStopped: paused || !budgetAllows(budget, true),
+    pausedUntil: paused ? new Date(runtime.pausedUntil).toISOString() : null,
+    pauseReason: paused ? runtime.pauseReason : null,
+  };
 }
 
 function isQuotaErrorMessage(msg: string | null | undefined): boolean {
@@ -101,11 +348,12 @@ export async function fetchAndCacheMdblistForTmdb(
   mediaType: "movie" | "tv",
   cacheKey: string,
   releaseDate?: string | null,
+  opts: MdblistCallOptions = {},
 ): Promise<MdblistResult> {
   const apiKey = await getApiKey();
   if (!apiKey) return { found: false, keyConfigured: false };
 
-  if (isMdblistQuotaLocked()) {
+  if (await checkMdblistPause(opts)) {
     return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
   }
 
@@ -114,10 +362,10 @@ export async function fetchAndCacheMdblistForTmdb(
     const url = new URL(`${MDBLIST_REST_BASE}tmdb/${mdbType}/${encodeURIComponent(String(tmdbId))}/`);
     url.searchParams.set("apikey", apiKey);
 
-    const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
+    const res = await mdblistRequest(url.toString());
 
     if (res.status === 429) {
-      tripQuotaLockout(`HTTP 429 for ${mediaType}:${tmdbId}`);
+      pauseForLimit(res.headers, await errorTextOf(res), `HTTP 429 for ${mediaType}:${tmdbId}`);
       return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
     }
 
@@ -144,7 +392,7 @@ export async function fetchAndCacheMdblistForTmdb(
         null;
       if (errMsg) {
         if (isQuotaErrorMessage(errMsg)) {
-          tripQuotaLockout(`${errMsg} for ${mediaType}:${tmdbId}`);
+          pauseForLimit(res.headers, errMsg, `for ${mediaType}:${tmdbId}`);
           return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
         }
         console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}: ${sanitizeForLog(errMsg)}`);
@@ -271,6 +519,7 @@ export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
 export async function fetchMdblistBatch(
   items: { id: number; releaseDate?: string | null }[],
   mediaType: "movie" | "tv",
+  opts: MdblistCallOptions = {},
 ): Promise<Map<number, MdblistRatings>> {
   const result = new Map<number, MdblistRatings>();
   if (items.length === 0) return result;
@@ -281,7 +530,7 @@ export async function fetchMdblistBatch(
 
   const apiKey = await getApiKey();
   if (!apiKey) return result;
-  if (isMdblistQuotaLocked()) return result;
+  if (await checkMdblistPause(opts)) return result;
 
   const mdbType = mediaType === "tv" ? "show" : "movie";
   const url = new URL(`${MDBLIST_REST_BASE}tmdb/${mdbType}/`);
@@ -294,9 +543,10 @@ export async function fetchMdblistBatch(
   const MAX_CONSECUTIVE_FAILURES = 3;
 
   for (let offset = 0; offset < items.length; offset += MDBLIST_BATCH_SIZE) {
-    // A lockout tripped mid-run (this loop's own 429 breaks directly; a
-    // CONCURRENT caller's trip is only visible here) must stop later pages.
-    if (isMdblistQuotaLocked()) break;
+    // A pause tripped mid-run (this loop's own 429 breaks directly; a
+    // CONCURRENT caller's trip, the breaker, or the budget running down is only
+    // visible here) must stop later pages.
+    if (isMdblistQuotaLocked(opts)) break;
     const page = items.slice(offset, offset + MDBLIST_BATCH_SIZE);
     const ids  = page.map((item) => item.id);
 
@@ -305,8 +555,7 @@ export async function fetchMdblistBatch(
       const body = JSON.stringify({ ids });
 
       for (let attempt = 0; attempt < 2; attempt++) {
-        res = await safeFetchTrusted(url.toString(), {
-          allowedHosts: MDBLIST_HOSTS,
+        res = await mdblistRequest(url.toString(), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body,
@@ -320,7 +569,7 @@ export async function fetchMdblistBatch(
       if (!res) break;
 
       if (res.status === 429) {
-        tripQuotaLockout(`HTTP 429 on batch ${mediaType}`);
+        pauseForLimit(res.headers, await errorTextOf(res), `HTTP 429 on batch ${mediaType}`);
         break;
       }
 
@@ -339,7 +588,7 @@ export async function fetchMdblistBatch(
         const d = data as { error?: unknown; message?: string };
         const errMsg = typeof d.error === "string" ? d.error : d.error === true ? (d.message ?? "unknown") : null;
         if (errMsg && isQuotaErrorMessage(errMsg)) {
-          tripQuotaLockout(`${errMsg} on batch ${mediaType}`);
+          pauseForLimit(res.headers, errMsg, `on batch ${mediaType}`);
           break;
         }
         if (errMsg) {
@@ -464,8 +713,9 @@ export function getMdblistRatingsForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
+  opts: MdblistCallOptions = {},
 ): Promise<MdblistResult> {
-  return readMdblistForTmdb(tmdbId, mediaType, releaseDate, false);
+  return readMdblistForTmdb(tmdbId, mediaType, releaseDate, false, opts);
 }
 
 // The batch counterpart (guardrail 31a): the same read, except that a stale row's
@@ -481,8 +731,9 @@ export async function revalidateMdblistForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
+  opts: MdblistCallOptions = {},
 ): Promise<void> {
-  await readMdblistForTmdb(tmdbId, mediaType, releaseDate, true);
+  await readMdblistForTmdb(tmdbId, mediaType, releaseDate, true, opts);
 }
 
 async function readMdblistForTmdb(
@@ -490,6 +741,7 @@ async function readMdblistForTmdb(
   mediaType: "movie" | "tv",
   releaseDate: string | null | undefined,
   awaitRefresh: boolean,
+  opts: MdblistCallOptions,
 ): Promise<MdblistResult> {
   const cacheKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
   const { value: cached, isStale } = await getCacheStale<MdblistRatings | typeof NOT_FOUND_SENTINEL>(cacheKey);
@@ -499,7 +751,7 @@ async function readMdblistForTmdb(
       const revalKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
       if (!mdblistRevalidating.has(revalKey)) {
         mdblistRevalidating.add(revalKey);
-        const refresh = fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate).catch(() => {}).finally(() => {
+        const refresh = fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate, opts).catch(() => {}).finally(() => {
           mdblistRevalidating.delete(revalKey);
         });
         if (awaitRefresh) await refresh;
@@ -514,12 +766,15 @@ async function readMdblistForTmdb(
 
   const existing = mdblistInflightCold.get(cacheKey);
   if (existing) return existing;
-  const p = fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate)
+  const p = fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate, opts)
     .finally(() => mdblistInflightCold.delete(cacheKey));
   mdblistInflightCold.set(cacheKey, p);
   return p;
 }
 
+// Admin connection test. Ignores the pause and the budget (a recovered or
+// replaced key must be checkable at once) but still goes through mdblistRequest,
+// so the reply's usage report is what the settings page shows next.
 export async function testMdblistConnection(): Promise<string> {
   const apiKey = await getApiKey({ fresh: true });
   if (!apiKey) throw new Error("No MDBList API key configured");
@@ -527,7 +782,7 @@ export async function testMdblistConnection(): Promise<string> {
   const url = new URL(`${MDBLIST_REST_BASE}tmdb/show/1396/`);
   url.searchParams.set("apikey", apiKey);
 
-  const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
+  const res = await mdblistRequest(url.toString());
   if (!res.ok) throw new Error(`MDBList returned HTTP ${res.status}`);
 
   const data = await res.json() as {
@@ -574,15 +829,15 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
 
   const apiKey = await getApiKey();
   if (!apiKey) return [];
-  if (isMdblistQuotaLocked()) return [];
+  if (await checkMdblistPause()) return [];
 
   try {
     const url = new URL(`${MDBLIST_REST_BASE}lists/top`);
     url.searchParams.set("apikey", apiKey);
     url.searchParams.set("limit", String(limit));
 
-    const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
-    if (res.status === 429) { tripQuotaLockout("HTTP 429 on top lists"); return []; }
+    const res = await mdblistRequest(url.toString());
+    if (res.status === 429) { pauseForLimit(res.headers, await errorTextOf(res), "HTTP 429 on top lists"); return []; }
     if (!res.ok) return [];
 
     const data = await res.json() as unknown;
@@ -594,7 +849,7 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
       const d = data as { error?: unknown; message?: string };
       const errMsg = typeof d.error === "string" ? d.error : d.error === true ? (d.message ?? "unknown") : null;
       if (errMsg) {
-        if (isQuotaErrorMessage(errMsg)) tripQuotaLockout(`${errMsg} on top lists`);
+        if (isQuotaErrorMessage(errMsg)) pauseForLimit(res.headers, errMsg, "on top lists");
         console.warn(`[mdblist] top lists API error: ${sanitizeForLog(errMsg)}`);
       }
     }
@@ -627,14 +882,14 @@ async function fetchMdblistListItemsWithStatus(
 
   const apiKey = await getApiKey();
   if (!apiKey) return { items: [], ok: false };
-  if (isMdblistQuotaLocked()) return { items: [], ok: false };
+  if (await checkMdblistPause()) return { items: [], ok: false };
 
   try {
     const url = new URL(`${MDBLIST_REST_BASE}lists/${listId}/items`);
     url.searchParams.set("apikey", apiKey);
 
-    const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
-    if (res.status === 429) { tripQuotaLockout("HTTP 429 on list items"); return { items: [], ok: false }; }
+    const res = await mdblistRequest(url.toString());
+    if (res.status === 429) { pauseForLimit(res.headers, await errorTextOf(res), "HTTP 429 on list items"); return { items: [], ok: false }; }
     if (!res.ok) return { items: [], ok: false };
 
     const data = await res.json() as MdblistListItem[];

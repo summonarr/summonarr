@@ -628,10 +628,24 @@ test("ratings-state: provider flags reflect configured keys (truthiness only) an
   assert.deepEqual(body.lockouts, { mdblistQuotaLocked: false, omdbQuotaLocked: false });
   assert.deepEqual(
     Object.keys(body).sort(),
-    ["cache", "details", "lockouts", "now", "providers", "query"],
+    ["cache", "details", "lockouts", "mdblistUsage", "now", "providers", "query"],
     "no `live` key without ?live=1",
   );
   assert.deepEqual(body.query, { tmdbId: 603, type: "movie", live: false });
+  // The MDBList budget at rest: no plan saved (auto), nothing reported yet, so
+  // no limit of our own and nothing paused.
+  assert.deepEqual(body.mdblistUsage, {
+    plan: "auto",
+    reportedLimit: null,
+    reportedPlan: null,
+    usedToday: null,
+    limit: null,
+    remaining: null,
+    reserve: 0,
+    backgroundStopped: false,
+    pausedUntil: null,
+    pauseReason: null,
+  });
 });
 
 test("ratings-state: the raw ratings cache section reports fresh values, a stale row, and a _notFound sentinel (data withheld)", async () => {

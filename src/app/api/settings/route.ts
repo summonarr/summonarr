@@ -28,6 +28,8 @@ import { NEVER_WATCHED_FEATURE_KEY } from "@/lib/never-watched-data";
 import { CLEANUP_FEATURE_KEY } from "@/lib/library-cleanup-data";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 import { clearArrSnapshots, isArrConfigKey } from "@/lib/arr-snapshot";
+import { MDBLIST_PLAN_SETTING_KEY, isMdblistPlanSetting } from "@/lib/mdblist-plan";
+import { invalidateMdblistPlanCache } from "@/lib/mdblist";
 
 // The settings this route writes that the never-watched report reads (guardrail
 // 14d): a tracking switch (and its stamp) moves a server's coverage, retention
@@ -136,6 +138,8 @@ const SETTINGS_SCHEMA = [
   ["discordNotifyChannelId",        false],
   ["omdbApiKey",                    true ],
   ["mdblistApiKey",                 true ],
+  // The MDBList plan the budget is kept against (mdblist-plan.ts).
+  ["mdblistPlan",                   false],
   ["traktClientId",                 true ],
   // The Trakt app's secret — with the client id, what lets users connect their
   // own Trakt accounts (src/lib/trakt-user.ts).
@@ -635,6 +639,15 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
+    // The MDBList plan is one of the known plans or "auto"; anything else would
+    // read back as "auto" and silently drop the admin's choice.
+    if (key === MDBLIST_PLAN_SETTING_KEY && !isMdblistPlanSetting(value)) {
+      return NextResponse.json(
+        { error: t("apiAdmin.settings.mdblistPlanInvalid", { key }) },
+        { status: 400 },
+      );
+    }
+
     // Radarr minimum-availability is a closed enum on the movie resource — an
     // arbitrary string would 400 every future add on that instance.
     if (key === "radarrMinimumAvailability" || key === "radarr4kMinimumAvailability") {
@@ -962,6 +975,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // flow is "save the relay key, then press Send test notification", so a stale
   // read lands on exactly the interaction used to verify the change.
   invalidateApnsRelayCache();
+  // The MDBList plan is memoized for 30s too (mdblist.ts); a new plan applies now.
+  const mdblistPlanChanged = changedKeys.includes(MDBLIST_PLAN_SETTING_KEY);
+  if (mdblistPlanChanged) invalidateMdblistPlanCache();
 
   const writeTs = Date.now();
   for (const [key] of entries) {
@@ -1167,6 +1183,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // The rollback rewrote Setting rows — drop the flag memo again.
     invalidateFeatureFlagCache();
     invalidateApnsRelayCache();
+    if (mdblistPlanChanged) invalidateMdblistPlanCache();
     if (neverWatchedInputChanged) invalidateNeverWatchedReport();
     if (arrConfigChanged) clearArrSnapshots();
     // Same for the Discord public key and the session-duration TTLs: both memos were

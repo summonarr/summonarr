@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { testOmdbConnection } from "@/lib/omdb";
-import { testMdblistConnection } from "@/lib/mdblist";
+import { getMdblistUsageSnapshot, testMdblistConnection } from "@/lib/mdblist";
 import { testTraktConnection } from "@/lib/trakt";
 import { testIpinfoConnection } from "@/lib/ip-lookup";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { localeForRequest, translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin connectivity test for the ratings/lookup providers: dispatches on the
 // requested service to the matching test helper (OMDB, MDBList, Trakt, ipinfo).
@@ -36,6 +36,21 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (body.service === "mdblist") {
     try {
       const title = await testMdblistConnection();
+      // The test's own reply carried MDBList's usage report, so the plan and
+      // today's count are known now (when MDBList sent them).
+      const usage = await getMdblistUsageSnapshot();
+      const number = new Intl.NumberFormat(localeForRequest(req));
+      if (usage.reportedLimit !== null && usage.usedToday !== null) {
+        const vars = {
+          title: String(title),
+          limit: number.format(usage.reportedLimit),
+          used: number.format(usage.usedToday),
+        };
+        const message = usage.reportedPlan
+          ? t("apiAdmin.settings.mdblistConnectedPlan", { ...vars, plan: t(`settings.form.mdblistPlan.name.${usage.reportedPlan}`) })
+          : t("apiAdmin.settings.mdblistConnectedLimit", vars);
+        return NextResponse.json({ ok: true, message });
+      }
       return NextResponse.json({ ok: true, message: t("apiAdmin.settings.connectedFetched", { title: String(title) }) });
     } catch (err) {
       console.error("[test-ratings] MDBList test failed:", err);

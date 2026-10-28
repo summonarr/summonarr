@@ -1045,3 +1045,29 @@ test("PATCH: an empty discordGuildId / discordClientId / discordPublicKey / site
     assert.equal(write.create.value, "", `${key} must be stored empty, not left at its previous value`);
   }
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — the MDBList plan (mdblist-plan.ts)
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: mdblistPlan accepts only auto or a known plan, and a save applies at once (no 30s stale memo)", async () => {
+  const { getMdblistUsageSnapshot } = await import("../src/lib/mdblist.ts");
+  const admin = await mintSession("ADMIN");
+
+  const bad = await PATCH(patchReq(JSON.stringify({ mdblistPlan: "gold" }), admin.header), undefined);
+  assert.equal(bad.status, 400);
+  assert.deepEqual(await bad.json(), { error: "\"mdblistPlan\" must be auto or one of MDBList's plans" });
+  assert.equal(upsertFor("mdblistPlan").length, 0, "an unknown plan is never stored (it would read back as auto)");
+
+  // Prime the memo with the current choice (nothing stored ⇒ auto).
+  assert.equal((await getMdblistUsageSnapshot()).plan, "auto");
+
+  const ok = await PATCH(patchReq(JSON.stringify({ mdblistPlan: "plus" }), admin.header), undefined);
+  assert.equal(ok.status, 200);
+  assert.equal(upsertFor("mdblistPlan").at(-1)?.create.value, "plus");
+  assert.equal(
+    (await getMdblistUsageSnapshot()).plan,
+    "plus",
+    "the route drops the plan memo, so the budget follows the save immediately",
+  );
+});

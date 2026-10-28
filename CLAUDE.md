@@ -675,7 +675,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Turbopack copies a lib module into every server chunk that imports it ([process-singleton.ts](src/lib/process-singleton.ts)). `session-revocation.ts`'s force-revalidate Sets were plain module state: the revoke routes marked in THEIR chunk, while the proxy and every page render read their own copies, which nothing ever wrote. So "revocation takes effect on the next request" held for `withAuth` API routes only, and a revoked session kept rendering pages for the whole dbCheckedAt window (10s with admin-area access / 60s otherwise).
 
     Rules:
-    - Any state that means "remember across the whole server" goes through `processSingleton`: revocation marks, rate-limit buckets, the MFA token ledger.
+    - Any state that means "remember across the whole server" goes through `processSingleton`: revocation marks, rate-limit buckets, the MFA token ledger, and the MDBList and OMDb lockouts (31b).
     - A single-module unit test can't see the bug. Pin it with a cache-busted second import (`?chunk=…`), the unit-test analogue of a second chunk, as `tests/session-revocation.test.mts` does.
 28. **NEVER hard-delete a `MediaServerUser`. Soft-delete (`active = false`) instead.**
 
@@ -721,6 +721,20 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - `deferToAfter: false` runs the deferred refresh before `attachRatingsUnified` returns. It is for callers with no response to protect and many calls to make; pages keep the default so the viewer isn't held waiting.
     - The OMDB fallback never fetches a title that already has an OMDB row (`lacksOmdbRow`). The getter would only hand that row back, plus a detached refresh; the stale-OMDB pass refreshes it instead.
     - `tests/ratings-refresh.test.mts` pins every route with in-flight counts and `tests/recommendations.test.mts` pins the verdict pass's option; all twelve mutations fail a named test.
+31b. **ALWAYS mark a cron's MDBList call as background work (`{ background: true }`), and NEVER call MDBList except through `mdblistRequest` ([mdblist.ts](src/lib/mdblist.ts)).** The plan rules live in [mdblist-plan.ts](src/lib/mdblist-plan.ts) (pure); the admin picks the plan in Settings → Integrations (`mdblistPlan`, default `auto`).
+
+    Why:
+    - MDBList's daily limit is per ACCOUNT and shared with every other app on it. A cron with no flag spends the day down to zero, and pages get no ratings until midnight UTC.
+    - For You's `providersAnswering` reads MDBList as answering unless the call is marked background, so a null from a cron that stopped asking became a week-long "no ratings" verdict.
+    - 2026-10-28: MDBList's servers were slow, and every batch POST timed out. Nothing paused, because a pause needed a RESPONSE, so each page of every job waited out its full 30s.
+
+    Rules:
+    - Background (pre-warm, `/api/sync/ratings`, the For You verdict pass) stops while 25% or less of the day is left. A page may spend it down to zero. The limit is the lower of what MDBList reports (`X-RateLimit-*` on every reply) and the picked plan, which caps Summonarr's OWN count. `auto` with nothing reported means no cap of our own; MDBList's 429 is then the stop.
+    - `mdblistRequest` counts the request, reads the body inside the timeout, keeps MDBList's usage report and feeds the transport breaker: five timeouts or network failures in a row, across all MDBList calls, pause every call for an hour. Any response clears the count.
+    - A 429 pauses for `Retry-After` when sent. Without it: until `X-RateLimit-Reset` (or 00:00 UTC) for "Daily API limit exceeded!", until the next fixed 5-minute window for "API rate limit exceeded!", else one hour.
+    - The pause, breaker count, usage and plan memo are `processSingleton` state (27a), and so is OMDb's lockout.
+    - Not documented by MDBList: whether a 200-id batch counts as 1 request or 200. The budget uses MDBList's own remaining count when a reply carries one, so it is right either way. Don't hard-code either answer.
+    - `tests/mdblist-plan.test.mts`, `tests/mdblist-budget.test.mts`, `tests/mdblist-background-callers.test.mts` (scans the three crons for the flag) and the `mdblistPlan` case in `tests/settings-route.test.mts` pin it. All 23 mutations fail a named test.
 32. **A Radarr/Sonarr instance is identified by an `arrInstance` slug string, NEVER the old `is4k` boolean.** The two-instance (HD/4K) model was generalized to N named instances (e.g. an "anime" instance).
 
     Detail and rationale: [docs/guardrails/32.md](docs/guardrails/32.md).

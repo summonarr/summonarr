@@ -128,6 +128,8 @@ const SLOW_PAGE_WRITE_MS = 10_000;
 // Titles per ratings pass. attachRatingsUnified batches MDBList at 200 ids per
 // POST internally, so this is the natural page size.
 const QUALITY_BATCH = 200;
+// The verdict pass is a cron: MDBList stops it at the reserve kept for pages.
+const BACKGROUND_RATINGS = { background: true } as const;
 
 export interface GraphSource {
   tmdbId: number;
@@ -953,7 +955,7 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
     // "nobody answered" and then STAMP that as a verdict for a week. Stop, and
     // let the next run rate them for real. Mirrors prewarmMdblistCache's
     // early exit; either provider still answering is reason enough to continue.
-    if (isMdblistQuotaLocked() && isOmdbQuotaLocked()) {
+    if (isMdblistQuotaLocked(BACKGROUND_RATINGS) && isOmdbQuotaLocked()) {
       console.warn(`[recommendation-graph] both ratings providers are quota-locked — stopping after ${stats.titlesRated} verdict(s)`);
       break;
     }
@@ -992,7 +994,7 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
           voteAverage: 0,
           voteCount: 0,
         })),
-        { blocking: true, deferToAfter: false },
+        { blocking: true, deferToAfter: false, background: true },
       );
     } catch (err) {
       stats.ratingsFailed += slice.length;
@@ -1007,9 +1009,13 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
     // would then demote every low-vote title it touched.
     //
     // Checked AFTER the batch so a lockout tripped mid-batch is seen. This is
-    // why the OMDB transport circuit breaker (omdb.ts) matters: without it a
-    // run of timeouts would never set this flag.
-    const providersAnswering = !isMdblistQuotaLocked() && !isOmdbQuotaLocked();
+    // why the transport circuit breakers (omdb.ts, mdblist.ts) matter: without
+    // them a run of timeouts would never set this flag. MDBList had none until
+    // 2026-10-28, so a night of MDBList timeouts stamped null verdicts here.
+    //
+    // MDBList also reads as not answering once this cron is down to the reserve
+    // the plan setting keeps for pages: it stopped asking, so a null is not a verdict.
+    const providersAnswering = !isMdblistQuotaLocked(BACKGROUND_RATINGS) && !isOmdbQuotaLocked();
 
     const now = new Date();
     for (const media of rated) {

@@ -1,10 +1,12 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { fetchMdblistBatch, isMdblistQuotaLocked } from "./mdblist";
+import { checkMdblistPause, fetchMdblistBatch, mdblistPause } from "./mdblist";
 import { collectAllLibraryItems, LIBRARY_PAGE_SIZE } from "./library-iterator";
 
 // Titles per MDBList batch request.
 const BATCH_SIZE = 200;
+
+const BACKGROUND = { background: true } as const;
 
 // Safety cap on how many library titles one run will look at.
 const MAX_PREWARM_ITEMS = 200_000;
@@ -28,8 +30,12 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
 }> {
   const force = opts.force ?? false;
 
-  if (isMdblistQuotaLocked()) {
-    console.warn("[mdblist-prewarm] MDBList quota locked — aborting before any calls");
+  // A background job: it stops at the reserve the plan setting keeps for pages.
+  const startPause = await checkMdblistPause(BACKGROUND);
+  if (startPause) {
+    console.warn(startPause === "locked"
+      ? "[mdblist-prewarm] MDBList quota locked — aborting before any calls"
+      : "[mdblist-prewarm] MDBList's daily budget for background jobs is used up — aborting before any calls");
     return { total: 0, fetched: 0, skipped: 0, failed: 0, purged: 0, quotaExhausted: true };
   }
 
@@ -124,9 +130,12 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
       console.warn(`[mdblist-prewarm] aborted after ${fetched} fetches — the advisory lock timed out`);
       break;
     }
-    if (isMdblistQuotaLocked()) {
+    const pageStart = mdblistPause(BACKGROUND);
+    if (pageStart) {
       quotaHit = true;
-      console.warn(`[mdblist-prewarm] Quota exhausted after ${fetched} fetches — stopping early`);
+      console.warn(pageStart === "locked"
+        ? `[mdblist-prewarm] Quota exhausted after ${fetched} fetches — stopping early`
+        : `[mdblist-prewarm] Daily budget for background jobs used up after ${fetched} fetches — stopping early`);
       break;
     }
 
@@ -134,8 +143,8 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
     const tvPage    = tvItems.slice(page    * BATCH_SIZE, (page + 1) * BATCH_SIZE);
 
     const [movieResults, tvResults] = await Promise.allSettled([
-      moviePage.length > 0 ? fetchMdblistBatch(moviePage, "movie") : Promise.resolve(new Map()),
-      tvPage.length    > 0 ? fetchMdblistBatch(tvPage,    "tv")    : Promise.resolve(new Map()),
+      moviePage.length > 0 ? fetchMdblistBatch(moviePage, "movie", BACKGROUND) : Promise.resolve(new Map()),
+      tvPage.length    > 0 ? fetchMdblistBatch(tvPage,    "tv",    BACKGROUND) : Promise.resolve(new Map()),
     ]);
 
     if (movieResults.status === "fulfilled") {
@@ -152,9 +161,12 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
       console.warn("[mdblist-prewarm] tv batch failed:", tvResults.reason);
     }
 
-    if (isMdblistQuotaLocked()) {
+    const pageEnd = mdblistPause(BACKGROUND);
+    if (pageEnd) {
       quotaHit = true;
-      console.warn(`[mdblist-prewarm] Quota hit mid-batch after ${fetched} fetches — stopping early`);
+      console.warn(pageEnd === "locked"
+        ? `[mdblist-prewarm] Quota hit mid-batch after ${fetched} fetches — stopping early`
+        : `[mdblist-prewarm] Daily budget for background jobs used up mid-batch after ${fetched} fetches — stopping early`);
       break;
     }
   }
