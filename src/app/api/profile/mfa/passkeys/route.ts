@@ -8,6 +8,7 @@ import { revokeOtherUserSessions } from "@/lib/auth";
 import {
   ensureRecoveryCodesInTx,
   getMfaState,
+  getMfaStateInTx,
   lockUserMfaInTx,
   MAX_PASSKEYS_PER_USER,
   sanitizePasskeyName,
@@ -99,7 +100,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
       // codes) takes the same lock, so this read can't be stale by the time
       // the credential lands. The `before` read above is a request old.
       await lockUserMfaInTx(tx, user.id);
-      const state = await getMfaState(user.id, tx);
+      const state = await getMfaStateInTx(tx, user.id);
       if (state.enabled && !claims.factorVerified) return { kind: "gained-factor" as const };
       if (state.passkeys.length >= MAX_PASSKEYS_PER_USER) return { kind: "max" as const };
       // The unique credentialId violation, if any, is this tx's FIRST write and

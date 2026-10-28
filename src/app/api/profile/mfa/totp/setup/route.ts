@@ -3,7 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { beginTotpEnrollmentInTx, getMfaState, lockUserMfaInTx } from "@/lib/mfa/mfa-store";
+import { beginTotpEnrollmentInTx, getMfaState, getMfaStateInTx, lockUserMfaInTx } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp, secondFactorRequiredResponse } from "@/lib/mfa/step-up";
 import { buildOtpauthUri } from "@/lib/mfa/totp";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -39,7 +39,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const result = await prisma.$transaction(async (tx) => {
     await lockUserMfaInTx(tx, user.id);
-    const now = await getMfaState(user.id, tx);
+    const now = await getMfaStateInTx(tx, user.id);
     if (now.totpEnabled) return "already-enabled" as const;
     if (now.enabled && !proof.proved) return { gainedFactor: now };
     return beginTotpEnrollmentInTx(tx, user.id);

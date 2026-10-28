@@ -621,6 +621,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Add a new code to `PrismaErrorCode` when you need one; never inline `(err as { code })…` checks.
     - Type-only `Prisma` imports (`Prisma.UserWhereInput`) are fine; this is about runtime class identity only. Tests may still construct real `Prisma.PrismaClientKnownRequestError`s — the helper reads them.
     - `tests/prisma-errors.test.mts` scans `src` for `instanceof …PrismaClient*Error` and inline `.code === "Pxxxx"`; four mutations each fail it.
+23c. **NEVER run queries in parallel on a transaction client. Inside `$transaction(async (tx) => …)`, and in any helper that takes a `tx`, await each query in turn — no `Promise.all`/`allSettled`/`mapLimit`/`settleLimit` over `tx` calls or over helpers handed `tx`.**
+
+    Why:
+    - An interactive transaction is ONE pooled pg connection, and pg runs one query at a time per connection. The parallel form saves nothing: Prisma's adapter (7.10) hands every query straight to that connection's queue, and Prisma's own transaction queue serializes only BEGIN/COMMIT/ROLLBACK.
+    - From the third queued query, pg 8.x prints `DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0`. Seen in production 2026-10-28 from the 2FA enrollment routes, which read `getMfaState` (three parallel reads) on the tx. pg@9 removes that queueing, so the pattern breaks on that upgrade.
+
+    Rules:
+    - A helper that runs on the pool AND in a transaction comes as a pair: the pool version may fan out, the `…InTx(tx, …)` version reads sequentially (`getMfaState` / `getMfaStateInTx`, [mfa-store.ts](src/lib/mfa/mfa-store.ts)). Never one function with a `db = prisma` default that fans out on whatever it's given.
+    - Separate transactions in parallel are fine (`settleLimit(users, N, (u) => prisma.$transaction(…))`): each holds its own connection.
+    - Prisma itself also fans out inside a transaction: it loads each `include`d relation as its own query and runs sibling relations in parallel (no `relationJoins`). Today no transaction query loads a relation; keep includes of several relations out of `tx` reads, or read them in separate awaited calls.
+    - `tests/tx-sequential-queries.test.mts` scans `src` (TypeScript AST: `$transaction` callbacks, `tx`-named or `…Tx`/`…TxClient`/`TransactionClient`/`typeof prisma`-alias-typed params) and pins `getMfaStateInTx` / `dropRecoveryCodesIfNoFactorInTx` to one query in flight. Reverting any of the four fixed files fails it; a caller passing `tx` to `getMfaState` fails typecheck.
 24. **The native-client version gate (426) fails SOFT and is NEVER an authz input.**
 
     Why:

@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
-import { confirmTotpEnrollmentInTx, ensureRecoveryCodesInTx, getMfaState, lockUserMfaInTx, type ConfirmTotpResult } from "@/lib/mfa/mfa-store";
+import { confirmTotpEnrollmentInTx, ensureRecoveryCodesInTx, getMfaStateInTx, lockUserMfaInTx, type ConfirmTotpResult } from "@/lib/mfa/mfa-store";
 import { mfaEligibleUser } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -46,7 +46,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     // committed before (its delete of the pending secret is visible, and this
     // is not the first factor) or waits for this one to commit.
     await lockUserMfaInTx(tx, user.id);
-    const before = await getMfaState(user.id, tx);
+    const before = await getMfaStateInTx(tx, user.id);
     const result: ConfirmTotpResult = await confirmTotpEnrollmentInTx(tx, user.id, code);
     if (result !== "ok") return { result, recoveryCodes: null as string[] | null, firstFactor: false };
     return { result, recoveryCodes: await ensureRecoveryCodesInTx(tx, user.id), firstFactor: !before.enabled };
