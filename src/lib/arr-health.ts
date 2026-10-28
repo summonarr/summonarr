@@ -247,11 +247,11 @@ export function arrValidationMessage(body: string): string | null {
       .map((e) => (typeof e?.errorMessage === "string" ? e.errorMessage : typeof e?.message === "string" ? e.message : ""))
       .filter((m) => m.trim() !== "");
     if (msgs.length === 0) return null;
-    return [...new Set(msgs)]
-      .join(" ")
-      .replace(/[\r\n\t]+/g, " ")
-      .replace(/token=[^&\s\]\)"']+/gi, "token=••••••••")
-      .slice(0, 400);
+    // The literal form first (the stored URL as the arr quotes it), then the
+    // shared mask for the %3D-encoded and quoted forms as well (arr-parse.ts),
+    // one line, bounded.
+    const joined = [...new Set(msgs)].join(" ").replace(/token=[^&\s\]\)"']+/gi, "token=••••••••");
+    return safeMessage(joined, 400);
   } catch {
     return null;
   }

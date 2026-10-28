@@ -95,8 +95,16 @@ export async function getMediaInstanceAccessLists(): Promise<{
 export async function getVisibleServerInstances(
   session: SummonarrSession | null,
 ): Promise<VisibleServerInstances> {
-  const { plex: plexInstances, jellyfin: jellyfinInstances, anyRestricted } =
-    await getMediaInstanceAccessLists();
+  return visibleForSession(session, await getMediaInstanceAccessLists());
+}
+
+// The session half of the resolver, over instance lists the caller already
+// loaded — so titlesHiddenFromViewer below reads the registry once, not twice.
+async function visibleForSession(
+  session: SummonarrSession | null,
+  lists: { plex: MediaInstanceAccess[]; jellyfin: MediaInstanceAccess[]; anyRestricted: boolean },
+): Promise<VisibleServerInstances> {
+  const { plex: plexInstances, jellyfin: jellyfinInstances, anyRestricted } = lists;
 
   if (!session) return visibleInstancesFor(0n, {}, plexInstances, jellyfinInstances);
 
@@ -115,6 +123,82 @@ export async function getVisibleServerInstances(
   }
 
   return visibleInstancesFor(perms, grants, plexInstances, jellyfinInstances);
+}
+
+export interface MediaTitleKey {
+  tmdbId: number;
+  mediaType: "MOVIE" | "TV";
+}
+
+// A where fragment selecting exactly these (tmdbId, mediaType) keys, split per
+// type so each half is one `IN` the planner serves from the composite key. The
+// shape fits every table carrying the pair (DeletionVote, the two library
+// tables). An EMPTY list selects nothing (`OR: []` is false in Prisma) — a
+// caller negating it must check the length first.
+export function titleKeysWhere(keys: MediaTitleKey[]): { OR: Array<{ mediaType: "MOVIE" | "TV"; tmdbId: { in: number[] } }> } {
+  const movie: number[] = [];
+  const tv: number[] = [];
+  for (const k of keys) (k.mediaType === "MOVIE" ? movie : tv).push(k.tmdbId);
+  const OR: Array<{ mediaType: "MOVIE" | "TV"; tmdbId: { in: number[] } }> = [];
+  if (movie.length) OR.push({ mediaType: "MOVIE", tmdbId: { in: movie } });
+  if (tv.length) OR.push({ mediaType: "TV", tmdbId: { in: tv } });
+  return { OR };
+}
+
+// Among `keys`, the titles this viewer must not be shown at all: held ONLY on
+// servers they hold no grant for (guardrail 35). A title the viewer can see on
+// some server is not hidden, and neither is one in no library at all — a vote
+// or a request outlives the copy it was about, and "it was here once" is not a
+// restricted server's holding. Lists built from user records (the deletion
+// votes list, which otherwise names a restricted server's titles AND other
+// voters' reasons about them) subtract this before paging.
+//
+// `keys` may be a loader, called only when something IS hidden from this
+// viewer: an unrestricted deployment, an ADMIN, or a fully granted user pays
+// no read for it.
+export async function titlesHiddenFromViewer(
+  session: SummonarrSession | null,
+  keys: MediaTitleKey[] | (() => Promise<MediaTitleKey[]>),
+): Promise<MediaTitleKey[]> {
+  const lists = await getMediaInstanceAccessLists();
+  if (!lists.anyRestricted) return [];
+  const visible = await visibleForSession(session, lists);
+  const hiddenPlex = lists.plex.map((i) => i.slug).filter((s) => !visible.plex.includes(s));
+  const hiddenJellyfin = lists.jellyfin.map((i) => i.slug).filter((s) => !visible.jellyfin.includes(s));
+  if (hiddenPlex.length === 0 && hiddenJellyfin.length === 0) return [];
+
+  const list = typeof keys === "function" ? await keys() : keys;
+  if (list.length === 0) return [];
+  const keyWhere = titleKeysWhere(list);
+  const select = { tmdbId: true, mediaType: true } as const;
+  // A fixed four-way fan-out (guardrail 31), each bounded by `list`.
+  const [onHiddenPlex, onHiddenJellyfin, onVisiblePlex, onVisibleJellyfin] = await Promise.all([
+    hiddenPlex.length
+      ? prisma.plexLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { in: hiddenPlex } }, select })
+      : Promise.resolve([]),
+    hiddenJellyfin.length
+      ? prisma.jellyfinLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { in: hiddenJellyfin } }, select })
+      : Promise.resolve([]),
+    visible.plex.length
+      ? prisma.plexLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { in: visible.plex } }, select })
+      : Promise.resolve([]),
+    visible.jellyfin.length
+      ? prisma.jellyfinLibraryItem.findMany({ where: { ...keyWhere, serverInstance: { in: visible.jellyfin } }, select })
+      : Promise.resolve([]),
+  ]);
+  const keyOf = (r: { tmdbId: number; mediaType: string }) => `${r.mediaType}:${r.tmdbId}`;
+  const seenOnVisible = new Set<string>();
+  for (const r of onVisiblePlex) seenOnVisible.add(keyOf(r));
+  for (const r of onVisibleJellyfin) seenOnVisible.add(keyOf(r));
+  const out: MediaTitleKey[] = [];
+  const added = new Set<string>();
+  for (const r of [...onHiddenPlex, ...onHiddenJellyfin]) {
+    const k = keyOf(r);
+    if (seenOnVisible.has(k) || added.has(k)) continue;
+    added.add(k);
+    out.push({ tmdbId: r.tmdbId, mediaType: r.mediaType });
+  }
+  return out;
 }
 
 // Same resolver for a caller holding a bare user id instead of a session — the

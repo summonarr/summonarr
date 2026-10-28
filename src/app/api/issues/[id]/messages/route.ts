@@ -141,7 +141,14 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
 
   emitSSE({ type: "issuemessage:created", issueId: id, userId: issue.reportedBy });
 
+  // Two names for one author. Managers (the admin fan-out and the agents) see
+  // emails throughout the issue surface, so the email fallback stays for them.
+  // The REPORTER does not: this route's own GET strips `author.email` for a
+  // non-manager, and the reply notifications (Discord DM, inbox row, email)
+  // must not undo that for a name-less admin. Every reporter-facing send below
+  // is skipped on a self-reply, so the author there is always a manager.
   const authorName = session.user.name ?? session.user.email ?? "Someone";
+  const reporterFacingAuthor = session.user.name ?? t("shared.thread.admin");
 
   emitNotificationEvent({
     event: "issue.reply",
@@ -183,22 +190,22 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
           })
           .catch(() => null);
     if (reporter && reporter.deactivatedAt == null) {
-      void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text, { tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
+      void notifyUserIssueMessage(issue.reportedBy, issue.title, reporterFacingAuthor, text, { tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
       void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, body: text, issueId: id }).catch(() => {});
       createInAppNotification(issue.reportedBy, {
         type: "ISSUE_REPLY",
         title: issue.title,
-        body: `${authorName} replied: ${text.slice(0, 400)}`,
+        body: `${reporterFacingAuthor} replied: ${text.slice(0, 400)}`,
         tmdbId: issue.tmdbId,
         mediaType: issue.mediaType,
         posterPath: issue.posterPath,
         // Re-rendered in the reader's language at read time (notification-render.ts).
-        data: { v: 1, author: authorName, text: text.slice(0, 400) },
+        data: { v: 1, author: reporterFacingAuthor, text: text.slice(0, 400) },
       });
       if (reporter.notifyOnIssue) {
         const toEmail = resolveUserNotificationEmail(reporter);
         if (toEmail) {
-          void notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, authorName, body: text, locale: reporter.locale }).catch(() => {});
+          void notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, authorName: reporterFacingAuthor, body: text, locale: reporter.locale }).catch(() => {});
         }
       }
     }

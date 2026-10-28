@@ -5,7 +5,7 @@ import { readJsonCapped, readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
-import { dropRecoveryCodesIfNoFactorInTx, sanitizePasskeyName } from "@/lib/mfa/mfa-store";
+import { dropRecoveryCodesIfNoFactorInTx, lockUserMfaInTx, sanitizePasskeyName } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -82,6 +82,12 @@ export const DELETE = withAuth(async (
   if (proof instanceof NextResponse) return proof;
 
   const outcome = await prisma.$transaction(async (tx) => {
+    // Same lock as every other enrollment write (guardrail 6d: recovery-code
+    // writes serialize per user). Without it, this delete's "no factor left,
+    // drop the codes" could interleave with a concurrent totp/enable that read
+    // the still-committed passkey as "not the first factor" and so showed no
+    // codes — leaving TOTP active with zero recovery codes.
+    await lockUserMfaInTx(tx, user.id);
     const res = await tx.webAuthnCredential.deleteMany({ where: { id, userId: user.id } });
     const noneLeft = res.count > 0 ? await dropRecoveryCodesIfNoFactorInTx(tx, user.id) : false;
     return { removed: res.count, noneLeft };

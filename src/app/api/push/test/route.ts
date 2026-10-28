@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { decryptToken } from "@/lib/token-crypto";
 import { sendPushNotification } from "@/lib/web-push";
+import { SafeFetchError } from "@/lib/safe-fetch";
 import { sendApnsTestToUser, buildVapidContact } from "@/lib/push";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest, translatorForUser } from "@/lib/i18n/server-locale";
@@ -87,12 +88,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
             return { platform: "web", endpoint: sub.endpoint.slice(0, 28) + "…", ok: true };
           } catch (err: unknown) {
             const e = err as { statusCode?: number; message?: string };
+            // A transport failure's message quotes the subscription's full
+            // endpoint URL (and on some paths its resolved address) — the very
+            // value every result below truncates to 28 characters. A fixed
+            // phrase says what happened; the WebPushError status still rides.
+            const message = err instanceof SafeFetchError
+              ? t("apiUser.common.couldNotConnect", { service: "Web Push" })
+              : e.message;
             return {
               platform: "web",
               endpoint: sub.endpoint.slice(0, 28) + "…",
               ok: false,
               status: e.statusCode,
-              message: e.message,
+              message,
             };
           }
         }),

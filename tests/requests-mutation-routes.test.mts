@@ -99,7 +99,14 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
 
   if (url.pathname.includes("/api/v3/qualityprofile")) {
-    return profilesOk ? json([{ id: 1, name: "HD-1080p" }, { id: 2, name: "Ultra-HD" }]) : json({ error: "ARR PROFILES DOWN" }, 500);
+    // The whole QualityProfileResource, as Radarr sends it: the quality-profiles
+    // route must forward only `{ id, name }` (its deepEqual below pins that).
+    return profilesOk
+      ? json([
+          { id: 1, name: "HD-1080p", upgradeAllowed: true, cutoff: 7, items: [{ quality: { id: 7, name: "Bluray-1080p" }, allowed: true }], minFormatScore: 0, formatItems: [] },
+          { id: 2, name: "Ultra-HD", upgradeAllowed: false, cutoff: 19, items: [], language: { id: 1, name: "English" } },
+        ])
+      : json({ error: "ARR PROFILES DOWN" }, 500);
   }
   if (url.pathname.includes("/api/v3/rootfolder")) return json([{ path: "/media" }]);
   // LOOKUP comes before the add and must return an ARRAY containing the tmdbId

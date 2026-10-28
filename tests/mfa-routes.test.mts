@@ -860,8 +860,13 @@ test("removing the last factor removes the recovery codes and signs out OTHER se
   const removeTheirs = await call(passkeyItem.DELETE as never, "/api/profile/mfa/passkeys/pk-theirs", { method: "DELETE", body: { password: PASSWORD, secondFactor: recovery() }, headers: bearer(jwt), ctx: ctx("pk-theirs") });
   assert.equal(removeTheirs.status, 404);
   assert.equal(codes.find((c) => c.userId === u.id)!.usedAt, null, "a 404 is answered BEFORE the step-up: the recovery code is not spent");
+  rawSql = [];
   const remove = await call(passkeyItem.DELETE as never, "/api/profile/mfa/passkeys/pk-mine", { method: "DELETE", body: { password: PASSWORD, secondFactor: recovery() }, headers: bearer(jwt), ctx: ctx("pk-mine") });
   assert.equal(remove.status, 200);
+  // Guardrail 6d: recovery-code writes serialize per user. Without the lock this
+  // delete's "no factor left ⇒ drop the codes" could interleave with a concurrent
+  // totp/enable that saw the still-committed passkey and so showed no codes.
+  assert.equal(rawSql[0], MFA_LOCK_SQL(u.id as string), "the passkey delete takes the per-user MFA lock FIRST");
   assert.equal(codes.filter((c) => c.userId === u.id).length, 0, "no factor left ⇒ recovery codes go too");
   assert.equal(passkeys.length, 1);
   assert.equal(sessions.filter((s) => s.userId === u.id).length, 1, "the LAST factor went ⇒ the other session is signed out");

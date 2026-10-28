@@ -276,6 +276,9 @@ async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = ""): P
   };
 }
 
+export const MAX_QUALITY_PROFILES = 200;
+const PROFILE_SCAN_FACTOR = 4;
+
 // Quality profiles for one instance variant, plus the configured default id so a
 // picker can mark/pre-select it. Returns null when that instance isn't configured.
 // Permission-agnostic — callers gate access (e.g. MANAGE_REQUESTS for the approve
@@ -286,7 +289,18 @@ export async function listQualityProfiles(
 ): Promise<{ profiles: { id: number; name: string }[]; defaultId: number | null } | null> {
   const cfg = await getCfg(service, variant);
   if (!cfg) return null;
-  const profiles = await arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/qualityprofile");
+  // Projected, not forwarded: the TS type is a compile-time claim, and the whole
+  // QualityProfileResource (items, cutoff, format scores, language, …) otherwise
+  // reaches ordinary requesters through /api/requests/quality-profiles. Bounded
+  // like every projection over an upstream list (guardrail 5i).
+  const raw = await arrFetch<Array<{ id?: unknown; name?: unknown } | null> | null>(cfg, "/api/v3/qualityprofile");
+  const profiles: { id: number; name: string }[] = [];
+  const list = Array.isArray(raw) ? raw : [];
+  for (let i = 0; i < list.length && i < MAX_QUALITY_PROFILES * PROFILE_SCAN_FACTOR && profiles.length < MAX_QUALITY_PROFILES; i++) {
+    const p = list[i];
+    if (!p || typeof p !== "object" || typeof p.id !== "number" || !Number.isSafeInteger(p.id)) continue;
+    profiles.push({ id: p.id, name: typeof p.name === "string" ? p.name : String(p.id) });
+  }
   return { profiles, defaultId: cfg.qualityProfileId ?? null };
 }
 

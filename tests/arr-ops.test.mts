@@ -597,6 +597,12 @@ test("arrValidationMessage: the arr's own reason, single line, with the webhook 
   assert.ok(!msg.includes("abc123"), msg);
   assert.ok(msg.includes("token=••••••••"));
   assert.ok(!msg.includes("\n"));
+  // The shared mask (arr-parse.ts) covers the forms the literal rule misses: the
+  // %3D-encoded query and a quoted JSON pair.
+  const encoded = arrValidationMessage(JSON.stringify([{ errorMessage: "failed at [http://s:3000/api/webhooks/radarr?token%3Dabc123]" }]))!;
+  assert.ok(!encoded.includes("abc123"), encoded);
+  const quoted = arrValidationMessage(JSON.stringify([{ errorMessage: 'rejected: {"token":"abc123"}' }]))!;
+  assert.ok(!quoted.includes("abc123"), quoted);
   assert.equal(arrValidationMessage("not json"), null);
   assert.equal(arrValidationMessage("[]"), null);
 });

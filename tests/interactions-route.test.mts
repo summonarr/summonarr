@@ -1605,3 +1605,20 @@ test("a handler error AFTER the 'taking longer' line is still reported to the us
   assert.notEqual(discordEdits[0].content, discordEdits[1].content);
   assert.ok(errors.some((e) => e.includes("handler error")));
 });
+
+test("/status for a DEACTIVATED linked account answers 'no requests' and reads none (guardrail 33: a disabled account's data is not served)", async () => {
+  linkMember({ deactivatedAt: new Date("2026-01-01T00:00:00.000Z") });
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  let reads = 0;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...orig,
+    findMany: async () => { reads++; return [{ title: "Dune Part Two", mediaType: "MOVIE", status: "PENDING", tmdbId: 693134 }]; },
+  });
+  try {
+    await run(slash("status", []));
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+  assert.equal(reads, 0, "a disabled account's requests are never read");
+  assert.doesNotMatch(String(lastEdit().content), /Dune/);
+});

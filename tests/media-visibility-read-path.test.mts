@@ -142,6 +142,8 @@ const jellyfinWhere: unknown[] = [];
 let existingRequests: Array<{ id: string; tmdbId: number; mediaType: string; status: string; permanentlyDeclined: boolean }> = [];
 let ownRequest: { id: string } | null = null;
 const createdVotes: unknown[] = [];
+// GET /api/votes: the voted titles, one group each.
+let voteGroups: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV" }> = [];
 
 function makeUser(id: string, over: Partial<DbUser> = {}): DbUser {
   return {
@@ -171,13 +173,17 @@ function makeUser(id: string, over: Partial<DbUser> = {}): DbUser {
 type LibWhere = {
   tmdbId?: number;
   mediaType?: "MOVIE" | "TV";
-  OR?: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV" }>;
+  // A (tmdbId, mediaType) pair list, or titleKeysWhere's per-type `IN` halves.
+  OR?: Array<{ tmdbId: number | { in: number[] }; mediaType: "MOVIE" | "TV" }>;
   serverInstance: { in: string[] };
 };
 function matchLib(rows: LibRow[], where: LibWhere): LibRow[] {
   return rows.filter((r) => {
     if (!where.serverInstance.in.includes(r.serverInstance)) return false;
-    if (where.OR) return where.OR.some((p) => p.tmdbId === r.tmdbId && p.mediaType === r.mediaType);
+    if (where.OR) {
+      return where.OR.some((p) =>
+        p.mediaType === r.mediaType && (typeof p.tmdbId === "number" ? p.tmdbId === r.tmdbId : p.tmdbId.in.includes(r.tmdbId)));
+    }
     return r.tmdbId === where.tmdbId && r.mediaType === where.mediaType;
   });
 }
@@ -274,6 +280,16 @@ shadowPrismaModel(prisma, "radarrAvailableItem", { findMany: async () => [] });
 shadowPrismaModel(prisma, "sonarrAvailableItem", { findMany: async () => [] });
 shadowPrismaModel(prisma, "blacklistItem", { findMany: async () => [] });
 shadowPrismaModel(prisma, "deletionVote", {
+  // The list route: every voted title, minus the `NOT` the guardrail-35 scope
+  // adds; the representative read (distinct) carries title/poster.
+  groupBy: async (args: { where?: { NOT?: { OR: Array<{ mediaType: "MOVIE" | "TV"; tmdbId: { in: number[] } }> } } }) => {
+    const excluded = new Set((args.where?.NOT?.OR ?? []).flatMap((o) => o.tmdbId.in.map((id) => `${o.mediaType}:${id}`)));
+    return voteGroups
+      .filter((g) => !excluded.has(`${g.mediaType}:${g.tmdbId}`))
+      .map((g) => ({ ...g, _count: { id: 1 }, _max: { createdAt: new Date(0) } }));
+  },
+  findMany: async (args: { distinct?: string[] }) =>
+    args.distinct ? voteGroups.map((g) => ({ ...g, title: `Title ${g.tmdbId}`, posterPath: null })) : [],
   deleteMany: async () => ({ count: 0 }),
   create: async (args: { data: unknown }) => {
     createdVotes.push(args.data);
@@ -284,7 +300,7 @@ shadowPrismaModel(prisma, "deletionVote", {
 
 // Routes under test (imported AFTER every stub is in place).
 const { POST: bulkRequest } = await import("../src/app/api/requests/bulk/route.ts");
-const { POST: postVote } = await import("../src/app/api/votes/route.ts");
+const { GET: listVotes, POST: postVote } = await import("../src/app/api/votes/route.ts");
 
 // ── synthetic request scope with a recording afterContext ───────────────────
 const afterTasks: Array<() => Promise<unknown>> = [];
@@ -357,6 +373,7 @@ beforeEach(() => {
   existingRequests = [];
   ownRequest = null;
   createdVotes.length = 0;
+  voteGroups = [];
   afterTasks.length = 0;
   tmdbCacheRows.clear();
   for (const k of Object.keys(quotaUsed)) delete quotaUsed[k];
@@ -502,6 +519,50 @@ test("the votes in-library gate is per-grant: ungranted → 422, granted → 201
   const allowed = await vote(grantedToken, "granted");
   assert.equal(allowed.status, 201);
   assert.equal(createdVotes.length, 1);
+});
+
+// ── GET /api/votes — the LIST is scoped like the POST gate ──────────────────
+// The POST above refuses a vote on a title the voter can't see; the list used
+// to show every voted title to everyone, naming a restricted server's titles
+// and other voters' reasons about them. titlesHiddenFromViewer subtracts the
+// titles held ONLY on servers the viewer holds no grant for, before paging.
+
+async function listVotesFor(token: string): Promise<{ items: Array<{ tmdbId: number }>; total: number }> {
+  const req = new NextRequest("http://localhost:3000/api/votes", { headers: { cookie: `${COOKIE}=${token}` } });
+  const res = await inScope(() => listVotes(req, undefined));
+  const text = await res.text();
+  assert.equal(res.status, 200, text);
+  return JSON.parse(text) as { items: Array<{ tmdbId: number }>; total: number };
+}
+
+test("GET /api/votes hides a title held ONLY on a restricted server from an ungranted viewer; the granted viewer and an ADMIN still see it", async () => {
+  settings.set("plexInstances", RESTRICTED_PLEX);
+  plexRows = [
+    { tmdbId: 500, mediaType: "MOVIE", serverInstance: "remote" }, // the restricted server's alone
+    { tmdbId: 600, mediaType: "MOVIE", serverInstance: "" },       // the default server
+    { tmdbId: 800, mediaType: "MOVIE", serverInstance: "remote" }, // on BOTH
+    { tmdbId: 800, mediaType: "MOVIE", serverInstance: "" },
+  ];
+  // 700 is in no library at all: a vote outlives the copy it was about.
+  voteGroups = [500, 600, 700, 800].map((tmdbId) => ({ tmdbId, mediaType: "MOVIE" as const }));
+
+  const plain = await listVotesFor(await mintSession(makeUser("plain")));
+  assert.deepEqual(plain.items.map((i) => i.tmdbId).sort(), [600, 700, 800]);
+  assert.equal(plain.total, 3, "the total is scoped too, or paging counts a title the viewer never gets");
+
+  const granted = await listVotesFor(await mintSession(makeUser("granted", { mediaServerGrants: VIEW_REMOTE })));
+  assert.deepEqual(granted.items.map((i) => i.tmdbId).sort(), [500, 600, 700, 800]);
+  assert.equal(granted.total, 4);
+
+  const admin = await listVotesFor(await mintSession(makeUser("boss", { role: "ADMIN", permissions: Permission.ADMIN })));
+  assert.deepEqual(admin.items.map((i) => i.tmdbId).sort(), [500, 600, 700, 800]);
+});
+
+test("GET /api/votes on an unrestricted deployment reads no library row at all (the fast path)", async () => {
+  voteGroups = [{ tmdbId: 500, mediaType: "MOVIE" }];
+  const body = await listVotesFor(await mintSession(makeUser("plain")));
+  assert.deepEqual(body.items.map((i) => i.tmdbId), [500]);
+  assert.equal(plexWhere.length + jellyfinWhere.length, 0, "nothing restricted ⇒ no hidden-title read");
 });
 
 // ── TVEpisodeCache gate ──────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import { arrFetch } from "@/lib/arr";
 import { getCache } from "@/lib/tmdb-cache";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { libraryPathFor } from "@/lib/library-path-view";
 
 // One configured server that holds this title, with the path it holds it at.
 export type FileInfoInstance = {
@@ -34,7 +35,7 @@ export type FileInfoResponse = {
   jellyfinInstances: FileInfoInstance[];
 };
 
-export const GET = withIssueAdmin(async (request, _ctx, _session) => {
+export const GET = withIssueAdmin(async (request, _ctx, session) => {
   const t = translatorForRequest(request);
   const { searchParams } = new URL(request.url);
   const tmdbIdParam = searchParams.get("tmdbId");
@@ -161,14 +162,20 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     }
   }
 
+  // The arr match above used the full paths; what leaves is the caller's view
+  // of them (library-path-view.ts: the path for an ADMIN, the file name for a
+  // MANAGE_ISSUES delegate).
+  const perms = session.user.permissions;
+  const view = (rows: FileInfoInstance[]): FileInfoInstance[] =>
+    rows.map((r) => ({ serverInstance: r.serverInstance, filePath: libraryPathFor(perms, r.filePath) }));
   return NextResponse.json({
-    plexFilePath:     plexItem?.filePath ?? null,
-    jellyfinFilePath: jellyfinItem?.filePath ?? null,
+    plexFilePath:     libraryPathFor(perms, plexItem?.filePath),
+    jellyfinFilePath: libraryPathFor(perms, jellyfinItem?.filePath),
     arrTmdbId,
     arrTitle,
     plexServerInstance:     plexItem     ? serverInstance : null,
     jellyfinServerInstance: jellyfinItem ? serverInstance : null,
-    plexInstances,
-    jellyfinInstances,
+    plexInstances:     view(plexInstances),
+    jellyfinInstances: view(jellyfinInstances),
   } satisfies FileInfoResponse);
 });

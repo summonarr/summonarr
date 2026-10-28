@@ -855,6 +855,15 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The sync-side grant filter is PRE-CAS, and that is not a style choice.
     - Instance-aware surfaces:
     - Still default-only by design (not gaps):
+35a. **A list built from USER records (votes, requests, anything keyed by title) subtracts the titles hidden from the viewer BEFORE paging — `titlesHiddenFromViewer` ([media-visibility.ts](src/lib/media-visibility.ts)) — never only at the write gate.**
+
+    Why:
+    - `POST /api/votes` refused a vote on a title the voter couldn't see (35), but `GET /api/votes` and the `/votes` page listed every voted title to everyone: a restricted server's holdings, with other voters' reasons about them, were one page view away for any account.
+
+    Rules:
+    - Hidden = held ONLY on servers the viewer holds no grant for. A title the viewer can see somewhere is not hidden, and neither is one in no library at all (a vote outlives the copy). The scope goes into the paging `where` (`NOT: titleKeysWhere(hidden)`) and the total is reduced by it, or page counts drift.
+    - The helper reads the registry once, returns `[]` with no library read on an unrestricted deployment, for an ADMIN, or for a fully granted user, and takes a LAZY key loader so the page pays the voted-titles read only when something is hidden.
+    - `tests/media-visibility-read-path.test.mts` pins the list and the fast path (mutation-verified).
 36. **An unconfigured media server is SKIPPED, never failed. A client must decide that BEFORE the request, not from the response.**
 
     Detail and rationale: [docs/guardrails/36.md](docs/guardrails/36.md).
@@ -927,6 +936,15 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The DB phase moves only that key (`moveItemToTitleInTx`). The item leaves every other title's row on its server: a row left with no copy is deleted, and a row whose canonical copy it was falls back to its next copy. It joins the corrected title's row. Plays move by THIS item's key, never filtered by the old id (an unmatched item's plays carry none): a movie by `sourceItemId`, an episode by `sourceShowId`. The episode cache is left to the next full sync, which has no item key to move one copy's episodes. The flag leaves the stored report in the same transaction.
     - Item jobs are keyed by the item (`fixMatchJobKey`), so two unmatched items fixed to one title are two jobs. The tmdbId mode and its wire contract are unchanged.
     - `tests/fix-match-routes.test.mts`, `tests/library-match.test.mts` and `tests/library-match-data.test.mts` pin it. 20 of 21 mutations fail a named test; the survivor removes a redundant abort check.
+37f. **A library item's on-disk path is ADMIN data. A route a MANAGE_ISSUES delegate can reach (fix-match `file-info`, `candidates`) answers them the FILE NAME only — `libraryPathFor` ([library-path-view.ts](src/lib/library-path-view.ts)) — and a title-keyed cache is projected on the way OUT, never on the way in.**
+
+    Why:
+    - `library-sample-paths` and `issues/[id]/files` are `withAdmin` because mount layout is admin data, but the two `withIssueAdmin` fix-match reads returned every configured server's full paths for any tmdbId a delegate named — the whole library's filesystem layout, by enumeration.
+    - The candidates cache is keyed by the title, so a projection applied before `setCachedCandidates` would serve an ADMIN's full paths to the next delegate, or a delegate's names to the next ADMIN.
+
+    Rules:
+    - The dialogs only ever showed the file name (the path was a tooltip), so the delegate view loses nothing they used. The arr path match inside the route still uses the full path.
+    - `tests/fix-match-routes.test.mts` pins both routes for a delegate and the cached answer for both roles.
 38. **`'unsafe-eval'` in the CSP is gated on `NODE_ENV === "development"` and NEVER widens. Don't delete the branch either.**
 
     Why:
