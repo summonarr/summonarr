@@ -3388,6 +3388,168 @@ test("a null verdict is NOT stamped while a provider is locked out — an outage
   }
 });
 
+// ── edge write: Postgres-side timeouts and the failure / slow-page logs ─────
+//
+// Production logged a bare P2028 naming recommendationTitle.createMany, while
+// the 39s actually went into the edge delete/insert before it. The page write
+// now sets Postgres timeouts first and, on failure, logs which run, the cause
+// and the time per step — once, with the old edges left in place.
+
+const { Prisma: PrismaNs } = await import("../src/generated/prisma/index.js");
+
+// The exact shape Prisma 7.10 + adapter-pg throws for a lock_timeout cancel
+// (captured from a live Postgres 17).
+function lockTimeoutError(): Error {
+  return new PrismaNs.PrismaClientKnownRequestError(
+    "\nInvalid `prisma.titleSuggestion.createMany()` invocation:\n\n\nDatabase error. Code: `55P03`. Message: `canceling statement due to lock timeout`",
+    {
+      code: "P2039",
+      clientVersion: "7.10.1",
+      meta: { modelName: "TitleSuggestion", driverAdapterError: { cause: { originalCode: "55P03", kind: "postgres" } } },
+    },
+  );
+}
+
+async function withConsole(run: () => Promise<void>): Promise<{ errors: unknown[][]; warns: unknown[][] }> {
+  const errors: unknown[][] = [];
+  const warns: unknown[][] = [];
+  const realError = console.error;
+  const realWarn = console.warn;
+  console.error = (...args: unknown[]) => void errors.push(args);
+  console.warn = (...args: unknown[]) => void warns.push(args);
+  try {
+    await run();
+  } finally {
+    console.error = realError;
+    console.warn = realWarn;
+  }
+  return { errors, warns };
+}
+
+const edgeWriteLines = (lines: unknown[][], marker: string) =>
+  lines.filter((args) => typeof args[0] === "string" && (args[0] as string).includes(marker));
+
+test("edge write: Postgres timeouts are the transaction's FIRST statement, as SET LOCAL", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  const order: string[] = [];
+  const raw: { text: string; values: unknown[] }[] = [];
+  const realExecuteRaw = (prisma as unknown as Record<string, unknown>).$executeRaw;
+  const realDelete = prisma.titleSuggestion.deleteMany;
+  (prisma as unknown as Record<string, unknown>).$executeRaw = async (q: { text: string; values: unknown[] }) => {
+    order.push("executeRaw");
+    raw.push({ text: q.text, values: q.values });
+    return 0;
+  };
+  (prisma.titleSuggestion as { deleteMany: unknown }).deleteMany = async (args: never) => {
+    order.push("deleteMany");
+    return (realDelete as (a: never) => Promise<unknown>)(args);
+  };
+  try {
+    const result = await refreshRecommendationGraph();
+    assert.equal(result.sourcesRefreshed, 1);
+  } finally {
+    (prisma as unknown as Record<string, unknown>).$executeRaw = realExecuteRaw;
+    (prisma.titleSuggestion as { deleteMany: unknown }).deleteMany = realDelete;
+  }
+  assert.deepEqual(order.slice(0, 2), ["executeRaw", "deleteMany"], "timeouts go first, before the delete takes any lock");
+  assert.match(raw[0].text, /set_config\('statement_timeout', \$1, true\), set_config\('lock_timeout', \$2, true\)/);
+  assert.deepEqual(raw[0].values, ["20000ms", "10000ms"]);
+});
+
+test("edge write: a failed page logs ONE line — run, cause, time per step — and stamps nothing", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+
+  const realCreate = prisma.titleSuggestion.createMany;
+  (prisma.titleSuggestion as { createMany: unknown }).createMany = async () => {
+    mock.timers.tick(10_000);
+    throw lockTimeoutError();
+  };
+  let result!: Awaited<ReturnType<typeof refreshRecommendationGraph>>;
+  const { errors } = await withConsole(async () => {
+    try {
+      result = await refreshRecommendationGraph();
+    } finally {
+      (prisma.titleSuggestion as { createMany: unknown }).createMany = realCreate;
+    }
+  });
+
+  assert.equal(result.sourcesFailed, 1);
+  assert.equal(result.sourcesRefreshed, 0);
+  const lines = edgeWriteLines(errors, "edge write failed");
+  assert.equal(lines.length, 1, "one line per failed page — the caller does not log it again");
+  assert.equal(lines[0].length, 1, "a classified cause logs the line alone, not the whole Prisma error");
+  const line = lines[0][0] as string;
+  assert.match(line, /^\[recommendation-graph\] edge write failed \(speculative\) for 1 sources, 1 edges: /);
+  assert.match(line, /waited past the 10\.0s lock timeout for rows another transaction holds/);
+  assert.match(
+    line,
+    /Time by step: start transaction 0\.0s, set timeouts 0\.0s, delete old edges 0\.0s, insert 1 edges 10\.0s\./,
+    "the step that took the time is named, not the one after it",
+  );
+  // The stub transaction cannot roll back; what matters here is that nothing
+  // past the failure ran: no new target node, no stamp.
+  assert.equal(nodeRows.some((n) => n.tmdbId === 500), false, "no target node from the failed page");
+  assert.equal(nodeRows.find((n) => n.tmdbId === 10)?.suggestionsRefreshedAt ?? null, null, "the source is not stamped as built");
+});
+
+test("edge write: an unclassified failure keeps the full error beside the line", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  const boom = new Error("something new");
+  const realCreate = prisma.titleSuggestion.createMany;
+  (prisma.titleSuggestion as { createMany: unknown }).createMany = async () => {
+    throw boom;
+  };
+  const { errors } = await withConsole(async () => {
+    try {
+      await refreshRecommendationGraph();
+    } finally {
+      (prisma.titleSuggestion as { createMany: unknown }).createMany = realCreate;
+    }
+  });
+  const lines = edgeWriteLines(errors, "edge write failed");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0][0] as string, /: something new\. Time by step: /);
+  assert.equal(lines[0][1], boom, "an unknown cause keeps its stack");
+});
+
+test("edge write: a slow page warns ONCE per pass, naming the slowest page's steps", async () => {
+  // Two pages' worth of sources, each page slow — still one warning.
+  libraryRows = Array.from({ length: 60 }, (_, i) => ({ tmdbId: 1000 + i, mediaType: "MOVIE" as const, serverInstance: "" }));
+  for (let i = 0; i < 60; i++) suggestionsFor.set(`movie:${1000 + i}`, [movieItem(5000 + i)]);
+  let pageNo = 0;
+  const realCreate = prisma.titleSuggestion.createMany;
+  (prisma.titleSuggestion as { createMany: unknown }).createMany = async (args: never) => {
+    pageNo++;
+    mock.timers.tick(pageNo === 1 ? 11_000 : 14_000);
+    return (realCreate as (a: never) => Promise<unknown>)(args);
+  };
+  const { warns, errors } = await withConsole(async () => {
+    try {
+      await refreshRecommendationGraph();
+    } finally {
+      (prisma.titleSuggestion as { createMany: unknown }).createMany = realCreate;
+    }
+  });
+  assert.equal(pageNo, 2, "two pages were written");
+  assert.equal(edgeWriteLines(errors, "edge write failed").length, 0);
+  const slow = edgeWriteLines(warns, "slowest edge write");
+  assert.equal(slow.length, 1, "one warning per pass, never one per page");
+  assert.match(slow[0][0] as string, /slowest edge write \(speculative\) took 14\.0s of the 30\.0s limit\. Time by step: .*insert 10 edges 14\.0s/);
+});
+
+test("edge write: a healthy page logs nothing", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  const { warns, errors } = await withConsole(async () => {
+    await refreshRecommendationGraph();
+  });
+  assert.equal(edgeWriteLines(warns, "slowest edge write").length, 0);
+  assert.equal(edgeWriteLines(errors, "edge write failed").length, 0);
+});
+
 // ═══ guardrail 40c: the viewer's other records, taste, quit shows, co-watch ══
 
 // The co-watch build's one aggregate runs in Postgres; here it is scripted.

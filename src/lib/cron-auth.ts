@@ -165,6 +165,35 @@ export async function getCronActor(request: NextRequest): Promise<CronActor | nu
 
 // Always pass BATCH_TX_TIMEOUT to $transaction for library-sized writes to avoid Prisma's default 5s timeout
 export const BATCH_TX_TIMEOUT = 30_000;
+
+// Postgres-side limits for a batch transaction, below BATCH_TX_TIMEOUT.
+//
+// Prisma's timeout never reaches Postgres: when it fires, Prisma queues a
+// ROLLBACK behind the statement still running, so that statement keeps its
+// locks and its connection until it finishes on its own (an edge write held
+// them for 39s against a 30s limit). With these set, Postgres cancels a stuck
+// statement itself, a wait on another transaction's rows fails fast, and the
+// error names the cause (txFailureKind) instead of a P2028 on the NEXT query.
+export const BATCH_TX_STATEMENT_TIMEOUT = 20_000;
+export const BATCH_TX_LOCK_TIMEOUT = 10_000;
+
+// Run FIRST inside the transaction. set_config(…, true) is SET LOCAL: it ends
+// with the transaction and never leaks onto the pooled connection.
+//
+// Opt-in, NOT for every batch transaction: lock_timeout also bounds a wait on
+// pg_advisory_xact_lock, so a transaction that serializes on one (the library
+// swap, 2001,x) would fail after 10s instead of queueing behind the holder.
+// statement_timeout would likewise cut off a legitimately long INSERT … SELECT.
+export async function setBatchTxTimeouts(
+  tx: Pick<LibraryTxClient, "$executeRaw">,
+  limits: { statementMs?: number; lockMs?: number } = {},
+): Promise<void> {
+  const statement = `${limits.statementMs ?? BATCH_TX_STATEMENT_TIMEOUT}ms`;
+  const lock = `${limits.lockMs ?? BATCH_TX_LOCK_TIMEOUT}ms`;
+  await tx.$executeRaw(
+    Prisma.sql`SELECT set_config('statement_timeout', ${statement}, true), set_config('lock_timeout', ${lock}, true)`,
+  );
+}
 // Raw createMany on library-sized datasets blows transaction timeouts; this chunk size keeps each batch safe
 const CREATE_MANY_BATCH = 5_000;
 

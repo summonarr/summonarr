@@ -17,7 +17,14 @@ import { isOmdbQuotaLocked } from "./omdb";
 import { qualityScoreOf } from "./recommendation-quality";
 import { collectAllLibraryItems } from "./library-iterator";
 import { settleLimit } from "./concurrency";
-import { batchCreateMany, BATCH_TX_TIMEOUT } from "./cron-auth";
+import {
+  batchCreateMany,
+  BATCH_TX_LOCK_TIMEOUT,
+  BATCH_TX_STATEMENT_TIMEOUT,
+  BATCH_TX_TIMEOUT,
+  setBatchTxTimeouts,
+} from "./cron-auth";
+import { describeTxFailure, seconds, txTrace } from "./tx-diagnostics";
 import { tmdbAuth } from "./tmdb-auth";
 import { FOR_YOU_COWATCH_FEATURE_KEY, isFeatureEnabled } from "./features";
 
@@ -115,6 +122,9 @@ const SOURCE_CONCURRENCY = 5;
 // Sources whose edges are written in one transaction. Small enough that a
 // failure loses little work, large enough to keep the round-trip count sane.
 const SOURCE_WRITE_PAGE = 50;
+// A page write this slow gets one warning per pass (refreshSuggestionEdges):
+// a third of BATCH_TX_TIMEOUT, where a healthy page takes about a second.
+const SLOW_PAGE_WRITE_MS = 10_000;
 // Titles per ratings pass. attachRatingsUnified batches MDBList at 200 ids per
 // POST internally, so this is the natural page size.
 const QUALITY_BATCH = 200;
@@ -339,7 +349,20 @@ interface FetchedSource {
 // then the replacement rows, then the node bookkeeping. The delete is scoped to
 // the sources in THIS page — never a bare deleteMany — so a page that fails
 // cannot take another page's edges with it.
-async function writeSourcePage(page: FetchedSource[]): Promise<number> {
+//
+// Postgres-side timeouts go first (setBatchTxTimeouts): a stuck statement is
+// cancelled by Postgres before Prisma's 30s deadline instead of holding its
+// locks past it, and a wait on another writer's rows fails fast. On failure it
+// logs ONE line — which run, the cause, and the time per step — and rethrows;
+// a P2028 alone names the query that started after the deadline, not the slow
+// one before it.
+interface PageWrite {
+  edges: number;
+  ms: number;
+  steps: string;
+}
+
+async function writeSourcePage(page: FetchedSource[], run: string): Promise<PageWrite> {
   const edges = page.flatMap(({ source, suggestions }) =>
     suggestions.map((item, position) => ({
       sourceTmdbId: source.tmdbId,
@@ -358,60 +381,84 @@ async function writeSourcePage(page: FetchedSource[]): Promise<number> {
     })),
   );
 
-  await prisma.$transaction(
-    async (tx) => {
-      await tx.titleSuggestion.deleteMany({
-        where: {
-          OR: page.map(({ source }) => ({
-            sourceTmdbId: source.tmdbId,
-            sourceMediaType: source.mediaType,
-          })),
-        },
-      });
-      if (edges.length > 0) await batchCreateMany(tx.titleSuggestion, edges);
-
-      // Introduce every NEW suggestion target as a graph node, carrying just
-      // enough (title + releaseDate) for the ratings pass to look it up later.
-      // skipDuplicates, never an update: an existing node already holds its
-      // verdict and its own metadata, and rewriting those from an edge would
-      // reset a title's rated state every time any source re-linked to it.
-      //
-      // This is what makes the quality pass a bounded indexed scan instead of a
-      // distinct-over-every-edge aggregate: targets announce themselves here,
-      // once, at the moment the edge that introduced them is written.
-      const targets = new Map<string, { tmdbId: number; mediaType: MediaType; releaseDate: string | null }>();
-      for (const edge of edges) {
-        const k = key(edge.tmdbId, edge.mediaType);
-        if (!targets.has(k)) {
-          targets.set(k, { tmdbId: edge.tmdbId, mediaType: edge.mediaType, releaseDate: edge.releaseDate });
-        }
-      }
-      if (targets.size > 0) {
-        await batchCreateMany(tx.recommendationTitle, [...targets.values()]);
-      }
-
-      const now = new Date();
-      for (const { source, suggestions } of page) {
-        // upsert, not create-catch-duplicate: a caught unique violation inside a
-        // top-level interactive transaction silently converts the COMMIT to a
-        // ROLLBACK (guardrail 23), which would discard this whole page's edges
-        // while reporting success.
-        await tx.recommendationTitle.upsert({
-          where: { tmdbId_mediaType: { tmdbId: source.tmdbId, mediaType: source.mediaType } },
-          create: {
-            tmdbId: source.tmdbId,
-            mediaType: source.mediaType,
-            suggestionsRefreshedAt: now,
-            suggestionCount: suggestions.length,
+  const trace = txTrace();
+  trace.step("start transaction");
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        trace.step("set timeouts");
+        await setBatchTxTimeouts(tx);
+        trace.step("delete old edges");
+        await tx.titleSuggestion.deleteMany({
+          where: {
+            OR: page.map(({ source }) => ({
+              sourceTmdbId: source.tmdbId,
+              sourceMediaType: source.mediaType,
+            })),
           },
-          update: { suggestionsRefreshedAt: now, suggestionCount: suggestions.length },
         });
-      }
-    },
-    { timeout: BATCH_TX_TIMEOUT },
-  );
+        trace.step(`insert ${edges.length} edges`);
+        if (edges.length > 0) await batchCreateMany(tx.titleSuggestion, edges);
 
-  return edges.length;
+        // Introduce every NEW suggestion target as a graph node, carrying just
+        // enough (title + releaseDate) for the ratings pass to look it up later.
+        // skipDuplicates, never an update: an existing node already holds its
+        // verdict and its own metadata, and rewriting those from an edge would
+        // reset a title's rated state every time any source re-linked to it.
+        //
+        // This is what makes the quality pass a bounded indexed scan instead of a
+        // distinct-over-every-edge aggregate: targets announce themselves here,
+        // once, at the moment the edge that introduced them is written.
+        const targets = new Map<string, { tmdbId: number; mediaType: MediaType; releaseDate: string | null }>();
+        for (const edge of edges) {
+          const k = key(edge.tmdbId, edge.mediaType);
+          if (!targets.has(k)) {
+            targets.set(k, { tmdbId: edge.tmdbId, mediaType: edge.mediaType, releaseDate: edge.releaseDate });
+          }
+        }
+        trace.step(`add ${targets.size} titles`);
+        if (targets.size > 0) {
+          await batchCreateMany(tx.recommendationTitle, [...targets.values()]);
+        }
+
+        trace.step(`stamp ${page.length} sources`);
+        const now = new Date();
+        for (const { source, suggestions } of page) {
+          // upsert, not create-catch-duplicate: a caught unique violation inside a
+          // top-level interactive transaction silently converts the COMMIT to a
+          // ROLLBACK (guardrail 23), which would discard this whole page's edges
+          // while reporting success.
+          await tx.recommendationTitle.upsert({
+            where: { tmdbId_mediaType: { tmdbId: source.tmdbId, mediaType: source.mediaType } },
+            create: {
+              tmdbId: source.tmdbId,
+              mediaType: source.mediaType,
+              suggestionsRefreshedAt: now,
+              suggestionCount: suggestions.length,
+            },
+            update: { suggestionsRefreshedAt: now, suggestionCount: suggestions.length },
+          });
+        }
+        trace.step("commit");
+      },
+      { timeout: BATCH_TX_TIMEOUT },
+    );
+  } catch (err) {
+    const { kind, text } = describeTxFailure(err, {
+      txTimeoutMs: BATCH_TX_TIMEOUT,
+      statementTimeoutMs: BATCH_TX_STATEMENT_TIMEOUT,
+      lockTimeoutMs: BATCH_TX_LOCK_TIMEOUT,
+    });
+    const line =
+      `[recommendation-graph] edge write failed (${run}) for ${page.length} sources, ${edges.length} edges: ` +
+      `${text}. Time by step: ${trace.summary()}. Those sources keep their old edges and are retried next run.`;
+    // A classified cause says everything; anything else keeps the full error.
+    if (kind === "other") console.error(line, err);
+    else console.error(line);
+    throw err;
+  }
+
+  return { edges: edges.length, ms: trace.elapsedMs(), steps: trace.summary() };
 }
 
 export interface GraphRefreshResult {
@@ -455,10 +502,13 @@ const EMPTY_REFRESH: GraphRefreshResult = {
 
 // Builds the edges for every stale source, oldest-first, up to `limit`.
 // Pass Infinity for the required set — see MAX_SOURCES_PER_RUN.
+// `run` names the pass in the logs ("library prewarm", "required seeds",
+// "speculative") — the warm-library and warm-recommendations crons both call this.
 async function refreshSuggestionEdges(
   sources: GraphSource[],
   stats: GraphRefreshResult,
   limit: number,
+  run: string,
   signal?: AbortSignal,
 ): Promise<void> {
   const refreshedAt = new Map<string, Date | null>();
@@ -488,6 +538,7 @@ async function refreshSuggestionEdges(
   });
 
   const batch = Number.isFinite(limit) ? stale.slice(0, limit) : stale;
+  let slowest: PageWrite | null = null;
   for (let i = 0; i < batch.length; i += SOURCE_WRITE_PAGE) {
     // Stop when the lock's timeout aborts us; ignoring it would keep this
     // running after withAdvisoryLock released the lock (guardrail 41).
@@ -522,12 +573,24 @@ async function refreshSuggestionEdges(
 
     if (fetched.length === 0) continue;
     try {
-      stats.edgesWritten += await writeSourcePage(fetched);
+      const written = await writeSourcePage(fetched, run);
+      stats.edgesWritten += written.edges;
       stats.sourcesRefreshed += fetched.length;
-    } catch (err) {
+      if (!slowest || written.ms > slowest.ms) slowest = written;
+    } catch {
+      // writeSourcePage logged the cause and the time per step.
       stats.sourcesFailed += fetched.length;
-      console.error("[recommendation-graph] edge write failed for a page of sources:", err);
     }
+  }
+
+  // A page normally commits in about a second. One that took a third of the
+  // transaction limit is the early sign of the stall that makes pages fail, so
+  // say so once per pass (the slowest page, never one line per page).
+  if (slowest && slowest.ms >= SLOW_PAGE_WRITE_MS) {
+    console.warn(
+      `[recommendation-graph] slowest edge write (${run}) took ${seconds(slowest.ms)} of the ${seconds(BATCH_TX_TIMEOUT)} limit. ` +
+        `Time by step: ${slowest.steps}`,
+    );
   }
 }
 
@@ -1056,7 +1119,7 @@ export async function prewarmSuggestionEdges(opts: { signal?: AbortSignal } = {}
   // the only pass that reaches them before the person signs back in.
   const { sources } = await collectGraphSources();
   const stats: GraphRefreshResult = { ...EMPTY_REFRESH };
-  if (sources.length > 0) await refreshSuggestionEdges(sources, stats, MAX_PREWARM_EDGE_SOURCES_PER_RUN, opts.signal);
+  if (sources.length > 0) await refreshSuggestionEdges(sources, stats, MAX_PREWARM_EDGE_SOURCES_PER_RUN, "library prewarm", opts.signal);
 
   return {
     sources: sources.length,
@@ -1110,7 +1173,7 @@ export async function refreshRecommendationGraph(
   stats.requiredSources = required.length;
 
   // 1. The guarantee: every seed the fan-out is about to read, uncapped.
-  if (required.length > 0) await refreshSuggestionEdges(required, stats, Infinity, opts.signal);
+  if (required.length > 0) await refreshSuggestionEdges(required, stats, Infinity, "required seeds", opts.signal);
   stats.requiredCovered = required.length > 0 ? await countCovered(required) : 0;
 
   // 1b. The server's private co-watching (guardrail 40c). Local data only, no
@@ -1124,7 +1187,7 @@ export async function refreshRecommendationGraph(
   const requiredKeys = new Set(required.map((r) => key(r.tmdbId, r.mediaType)));
   const tail = sources.filter((s) => !requiredKeys.has(key(s.tmdbId, s.mediaType)));
   stats.sources = required.length + tail.length;
-  if (tail.length > 0) await refreshSuggestionEdges(tail, stats, MAX_SOURCES_PER_RUN, opts.signal);
+  if (tail.length > 0) await refreshSuggestionEdges(tail, stats, MAX_SOURCES_PER_RUN, "speculative", opts.signal);
 
   // 3. Reap sources that have left the server. Only on a COMPLETE source list —
   //    see SourceSet.complete. The required set is added to `live` too: a seed
