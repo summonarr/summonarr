@@ -200,6 +200,7 @@ model User {
   autoRequests      AutoRequestLedger[]
   traktConnection   TraktConnection?
   traktWatched      TraktWatchedItem[]
+  traktRatings      TraktRating[]
   // Two-factor authentication for LOCAL-CREDENTIALS sign-in (src/lib/mfa/).
   // The factor rows ARE the source of truth for "has 2FA" — there is no
   // denormalized flag on this row that could drift and silently fail open.
@@ -1228,9 +1229,53 @@ model MediaServerUser {
   activeSessions ActiveSession[]
   watchSyncFrom  WatchSyncPair[] @relation("WatchSyncPlex")
   watchSyncTo    WatchSyncPair[] @relation("WatchSyncJellyfin")
+  watchedTitles  ServerWatchedTitle[]
+  watchCursor    ServerWatchCursor?
 
   @@unique([source, serverInstance, sourceUserId])
   @@index([userId])
+}
+
+// One server identity's watched (or favorited) title, read from the media
+// server's OWN records — Plex's history, Jellyfin's played flags and favorites —
+// by src/lib/server-watch-history-data.ts. It reaches back past the day
+// Summonarr was installed, which PlayHistory (the live poller's log, guardrail
+// 19) never does. Read ONLY by "For You": seeds, the "already watched"
+// exclusion, and the server's private co-watch edges. It is NEVER a play: no
+// stats, no activity page and no play count reads it, so it cannot inflate
+// what guardrail 19 protects. Keyed by the server identity like PlayHistory, and
+// for the same reason it survives a purge unattributed (the identity is unlinked,
+// the rows are server data). Derived: de-registering the instance deletes them.
+model ServerWatchedTitle {
+  mediaServerUserId String
+  // Restrict, like PlayHistory (guardrail 28): a MediaServerUser is never
+  // hard-deleted, and no relation off it may cascade one.
+  mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Restrict)
+  tmdbId            Int
+  mediaType         MediaType
+  title             String          @db.VarChar(500)
+  // Movie plays, or episode plays for a show — PlayHistory's per-episode grain.
+  // 0 = favorited but never played.
+  plays             Int             @default(0)
+  lastWatchedAt     DateTime?
+  // Jellyfin "favorite" (the heart). Plex has no equivalent.
+  favorite          Boolean         @default(false)
+  updatedAt         DateTime        @updatedAt
+
+  @@id([mediaServerUserId, tmdbId, mediaType])
+  // Seed selection reads one identity's rows newest-first (readServerHistory).
+  @@index([mediaServerUserId, lastWatchedAt])
+}
+
+// How far one server identity's history has been read into ServerWatchedTitle.
+// One row per identity, so a failed write for one person never makes another's
+// plays count twice: each identity's rows and its read point commit together.
+model ServerWatchCursor {
+  mediaServerUserId String          @id
+  mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Restrict)
+  // The newest play already counted. Null ⇒ never read: the next read is a full one.
+  readTo            DateTime?
+  importedAt        DateTime?
 }
 
 model PlayHistory {
@@ -1630,6 +1675,23 @@ model TraktWatchedItem {
   @@index([userId, lastWatchedAt])
 }
 
+// A connected user's own Trakt ratings (1–10), imported beside the history and
+// under the same "use my Trakt history" switch (src/lib/trakt-user.ts). "For
+// You" reads them as taste: 8+ is a strong seed, 4 or below is never a seed.
+// Personal data: deleted with the history (switch off, disconnect, revoked
+// grant, purge).
+model TraktRating {
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tmdbId    Int
+  mediaType MediaType
+  title     String    @db.VarChar(500)
+  rating    Int
+  ratedAt   DateTime
+
+  @@id([userId, tmdbId, mediaType])
+}
+
 // Per-user "not interested" / hide list. Distinct from the admin-global
 // BlacklistItem: HiddenItem is per-user and REMOVES a title from that user's
 // discovery (attachAllAvailability filters it out), whereas the admin blacklist
@@ -1814,6 +1876,37 @@ model RecommendationTitle {
   // cannot serve either ordering.
   @@index([suggestionsRefreshedAt])
   @@index([qualityRatedAt])
+}
+
+// "People on THIS server who watched the source also watched this" — the
+// server's own co-watching, rebuilt whole each warm-recommendations run from
+// PlayHistory + ServerWatchedTitle (recommendation-graph.ts, guardrail 40c).
+// OPT-IN: empty unless an admin turns on feature.behavior.forYouCoWatch
+// (default OFF); turning it off empties the table on the next run.
+// An edge exists only when at least COWATCH_MIN_VIEWERS distinct people watched
+// BOTH titles, so no edge can point at what one person watched. Display fields
+// are denormalized for the same reason as TitleSuggestion's.
+model CoWatchSuggestion {
+  sourceTmdbId    Int
+  sourceMediaType MediaType
+
+  tmdbId    Int
+  mediaType MediaType
+  // 0 = the strongest co-watch for this source.
+  position  Int
+  // Distinct people who watched both titles (never below the privacy floor).
+  viewers   Int
+
+  title            String  @db.VarChar(500)
+  overview         String?
+  posterPath       String? @db.VarChar(500)
+  backdropPath     String? @db.VarChar(500)
+  releaseDate      String? @db.VarChar(16)
+  voteAverage      Float   @default(0)
+  voteCount        Int     @default(0)
+  originalLanguage String? @db.VarChar(16)
+
+  @@id([sourceTmdbId, sourceMediaType, tmdbId, mediaType])
 }
 
 // In-app notification inbox (the header bell). One row per user-facing event

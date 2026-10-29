@@ -12,6 +12,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const BATCH = 5;
 
+// A cron: MDBList stops it at the reserve the plan setting keeps for pages.
+const BACKGROUND = { background: true } as const;
+
 const mdblistKeyFor = (m: TmdbMedia) => `mdblist:tmdb:${m.mediaType}:${m.id}`;
 const omdbKeyFor = (m: TmdbMedia) => `omdb:tmdb:${m.mediaType}:${m.id}`;
 
@@ -32,7 +35,7 @@ async function warmItem(item: TmdbMedia, rows: Map<string, CachedRatingsRow>): P
   const omdb = rows.get(omdbKey);
   const revalidated: string[] = [];
   if (mdb?.isStale) {
-    await revalidateMdblistForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {});
+    await revalidateMdblistForTmdb(item.id, item.mediaType, item.releaseDate, BACKGROUND).catch(() => {});
     revalidated.push(mdbKey);
   }
   // The OMDB row is refreshed only when MDBList holds no USABLE value — the gate
@@ -51,7 +54,7 @@ async function warmItem(item: TmdbMedia, rows: Map<string, CachedRatingsRow>): P
     const after = await getCacheStaleMany<CachedRatingsRow["value"]>(revalidated);
     if (revalidated.some((k) => after.get(k)?.isStale)) return { found: false, keyConfigured: true, transient: true };
   }
-  return fetchUnifiedRatings(item.id, item.mediaType, item.releaseDate);
+  return fetchUnifiedRatings(item.id, item.mediaType, item.releaseDate, undefined, BACKGROUND);
 }
 
 async function warmBatch(
@@ -89,7 +92,7 @@ async function warmBatch(
     // missed (an OMDB hit returns found:true), so also honor the module-level
     // MDBList lockout between batches — continuing would funnel every remaining
     // item into OMDB's much smaller daily quota.
-    if (isMdblistQuotaLocked()) quotaExhausted = true;
+    if (isMdblistQuotaLocked(BACKGROUND)) quotaExhausted = true;
   }
 
   return { warmed, skipped, quotaExhausted };
@@ -163,7 +166,7 @@ export async function POST(request: NextRequest) {
             .map((m) => ({ id: m.id, releaseDate: m.releaseDate }));
           // Sequential per type on purpose (pacing); the helper pages at 200,
           // checks the quota lockout itself, and never throws past a page.
-          await fetchMdblistBatch(stale, type).catch(() => {});
+          await fetchMdblistBatch(stale, type, BACKGROUND).catch(() => {});
         }
       }
 

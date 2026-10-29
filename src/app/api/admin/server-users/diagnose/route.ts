@@ -4,7 +4,7 @@ import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
-import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
+import { SafeFetchError, safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Raw Jellyfin user shape — every field optional so no user is dropped while parsing.
@@ -70,7 +70,13 @@ export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, _se
     httpStatus = res.status;
     rawBody = await res.json();
   } catch (err) {
-    fetchError = err instanceof Error ? err.message : String(err);
+    // A coarse kind, never the message: a SafeFetchError's text names the
+    // admin-configured server's scheme, host and port (and on the SSRF-policy
+    // branches its resolved address), and this route admits a MANAGE_USERS
+    // delegate who is not shown the server address anywhere else.
+    fetchError = err instanceof SafeFetchError
+      ? `fetch:${err.reason}`
+      : err instanceof Error ? err.name : "error";
   }
 
   // Parse however the body comes back

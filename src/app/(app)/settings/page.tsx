@@ -26,6 +26,8 @@ import { PlexWatchlistServerToggles } from "@/components/settings/forms/plex-wat
 import { parsePlexWatchlistServerStatus } from "@/lib/plex-watchlist";
 import { getFeatureFlags, groupFeaturesByCategory, isFeatureEnabled } from "@/lib/features";
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
+import { MDBLIST_PLAN_SETTING_KEY, parseMdblistPlanSetting } from "@/lib/mdblist-plan";
+import { getMdblistUsageSnapshot } from "@/lib/mdblist";
 import { mfaEnforcementDisabledByEnv } from "@/lib/mfa/policy";
 import { RequireAdminMfaToggle } from "@/components/settings/forms/require-admin-mfa-toggle";
 import { OidcAllowlistForm } from "@/components/settings/forms/oidc-allowlist-form";
@@ -193,7 +195,7 @@ const ALL_KEYS = [
   "playHistoryPollingInterval", "playHistoryRetentionDays",
   "watchGradeGraceDays", "watchGradeWindowDays", "watchGradeTvPercent", "watchGradeOtherViewers",
   "watchGradeBandA", "watchGradeBandB", "watchGradeBandC", "watchGradeBandD", "watchGradeMinRequests",
-  "omdbApiKey", "mdblistApiKey", "traktClientId", "traktClientSecret", "ratingsHiddenSources",
+  "omdbApiKey", "mdblistApiKey", MDBLIST_PLAN_SETTING_KEY, "traktClientId", "traktClientSecret", "ratingsHiddenSources",
   "ipinfoToken",
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
   "auditPiiRetentionDays",
@@ -206,6 +208,15 @@ const ALL_KEYS = [
 // be rendered in its place (see the Plex watchlist status line). NUL can't occur
 // in a catalog string.
 const TIME_SLOT = "\u0000";
+
+// The MDBList plan picker's usage line before anything is known.
+const EMPTY_MDBLIST_USAGE = {
+  reportedLimit: null,
+  reportedPlan: null,
+  usedToday: null,
+  backgroundStopped: false,
+  pausedUntil: null,
+} as const;
 
 const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "features", "system"];
 
@@ -231,6 +242,17 @@ export default async function SettingsPage({
   // null ⇒ the stored allowlist doesn't parse, and sign-in is refusing every
   // OIDC login until it is re-saved (guardrail 34e).
   const oidcAllowlist = parseOidcAllowlist(cfg[OIDC_ALLOWLIST_SETTING_KEY]);
+  // What MDBList last reported about the account, for the plan picker. Only the
+  // integrations tab shows it.
+  const mdblistSnapshot = tab === "integrations" ? await getMdblistUsageSnapshot() : null;
+  // Only the fields the form shows reach the browser.
+  const mdblistUsage = mdblistSnapshot && {
+    reportedLimit: mdblistSnapshot.reportedLimit,
+    reportedPlan: mdblistSnapshot.reportedPlan,
+    usedToday: mdblistSnapshot.usedToday,
+    backgroundStopped: mdblistSnapshot.backgroundStopped,
+    pausedUntil: mdblistSnapshot.pausedUntil,
+  };
 
   // Exactly the gates /api/sync/plex and /api/sync/jellyfin apply themselves, so
   // the sync buttons can skip a server that is not there instead of POSTing to
@@ -1005,7 +1027,11 @@ export default async function SettingsPage({
               description={t("settings.section.externalRatings.description")}
             >
               <div className="space-y-6">
-                <MdblistForm initialApiKey={cfg.mdblistApiKey ? "••••••••" : ""} />
+                <MdblistForm
+                  initialApiKey={cfg.mdblistApiKey ? "••••••••" : ""}
+                  initialPlan={parseMdblistPlanSetting(cfg[MDBLIST_PLAN_SETTING_KEY])}
+                  usage={mdblistUsage ?? EMPTY_MDBLIST_USAGE}
+                />
                 <div className="border-t border-zinc-800 pt-5">
                   <OmdbForm initialApiKey={cfg.omdbApiKey ? "••••••••" : ""} />
                 </div>

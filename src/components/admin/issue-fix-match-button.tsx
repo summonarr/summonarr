@@ -13,6 +13,7 @@ import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib
 import { rich } from "@/components/settings/forms/rich";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 import { useT } from "@/components/i18n/i18n-provider";
+import { requestPageRefresh } from "@/lib/client/refresh-hold";
 
 type ServerStatus = "idle" | "fetching" | "selecting" | "applying" | "done" | "error";
 
@@ -359,7 +360,8 @@ export function IssueFixMatchButton({
       }, { signal: ac.signal });
       const resolved = await resolveIssue(selected.title);
       setPlexState({ status: "done", warning: [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")].filter(Boolean).join(" ") || undefined });
-      router.refresh();
+      // Resolving is announced over SSE too; the shared refresh makes the two one.
+      requestPageRefresh(() => router.refresh());
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
       // Codes → translated lines; the server's own message passes through.
@@ -380,7 +382,8 @@ export function IssueFixMatchButton({
       }, { signal: ac.signal });
       const resolved = await resolveIssue(selected.title);
       setJellyfinState({ status: "done", warning: [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")].filter(Boolean).join(" ") || undefined });
-      router.refresh();
+      // Resolving is announced over SSE too; the shared refresh makes the two one.
+      requestPageRefresh(() => router.refresh());
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
       setJellyfinState({ status: "error", error: fixMatchErrorMessage(err, t) });

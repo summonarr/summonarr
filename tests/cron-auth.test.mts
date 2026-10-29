@@ -21,7 +21,9 @@
 //     The DB reads behind verifyAndRefreshSession run against the fake
 //     prisma's authSession/user models below, so these tests stay offline.
 //   - batchCreateMany's chunking contract (guardrail 4): CREATE_MANY_BATCH is
-//     5000 (pinned via 12001 rows → 5000/5000/2001), chunks run sequentially
+//     5000 (pinned via 12001 rows → 5000/5000/2001), wide rows are sized so a
+//     call stays under Postgres's 32,766 bind parameters (one INSERT, never
+//     Prisma's parallel split — guardrail 23c), chunks run sequentially
 //     (never a parallel burst against the pool), skipDuplicates on every call,
 //     and a chunk failure stops the loop so the enclosing $transaction rolls
 //     back cleanly. BATCH_TX_TIMEOUT itself is pinned at 30_000.
@@ -114,6 +116,8 @@ const fakePrisma = {
 const {
   BATCH_TX_TIMEOUT,
   batchCreateMany,
+  createManyBatchSize,
+  POSTGRES_MAX_BIND_PARAMS,
   isCronAuthorized,
   getCronActor,
   CRON_SYSTEM_ACTOR,
@@ -313,6 +317,45 @@ test("batchCreateMany: a failed chunk propagates and stops later chunks", async 
   const { tx, calls } = makeFakeTx({ failOnCall: 2 });
   await assert.rejects(batchCreateMany(tx, rows), /chunk write failed/);
   assert.equal(calls.length, 2); // third chunk never issued
+});
+
+// Wide rows: every createMany stays ONE statement. Past 32,766 bind parameters
+// Prisma splits a createMany into several INSERTs that run in parallel on one
+// connection (pg's "client is already executing a query" warning). Measured on
+// a live Postgres 17: a Jellyfin staging row is its 13 keys plus createdAt =
+// 14 parameters, and 5,000 of them split three ways.
+const JELLYFIN_STAGING_KEYS = [
+  "runId", "tmdbId", "mediaType", "serverInstance", "filePath", "jellyfinItemId", "jellyfinItemIds",
+  "title", "year", "overview", "contentRating", "communityRating", "addedAt",
+];
+const PARAMS_PER_STAGING_ROW = JELLYFIN_STAGING_KEYS.length + 1; // + createdAt @default(now())
+
+test("batchCreateMany: wide rows are sized under Postgres's bind-parameter limit (the Jellyfin staging shape)", async () => {
+  const rows = Array.from({ length: 9_134 }, (_, i) =>
+    Object.fromEntries(JELLYFIN_STAGING_KEYS.map((k) => [k, k === "tmdbId" ? i : `${k}${i}`])),
+  );
+  const { tx, calls } = makeFakeTx();
+  await batchCreateMany(tx as never, rows);
+  for (const call of calls) {
+    assert.ok(
+      call.data.length * PARAMS_PER_STAGING_ROW <= POSTGRES_MAX_BIND_PARAMS,
+      `${call.data.length} rows × ${PARAMS_PER_STAGING_ROW} params is past the limit — Prisma would split it into parallel INSERTs`,
+    );
+  }
+  assert.deepEqual(calls.map((c) => c.data.length), [2184, 2184, 2184, 2184, 398]);
+  assert.deepEqual(calls.flatMap((c) => c.data), rows, "every row once, in order");
+});
+
+test("createManyBatchSize: counts the union of keys across rows, not just the first row", () => {
+  const narrowFirst = [{ a: 1 }, ...Array.from({ length: 10 }, () => Object.fromEntries(JELLYFIN_STAGING_KEYS.map((k) => [k, 1])))];
+  assert.equal(createManyBatchSize(narrowFirst), Math.floor(POSTGRES_MAX_BIND_PARAMS / (JELLYFIN_STAGING_KEYS.length + 1 + 2)));
+});
+
+test("createManyBatchSize: narrow rows keep the 5,000 cap; an absurdly wide row still writes one per call", () => {
+  assert.equal(createManyBatchSize([{ i: 0 }]), 5000);
+  assert.equal(createManyBatchSize([]), 5000);
+  const huge = Object.fromEntries(Array.from({ length: 40_000 }, (_, k) => [`c${k}`, k]));
+  assert.equal(createManyBatchSize([huge]), 1);
 });
 
 // ---------------------------------------------------------------------------

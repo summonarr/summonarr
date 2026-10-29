@@ -99,7 +99,7 @@ const fakePrisma = {
 
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
-const { replaceEpisodeCacheForSource, BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
+const { replaceEpisodeCacheForSource, BATCH_TX_TIMEOUT, POSTGRES_MAX_BIND_PARAMS } = await import("../src/lib/cron-auth.ts");
 
 function reset() {
   calls.length = 0;
@@ -254,11 +254,17 @@ test("a library-sized load is chunked, sequentially, still outside the transacti
   await replaceEpisodeCacheForSource("plex", rowsOf(12_001));
 
   const loads = opsOf("staging.createMany");
-  assert.deepEqual(
-    loads.map((c) => (c.args as CreateManyArgs).data.length),
-    [5000, 5000, 2001],
-    "CREATE_MANY_BATCH chunking (guardrail 4) is unchanged by the staging move",
-  );
+  // Chunked under Postgres's bind-parameter limit, so each call is ONE INSERT:
+  // past it Prisma splits a createMany into parallel INSERTs on one connection
+  // (guardrail 23c). Every row is loaded exactly once, in order.
+  const loaded = loads.flatMap((c) => (c.args as CreateManyArgs).data as object[]);
+  assert.equal(loaded.length, 12_001);
+  assert.ok(loads.length > 1, "a library-sized load is chunked");
+  const perRow = Object.keys(loaded[0]).length + 1; // + createdAt, which Prisma sends itself
+  for (const c of loads) {
+    const n = (c.args as CreateManyArgs).data.length;
+    assert.ok(n * perRow <= POSTGRES_MAX_BIND_PARAMS, `${n} rows × ${perRow} params is past the bind limit`);
+  }
   assert.ok(loads.every((c) => c.inTransaction === false));
   assert.ok(
     loads.every((c) => (c.args as CreateManyArgs).skipDuplicates === true),

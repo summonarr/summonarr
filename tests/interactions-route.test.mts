@@ -121,6 +121,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
+// These suites script a dead arr and assert ONE attempt: no retry backoff.
+(await import("../src/lib/arr.ts")).arrReadRetry.delaysMs = [];
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { Prisma } = await import("@/generated/prisma");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
@@ -1604,4 +1606,21 @@ test("a handler error AFTER the 'taking longer' line is still reported to the us
   assert.equal(discordEdits.length, 2, "the failure is reported after the slow line");
   assert.notEqual(discordEdits[0].content, discordEdits[1].content);
   assert.ok(errors.some((e) => e.includes("handler error")));
+});
+
+test("/status for a DEACTIVATED linked account answers 'no requests' and reads none (guardrail 33: a disabled account's data is not served)", async () => {
+  linkMember({ deactivatedAt: new Date("2026-01-01T00:00:00.000Z") });
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  let reads = 0;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...orig,
+    findMany: async () => { reads++; return [{ title: "Dune Part Two", mediaType: "MOVIE", status: "PENDING", tmdbId: 693134 }]; },
+  });
+  try {
+    await run(slash("status", []));
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+  assert.equal(reads, 0, "a disabled account's requests are never read");
+  assert.doesNotMatch(String(lastEdit().content), /Dune/);
 });

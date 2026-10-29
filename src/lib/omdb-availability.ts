@@ -75,13 +75,18 @@ export type UnifiedRatingsResult = {
 // leave the title with no ratings at all. `knownImdbId` (optional) spares a cold
 // OMDB fallback its TMDB external_ids resolve — the detail fetchers already hold
 // the id from their own append_to_response=external_ids.
+//
+// `background: true` marks a cron caller: MDBList then stops at the reserve the
+// plan setting keeps for pages (mdblist-plan.ts).
 export async function fetchUnifiedRatings(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
   knownImdbId?: string | null,
+  opts: { background?: boolean } = {},
 ): Promise<UnifiedRatingsResult> {
-  const mdb = await getMdblistRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
+  const mdbOpts = { background: opts.background };
+  const mdb = await getMdblistRatingsForTmdb(tmdbId, mediaType, releaseDate, mdbOpts).catch(
     (): MdblistResult => ({ found: false, keyConfigured: true, transient: true }),
   );
   // Require an actual score before letting MDBList win — a `found` row with every
@@ -166,12 +171,16 @@ export async function fetchUnifiedRatings(
 // limit), so a caller that makes one call per batch releases every batch's
 // refreshes together. The recommendation verdict pass did exactly that, one
 // callback per 200 titles, and the burst came back as a wall of TMDB 429s.
+//
+// `background: true` marks a cron caller: MDBList then stops at the reserve the
+// plan setting keeps for pages, and reads as paused once it does (mdblist-plan.ts).
 export async function attachRatingsUnified(
   items: TmdbMedia[],
-  opts: { blocking?: boolean; deferToAfter?: boolean } = {},
+  opts: { blocking?: boolean; deferToAfter?: boolean; background?: boolean } = {},
 ): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
   const blocking = opts.blocking ?? false;
+  const mdbOpts = { background: opts.background };
   const runDeferred = async (work: () => Promise<void>): Promise<void> => {
     if (opts.deferToAfter === false) await work();
     else after(work);
@@ -209,15 +218,15 @@ export async function attachRatingsUnified(
       // held waiting; the next page load will hit the warm cache. Stale-served entries
       // revalidate here too — never before the response.
       await runDeferred(async () => {
-        if (!isMdblistQuotaLocked()) {
+        if (!isMdblistQuotaLocked(mdbOpts)) {
           // Stale MDBList revalidations ride the same batch POSTs as the genuine
           // misses — one request per 200 ids instead of N singles.
           const toBatch = [...uncached, ...staleMdblist];
           const movieBatch = toBatch.filter((m) => m.mediaType === "movie");
           const tvBatch    = toBatch.filter((m) => m.mediaType === "tv");
           const [movieRatings, tvRatings] = await Promise.all([
-            movieBatch.length > 0 ? fetchMdblistBatch(movieBatch, "movie") : Promise.resolve(new Map<number, MdblistRatings>()),
-            tvBatch.length    > 0 ? fetchMdblistBatch(tvBatch,    "tv")    : Promise.resolve(new Map<number, MdblistRatings>()),
+            movieBatch.length > 0 ? fetchMdblistBatch(movieBatch, "movie", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
+            tvBatch.length    > 0 ? fetchMdblistBatch(tvBatch, "tv", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
           ]);
           // Mirror the blocking path (below): only count an MDBList row as a hit when it
           // carries a rating, and key by `${mediaType}:${id}`. An indexed-but-unscored
@@ -235,7 +244,7 @@ export async function attachRatingsUnified(
           if (stillMissing.length > 0) {
             // Fall back to OMDB whenever MDBList can't serve the item (no key, genuine miss,
             // or mid-batch quota trip), not only when the MDBList key is absent.
-            const probe = await getMdblistRatingsForTmdb(stillMissing[0].id, stillMissing[0].mediaType, stillMissing[0].releaseDate).catch(() => null);
+            const probe = await getMdblistRatingsForTmdb(stillMissing[0].id, stillMissing[0].mediaType, stillMissing[0].releaseDate, mdbOpts).catch(() => null);
             // `found` alone is not a usable signal — see the blocking path's note.
             if (!probe || !probe.found || !hasAnyMdblistRating(probe.data)) {
               await mapLimit(stillMissing.filter((item) => lacksOmdbRow(item, warm)), OMDB_FALLBACK_CONCURRENCY, (item) =>
@@ -288,14 +297,14 @@ export async function attachRatingsUnified(
   }
 
   if (misses.length > 0) {
-    if (!isMdblistQuotaLocked()) {
+    if (!isMdblistQuotaLocked(mdbOpts)) {
       // Batch by media type — MDBList's bulk endpoint is type-specific
       const movieMisses = misses.filter((m) => m.mediaType === "movie");
       const tvMisses    = misses.filter((m) => m.mediaType === "tv");
 
       const [movieRatings, tvRatings] = await Promise.all([
-        movieMisses.length > 0 ? fetchMdblistBatch(movieMisses, "movie") : Promise.resolve(new Map<number, MdblistRatings>()),
-        tvMisses.length    > 0 ? fetchMdblistBatch(tvMisses,    "tv")    : Promise.resolve(new Map<number, MdblistRatings>()),
+        movieMisses.length > 0 ? fetchMdblistBatch(movieMisses, "movie", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
+        tvMisses.length    > 0 ? fetchMdblistBatch(tvMisses, "tv", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
       ]);
 
       // Only count an MDBList batch row as a hit when it carries a rating. Rows for
@@ -311,7 +320,7 @@ export async function attachRatingsUnified(
         // whenever MDBList can't supply the item — no key, a genuine miss, or a mid-batch
         // quota trip — not only when the key is absent. A single source being unavailable
         // must not leave the title with no ratings.
-        const probe = await getMdblistRatingsForTmdb(mdbMisses[0].id, mdbMisses[0].mediaType, mdbMisses[0].releaseDate).catch(() => null);
+        const probe = await getMdblistRatingsForTmdb(mdbMisses[0].id, mdbMisses[0].mediaType, mdbMisses[0].releaseDate, mdbOpts).catch(() => null);
         // A bare `found` is not enough: fetchMdblistBatch awaits its cache flush, so an
         // indexed-but-unscored (all-null) row it just wrote reads back here as found —
         // one such title at the head of mdbMisses would disable the OMDB fallback for the
@@ -341,7 +350,7 @@ export async function attachRatingsUnified(
   // capped-out misses, refresh after the response, same as the non-blocking path.
   if (staleMdblist.length > 0 || staleOmdb.length > 0 || deferredOmdb.length > 0) {
     await runDeferred(async () => {
-      if (staleMdblist.length > 0 && !isMdblistQuotaLocked()) {
+      if (staleMdblist.length > 0 && !isMdblistQuotaLocked(mdbOpts)) {
         // Same quota-efficient shape as the non-blocking path: one batch POST per media
         // type. An item absent from a full response gets its _notFound sentinel refreshed
         // by fetchMdblistBatch — no OMDB chase for stale entries. When quota-locked these
@@ -350,8 +359,8 @@ export async function attachRatingsUnified(
         const movieStale = staleMdblist.filter((m) => m.mediaType === "movie");
         const tvStale    = staleMdblist.filter((m) => m.mediaType === "tv");
         await Promise.all([
-          movieStale.length > 0 ? fetchMdblistBatch(movieStale, "movie") : Promise.resolve(new Map<number, MdblistRatings>()),
-          tvStale.length    > 0 ? fetchMdblistBatch(tvStale,    "tv")    : Promise.resolve(new Map<number, MdblistRatings>()),
+          movieStale.length > 0 ? fetchMdblistBatch(movieStale, "movie", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
+          tvStale.length    > 0 ? fetchMdblistBatch(tvStale, "tv", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
         ]);
       }
       if (deferredOmdb.length > 0) {

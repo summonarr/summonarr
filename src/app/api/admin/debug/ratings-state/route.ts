@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { prisma } from "@/lib/prisma";
-import { isMdblistQuotaLocked } from "@/lib/mdblist";
+import { getMdblistUsageSnapshot, isMdblistQuotaLocked } from "@/lib/mdblist";
 import { isOmdbQuotaLocked } from "@/lib/omdb";
 import { fetchUnifiedRatings, type UnifiedRatingsResult } from "@/lib/omdb-availability";
 import type { TmdbMedia } from "@/lib/tmdb-types";
@@ -155,6 +155,9 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       mdblistQuotaLocked: isMdblistQuotaLocked(),
       omdbQuotaLocked: isOmdbQuotaLocked(),
     },
+    // The MDBList plan budget: the plan picked, what MDBList last reported,
+    // what is left today, and whether background jobs have stopped.
+    mdblistUsage: await getMdblistUsageSnapshot(),
     cache: {
       mdblist: describeRatingsRow(mdblistCacheKey, mdblistCacheRow, now),
       omdb: describeRatingsRow(omdbCacheKey, omdbCacheRow, now),

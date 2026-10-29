@@ -71,6 +71,7 @@ const fakePrisma = {
   tmdbMediaCore: { deleteMany: async () => ({ count: 0 }) },
   recommendationTitle: { updateMany: async () => ({ count: 0 }) },
   titleSuggestion: { deleteMany: async () => ({ count: 0 }) },
+  coWatchSuggestion: { deleteMany: async () => ({ count: 0 }) },
   $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(fakePrisma),
 };
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;

@@ -9,6 +9,7 @@ import { arrFetch } from "@/lib/arr";
 import { configuredArrCfg, enabledArrInstances } from "@/lib/arr-admin";
 import { processSingleton } from "@/lib/process-singleton";
 import { candidateCacheKey, getCachedCandidates, setCachedCandidates } from "@/lib/fix-match-candidate-cache";
+import { libraryPathFor } from "@/lib/library-path-view";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
 import { settleLimit } from "@/lib/concurrency";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
@@ -492,8 +493,10 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
       ...target,
       ...arr,
       ratingKey: "",
-      plexFilePath: plexHint?.filePath ?? null,
-      jellyfinFilePath: jfItem.filePath ?? null,
+      // The caller's view of the paths (library-path-view.ts), like the Plex
+      // mode's answer below.
+      plexFilePath: libraryPathFor(session.user.permissions, plexHint?.filePath),
+      jellyfinFilePath: libraryPathFor(session.user.permissions, jfItem.filePath),
       serverInstance,
       currentTitle: jfItem.title ?? null,
       currentYear: jfItem.year ?? null,
@@ -532,8 +535,18 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.plexRatingKeyNotFound") }, { status: 404 });
   }
   const cacheKey = candidateCacheKey({ serverInstance, ratingKey: item.plexRatingKey, correctTmdbId, arrHint: arrTmdbIdHint });
+  // The cache holds the full body (it is keyed by the title, not the caller);
+  // every answer, cached or fresh, leaves through the caller's view of the
+  // two paths (library-path-view.ts: ADMIN sees the path, a MANAGE_ISSUES
+  // delegate the file name).
+  const perms = session.user.permissions;
+  const viewOf = (body: CandidatesResponse): CandidatesResponse => ({
+    ...body,
+    plexFilePath: libraryPathFor(perms, body.plexFilePath),
+    jellyfinFilePath: libraryPathFor(perms, body.jellyfinFilePath),
+  });
   const cached = getCachedCandidates<CandidatesResponse>(cacheKey);
-  if (cached) return NextResponse.json(cached);
+  if (cached) return NextResponse.json(viewOf(cached));
   // Coerce to break taint from the DB-read string before interpolating into the
   // Plex admin-token URL below (rating keys are always integers).
   const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
@@ -735,5 +748,5 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     currentYear: item.year ?? null,
   } satisfies CandidatesResponse;
   setCachedCandidates(cacheKey, responseBody);
-  return NextResponse.json(responseBody);
+  return NextResponse.json(viewOf(responseBody));
 });

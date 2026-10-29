@@ -246,6 +246,7 @@ export async function purgeUserDataInTx(
   // rows above; the User row is anonymized in place, never deleted, so the
   // schema's onDelete cascade would never reach these.
   await tx.traktWatchedItem.deleteMany({ where: { userId: id } });
+  await tx.traktRating.deleteMany({ where: { userId: id } });
   await tx.traktConnection.deleteMany({ where: { userId: id } });
   // A pending notification-email verification carries the candidate address in its
   // identifier, and the confirm link stays redeemable for its TTL — left behind, a

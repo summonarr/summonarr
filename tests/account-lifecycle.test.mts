@@ -99,6 +99,7 @@ const baseTx = {
   notification: { deleteMany: record("notification", "deleteMany") },
   userRecommendation: { deleteMany: record("userRecommendation", "deleteMany") },
   traktWatchedItem: { deleteMany: record("traktWatchedItem", "deleteMany") },
+  traktRating: { deleteMany: record("traktRating", "deleteMany") },
   traktConnection: { deleteMany: record("traktConnection", "deleteMany") },
   verificationToken: { deleteMany: record("verificationToken", "deleteMany") },
   userTotp: { deleteMany: record("userTotp", "deleteMany") },
@@ -201,8 +202,9 @@ const PURGE_OPS = [
   "hiddenItem.deleteMany",
   "notification.deleteMany",
   "userRecommendation.deleteMany",
-  // Trakt (guardrail 34c): the imported history and the connection row.
+  // Trakt (guardrail 34c): the imported history, ratings (40c) and the connection row.
   "traktWatchedItem.deleteMany",
+  "traktRating.deleteMany",
   "traktConnection.deleteMany",
   "verificationToken.deleteMany",
   // The audit trail's copies of who this was (audit-scrub.ts): rows ABOUT the

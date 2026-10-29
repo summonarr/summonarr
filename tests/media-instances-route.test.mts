@@ -192,6 +192,10 @@ function makeClient(txId: number | null) {
     // The removed server's upstream watch-record snapshot (guardrail 14d) —
     // pinned in tests/audit-fix-nw-upstream.test.mts.
     upstreamWatchEvidence: rowDelegate("upstreamWatchEvidence", () => upstreamEvidence, (r) => { upstreamEvidence = r; }),
+    // For You's copy of the removed server's own history and its read points
+    // (guardrail 40c) — journaled so the scoping and the transaction are pinned.
+    serverWatchedTitle: rowDelegate("serverWatchedTitle", () => [] as Record<string, unknown>[], () => {}),
+    serverWatchCursor: rowDelegate("serverWatchCursor", () => [] as Record<string, unknown>[], () => {}),
     // PlayHistory has NO legitimate caller in this route — every op is journaled
     // so the guardrail-19 test can assert the model was never addressed at all.
     playHistory: rowDelegate("playHistory", () => [] as Record<string, unknown>[], () => {}),
@@ -554,8 +558,15 @@ test("ONE transaction: the registry write AND every cleanup op share a single tx
     ...opsFor("activeSession", "deleteMany"),
     ...opsFor("mediaServerUser", "updateMany"),
     ...opsFor("upstreamWatchEvidence", "deleteMany"),
+    ...opsFor("serverWatchedTitle", "deleteMany"),
+    ...opsFor("serverWatchCursor", "deleteMany"),
   ];
-  assert.equal(cleanup.length, 5, "all five cleanup ops ran");
+  assert.equal(cleanup.length, 7, "all seven cleanup ops ran");
+  // The For You history rows are scoped through their server identity to the
+  // removed (service, slug) — never a bare deleteMany (guardrail 40c / 35).
+  for (const op of [...opsFor("serverWatchedTitle", "deleteMany"), ...opsFor("serverWatchCursor", "deleteMany")]) {
+    assert.deepEqual(op.where, { mediaServerUser: { source: "plex", serverInstance: "remote" } });
+  }
   for (const op of cleanup) {
     assert.equal(op.txId, txId, `${op.model}.${op.op} must run in the same transaction as the registry write`);
   }

@@ -75,18 +75,17 @@ export const POST = withAuth(async (req, _ctx, session) => {
     // row deletion). The current session survives because its iat > createdAt
     // > new sessionsRevokedAt value.
     await prisma.$transaction(async (tx) => {
-      const [callerRow, userRow] = await Promise.all([
-        session.sessionId
-          ? tx.authSession.findUnique({
-              where: { sessionId: session.sessionId },
-              select: { createdAt: true },
-            })
-          : Promise.resolve(null),
-        tx.user.findUnique({
-          where: { id: session.user.id },
-          select: { sessionsRevokedAt: true },
-        }),
-      ]);
+      // One at a time: a transaction is one connection (guardrail 23c).
+      const callerRow = session.sessionId
+        ? await tx.authSession.findUnique({
+            where: { sessionId: session.sessionId },
+            select: { createdAt: true },
+          })
+        : null;
+      const userRow = await tx.user.findUnique({
+        where: { id: session.user.id },
+        select: { sessionsRevokedAt: true },
+      });
       const result = await tx.authSession.deleteMany({
         where: {
           userId: session.user.id,

@@ -57,20 +57,48 @@ export interface MfaState {
   enabled: boolean;
 }
 
-export async function getMfaState(userId: string, db: MfaTxClient = prisma): Promise<MfaState> {
+const PASSKEY_SUMMARY_SELECT = {
+  id: true,
+  credentialId: true,
+  transports: true,
+  name: true,
+  createdAt: true,
+  lastUsedAt: true,
+  backedUp: true,
+} as const;
+
+// On the pool, so the three reads run on three connections at once.
+export async function getMfaState(userId: string): Promise<MfaState> {
   const [totp, passkeys, recoveryRemaining] = await Promise.all([
-    db.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } }),
-    db.webAuthnCredential.findMany({
-      where: { userId },
-      select: { id: true, credentialId: true, transports: true, name: true, createdAt: true, lastUsedAt: true, backedUp: true },
-      orderBy: { createdAt: "asc" },
-    }),
-    db.mfaRecoveryCode.count({ where: { userId, usedAt: null } }),
+    prisma.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } }),
+    prisma.webAuthnCredential.findMany({ where: { userId }, select: PASSKEY_SUMMARY_SELECT, orderBy: { createdAt: "asc" } }),
+    prisma.mfaRecoveryCode.count({ where: { userId, usedAt: null } }),
   ]);
-  const totpEnabled = !!totp?.enabledAt;
+  return mfaStateFrom(totp, passkeys, recoveryRemaining);
+}
+
+// The same read inside a transaction. A transaction is ONE connection, so the
+// reads go one at a time (guardrail 23c).
+export async function getMfaStateInTx(tx: MfaTxClient, userId: string): Promise<MfaState> {
+  const totp = await tx.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } });
+  const passkeys = await tx.webAuthnCredential.findMany({
+    where: { userId },
+    select: PASSKEY_SUMMARY_SELECT,
+    orderBy: { createdAt: "asc" },
+  });
+  const recoveryRemaining = await tx.mfaRecoveryCode.count({ where: { userId, usedAt: null } });
+  return mfaStateFrom(totp, passkeys, recoveryRemaining);
+}
+
+function mfaStateFrom(
+  totpRow: { enabledAt: Date | null } | null,
+  passkeys: PasskeySummary[],
+  recoveryRemaining: number,
+): MfaState {
+  const totpEnabled = !!totpRow?.enabledAt;
   return {
     totpEnabled,
-    totpPending: !!totp && !totp.enabledAt,
+    totpPending: !!totpRow && !totpRow.enabledAt,
     passkeys,
     recoveryRemaining,
     enabled: totpEnabled || passkeys.length > 0,
@@ -304,10 +332,9 @@ export async function ensureRecoveryCodesInTx(tx: MfaTxClient, userId: string): 
 // Returns true when the account is left with NO active factor — the caller then
 // signs out the other sessions, exactly as turning 2FA off outright does.
 export async function dropRecoveryCodesIfNoFactorInTx(tx: MfaTxClient, userId: string): Promise<boolean> {
-  const [totp, passkeys] = await Promise.all([
-    tx.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } }),
-    tx.webAuthnCredential.count({ where: { userId } }),
-  ]);
+  // One at a time: a transaction is one connection (guardrail 23c).
+  const totp = await tx.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } });
+  const passkeys = await tx.webAuthnCredential.count({ where: { userId } });
   if (!totp?.enabledAt && passkeys === 0) {
     await tx.mfaRecoveryCode.deleteMany({ where: { userId } });
     return true;

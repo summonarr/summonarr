@@ -880,6 +880,16 @@ test("releases POST is instance-slug-scoped (guardrail 32): an invalid slug → 
   assert.equal(unconfigured.status, 422);
   assert.deepEqual(await unconfigured.json(), { error: "radarr (anime) is not configured" });
   assert.equal(opsOf("issueGrab.create").length, 0);
+
+  // Guardrail 32: the REGISTRY decides which slugs exist. A de-registered
+  // instance's Url/ApiKey rows can outlive it, and they alone must not turn a
+  // guessed slug into searches and grabs on a server the admin removed.
+  settings.set("radarrAnimeUrl", "http://radarr-anime.example.com:7878");
+  settings.set("radarrAnimeApiKey", "anime-key");
+  const stranded = await postRelease(admin.token, "issue-r2", { guid: "abc", indexerId: 1, instance: "anime" });
+  assert.equal(stranded.status, 422, "configured keys without a registry entry are not an instance");
+  assert.deepEqual(await stranded.json(), { error: "radarr (anime) is not configured" });
+  assert.equal(fetchCalls.length, 0, "nothing was asked of the stranded server");
 });
 
 test("releases POST (happy grab): the resolved instance slug flows into IssueGrab.arrInstance and the issue is claimed IN_PROGRESS", async () => {
@@ -1438,4 +1448,20 @@ test("claim: a present-but-non-string, non-null expectedClaimedBy → 400 before
   assert.deepEqual(await res.json(), { error: "Invalid expectedClaimedBy" });
   assert.equal(opsOf("issue.findUnique").length, 0, "the shape check precedes the row read");
   assert.equal(opsOf("issue.updateMany").length, 0);
+});
+
+test("messages POST: a NAME-LESS manager's reply reaches the reporter as 'Admin' — never the manager's email (the GET strips it for them too)", async () => {
+  usersById.set("reporter-owner9", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: "owner9@example.com", notificationEmail: null,
+  });
+  issueRow = { id: "issue-n9", status: "OPEN", reportedBy: "reporter-owner9", title: "Heat", mediaType: "MOVIE", tmdbId: 949, posterPath: "/h.jpg", claimedBy: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" }); // no display name on the session
+  const res = await postMessage(admin.token, "issue-n9", { body: "on it" });
+  assert.equal(res.status, 201);
+  const note = opsOf("notification.create")[0].args as { data: { userId: string; body: string; data: { author: string } } };
+  assert.equal(note.data.userId, "reporter-owner9");
+  assert.equal(note.data.body, "Admin replied: on it");
+  assert.equal(note.data.data.author, "Admin");
+  assert.ok(!JSON.stringify(note).includes("@example.com"), JSON.stringify(note));
 });

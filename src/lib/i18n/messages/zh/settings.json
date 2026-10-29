@@ -78,6 +78,8 @@
   "settings.featureDesc.behavior_watchGrades": "根据用户是否观看其请求的内容为其评定 A–F 等级，在“用户”页面和请求队列中向管理员显示。仅供显示——从不阻止请求。需要开启播放历史追踪；可在“媒体 → 观看评级”中调整。",
   "settings.featureLabel.behavior_watchlistAutoRequest": "待看清单自动请求",
   "settings.featureDesc.behavior_watchlistAutoRequest": "当用户将作品加入待看清单时自动发起请求——包括 Summonarr 中的待看清单和其 Plex 待看清单（由 sync-plex-watchlists 定时任务轮询）。仅适用于被授予自动请求权限的用户；每个请求仍需经过配额、黑名单和审批。Plex 待看清单通过用户本人的 Plex 登录读取（开启后登录一次），或在“设置 → 媒体 → Plex 待看清单”允许时，通过你的 Plex 服务器所有者账户读取已同意的 Plex 好友的清单。用户还可以在个人资料中连接 Trakt，从其 Trakt 待看清单自动请求（由 sync-trakt 定时任务轮询）。",
+  "settings.featureLabel.behavior_forYouCoWatch": "为你推荐：共同观看",
+  "settings.featureDesc.behavior_forYouCoWatch": "同时推荐本服务器上其他人与相同作品一起观看过的作品（“这里看过 X 的人也看过 Y”）。关闭时：“为你推荐”只使用每位观众自己的观看记录、评分、收藏、待看清单和请求。开启时，一条推荐需要至少 3 人同时看过两部作品，绝不显示任何人的名字，且看起来与其他推荐完全相同。",
   "settings.featureLabel.integration_plex": "Plex",
   "settings.featureDesc.integration_plex": "启用 Plex 登录、媒体库同步和可观看徽章。",
   "settings.featureLabel.integration_jellyfin": "Jellyfin",

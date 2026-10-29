@@ -149,6 +149,7 @@ function makeTx() {
     notification: { deleteMany: rec("notification.deleteMany") },
     userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
     traktWatchedItem: { deleteMany: rec("traktWatchedItem.deleteMany") },
+    traktRating: { deleteMany: rec("traktRating.deleteMany") },
     traktConnection: { deleteMany: rec("traktConnection.deleteMany") },
     verificationToken: { deleteMany: rec("verificationToken.deleteMany") },
     // Two-factor credentials — purge and the admin 2FA reset share this write set.
@@ -173,6 +174,13 @@ function makeTx() {
       deleteMany: async (args?: unknown) => {
         txOps.push({ op: "titleSuggestion.deleteMany", args });
         return { count: edgeDeleteCount };
+      },
+    },
+    // The co-watch edges (guardrail 40c) carry the same copied TMDB fields.
+    coWatchSuggestion: {
+      deleteMany: async (args?: unknown) => {
+        txOps.push({ op: "coWatchSuggestion.deleteMany", args });
+        return { count: 0 };
       },
     },
     mediaServerUser: {

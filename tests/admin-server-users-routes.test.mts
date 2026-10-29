@@ -726,6 +726,10 @@ test("diagnose surfaces a transport failure instead of throwing", async () => {
   const body = await res.json();
   assert.ok(body.fetchError, "the transport error must be reported in the body");
   assert.equal(body.rawCount, 0);
+  // A coarse KIND, never the message: a SafeFetchError's text names the server's
+  // scheme, host and port, and this route admits a MANAGE_USERS delegate.
+  assert.equal(body.fetchError, "fetch:network");
+  assert.ok(!JSON.stringify(body).includes(new URL(JF_URL).host), `the Jellyfin host must not appear: ${JSON.stringify(body)}`);
 });
 
 test("diagnose reports a non-2xx upstream status", async () => {

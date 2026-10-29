@@ -8,12 +8,16 @@ import { settleLimit } from "@/lib/concurrency";
 import { getBlacklistSet } from "@/lib/blacklist";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { qualityMultiplier, withTmdbTerm } from "@/lib/recommendation-quality";
+import { isFeatureEnabled } from "@/lib/features";
 import {
+  FOR_YOU_COWATCH_FEATURE_KEY,
+  readCoWatchSuggestions,
   readGraphSuggestions,
   readTitleQuality,
   refreshRecommendationGraph,
   type GraphRefreshResult,
 } from "@/lib/recommendation-graph";
+import { importServerWatchHistory, type ServerHistoryImportResult } from "@/lib/server-watch-history-data";
 
 // qualityScoreOf moved to recommendation-quality.ts (the graph precomputes a
 // verdict per TITLE, so the scorer can no longer live behind `server-only`).
@@ -23,10 +27,14 @@ export { qualityScoreOf } from "@/lib/recommendation-quality";
 export type { QualityVerdict } from "@/lib/recommendation-quality";
 
 // "For You" recommendation engine. Seeds are drawn from a user's own watched
-// PlayHistory + WatchlistItem + MediaRequest, fanned out through the SERVER-WIDE
-// recommendation graph (recommendation-graph.ts), scored, and cached per-user in
-// UserRecommendation by the warm-recommendations cron. getUserRecommendations is
-// the only live-request-path read — it never calls TMDB.
+// PlayHistory + the media servers' own history (ServerWatchedTitle) + imported
+// Trakt history + WatchlistItem + MediaRequest, weighted by what they SAID about
+// a title (Trakt ratings, Jellyfin favorites) and damped for series they
+// dropped. They fan out through the SERVER-WIDE recommendation graph
+// (recommendation-graph.ts) — TMDB's suggestions plus the server's private
+// co-watching — are scored, and cached per-user in UserRecommendation by the
+// warm-recommendations cron. getUserRecommendations is the only
+// live-request-path read — it never calls TMDB. Guardrails 40 and 40c.
 //
 // The key split is what is PER-USER and what is not. A seed's suggestion list
 // and a candidate's quality verdict belong to the TITLE and are the same for
@@ -65,14 +73,16 @@ export type { QualityVerdict } from "@/lib/recommendation-quality";
 // steady state a source refreshes once every 14 runs.
 //
 // The two ceilings guardrail 40 requires re-checking on any change, at the
-// 300 + 24 + 24 = 348 titles per user this now admits:
-//   - MAX_REQUIRED_SOURCES (50k, a wall-clock bound) binds at ~144 zero-overlap
-//     active users, down from ~200. Households share a library, so the real
-//     figure is far higher — and overrun is a console.error naming the shortfall,
-//     never a silent truncation.
-//   - MAX_QUALITY_TITLES_PER_RUN (10k) is unchanged, so with ~1.4x the required
+// 300 + 24 + 24 + 24 = 372 titles per user this now admits (history, watchlist,
+// requests, and the loved pool — MAX_LOVED_SEEDS):
+//   - MAX_REQUIRED_SOURCES (50k, a wall-clock bound) binds at ~134 zero-overlap
+//     active users. Households share a library, so the real figure is far
+//     higher — and overrun is a console.error naming the shortfall, never a
+//     silent truncation. The loved pool rarely adds a NEW source: a loved title
+//     is almost always one the viewer watched, so it is already in the graph.
+//   - MAX_QUALITY_TITLES_PER_RUN (10k) is unchanged, so with more required
 //     sources competing for the same verdict budget, quality convergence on a
-//     cold instance takes roughly 1.4x as many runs. Verdicts are spent
+//     cold instance takes proportionally more runs. Verdicts are spent
 //     priority-first and an unrated candidate still ranks on relevance, so this
 //     is a warm-up cost, not a correctness one.
 // Exported so tests derive from it instead of re-pasting the number (the
@@ -317,6 +327,126 @@ const WATCH_HISTORY_SEED_WEIGHT = 1.0;
 // the dedup in selectSeeds).
 const REQUEST_SEED_WEIGHT = 1.5;
 
+// ── Taste: ratings and favorites (guardrail 40c) ───────────────────────────
+// What a person SAID about a title, not only that they watched it: their own
+// Trakt ratings (1–10, while "use my Trakt history" is on) and their Jellyfin
+// favorites. It multiplies the weight of the seed it is about:
+//   - 8–10 on Trakt, or a Jellyfin favorite → LOVED, ×TASTE_LOVED_FACTOR;
+//   - 5 → lukewarm, ×TASTE_MEH_FACTOR;
+//   - 1–4 → NEVER a seed. "Because you watched X" about a title someone rated
+//     3/10 is the worst card the shelf can produce;
+//   - 6–7, or no opinion → unchanged.
+// A rating outranks a favorite: it is the more explicit statement.
+//
+// A dislike only removes its OWN seed. It is deliberately not fanned out to the
+// titles that resemble it: the 2026-08 audit rejected anti-seed neighbourhoods
+// (hides concentrate in the viewer's densest taste region, so a handful can
+// invert a shelf toward the periphery), and ratings would carry the same flaw.
+export const TASTE_LOVED_FACTOR = 1.75;
+export const TASTE_MEH_FACTOR = 0.5;
+export const TASTE_LOVED_MIN_RATING = 8;
+export const TASTE_DISLIKED_MAX_RATING = 4;
+// A loved title too old to win one of the recency-ordered history slots still
+// seeds, from a pool of its own. This is a seed cap, so it is a build-budget
+// knob too (guardrail 40): it raises the per-user ceiling by this much.
+export const MAX_LOVED_SEEDS = 24;
+
+// ── Quit shows ─────────────────────────────────────────────────────────────
+// PlayHistory counts episodes, so two episodes of a sixty-episode series used to
+// read as a modest "liked it" seed. A series the viewer demonstrably dropped is
+// DAMPENED as a seed (never dropped — they did choose to start it), judged
+// against the episodes the server itself holds (TVEpisodeCache):
+//   - at most QUIT_SHOW_MAX_PLAYS episode plays, AND under QUIT_SHOW_MAX_RATIO of
+//     the episodes on the server — so a short series finished in four plays is
+//     not "quit", and neither is a long one someone is steadily working through;
+//   - the server holds at least QUIT_SHOW_MIN_EPISODES regular episodes — the
+//     ratio means nothing against a two-episode download;
+//   - the last watch is QUIT_SHOW_SETTLE_MS old: a show started last week is
+//     being watched, not abandoned;
+//   - never a LOVED title: a favorite or an 8+ rating says otherwise.
+// A series not on the server (Trakt history only) is never judged.
+export const QUIT_SHOW_DAMP = 0.3;
+export const QUIT_SHOW_MAX_PLAYS = 4;
+export const QUIT_SHOW_MAX_RATIO = 0.2;
+export const QUIT_SHOW_MIN_EPISODES = 8;
+export const QUIT_SHOW_SETTLE_MS = 30 * 24 * 60 * 60 * 1000;
+
+// ── Server co-watching ─────────────────────────────────────────────────────
+// "People on this server who watched the seed also watched this"
+// (CoWatchSuggestion, built server-wide by recommendation-graph.ts). It adds
+// candidates TMDB never suggests and corroborates the ones it does. Weighted
+// below a TMDB suggestion at the same position: TMDB's lists are built from far
+// more viewers than any home server has. Every edge clears a distinct-viewer
+// floor at build time, so nothing here can point at one person's viewing.
+// OPT-IN (feature.behavior.forYouCoWatch, default OFF): with it off, a shelf is
+// built from the viewer's own records and nobody else's.
+export const COWATCH_WEIGHT = 0.6;
+
+export interface TasteSignal {
+  // Multiplier on the seed's weight; 0 = vetoed (never a seed).
+  factor: number;
+  // The latest evidence (rated, or last watched) — orders the loved pool.
+  at: Date | null;
+  title: string;
+  // Whether the viewer is known to have watched it, which is what lets a loved
+  // title seed under the "Because you watched…" wording.
+  watched: boolean;
+  plays: number;
+}
+
+// A Trakt rating (1–10, or null) and a favorite flag → the seed multiplier.
+// Pure — see the TASTE_* constants for the policy.
+export function tasteFactor(rating: number | null, favorite: boolean): number {
+  if (rating !== null) {
+    if (rating <= TASTE_DISLIKED_MAX_RATING) return 0;
+    if (rating >= TASTE_LOVED_MIN_RATING) return TASTE_LOVED_FACTOR;
+    if (rating === 5) return TASTE_MEH_FACTOR;
+    return 1;
+  }
+  return favorite ? TASTE_LOVED_FACTOR : 1;
+}
+
+// One viewer's taste signals by candidateKey. Pure.
+export function buildTasteSignals(
+  ratings: readonly { tmdbId: number; mediaType: MediaType; title: string; rating: number; ratedAt: Date }[],
+  favorites: readonly { tmdbId: number; mediaType: MediaType; title: string; plays: number; lastWatchedAt: Date | null }[],
+): Map<string, TasteSignal> {
+  const fav = new Map<string, { title: string; plays: number; lastWatchedAt: Date | null }>();
+  for (const f of favorites) {
+    const k = candidateKey(f.tmdbId, f.mediaType);
+    const prior = fav.get(k);
+    if (!prior) {
+      fav.set(k, { title: f.title, plays: f.plays, lastWatchedAt: f.lastWatchedAt });
+      continue;
+    }
+    // The same title favorited on two servers: one signal, the larger evidence.
+    prior.plays = Math.max(prior.plays, f.plays);
+    if (f.lastWatchedAt && (!prior.lastWatchedAt || f.lastWatchedAt > prior.lastWatchedAt)) prior.lastWatchedAt = f.lastWatchedAt;
+  }
+  const out = new Map<string, TasteSignal>();
+  for (const r of ratings) {
+    const k = candidateKey(r.tmdbId, r.mediaType);
+    const f = fav.get(k);
+    const at = f?.lastWatchedAt && f.lastWatchedAt > r.ratedAt ? f.lastWatchedAt : r.ratedAt;
+    out.set(k, { factor: tasteFactor(r.rating, f !== undefined), at, title: r.title, watched: true, plays: f?.plays ?? 0 });
+  }
+  for (const [k, f] of fav) {
+    if (out.has(k)) continue;
+    out.set(k, { factor: tasteFactor(null, true), at: f.lastWatchedAt, title: f.title, watched: f.plays > 0, plays: f.plays });
+  }
+  return out;
+}
+
+// Whether a series seed reads as dropped. `episodesOnServer` is null when the
+// server holds none of it (never judged). Pure — see the QUIT_SHOW_* constants.
+export function isQuitShow(plays: number, episodesOnServer: number | null, lastAt: Date | null, now: number): boolean {
+  if (episodesOnServer === null || episodesOnServer < QUIT_SHOW_MIN_EPISODES) return false;
+  if (plays > QUIT_SHOW_MAX_PLAYS || plays / episodesOnServer >= QUIT_SHOW_MAX_RATIO) return false;
+  // Undated ⇒ can't show it is settled; leave it alone.
+  if (!lastAt || now - lastAt.getTime() < QUIT_SHOW_SETTLE_MS) return false;
+  return true;
+}
+
 export interface RecommendationCandidate {
   tmdbId: number;
   mediaType: MediaType;
@@ -494,28 +624,30 @@ export interface HistorySeedRow {
   count: number;
 }
 
-// Fold a user's imported Trakt history into their server watch history — still
-// AT MOST `max` titles (MAX_WATCH_HISTORY_SEEDS), so the per-user seed ceiling,
-// and with it the graph's required-set budget, is unchanged (guardrail 40: a
-// seed cap is a build-budget knob, and this one did not move). Trakt titles
-// compete for the same slots by recency.
+// Fold a user's OTHER watch records — their imported Trakt history and the
+// media servers' own history (ServerWatchedTitle, guardrail 40c) — into the
+// PlayHistory rows. Still AT MOST `max` titles (MAX_WATCH_HISTORY_SEEDS), so
+// this pool's seed ceiling, and with it the graph's required-set budget, is
+// unchanged (guardrail 40: a seed cap is a build-budget knob, and this one did
+// not move). Every record competes for the same slots by recency.
 //
-// A title in both is ONE seed: the later watch and the LARGER play count win.
-// Never the sum — a Trakt scrobbler records the very plays the server did, so
-// summing would double every title a household both streams and scrobbles.
+// A title in several is ONE seed: the later watch and the LARGEST play count
+// win. Never the sum — a Trakt scrobbler records the very plays the server did,
+// and the server's own history repeats every play PlayHistory logged since the
+// install, so summing would double (or triple) the same viewing.
 //
-// No Trakt rows ⇒ the server rows come back exactly as given (already
-// recency-ordered by the query), so an instance without Trakt is untouched.
+// No extra rows ⇒ the PlayHistory rows come back exactly as given (already
+// recency-ordered by the query), so an instance without them is untouched.
 // Pure.
 export function mergeHistorySeedRows(
   serverRows: readonly HistorySeedRow[],
-  traktRows: readonly HistorySeedRow[],
+  extraRows: readonly HistorySeedRow[],
   max: number,
 ): HistorySeedRow[] {
-  if (traktRows.length === 0) return serverRows.slice(0, max);
+  if (extraRows.length === 0) return serverRows.slice(0, max);
   const byKey = new Map<string, HistorySeedRow>();
   for (const r of serverRows) byKey.set(candidateKey(r.tmdbId, r.mediaType), { ...r });
-  for (const r of traktRows) {
+  for (const r of extraRows) {
     const key = candidateKey(r.tmdbId, r.mediaType);
     const prior = byKey.get(key);
     if (!prior) {
@@ -546,6 +678,55 @@ function readTraktHistory(userId: string, take?: number) {
     ...(take !== undefined ? { take } : {}),
     select: { tmdbId: true, mediaType: true, title: true, lastWatchedAt: true, plays: true },
   });
+}
+
+// The media servers' own history for the user's linked identities, newest
+// first (ServerWatchedTitle — imported by server-watch-history-data.ts, so the
+// engine still makes no upstream call). One title can appear once per identity
+// (a Plex AND a Jellyfin account), so the read takes a multiple of the slots;
+// mergeHistorySeedRows folds the duplicates.
+function readServerHistory(linkedServerUserIds: string[]) {
+  if (linkedServerUserIds.length === 0) return Promise.resolve([]);
+  return prisma.serverWatchedTitle.findMany({
+    where: { mediaServerUserId: { in: linkedServerUserIds }, plays: { gt: 0 } },
+    orderBy: { lastWatchedAt: { sort: "desc", nulls: "last" } },
+    take: MAX_WATCH_HISTORY_SEEDS * Math.min(linkedServerUserIds.length, 4),
+    select: { tmdbId: true, mediaType: true, title: true, lastWatchedAt: true, plays: true },
+  });
+}
+
+// Jellyfin favorites for the user's linked identities — every one, however old
+// (an undated favorite would sort last and be cut by a recency take).
+function readServerFavorites(linkedServerUserIds: string[]) {
+  if (linkedServerUserIds.length === 0) return Promise.resolve([]);
+  return prisma.serverWatchedTitle.findMany({
+    where: { mediaServerUserId: { in: linkedServerUserIds }, favorite: true },
+    select: { tmdbId: true, mediaType: true, title: true, plays: true, lastWatchedAt: true },
+  });
+}
+
+// The user's own Trakt ratings — under the SAME switch as their Trakt history,
+// carried in the where clause so an opted-out user's rows are never read.
+function readTraktRatings(userId: string) {
+  return prisma.traktRating.findMany({
+    where: { userId, user: { traktConnection: { is: { historySeeds: true } } } },
+    select: { tmdbId: true, mediaType: true, title: true, rating: true, ratedAt: true },
+  });
+}
+
+// Regular-season episodes the server holds per series (season 0 — specials —
+// excluded), the larger of the Plex and Jellyfin counts. Only series that could
+// read as quit are asked about, which keeps the IN list short.
+async function episodesOnServer(tmdbIds: number[]): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  if (tmdbIds.length === 0) return out;
+  const rows = await prisma.tVEpisodeCache.groupBy({
+    by: ["tmdbId", "source"],
+    where: { tmdbId: { in: tmdbIds }, seasonNumber: { gte: 1 } },
+    _count: { _all: true },
+  });
+  for (const r of rows) out.set(r.tmdbId, Math.max(out.get(r.tmdbId) ?? 0, r._count._all));
+  return out;
 }
 
 async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promise<Seed[]> {
@@ -589,7 +770,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       take,
     });
 
-  const [windowedRows, watchlistRows, requestRows, traktRows] = await Promise.all([
+  const [windowedRows, watchlistRows, requestRows, traktRows, serverWatchedRows, favoriteRows, ratingRows] = await Promise.all([
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
       : groupHistory(true, MAX_WATCH_HISTORY_SEEDS),
@@ -611,7 +792,14 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
     }),
     // The newest MAX_WATCH_HISTORY_SEEDS are all the merge below can ever keep.
     readTraktHistory(userId, MAX_WATCH_HISTORY_SEEDS),
+    readServerHistory(linkedServerUserIds),
+    readServerFavorites(linkedServerUserIds),
+    readTraktRatings(userId),
   ]);
+
+  // What the viewer said about titles: ratings and favorites (see TASTE_*).
+  const taste = buildTasteSignals(ratingRows, favoriteRows);
+  const vetoed = (tmdbId: number, mediaType: MediaType) => taste.get(candidateKey(tmdbId, mediaType))?.factor === 0;
 
   // Collapse the per-arrInstance duplicates (one user may hold an HD and a 4K
   // row for the same title): rows arrive newest-first, so first-wins is
@@ -653,15 +841,39 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       lastAt: r._max.startedAt,
       count: r._count.tmdbId,
     }));
+  // A disliked title never seeds, and is dropped BEFORE the merge so the slot it
+  // would have held goes to the next most recent watch.
   const historySeeds = mergeHistorySeedRows(
-    serverHistory,
-    traktRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastAt: r.lastWatchedAt, count: r.plays })),
+    serverHistory.filter((r) => !vetoed(r.tmdbId, r.mediaType)),
+    [
+      ...traktRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastAt: r.lastWatchedAt, count: r.plays })),
+      // The servers' own history (guardrail 40c) — reaches past the install.
+      ...serverWatchedRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastAt: r.lastWatchedAt, count: r.plays })),
+    ].filter((r) => !vetoed(r.tmdbId, r.mediaType)),
     MAX_WATCH_HISTORY_SEEDS,
   );
 
   // One `now` for the whole selection: reading the clock per seed would let a
   // slow query change the weights partway down the list.
   const now = Date.now();
+
+  // Series the viewer dropped (see QUIT_SHOW_*). Only series that could qualify
+  // on plays and age are counted against the server, which keeps the read small.
+  const quitCandidates = historySeeds.filter(
+    (r) =>
+      r.mediaType === "TV" &&
+      r.count <= QUIT_SHOW_MAX_PLAYS &&
+      r.lastAt !== null &&
+      now - r.lastAt.getTime() >= QUIT_SHOW_SETTLE_MS &&
+      // A loved series is never "quit".
+      (taste.get(candidateKey(r.tmdbId, r.mediaType))?.factor ?? 1) <= 1,
+  );
+  const episodeCounts = await episodesOnServer(quitCandidates.map((r) => r.tmdbId));
+  const quitKeys = new Set(
+    quitCandidates
+      .filter((r) => isQuitShow(r.count, episodeCounts.get(r.tmdbId) ?? null, r.lastAt, now))
+      .map((r) => candidateKey(r.tmdbId, r.mediaType)),
+  );
 
   // The app's core loop is watchlist -> request -> watch, so one title can sit
   // in all three pools at once — and it must seed exactly ONCE. Priority is
@@ -671,29 +883,57 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
   // identical (1.5), so which one keeps the slot changes nothing but the
   // reason wording, and watchlist keeps it as the earlier-established pool.
   const historyKeys = new Set(historySeeds.map((r) => candidateKey(r.tmdbId, r.mediaType)));
-  const unwatchedListRows = watchlistRows.filter((r) => !historyKeys.has(candidateKey(r.tmdbId, r.mediaType)));
+  const unwatchedListRows = watchlistRows.filter(
+    (r) => !historyKeys.has(candidateKey(r.tmdbId, r.mediaType)) && !vetoed(r.tmdbId, r.mediaType),
+  );
   const listKeys = new Set(unwatchedListRows.map((r) => candidateKey(r.tmdbId, r.mediaType)));
   const novelRequestRows = requestSeedRows.filter((r) => {
     const key = candidateKey(r.tmdbId, r.mediaType);
-    return !historyKeys.has(key) && !listKeys.has(key);
+    return !historyKeys.has(key) && !listKeys.has(key) && !vetoed(r.tmdbId, r.mediaType);
   });
 
+  // A LOVED title the recency-ordered pools did not reach (rated 9/10 years
+  // ago, say) still seeds, from its own pool — newest evidence first, only
+  // titles the viewer is known to have watched (the reason line says "Because
+  // you watched…"). Its type weight already carries the loved factor, so the
+  // taste pass below must not apply it twice.
+  const seededKeys = new Set([...historyKeys, ...listKeys, ...novelRequestRows.map((r) => candidateKey(r.tmdbId, r.mediaType))]);
+  const lovedRows = [...taste.entries()]
+    .filter(([k, t]) => t.factor > 1 && t.watched && !seededKeys.has(k))
+    .sort(([, a], [, b]) => (b.at?.getTime() ?? -Infinity) - (a.at?.getTime() ?? -Infinity))
+    .slice(0, MAX_LOVED_SEEDS)
+    .map(([k, t]) => {
+      const [id, type] = k.split(":");
+      return { tmdbId: Number(id), mediaType: type as MediaType, title: t.title, lastAt: t.at, count: Math.max(1, t.plays) };
+    });
+
+  // Taste multiplies the seed it is about, and a dropped series is dampened.
+  const adjust = (seeds: Seed[]): Seed[] => {
+    for (const s of seeds) {
+      const k = candidateKey(s.tmdbId, s.mediaType);
+      s.weight *= taste.get(k)?.factor ?? 1;
+      if (quitKeys.has(k)) s.weight *= QUIT_SHOW_DAMP;
+    }
+    return seeds;
+  };
+
   return [
-    ...weightSeeds(historySeeds, WATCH_HISTORY_SEED_WEIGHT, "WATCH_HISTORY", now),
+    ...adjust(weightSeeds(historySeeds, WATCH_HISTORY_SEED_WEIGHT, "WATCH_HISTORY", now)),
     // A watchlist entry has no play count; its recency is when it was added.
-    ...weightSeeds(
+    ...adjust(weightSeeds(
       unwatchedListRows.map((r) => ({ ...r, lastAt: r.createdAt })),
       WATCHLIST_SEED_WEIGHT,
       "WATCHLIST",
       now,
-    ),
+    )),
     // A request's recency is when it was placed.
-    ...weightSeeds(
+    ...adjust(weightSeeds(
       novelRequestRows.map((r) => ({ ...r, lastAt: r.createdAt })),
       REQUEST_SEED_WEIGHT,
       "REQUEST",
       now,
-    ),
+    )),
+    ...weightSeeds(lovedRows, WATCH_HISTORY_SEED_WEIGHT * TASTE_LOVED_FACTOR, "WATCH_HISTORY", now),
   ];
 }
 
@@ -709,8 +949,10 @@ const MAX_EXCLUSION_HIDDEN = 10_000;
 // something the user acted on. It is wider than the chosen seeds on purpose:
 // a watchlist entry or old watch that didn't make the seed list must still
 // never come back as a "new" recommendation. Covers:
-//   - the full watchlist and all watched history — the server's AND the
-//     user's imported Trakt history (while they keep it on);
+//   - the full watchlist and all watched history — the live PlayHistory, the
+//     media servers' own history and favorites (ServerWatchedTitle, which
+//     reaches back past the install), and the user's imported Trakt history
+//     and ratings (while they keep it on);
 //   - HiddenItem — "not interested" clicks, so a hidden title never takes up
 //     a stored slot. Read DIRECTLY rather than via getUserHiddenSet: that helper lowercases
 //     its keys to match attach-all's TMDB casing, while candidateKey uses the
@@ -728,7 +970,7 @@ const MAX_EXCLUSION_HIDDEN = 10_000;
 //     titles visible in general discovery: a browse grid states facts about the
 //     catalog, a recommendation is advice to act.
 async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string[]): Promise<Set<string>> {
-  const [watchlistRows, watchedRows, hiddenRows, requestRows, voteRows, blacklistSet, traktWatchedRows] = await Promise.all([
+  const [watchlistRows, watchedRows, hiddenRows, requestRows, voteRows, blacklistSet, traktWatchedRows, serverWatchedRows, ratedRows] = await Promise.all([
     prisma.watchlistItem.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
@@ -763,6 +1005,18 @@ async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string
     getBlacklistSet(),
     // Bounded by MAX_TRAKT_HISTORY_ITEMS at import.
     readTraktHistory(userId),
+    // The servers' own history and favorites (guardrail 40c): a film watched
+    // years before Summonarr was installed is just as watched. Bounded per
+    // identity at import (MAX_SERVER_WATCHED_TITLES).
+    linkedServerUserIds.length === 0
+      ? Promise.resolve([])
+      : prisma.serverWatchedTitle.findMany({
+          where: { mediaServerUserId: { in: linkedServerUserIds } },
+          select: { tmdbId: true, mediaType: true },
+        }),
+    // A title the viewer rated is one they already formed a view of. Bounded by
+    // MAX_TRAKT_RATINGS at import.
+    readTraktRatings(userId),
   ]);
 
   // blacklistKey (blacklist.ts) emits the same "{tmdbId}:{MOVIE|TV}" shape as
@@ -776,6 +1030,8 @@ async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string
   for (const r of requestRows) known.add(candidateKey(r.tmdbId, r.mediaType));
   for (const r of voteRows) known.add(candidateKey(r.tmdbId, r.mediaType));
   for (const r of traktWatchedRows) known.add(candidateKey(r.tmdbId, r.mediaType));
+  for (const r of serverWatchedRows) known.add(candidateKey(r.tmdbId, r.mediaType));
+  for (const r of ratedRows) known.add(candidateKey(r.tmdbId, r.mediaType));
   return known;
 }
 
@@ -929,12 +1185,23 @@ export async function computeRecommendationsForUser(
   // A read failure here is not recoverable by trying somewhere else — there is
   // nowhere else. It surfaces as zero coverage, which `conclusive` below turns
   // into "keep yesterday's shelf".
-  const graphed = await readGraphSuggestions(
-    seeds.map((s) => ({ tmdbId: s.tmdbId, mediaType: s.mediaType })),
-  ).catch((err) => {
-    console.error("[recommendations] graph read failed; this user keeps their existing shelf:", err);
-    return new Map<string, TmdbMedia[]>();
-  });
+  const seedTitles = seeds.map((s) => ({ tmdbId: s.tmdbId, mediaType: s.mediaType }));
+  const [graphed, coWatched] = await Promise.all([
+    readGraphSuggestions(seedTitles).catch((err) => {
+      console.error("[recommendations] graph read failed; this user keeps their existing shelf:", err);
+      return new Map<string, TmdbMedia[]>();
+    }),
+    // Supplementary, and OFF by default (FOR_YOU_COWATCH_FEATURE_KEY): with the
+    // switch off nothing about any other viewer is read and the shelf is the
+    // viewer's own. A failed read just means no co-watch votes this cycle; it
+    // never touches coverage, so it can never make a shelf look complete.
+    isFeatureEnabled(FOR_YOU_COWATCH_FEATURE_KEY)
+      .then((on) => (on ? readCoWatchSuggestions(seedTitles) : new Map<string, TmdbMedia[]>()))
+      .catch((err) => {
+        console.warn("[recommendations] co-watch read failed; ranking on TMDB suggestions alone:", err);
+        return new Map<string, TmdbMedia[]>();
+      }),
+  ]);
 
   // How many of this user's seeds the graph could actually answer for. The whole
   // trustworthiness of the result rests on this ratio (see `conclusive`), and it
@@ -955,10 +1222,79 @@ export async function computeRecommendationsForUser(
   // candidates are returned; none has a column. voteCount matters because the
   // graph's stored verdict leaves TMDB out, so this is the ONLY place the TMDB
   // term's vote count can come from (withTmdbTerm).
-  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number; contributions: number[]; seedRefs: { seed: RecommendationReasonSeed; contribution: number }[] }>();
+  // seedKeys is the same kind of bookkeeping: the distinct seeds behind a
+  // candidate, so a seed that reaches it through BOTH TMDB and the server's
+  // co-watching counts once in seedCount.
+  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number; contributions: number[]; seedRefs: { seed: RecommendationReasonSeed; contribution: number }[]; seedKeys: Set<string> }>();
   // Weighted language tally, accumulated in the same pass that scores.
   const languageWeight = new Map<string, number>();
   let totalLanguageWeight = 0;
+
+  // One suggestion's vote for one candidate.
+  const credit = (seed: Seed, item: TmdbMedia, contribution: number) => {
+    const mediaType = toDbMediaType(item.mediaType);
+    const key = candidateKey(item.id, mediaType);
+    if (excluded.has(key)) return;
+    const seedKey = candidateKey(seed.tmdbId, seed.mediaType);
+
+    // Tallied AFTER the exclusion check above, deliberately: excluded titles
+    // are ones the viewer has already watched or listed, so counting them
+    // would shape the profile around a back catalogue that can never appear
+    // in the output anyway. The profile describes the CANDIDATE pool.
+    if (item.originalLanguage) {
+      languageWeight.set(item.originalLanguage, (languageWeight.get(item.originalLanguage) ?? 0) + contribution);
+      totalLanguageWeight += contribution;
+    }
+
+    const existing = scored.get(key);
+    if (existing) {
+      existing.contributions.push(contribution);
+      existing.seedRefs.push({ seed: reasonSeedOf(seed), contribution });
+      if (!existing.seedKeys.has(seedKey)) {
+        existing.seedKeys.add(seedKey);
+        existing.seedCount++;
+      }
+      // Keep the STRONGEST contribution as the reason, not the first one
+      // encountered — seeds are not visited in weight order, so first-wins
+      // would name an essentially arbitrary title. Comparing
+      // CONTRIBUTION rather than raw seed weight is deliberate: a slightly
+      // weaker seed that ranks this title first is a better explanation than a
+      // strong seed that had it 40th. Ties keep the incumbent.
+      if (contribution > existing.reasonWeight) {
+        existing.reasonWeight = contribution;
+        existing.reasonTmdbId = seed.tmdbId;
+        existing.reasonTitle = seed.title;
+        existing.reasonMediaType = seed.mediaType;
+        existing.reasonSource = seed.source;
+      }
+      return;
+    }
+    scored.set(key, {
+      tmdbId: item.id,
+      mediaType,
+      title: item.title,
+      overview: item.overview || null,
+      posterPath: item.posterPath,
+      backdropPath: item.backdropPath,
+      releaseDate: item.releaseDate,
+      voteAverage: item.voteAverage,
+      score: contribution,
+      rank: 0,
+      reasonTmdbId: seed.tmdbId,
+      reasonTitle: seed.title,
+      reasonMediaType: seed.mediaType,
+      reasonSource: seed.source,
+      reasonWeight: contribution,
+      seedCount: 1,
+      reasonSeeds: null,
+      language: item.originalLanguage ?? undefined,
+      voteCount: item.voteCount ?? 0,
+      contributions: [contribution],
+      seedRefs: [{ seed: reasonSeedOf(seed), contribution }],
+      seedKeys: new Set([seedKey]),
+    });
+  };
+
   seeds.forEach((seed) => {
     const seedKey = candidateKey(seed.tmdbId, seed.mediaType);
     const suggestions = graphed.get(seedKey);
@@ -966,74 +1302,24 @@ export async function computeRecommendationsForUser(
     // IS an answer ("TMDB knows of nothing similar") and counts as covered — the
     // distinction is the node stamp, and collapsing the two would make a title
     // with genuinely no suggestions look like an outage forever.
-    if (suggestions === undefined) return;
-    coveredSeeds++;
-    // position is the index within THIS seed's suggestion list, so it has to be
-    // counted over the raw list — not over the survivors of the exclusion filter
-    // below, which would silently promote every item sitting behind a title the
-    // user had already watched.
-    let position = -1;
-    for (const item of suggestions) {
-      position++;
-      rawSuggestions++;
-      const mediaType = toDbMediaType(item.mediaType);
-      const key = candidateKey(item.id, mediaType);
-      if (excluded.has(key)) continue;
-      const contribution = seed.weight * positionFactor(position);
-
-      // Tallied AFTER the exclusion check above, deliberately: excluded titles
-      // are ones the viewer has already watched or listed, so counting them
-      // would shape the profile around a back catalogue that can never appear
-      // in the output anyway. The profile describes the CANDIDATE pool.
-      if (item.originalLanguage) {
-        languageWeight.set(item.originalLanguage, (languageWeight.get(item.originalLanguage) ?? 0) + contribution);
-        totalLanguageWeight += contribution;
-      }
-
-      const existing = scored.get(key);
-      if (existing) {
-        existing.contributions.push(contribution);
-        existing.seedRefs.push({ seed: reasonSeedOf(seed), contribution });
-        existing.seedCount++;
-        // Keep the STRONGEST contribution as the reason, not the first one
-        // encountered — seeds are not visited in weight order, so first-wins
-        // would name an essentially arbitrary title. Comparing
-        // CONTRIBUTION rather than raw seed weight is deliberate: a slightly
-        // weaker seed that ranks this title first is a better explanation than a
-        // strong seed that had it 40th. Ties keep the incumbent.
-        if (contribution > existing.reasonWeight) {
-          existing.reasonWeight = contribution;
-          existing.reasonTmdbId = seed.tmdbId;
-          existing.reasonTitle = seed.title;
-          existing.reasonMediaType = seed.mediaType;
-          existing.reasonSource = seed.source;
-        }
-        continue;
-      }
-      scored.set(key, {
-        tmdbId: item.id,
-        mediaType,
-        title: item.title,
-        overview: item.overview || null,
-        posterPath: item.posterPath,
-        backdropPath: item.backdropPath,
-        releaseDate: item.releaseDate,
-        voteAverage: item.voteAverage,
-        score: contribution,
-        rank: 0,
-        reasonTmdbId: seed.tmdbId,
-        reasonTitle: seed.title,
-        reasonMediaType: seed.mediaType,
-        reasonSource: seed.source,
-        reasonWeight: contribution,
-        seedCount: 1,
-        reasonSeeds: null,
-        language: item.originalLanguage ?? undefined,
-        voteCount: item.voteCount ?? 0,
-        contributions: [contribution],
-        seedRefs: [{ seed: reasonSeedOf(seed), contribution }],
+    if (suggestions !== undefined) {
+      coveredSeeds++;
+      // position is the index within THIS seed's suggestion list, so it has to
+      // be counted over the raw list — not over the survivors of the exclusion
+      // filter, which would silently promote every item sitting behind a title
+      // the user had already watched.
+      suggestions.forEach((item, position) => {
+        rawSuggestions++;
+        credit(seed, item, seed.weight * positionFactor(position));
       });
     }
+    // The server's own co-watching (COWATCH_WEIGHT). Deliberately OUTSIDE the
+    // coverage count and rawSuggestions: `conclusive` asks whether TMDB's half
+    // of the graph answered, and co-watch edges must never let a shelf built
+    // during a TMDB outage pass for a complete one.
+    coWatched.get(seedKey)?.forEach((item, position) => {
+      credit(seed, item, seed.weight * COWATCH_WEIGHT * positionFactor(position));
+    });
   });
 
   // ── Corroboration decay-sum ─────────────────────────────────────────────
@@ -1091,7 +1377,7 @@ export async function computeRecommendationsForUser(
     .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage)
     .slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER)
     .map(
-      ({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, contributions: _contributions, seedRefs, ...c }, i): RecommendationCandidate => ({
+      ({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, contributions: _contributions, seedKeys: _seedKeys, seedRefs, ...c }, i): RecommendationCandidate => ({
         ...c,
         rank: i,
         reasonSeeds: orderReasonSeeds(seedRefs),
@@ -1257,6 +1543,10 @@ export interface WarmRecommendationsResult {
   // case — see below.
   graphFailed: boolean;
   graph: GraphRefreshResult;
+  // Phase 0: the media servers' own history and favorites (guardrail 40c).
+  // Best-effort — its failures are reported here and logged, but never fail the
+  // run: seeds simply read what was stored before.
+  serverHistory: ServerHistoryImportResult;
 }
 
 const NO_GRAPH: GraphRefreshResult = {
@@ -1271,9 +1561,21 @@ const NO_GRAPH: GraphRefreshResult = {
   titlesRated: 0,
   verdictsDeferred: 0,
   ratingsFailed: 0,
+  coWatchEdges: 0,
 };
 
 export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = {}): Promise<WarmRecommendationsResult> {
+  // ── Phase 0: bring the servers' own watch records up to date ─────────────
+  // BEFORE seeds are selected, so this run's seeds and exclusions see them. It
+  // has its own time budget inside the lock's, reads incrementally (one small
+  // request per Jellyfin user and one short Plex walk per server once the first
+  // import is done), and never throws: an unreachable server leaves its stored
+  // rows in place and the run carries on.
+  const serverHistory = await importServerWatchHistory({ signal: opts.signal }).catch((err): ServerHistoryImportResult => {
+    console.error("[recommendations] server history import failed; seeding from what is stored:", err);
+    return { servers: 0, identities: 0, failedServers: 1, failedIdentities: 0, unresolved: 0, aborted: false };
+  });
+
   const userIds = await getActiveUserIds();
 
   // ── Phase 1: decide what every user will read ────────────────────────────
@@ -1321,6 +1623,7 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
       candidatesWritten: 0,
       graphFailed: true,
       graph: { ...NO_GRAPH },
+      serverHistory,
     };
   }
 
@@ -1397,6 +1700,7 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
     candidatesWritten,
     graphFailed: false,
     graph,
+    serverHistory,
   };
 }
 

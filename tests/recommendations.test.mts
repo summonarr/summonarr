@@ -110,9 +110,10 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS, mergeHistorySeedRows } =
+const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS, mergeHistorySeedRows, tasteFactor, isQuitShow, TASTE_MEH_FACTOR, TASTE_LOVED_FACTOR, QUIT_SHOW_SETTLE_MS } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
+const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { refreshRecommendationGraph, prewarmSuggestionEdges } = await import("../src/lib/recommendation-graph.ts");
 const { getOmdbRatings, isOmdbQuotaLocked } = await import("../src/lib/omdb.ts");
 
@@ -421,10 +422,20 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Pro
 // `omdbKeyConfigured` switches on a key so the OMDB path can actually be
 // reached — needed only by the transport-failure test at the bottom of the file.
 let omdbKeyConfigured = false;
+// feature.behavior.forYouCoWatch (guardrail 40c) — OFF unless a test turns it on,
+// exactly like a fresh install. Call setCoWatch, which also drops the flag cache.
+let coWatchOn = false;
+function setCoWatch(on: boolean): void {
+  coWatchOn = on;
+  invalidateFeatureFlagCache();
+}
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) =>
     omdbKeyConfigured && args.where.key === "omdbApiKey" ? { key: "omdbApiKey", value: "test-omdb-key" } : null,
-  findMany: async () => [],
+  findMany: async (args?: { where?: { key?: { in?: string[] } } }) =>
+    coWatchOn && args?.where?.key?.in?.includes("feature.behavior.forYouCoWatch")
+      ? [{ key: "feature.behavior.forYouCoWatch", value: "true" }]
+      : [],
 });
 
 // ── exclusion sources (collectKnownTitleKeys) ───────────────────────────────
@@ -498,6 +509,54 @@ shadowPrismaModel(prisma, "traktWatchedItem", {
 });
 shadowPrismaModel(prisma, "blacklistItem", {
   findMany: async () => blacklistItems.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
+});
+
+// ── guardrail 40c inputs: the servers' own history, Trakt ratings, episodes ──
+type ServerWatchedRow = { mediaServerUserId: string; tmdbId: number; mediaType: MT; title: string; plays: number; lastWatchedAt: Date | null; favorite: boolean };
+let serverWatchedRows: ServerWatchedRow[] = [];
+shadowPrismaModel(prisma, "serverWatchedTitle", {
+  findMany: async (args: {
+    where: { mediaServerUserId: { in: string[] }; plays?: { gt: number }; favorite?: boolean };
+    orderBy?: { lastWatchedAt: { sort: "desc"; nulls: "last" } };
+    take?: number;
+  }) => {
+    const ids = new Set(args.where.mediaServerUserId.in);
+    let rows = serverWatchedRows.filter(
+      (r) =>
+        ids.has(r.mediaServerUserId) &&
+        (args.where.plays === undefined || r.plays > args.where.plays.gt) &&
+        (args.where.favorite === undefined || r.favorite === args.where.favorite),
+    );
+    if (args.orderBy) rows = [...rows].sort((a, b) => (b.lastWatchedAt?.getTime() ?? -Infinity) - (a.lastWatchedAt?.getTime() ?? -Infinity));
+    if (args.take != null) rows = rows.slice(0, args.take);
+    return rows.map((r) => ({ ...r }));
+  },
+});
+type TraktRatingFixture = { userId: string; tmdbId: number; mediaType: MT; title: string; rating: number; ratedAt: Date };
+let traktRatingRows: TraktRatingFixture[] = [];
+shadowPrismaModel(prisma, "traktRating", {
+  // Gated exactly like the history read: the toggle must ride in the where.
+  findMany: async (args: { where: { userId: string; user?: { traktConnection?: { is?: { historySeeds?: boolean } } } } }) => {
+    const gated = args.where.user?.traktConnection?.is?.historySeeds === true;
+    return traktRatingRows
+      .filter((r) => r.userId === args.where.userId && !(gated && traktHistoryOff.has(r.userId)))
+      .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, rating: r.rating, ratedAt: r.ratedAt }));
+  },
+});
+let episodeCacheRows: { source: string; tmdbId: number; seasonNumber: number; episodeNumber: number }[] = [];
+shadowPrismaModel(prisma, "tVEpisodeCache", {
+  groupBy: async (args: { where: { tmdbId: { in: number[] }; seasonNumber: { gte: number } } }) => {
+    const ids = new Set(args.where.tmdbId.in);
+    const counts = new Map<string, { tmdbId: number; source: string; n: number }>();
+    for (const e of episodeCacheRows) {
+      if (!ids.has(e.tmdbId) || e.seasonNumber < args.where.seasonNumber.gte) continue;
+      const k = `${e.tmdbId}:${e.source}`;
+      const g = counts.get(k) ?? { tmdbId: e.tmdbId, source: e.source, n: 0 };
+      g.n++;
+      counts.set(k, g);
+    }
+    return [...counts.values()].map((g) => ({ tmdbId: g.tmdbId, source: g.source, _count: { _all: g.n } }));
+  },
 });
 
 // ── the SERVER-WIDE recommendation graph (recommendation-graph.ts) ──────────
@@ -633,6 +692,64 @@ shadowPrismaModel(prisma, "titleSuggestion", {
     return { count: args.data.length };
   },
 });
+
+// The server's co-watch edges (guardrail 40c) — same row shape as an edge, plus
+// the viewer count.
+let coWatchRows: (EdgeRow & { viewers: number })[] = [];
+let coWatchDeletes = 0;
+let coWatchReads = 0;
+shadowPrismaModel(prisma, "coWatchSuggestion", {
+  findMany: async (args: { where: { OR: { sourceTmdbId: number; sourceMediaType: MT }[] } }) => (
+    coWatchReads++,
+    coWatchRows.filter((e) => args.where.OR.some((c) => c.sourceTmdbId === e.sourceTmdbId && c.sourceMediaType === e.sourceMediaType))
+  ),
+  groupBy: async (args: { where: { OR: { sourceTmdbId: number; sourceMediaType: MT }[] } }) => {
+    const seen = new Set<string>();
+    const out: KeyPair[] = [];
+    for (const e of coWatchRows) {
+      if (!args.where.OR.some((c) => c.sourceTmdbId === e.sourceTmdbId && c.sourceMediaType === e.sourceMediaType)) continue;
+      const k = `${e.tmdbId}:${e.mediaType}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ tmdbId: e.tmdbId, mediaType: e.mediaType });
+    }
+    return out;
+  },
+  deleteMany: async () => {
+    coWatchDeletes++;
+    const n = coWatchRows.length;
+    coWatchRows = [];
+    return { count: n };
+  },
+  createMany: async (args: { data: (EdgeRow & { viewers: number })[] }) => {
+    coWatchRows.push(...args.data);
+    return { count: args.data.length };
+  },
+});
+
+function seedCoWatch(
+  source: { tmdbId: number; mediaType: MT },
+  targets: { tmdbId: number; mediaType: MT; title?: string }[],
+): void {
+  targets.forEach((t, position) => {
+    coWatchRows.push({
+      sourceTmdbId: source.tmdbId,
+      sourceMediaType: source.mediaType,
+      tmdbId: t.tmdbId,
+      mediaType: t.mediaType,
+      position,
+      viewers: 3,
+      title: t.title ?? `CoWatched ${t.tmdbId}`,
+      overview: null,
+      posterPath: null,
+      backdropPath: null,
+      releaseDate: null,
+      voteAverage: 7,
+      voteCount: 500,
+      originalLanguage: "en",
+    });
+  });
+}
 
 shadowPrismaModel(prisma, "recommendationTitle", {
   // Three query shapes share this delegate, discriminated by the where clause:
@@ -998,6 +1115,13 @@ beforeEach(() => {
   traktWatchedRows = [];
   traktHistoryOff = new Set();
   traktReadTakes = [];
+  serverWatchedRows = [];
+  traktRatingRows = [];
+  episodeCacheRows = [];
+  coWatchRows = [];
+  coWatchDeletes = 0;
+  coWatchReads = 0;
+  setCoWatch(false);
   // blacklist.ts caches its resolved set module-globally for 30s — without this
   // a test's blacklist rows leak into every later test in the file.
   invalidateBlacklistCache();
@@ -3262,4 +3386,369 @@ test("a null verdict is NOT stamped while a provider is locked out — an outage
       "no node may carry a verdict earned by an outage — they are re-asked next run",
     );
   }
+});
+
+// ── edge write: Postgres-side timeouts and the failure / slow-page logs ─────
+//
+// Production logged a bare P2028 naming recommendationTitle.createMany, while
+// the 39s actually went into the edge delete/insert before it. The page write
+// now sets Postgres timeouts first and, on failure, logs which run, the cause
+// and the time per step — once, with the old edges left in place.
+
+const { Prisma: PrismaNs } = await import("../src/generated/prisma/index.js");
+
+// The exact shape Prisma 7.10 + adapter-pg throws for a lock_timeout cancel
+// (captured from a live Postgres 17).
+function lockTimeoutError(): Error {
+  return new PrismaNs.PrismaClientKnownRequestError(
+    "\nInvalid `prisma.titleSuggestion.createMany()` invocation:\n\n\nDatabase error. Code: `55P03`. Message: `canceling statement due to lock timeout`",
+    {
+      code: "P2039",
+      clientVersion: "7.10.1",
+      meta: { modelName: "TitleSuggestion", driverAdapterError: { cause: { originalCode: "55P03", kind: "postgres" } } },
+    },
+  );
+}
+
+async function withConsole(run: () => Promise<void>): Promise<{ errors: unknown[][]; warns: unknown[][] }> {
+  const errors: unknown[][] = [];
+  const warns: unknown[][] = [];
+  const realError = console.error;
+  const realWarn = console.warn;
+  console.error = (...args: unknown[]) => void errors.push(args);
+  console.warn = (...args: unknown[]) => void warns.push(args);
+  try {
+    await run();
+  } finally {
+    console.error = realError;
+    console.warn = realWarn;
+  }
+  return { errors, warns };
+}
+
+const edgeWriteLines = (lines: unknown[][], marker: string) =>
+  lines.filter((args) => typeof args[0] === "string" && (args[0] as string).includes(marker));
+
+test("edge write: Postgres timeouts are the transaction's FIRST statement, as SET LOCAL", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  const order: string[] = [];
+  const raw: { text: string; values: unknown[] }[] = [];
+  const realExecuteRaw = (prisma as unknown as Record<string, unknown>).$executeRaw;
+  const realDelete = prisma.titleSuggestion.deleteMany;
+  (prisma as unknown as Record<string, unknown>).$executeRaw = async (q: { text: string; values: unknown[] }) => {
+    order.push("executeRaw");
+    raw.push({ text: q.text, values: q.values });
+    return 0;
+  };
+  (prisma.titleSuggestion as { deleteMany: unknown }).deleteMany = async (args: never) => {
+    order.push("deleteMany");
+    return (realDelete as (a: never) => Promise<unknown>)(args);
+  };
+  try {
+    const result = await refreshRecommendationGraph();
+    assert.equal(result.sourcesRefreshed, 1);
+  } finally {
+    (prisma as unknown as Record<string, unknown>).$executeRaw = realExecuteRaw;
+    (prisma.titleSuggestion as { deleteMany: unknown }).deleteMany = realDelete;
+  }
+  assert.deepEqual(order.slice(0, 2), ["executeRaw", "deleteMany"], "timeouts go first, before the delete takes any lock");
+  assert.match(raw[0].text, /set_config\('statement_timeout', \$1, true\), set_config\('lock_timeout', \$2, true\)/);
+  assert.deepEqual(raw[0].values, ["20000ms", "10000ms"]);
+});
+
+test("edge write: a failed page logs ONE line — run, cause, time per step — and stamps nothing", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+
+  const realCreate = prisma.titleSuggestion.createMany;
+  (prisma.titleSuggestion as { createMany: unknown }).createMany = async () => {
+    mock.timers.tick(10_000);
+    throw lockTimeoutError();
+  };
+  let result!: Awaited<ReturnType<typeof refreshRecommendationGraph>>;
+  const { errors } = await withConsole(async () => {
+    try {
+      result = await refreshRecommendationGraph();
+    } finally {
+      (prisma.titleSuggestion as { createMany: unknown }).createMany = realCreate;
+    }
+  });
+
+  assert.equal(result.sourcesFailed, 1);
+  assert.equal(result.sourcesRefreshed, 0);
+  const lines = edgeWriteLines(errors, "edge write failed");
+  assert.equal(lines.length, 1, "one line per failed page — the caller does not log it again");
+  assert.equal(lines[0].length, 1, "a classified cause logs the line alone, not the whole Prisma error");
+  const line = lines[0][0] as string;
+  assert.match(line, /^\[recommendation-graph\] edge write failed \(speculative\) for 1 sources, 1 edges: /);
+  assert.match(line, /waited past the 10\.0s lock timeout for rows another transaction holds/);
+  assert.match(
+    line,
+    /Time by step: start transaction 0\.0s, set timeouts 0\.0s, delete old edges 0\.0s, insert 1 edges 10\.0s\./,
+    "the step that took the time is named, not the one after it",
+  );
+  // The stub transaction cannot roll back; what matters here is that nothing
+  // past the failure ran: no new target node, no stamp.
+  assert.equal(nodeRows.some((n) => n.tmdbId === 500), false, "no target node from the failed page");
+  assert.equal(nodeRows.find((n) => n.tmdbId === 10)?.suggestionsRefreshedAt ?? null, null, "the source is not stamped as built");
+});
+
+test("edge write: an unclassified failure keeps the full error beside the line", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  const boom = new Error("something new");
+  const realCreate = prisma.titleSuggestion.createMany;
+  (prisma.titleSuggestion as { createMany: unknown }).createMany = async () => {
+    throw boom;
+  };
+  const { errors } = await withConsole(async () => {
+    try {
+      await refreshRecommendationGraph();
+    } finally {
+      (prisma.titleSuggestion as { createMany: unknown }).createMany = realCreate;
+    }
+  });
+  const lines = edgeWriteLines(errors, "edge write failed");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0][0] as string, /: something new\. Time by step: /);
+  assert.equal(lines[0][1], boom, "an unknown cause keeps its stack");
+});
+
+test("edge write: a slow page warns ONCE per pass, naming the slowest page's steps", async () => {
+  // Two pages' worth of sources, each page slow — still one warning.
+  libraryRows = Array.from({ length: 60 }, (_, i) => ({ tmdbId: 1000 + i, mediaType: "MOVIE" as const, serverInstance: "" }));
+  for (let i = 0; i < 60; i++) suggestionsFor.set(`movie:${1000 + i}`, [movieItem(5000 + i)]);
+  let pageNo = 0;
+  const realCreate = prisma.titleSuggestion.createMany;
+  (prisma.titleSuggestion as { createMany: unknown }).createMany = async (args: never) => {
+    pageNo++;
+    mock.timers.tick(pageNo === 1 ? 11_000 : 14_000);
+    return (realCreate as (a: never) => Promise<unknown>)(args);
+  };
+  const { warns, errors } = await withConsole(async () => {
+    try {
+      await refreshRecommendationGraph();
+    } finally {
+      (prisma.titleSuggestion as { createMany: unknown }).createMany = realCreate;
+    }
+  });
+  assert.equal(pageNo, 2, "two pages were written");
+  assert.equal(edgeWriteLines(errors, "edge write failed").length, 0);
+  const slow = edgeWriteLines(warns, "slowest edge write");
+  assert.equal(slow.length, 1, "one warning per pass, never one per page");
+  assert.match(slow[0][0] as string, /slowest edge write \(speculative\) took 14\.0s of the 30\.0s limit\. Time by step: .*insert 10 edges 14\.0s/);
+});
+
+test("edge write: a healthy page logs nothing", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  const { warns, errors } = await withConsole(async () => {
+    await refreshRecommendationGraph();
+  });
+  assert.equal(edgeWriteLines(warns, "slowest edge write").length, 0);
+  assert.equal(edgeWriteLines(errors, "edge write failed").length, 0);
+});
+
+// ═══ guardrail 40c: the viewer's other records, taste, quit shows, co-watch ══
+
+// The co-watch build's one aggregate runs in Postgres; here it is scripted.
+// Accepts both $queryRaw call shapes (guardrail 23a).
+let coWatchQueryRows: { srcId: number; srcType: string; dstId: number; dstType: string; together: number; position: number }[] = [];
+let coWatchQueries = 0;
+shadowPrismaClientMethod(prisma, "$queryRaw", async () => {
+  coWatchQueries++;
+  return coWatchQueryRows;
+});
+shadowPrismaClientMethod(prisma, "$executeRaw", async () => 0);
+
+function linkUser(): void {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+}
+const realPicks = (r: { candidates: { tmdbId: number; reasonSource: string | null }[] }) =>
+  r.candidates.filter((c) => c.reasonSource !== "TRENDING").map((c) => c.tmdbId);
+
+test("40c server history: a title watched BEFORE the install seeds, and is never recommended back", async () => {
+  linkUser();
+  // No PlayHistory at all — everything this viewer watched predates Summonarr.
+  serverWatchedRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", title: "Old Favourite", plays: 2, lastWatchedAt: daysAgo(400), favorite: false },
+    { mediaServerUserId: "msu1", tmdbId: 11, mediaType: "MOVIE", title: "Seen Long Ago", plays: 1, lastWatchedAt: daysAgo(900), favorite: false },
+    // Another person's identity on the same server: not this viewer's taste.
+    { mediaServerUserId: "msu-other", tmdbId: 90, mediaType: "MOVIE", title: "Someone Else's", plays: 5, lastWatchedAt: daysAgo(1), favorite: false },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(11), movieItem(12)]);
+  suggestionsFor.set("movie:90", [movieItem(91)]);
+
+  const result = await computeSeeded("u1");
+  assert.deepEqual(realPicks(result), [12], "12 from the pre-install seed; 11 was watched on the server, so it is never 'new'");
+  assert.equal(result.candidates.find((c) => c.tmdbId === 12)!.reasonTitle, "Old Favourite");
+});
+
+test("40c server history: the READ-TIME filter drops a stored pick the viewer has since been found to have watched on the server", async () => {
+  // Read through getUserRecommendations, which folds no seeds: the server
+  // history reader itself is what must exclude it.
+  linkUser();
+  userRecRows = [
+    { id: "r1", userId: "u1", tmdbId: 11, mediaType: "MOVIE", title: "Seen Long Ago", overview: null, posterPath: null, backdropPath: null, releaseDate: null, voteAverage: 7, score: 2, rank: 0, computedAt: new Date(T0) },
+    { id: "r2", userId: "u1", tmdbId: 12, mediaType: "MOVIE", title: "New", overview: null, posterPath: null, backdropPath: null, releaseDate: null, voteAverage: 7, score: 1, rank: 1, computedAt: new Date(T0) },
+  ];
+  serverWatchedRows = [{ mediaServerUserId: "msu1", tmdbId: 11, mediaType: "MOVIE", title: "Seen Long Ago", plays: 1, lastWatchedAt: daysAgo(900), favorite: false }];
+  assert.deepEqual((await getUserRecommendations("u1")).map((m) => m.id), [12]);
+  // A favorite with no plays is still a title the viewer knows.
+  serverWatchedRows = [{ mediaServerUserId: "msu1", tmdbId: 12, mediaType: "MOVIE", title: "New", plays: 0, lastWatchedAt: null, favorite: true }];
+  assert.deepEqual((await getUserRecommendations("u1")).map((m) => m.id), [11]);
+  // A Trakt rating means they have seen it too.
+  serverWatchedRows = [];
+  traktRatingRows = [{ userId: "u1", tmdbId: 11, mediaType: "MOVIE", title: "Seen Long Ago", rating: 6, ratedAt: daysAgo(10) }];
+  assert.deepEqual((await getUserRecommendations("u1")).map((m) => m.id), [12]);
+});
+
+test("40c ratings: a title rated 4 or lower never seeds — and only while the Trakt switch is on", async () => {
+  linkUser();
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 20, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) },
+    { mediaServerUserId: "msu1", tmdbId: 21, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) },
+  ];
+  suggestionsFor.set("movie:20", [movieItem(200)]);
+  suggestionsFor.set("movie:21", [movieItem(210)]);
+  traktRatingRows = [{ userId: "u1", tmdbId: 20, mediaType: "MOVIE", title: "Hated It", rating: 3, ratedAt: daysAgo(1) }];
+
+  assert.deepEqual(realPicks(await computeSeeded("u1")), [210], "no 'Because you watched Hated It'");
+
+  traktHistoryOff.add("u1");
+  assert.deepEqual(realPicks(await computeSeeded("u1")).sort(), [200, 210], "switch off ⇒ the rating is not read at all");
+});
+
+test("40c ratings + favorites: a LOVED title outweighs a slightly fresher ordinary one", async () => {
+  linkUser();
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 30, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) },
+    { mediaServerUserId: "msu1", tmdbId: 31, mediaType: "MOVIE", watched: true, startedAt: daysAgo(40) },
+  ];
+  suggestionsFor.set("movie:30", [movieItem(300)]);
+  suggestionsFor.set("movie:31", [movieItem(310)]);
+  assert.deepEqual(realPicks(await computeSeeded("u1")), [300, 310], "baseline: recency decides");
+
+  traktRatingRows = [{ userId: "u1", tmdbId: 31, mediaType: "MOVIE", title: "Loved", rating: 9, ratedAt: daysAgo(40) }];
+  assert.deepEqual(realPicks(await computeSeeded("u1")), [310, 300], "a 9/10 lifts its seed");
+
+  // A Jellyfin favorite says the same thing.
+  traktRatingRows = [];
+  serverWatchedRows = [{ mediaServerUserId: "msu1", tmdbId: 31, mediaType: "MOVIE", title: "Loved", plays: 1, lastWatchedAt: daysAgo(40), favorite: true }];
+  assert.deepEqual(realPicks(await computeSeeded("u1")), [310, 300], "a favorite lifts its seed");
+});
+
+test("40c loved pool: a loved title too old for the history slots still seeds, as WATCH_HISTORY; a 7/10 does not", async () => {
+  linkUser();
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 40, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:40", [movieItem(400)]);
+  suggestionsFor.set("movie:41", [movieItem(410)]);
+  suggestionsFor.set("movie:42", [movieItem(420)]);
+  traktRatingRows = [
+    { userId: "u1", tmdbId: 41, mediaType: "MOVIE", title: "All-Time Great", rating: 10, ratedAt: daysAgo(2000) },
+    { userId: "u1", tmdbId: 42, mediaType: "MOVIE", title: "Fine", rating: 7, ratedAt: daysAgo(2000) },
+  ];
+  const result = await computeSeeded("u1");
+  assert.deepEqual(realPicks(result).sort(), [400, 410]);
+  const pick = result.candidates.find((c) => c.tmdbId === 410)!;
+  assert.equal(pick.reasonTitle, "All-Time Great");
+  assert.equal(pick.reasonSource, "WATCH_HISTORY", "the wire keeps its three seed labels — no new enum value reaches the apps");
+});
+
+test("40c quit shows: a series dropped after two episodes is dampened — never when recent, short or loved", async () => {
+  linkUser();
+  const setup = (opts: { lastDays: number; episodes: number }) => {
+    playHistoryRows = [
+      { mediaServerUserId: "msu1", tmdbId: 50, mediaType: "TV", watched: true, startedAt: daysAgo(opts.lastDays) },
+      { mediaServerUserId: "msu1", tmdbId: 50, mediaType: "TV", watched: true, startedAt: daysAgo(opts.lastDays + 1) },
+      { mediaServerUserId: "msu1", tmdbId: 51, mediaType: "MOVIE", watched: true, startedAt: daysAgo(opts.lastDays) },
+    ];
+    episodeCacheRows = Array.from({ length: opts.episodes }, (_, i) => ({ source: "plex", tmdbId: 50, seasonNumber: 1, episodeNumber: i + 1 }));
+    // Specials never count toward the series' length.
+    episodeCacheRows.push(...Array.from({ length: 30 }, (_, i) => ({ source: "plex", tmdbId: 50, seasonNumber: 0, episodeNumber: i + 1 })));
+  };
+  suggestionsFor.set("tv:50", [tvItem(500)]);
+  suggestionsFor.set("movie:51", [movieItem(510)]);
+
+  // Two plays out of 20 episodes, last touched two months ago: dropped.
+  setup({ lastDays: 60, episodes: 20 });
+  assert.deepEqual(realPicks(await computeSeeded("u1")), [510, 500], "the dropped series' suggestion sinks");
+
+  // Without the damp the two plays out-vote the single movie watch.
+  setup({ lastDays: 60, episodes: 4 });
+  assert.deepEqual(realPicks(await computeSeeded("u1")), [500, 510], "a 4-episode download is too short to judge");
+  setup({ lastDays: 5, episodes: 20 });
+  assert.deepEqual(realPicks(await computeSeeded("u1")), [500, 510], "started last week is being watched, not abandoned");
+  setup({ lastDays: 60, episodes: 20 });
+  traktRatingRows = [{ userId: "u1", tmdbId: 50, mediaType: "TV", title: "Loved Show", rating: 9, ratedAt: daysAgo(60) }];
+  assert.deepEqual(realPicks(await computeSeeded("u1")), [500, 510], "a loved series is never 'quit'");
+});
+
+test("40c co-watch is OFF by default: no other viewer's data is read, and the build clears any old edges", async () => {
+  linkUser();
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 60, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:60", [movieItem(600)]);
+  seedCoWatch({ tmdbId: 60, mediaType: "MOVIE" }, [{ tmdbId: 601, mediaType: "MOVIE" }]);
+
+  const result = await computeSeeded("u1");
+  assert.deepEqual(realPicks(result), [600]);
+  assert.equal(coWatchReads, 0, "the per-viewer pass never reads the shared edges while the switch is off");
+  assert.equal(coWatchQueries, 0, "the build never runs the cross-viewer aggregate while the switch is off");
+  assert.equal(coWatchRows.length, 0, "edges left by an earlier 'on' are deleted, so no shared signal outlives the switch");
+  assert.ok(coWatchDeletes > 0);
+});
+
+test("40c co-watch ON: an edge adds a pick under the viewer's own seed, from local caches only", async () => {
+  linkUser();
+  setCoWatch(true);
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 60, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:60", [movieItem(600)]);
+  coWatchQueryRows = [{ srcId: 60, srcType: "MOVIE", dstId: 601, dstType: "MOVIE", together: 3, position: 0 }];
+  ratingRows.push({
+    key: "movie:601:details",
+    data: JSON.stringify({ id: 601, mediaType: "movie", title: "Co-Watched", overview: "", posterPath: "/p.jpg", backdropPath: null, releaseDate: "2021-01-01", voteAverage: 7, voteCount: 900, originalLanguage: "en" }),
+    expiresAt: new Date(T0 + DAY_MS),
+  });
+  try {
+    const result = await computeSeeded("u1");
+    assert.deepEqual(realPicks(result).sort(), [600, 601]);
+    const pick = result.candidates.find((c) => c.tmdbId === 601)!;
+    assert.equal(pick.reasonTmdbId, 60, "named by the viewer's OWN seed — never 'people here watched'");
+    assert.equal(pick.title, "Co-Watched");
+    assert.ok(!fetchCalls.some((p) => p.includes("/movie/601")), "the display fields came from the local cache, not TMDB");
+    assert.equal(pick.score < result.candidates.find((c) => c.tmdbId === 600)!.score, true, "weighted below a TMDB pick at the same position");
+  } finally {
+    coWatchQueryRows = [];
+  }
+});
+
+test("40c co-watch never counts toward seed coverage — it cannot make a TMDB-outage shelf look complete", async () => {
+  linkUser();
+  setCoWatch(true);
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 60, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  // The graph has NOT been built for the seed (no TMDB edges, no node stamp),
+  // but a co-watch edge exists.
+  seedCoWatch({ tmdbId: 60, mediaType: "MOVIE" }, [{ tmdbId: 601, mediaType: "MOVIE" }]);
+  const result = await computeRecommendationsForUser("u1");
+  assert.equal(result.conclusive, false, "an uncovered seed stays uncovered");
+  assert.ok(result.candidates.some((c) => c.tmdbId === 601), "the co-watch vote itself still counts");
+});
+
+test("40c pure: tasteFactor tiers, and a rating outranks a favorite", () => {
+  assert.equal(tasteFactor(3, false), 0);
+  assert.equal(tasteFactor(4, true), 0, "a favorite cannot rescue a 4/10");
+  assert.equal(tasteFactor(5, false), TASTE_MEH_FACTOR);
+  assert.equal(tasteFactor(7, true), 1, "the explicit 7 wins over the heart");
+  assert.equal(tasteFactor(8, false), TASTE_LOVED_FACTOR);
+  assert.equal(tasteFactor(null, true), TASTE_LOVED_FACTOR);
+  assert.equal(tasteFactor(null, false), 1);
+  const now = T0;
+  const old = new Date(now - QUIT_SHOW_SETTLE_MS - DAY_MS);
+  assert.equal(isQuitShow(2, 20, old, now), true);
+  assert.equal(isQuitShow(5, 100, old, now), false, "more than QUIT_SHOW_MAX_PLAYS");
+  assert.equal(isQuitShow(2, 9, old, now), false, "2/9 is not under the ratio");
+  assert.equal(isQuitShow(2, null, old, now), false, "not on the server ⇒ never judged");
+  assert.equal(isQuitShow(2, 20, null, now), false, "undated ⇒ not provably settled");
 });

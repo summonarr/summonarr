@@ -832,3 +832,23 @@ test("POST /api/push/announce-update (admin) broadcasts to EVERY iOS device acro
   );
   for (const c of relayCalls) assert.equal(c.body.collapseId, "app_update");
 });
+
+test("POST /api/push/test: a web transport failure is a fixed phrase — the SafeFetchError message names the full endpoint the route truncates everywhere else", async () => {
+  const { generateVapidKeys } = await import("../src/lib/web-push.ts");
+  const keys = generateVapidKeys();
+  settings.set("vapidPublicKey", keys.publicKey);
+  settings.set("vapidPrivateKey", keys.privateKey);
+  const web = await mintSession();
+  // A real P-256 point and auth secret, so the send gets past key validation and
+  // reaches the transport — whose only failure here is the scripted fetch throw.
+  const row = seedWebSub(web.userId, "unreachable-endpoint-slug-xyz");
+  row.p256dh = encryptToken(Buffer.from(createECDH("prime256v1").generateKeys()).toString("base64url"));
+  row.auth = encryptToken(Buffer.alloc(16, 7).toString("base64url"));
+  const res = await callRoute(testPost, pushReq("test", { token: web.token }));
+  assert.equal(res.status, 502);
+  const body = (await res.json()) as { results: Array<{ ok: boolean; message?: string }> };
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].ok, false);
+  assert.equal(body.results[0].message, "Could not connect to Web Push");
+  assert.ok(!JSON.stringify(body).includes("unreachable-endpoint-slug-xyz"), JSON.stringify(body));
+});

@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.36.2 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.37.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -171,6 +171,28 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.37.0
+
+**Added**
+
+- Issues: one **Fix file** window replaces Refetch / Replace / Replace file. It reads the files on disk, then leads with the fix that can work: delete and get a new copy, search automatically, or pick a release. Releases the arr turned down only because of the file on disk stay in the list, marked "Not better than what's on disk".
+- For You now learns from each viewer's own records: the Plex and Jellyfin watch history and Jellyfin favorites, Trakt ratings, and shows they quit early. A low rating removes only its own seed. Co-watching across viewers is opt-in and off by default.
+- Settings → Integrations: pick your MDBList plan. Background jobs stop at 25% of the daily limit left so pages still get ratings, and the form shows today's usage.
+
+**Changed**
+
+- MDBList and OMDb pause after repeated timeouts, and a 429 pauses for as long as MDBList says. The pause now applies to page renders as well as cron jobs.
+- Radarr/Sonarr reads retry twice on a reset or refused connection (an arr restart, a stale socket). Writes are never retried.
+- Download and queue checks for TV answer from Sonarr's own TMDB id before a lookup.
+
+**Fixed**
+
+- Votes: the list and the page no longer show titles held only on a server you have no access to, or other voters' reasons about them.
+- Delegates no longer see on-disk file paths in Fix match, a Jellyfin host and port in server diagnostics, or full quality-profile data. Issue reply emails no longer reveal an admin's email. Discord `/status` skips deactivated accounts, and deleting a passkey takes the per-user two-factor lock.
+- Boot syncs no longer log pg's "already executing a query" warning, and library inserts stay under Postgres's bind-parameter limit.
+- A slow For You graph write fails fast inside Postgres instead of holding locks past the transaction timeout, and a failed page logs one line saying why.
+- An unreachable push relay is logged instead of a bare 5xx.
 
 ### v0.36.2
 

@@ -55,7 +55,7 @@ The unit suite (`npm test`, Node's built-in `node:test`, files in [tests/](tests
 - **recentOnly** (default for Jellyfin) — incremental insert-only, bounded by a 2-hour `MinDateLastSaved` window (`RECENT_WINDOW_MS`). Intentionally wider than `SYNC_INTERVAL=3600s` so one missed run is survivable.
 
 **Batch writes** — [src/lib/cron-auth.ts](src/lib/cron-auth.ts)
-- `batchCreateMany(tx, rows)` chunks inserts into `CREATE_MANY_BATCH = 5_000`.
+- `batchCreateMany(tx, rows)` chunks inserts into at most `CREATE_MANY_BATCH = 5_000` rows, fewer for wide rows: `createManyBatchSize` keeps each call under Postgres's 32,766 bind parameters so it stays ONE INSERT (guardrail 23c).
 - `BATCH_TX_TIMEOUT = 30_000` — always pass this to `prisma.$transaction(..., { timeout: BATCH_TX_TIMEOUT })` for library-sized writes.
 
 **`isCronAuthorized`** — same file. Accepts an admin session *or* `Authorization: Bearer ${CRON_SECRET}`. Every sync/cron route funnels through this — touch carefully.
@@ -79,7 +79,7 @@ The unit suite (`npm test`, Node's built-in `node:test`, files in [tests/](tests
 - `recordCompletedSession()` ingests when an `ActiveSession` completes and writes a `PlayHistory` row with full playback metrics (duration, pause, codec, resolution, bitrate, device, IP, etc).
 - `getActivityCalendarUncached()` (~line 1892) backs the GitHub-style 365-day heatmap in [src/components/admin/activity-calendar.tsx](src/components/admin/activity-calendar.tsx). A `$1` placeholder offset bug in its filtered-query path was fixed — the dynamic SQL builder starts parameters at `$1`, not `$2`.
 
-**"For You" recommendations** — [src/lib/recommendations.ts](src/lib/recommendations.ts) + [src/lib/recommendation-graph.ts](src/lib/recommendation-graph.ts) + [src/lib/recommendation-quality.ts](src/lib/recommendation-quality.ts)
+**"For You" recommendations** — [src/lib/recommendations.ts](src/lib/recommendations.ts) + [src/lib/recommendation-graph.ts](src/lib/recommendation-graph.ts) + [src/lib/recommendation-quality.ts](src/lib/recommendation-quality.ts) + [src/lib/server-watch-history-data.ts](src/lib/server-watch-history-data.ts) (the servers' own history + favorites, phase 0 of the warm run). Built from the viewer's own records; cross-viewer co-watching is opt-in (`feature.behavior.forYouCoWatch`, default OFF) — guardrail 40c.
 
 Detail: [docs/architecture/for-you-recommendations.md](docs/architecture/for-you-recommendations.md).
 
@@ -119,7 +119,7 @@ Detail: [docs/architecture/request-pick-release.md](docs/architecture/request-pi
 
 Detail: [docs/architecture/request-why-status.md](docs/architecture/request-why-status.md).
 
-**Issue "Replace file"** — `GET/POST /api/issues/[id]/files` (ADMIN — deleting files is ADMIN-only; ISSUE_ADMIN keeps Refetch and Replace-release), rules in [issue-replace.ts](src/lib/issue-replace.ts), panel in [issue-actions.tsx](src/components/admin/issue-actions.tsx).
+**Issue "Fix file" / Replace file** — one "Fix file" window ([issue-actions.tsx](src/components/admin/issue-actions.tsx), rules in [issue-fix.ts](src/lib/issue-fix.ts)) in place of the old Refetch / Replace / Replace file buttons: it reads the files on disk (ADMIN), then leads with the fix that can work — delete and get a new copy (`GET/POST /api/issues/[id]/files`, ADMIN-only; rules in [issue-replace.ts](src/lib/issue-replace.ts)), search automatically (`PATCH { refetch }`) or pick a release (`/api/issues/[id]/releases`). ISSUE_ADMIN keeps the search and the release list. The routes and their iOS wire contracts are unchanged.
 
 Detail: [docs/architecture/issue-replace-file.md](docs/architecture/issue-replace-file.md).
 
@@ -225,7 +225,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - An instance with no secret gets one generated, create-if-absent (`setting.createMany` + `skipDuplicates`, encrypted by the Prisma extension — guardrail 7a), so two setups racing end on ONE secret instead of the second stranding the first hook's token. The generation is audited the moment it commits, even if the arr then refuses the hook. The default instance reuses the legacy shared `webhookSecret` when it has no own secret, exactly as the handlers resolve it.
     - An existing Connect entry pointing at `/api/webhooks/<service>` is updated IN PLACE (PUT), keeping the admin's name, tags and extra events; only the URL and Summonarr's handled events (`WEBHOOK_EVENTS`) are set — never a second entry.
 3. **Schema-first Prisma.** No migrations directory exists. Schema changes are applied with `prisma db push`, then `prisma generate`. Do not scaffold `prisma migrate` workflows.
-4. **Bulk writes must use `batchCreateMany` + `BATCH_TX_TIMEOUT`.** Raw `createMany` on library-sized datasets blows transaction timeouts. Always chunk via `batchCreateMany` and pass `{ timeout: BATCH_TX_TIMEOUT }` to `$transaction`.
+4. **Bulk writes must use `batchCreateMany` + `BATCH_TX_TIMEOUT`.** Raw `createMany` on library-sized datasets blows transaction timeouts. Always chunk via `batchCreateMany` and pass `{ timeout: BATCH_TX_TIMEOUT }` to `$transaction`. Prisma's timeout never reaches Postgres (it queues a ROLLBACK behind the running statement, which keeps its locks until it finishes), so a transaction that must not overrun can call `setBatchTxTimeouts(tx)` ([cron-auth.ts](src/lib/cron-auth.ts)) first: Postgres-side statement and lock timeouts, below the 30s. Opt-in only — `lock_timeout` also bounds `pg_advisory_xact_lock` waits, so NEVER use it in a transaction that serializes on an advisory lock. Diagnose a failure with `describeTxFailure` + `txTrace` ([tx-diagnostics.ts](src/lib/tx-diagnostics.ts)): a P2028 names the query that started AFTER the deadline, not the slow one. The recommendation graph's per-page edge write is the user.
 5. **Do not lower `ARR_FETCH_MAX_BYTES` (50 MB)** and do not bypass `arrFetch` with bare `fetch` for Radarr/Sonarr calls. The cap exists because large libraries silently truncated at 10 MB.
 5a. **Pick the right `safe-fetch` helper.** Never call `fetch` directly for outbound HTTP. Hardcoded third-party URL → `safeFetchTrusted(url, { allowedHosts: [...] })`. URL persisted in `Setting` (Radarr/Sonarr/Jellyfin/Plex server) → `safeFetchAdminConfigured(url)`. URL from end-user input → `safeFetch(url)`. The `allowedHosts` arg on `safeFetchTrusted` is required and exists so a future code change can't accidentally fan that path out to user-controlled hosts.
 5b. **Sole allowed direct `fetch` (internal loopback)**: The *only* exception to 5a is the controlled loopback in `src/lib/internal-trigger.ts` (`triggerFullSync`). It is used exclusively by the Plex SSE timeline handler (`plex-events.ts`) to drive a full orchestrator run (`/api/sync`) so that the advisory lock (2000), `withCronRunRecording`, `isCronAuthorized`, and `LIBRARY_SYNC` audit path are identical to an external cron. Target is always `http://127.0.0.1:${PORT}/api/sync` authenticated with `CRON_SECRET`. Update this note (and the helper) if you ever need another internal trigger. All other server HTTP must go through the safe-fetch helpers.
@@ -445,6 +445,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Every library-marking pass filters TV candidates through `sonarrIncompleteKeys` ([arr-availability.ts](src/lib/arr-availability.ts)) BEFORE the CAS
     - The webhook never transitions on an unverifiable verdict.
     - A tmdb lookup with no verified match falls back to TMDB's own TVDB cross-reference
+    - ALWAYS answer from Sonarr's own tmdbId (library row, queue record) before calling `series/lookup`
 14b. **A title an admin deleted through Library cleanup must NEVER be demoted and re-pushed. The demote's CAS carries `cleanedUpAt: null`, and nothing takes a TITLE off Radarr/Sonarr except the confirmed cleanup route and the title manager's confirmed Remove — both stamp before deleting.** (File deletes — the title manager's Files tab, an issue's Replace file — leave the title on the instance, so the arr's own search, not a re-push, is what follows them.)
 
     Detail and rationale: [docs/guardrails/14b.md](docs/guardrails/14b.md).
@@ -620,6 +621,18 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Add a new code to `PrismaErrorCode` when you need one; never inline `(err as { code })…` checks.
     - Type-only `Prisma` imports (`Prisma.UserWhereInput`) are fine; this is about runtime class identity only. Tests may still construct real `Prisma.PrismaClientKnownRequestError`s — the helper reads them.
     - `tests/prisma-errors.test.mts` scans `src` for `instanceof …PrismaClient*Error` and inline `.code === "Pxxxx"`; four mutations each fail it.
+23c. **NEVER run queries in parallel on a transaction client. Inside `$transaction(async (tx) => …)`, and in any helper that takes a `tx`, await each query in turn — no `Promise.all`/`allSettled`/`mapLimit`/`settleLimit` over `tx` calls or over helpers handed `tx`.**
+
+    Why:
+    - An interactive transaction is ONE pooled pg connection, and pg runs one query at a time per connection. The parallel form saves nothing: Prisma's adapter (7.10) hands every query straight to that connection's queue, and Prisma's own transaction queue serializes only BEGIN/COMMIT/ROLLBACK.
+    - From the third queued query, pg 8.x prints `DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0`. pg@9 removes that queueing, so the pattern breaks on that upgrade. Two sources, both 2026-10-28: the 2FA enrollment routes read `getMfaState` (three parallel reads) on the tx, and EVERY boot sync hit it from Prisma's own split of an oversized `createMany` (below) — found only with `NODE_OPTIONS=--trace-deprecation`, after static scans of app code came back clean.
+
+    Rules:
+    - A helper that runs on the pool AND in a transaction comes as a pair: the pool version may fan out, the `…InTx(tx, …)` version reads sequentially (`getMfaState` / `getMfaStateInTx`, [mfa-store.ts](src/lib/mfa/mfa-store.ts)). Never one function with a `db = prisma` default that fans out on whatever it's given.
+    - Separate transactions in parallel are fine (`settleLimit(users, N, (u) => prisma.$transaction(…))`): each holds its own connection.
+    - Prisma itself also fans out inside a transaction: it loads each `include`d relation as its own query and runs sibling relations in parallel (no `relationJoins`). Today no transaction query loads a relation; keep includes of several relations out of `tx` reads, or read them in separate awaited calls.
+    - A `createMany` past 32,766 bind parameters (rows × columns, plus Prisma's own `@default(now())`/`@updatedAt` values) is split by Prisma into several INSERTs that run IN PARALLEL inside an internal transaction on one connection — with or without a `$transaction` around it. The Jellyfin staging load (5,000 rows × 14 parameters) split three ways on every boot sync. ALWAYS insert library-sized data through `batchCreateMany`, which sizes each call under the limit (`createManyBatchSize`, [cron-auth.ts](src/lib/cron-auth.ts)); `tests/cron-auth.test.mts` pins it, measured shapes included.
+    - `tests/tx-sequential-queries.test.mts` scans `src` (TypeScript AST: `$transaction` callbacks, `tx`-named or `…Tx`/`…TxClient`/`TransactionClient`/`typeof prisma`-alias-typed params) and pins `getMfaStateInTx` / `dropRecoveryCodesIfNoFactorInTx` to one query in flight. Reverting any of the four fixed files fails it; a caller passing `tx` to `getMfaState` fails typecheck.
 24. **The native-client version gate (426) fails SOFT and is NEVER an authz input.**
 
     Why:
@@ -662,7 +675,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Turbopack copies a lib module into every server chunk that imports it ([process-singleton.ts](src/lib/process-singleton.ts)). `session-revocation.ts`'s force-revalidate Sets were plain module state: the revoke routes marked in THEIR chunk, while the proxy and every page render read their own copies, which nothing ever wrote. So "revocation takes effect on the next request" held for `withAuth` API routes only, and a revoked session kept rendering pages for the whole dbCheckedAt window (10s with admin-area access / 60s otherwise).
 
     Rules:
-    - Any state that means "remember across the whole server" goes through `processSingleton`: revocation marks, rate-limit buckets, the MFA token ledger.
+    - Any state that means "remember across the whole server" goes through `processSingleton`: revocation marks, rate-limit buckets, the MFA token ledger, and the MDBList and OMDb lockouts (31b).
     - A single-module unit test can't see the bug. Pin it with a cache-busted second import (`?chunk=…`), the unit-test analogue of a second chunk, as `tests/session-revocation.test.mts` does.
 28. **NEVER hard-delete a `MediaServerUser`. Soft-delete (`active = false`) instead.**
 
@@ -708,6 +721,20 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - `deferToAfter: false` runs the deferred refresh before `attachRatingsUnified` returns. It is for callers with no response to protect and many calls to make; pages keep the default so the viewer isn't held waiting.
     - The OMDB fallback never fetches a title that already has an OMDB row (`lacksOmdbRow`). The getter would only hand that row back, plus a detached refresh; the stale-OMDB pass refreshes it instead.
     - `tests/ratings-refresh.test.mts` pins every route with in-flight counts and `tests/recommendations.test.mts` pins the verdict pass's option; all twelve mutations fail a named test.
+31b. **ALWAYS mark a cron's MDBList call as background work (`{ background: true }`), and NEVER call MDBList except through `mdblistRequest` ([mdblist.ts](src/lib/mdblist.ts)).** The plan rules live in [mdblist-plan.ts](src/lib/mdblist-plan.ts) (pure); the admin picks the plan in Settings → Integrations (`mdblistPlan`, default `auto`).
+
+    Why:
+    - MDBList's daily limit is per ACCOUNT and shared with every other app on it. A cron with no flag spends the day down to zero, and pages get no ratings until midnight UTC.
+    - For You's `providersAnswering` reads MDBList as answering unless the call is marked background, so a null from a cron that stopped asking became a week-long "no ratings" verdict.
+    - 2026-10-28: MDBList's servers were slow, and every batch POST timed out. Nothing paused, because a pause needed a RESPONSE, so each page of every job waited out its full 30s.
+
+    Rules:
+    - Background (pre-warm, `/api/sync/ratings`, the For You verdict pass) stops while 25% or less of the day is left. A page may spend it down to zero. The limit is the lower of what MDBList reports (`X-RateLimit-*` on every reply) and the picked plan, which caps Summonarr's OWN count. `auto` with nothing reported means no cap of our own; MDBList's 429 is then the stop.
+    - `mdblistRequest` counts the request, reads the body inside the timeout, keeps MDBList's usage report and feeds the transport breaker: five timeouts or network failures in a row, across all MDBList calls, pause every call for an hour. Any response clears the count.
+    - A 429 pauses for `Retry-After` when sent. Without it: until `X-RateLimit-Reset` (or 00:00 UTC) for "Daily API limit exceeded!", until the next fixed 5-minute window for "API rate limit exceeded!", else one hour.
+    - The pause, breaker count, usage and plan memo are `processSingleton` state (27a), and so is OMDb's lockout.
+    - Not documented by MDBList: whether a 200-id batch counts as 1 request or 200. The budget uses MDBList's own remaining count when a reply carries one, so it is right either way. Don't hard-code either answer.
+    - `tests/mdblist-plan.test.mts`, `tests/mdblist-budget.test.mts`, `tests/mdblist-background-callers.test.mts` (scans the three crons for the flag) and the `mdblistPlan` case in `tests/settings-route.test.mts` pin it. All 23 mutations fail a named test.
 32. **A Radarr/Sonarr instance is identified by an `arrInstance` slug string, NEVER the old `is4k` boolean.** The two-instance (HD/4K) model was generalized to N named instances (e.g. an "anime" instance).
 
     Detail and rationale: [docs/guardrails/32.md](docs/guardrails/32.md).
@@ -828,6 +855,15 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The sync-side grant filter is PRE-CAS, and that is not a style choice.
     - Instance-aware surfaces:
     - Still default-only by design (not gaps):
+35a. **A list built from USER records (votes, requests, anything keyed by title) subtracts the titles hidden from the viewer BEFORE paging — `titlesHiddenFromViewer` ([media-visibility.ts](src/lib/media-visibility.ts)) — never only at the write gate.**
+
+    Why:
+    - `POST /api/votes` refused a vote on a title the voter couldn't see (35), but `GET /api/votes` and the `/votes` page listed every voted title to everyone: a restricted server's holdings, with other voters' reasons about them, were one page view away for any account.
+
+    Rules:
+    - Hidden = held ONLY on servers the viewer holds no grant for. A title the viewer can see somewhere is not hidden, and neither is one in no library at all (a vote outlives the copy). The scope goes into the paging `where` (`NOT: titleKeysWhere(hidden)`) and the total is reduced by it, or page counts drift.
+    - The helper reads the registry once, returns `[]` with no library read on an unrestricted deployment, for an ADMIN, or for a fully granted user, and takes a LAZY key loader so the page pays the voted-titles read only when something is hidden.
+    - `tests/media-visibility-read-path.test.mts` pins the list and the fast path (mutation-verified).
 36. **An unconfigured media server is SKIPPED, never failed. A client must decide that BEFORE the request, not from the response.**
 
     Detail and rationale: [docs/guardrails/36.md](docs/guardrails/36.md).
@@ -900,6 +936,15 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The DB phase moves only that key (`moveItemToTitleInTx`). The item leaves every other title's row on its server: a row left with no copy is deleted, and a row whose canonical copy it was falls back to its next copy. It joins the corrected title's row. Plays move by THIS item's key, never filtered by the old id (an unmatched item's plays carry none): a movie by `sourceItemId`, an episode by `sourceShowId`. The episode cache is left to the next full sync, which has no item key to move one copy's episodes. The flag leaves the stored report in the same transaction.
     - Item jobs are keyed by the item (`fixMatchJobKey`), so two unmatched items fixed to one title are two jobs. The tmdbId mode and its wire contract are unchanged.
     - `tests/fix-match-routes.test.mts`, `tests/library-match.test.mts` and `tests/library-match-data.test.mts` pin it. 20 of 21 mutations fail a named test; the survivor removes a redundant abort check.
+37f. **A library item's on-disk path is ADMIN data. A route a MANAGE_ISSUES delegate can reach (fix-match `file-info`, `candidates`) answers them the FILE NAME only — `libraryPathFor` ([library-path-view.ts](src/lib/library-path-view.ts)) — and a title-keyed cache is projected on the way OUT, never on the way in.**
+
+    Why:
+    - `library-sample-paths` and `issues/[id]/files` are `withAdmin` because mount layout is admin data, but the two `withIssueAdmin` fix-match reads returned every configured server's full paths for any tmdbId a delegate named — the whole library's filesystem layout, by enumeration.
+    - The candidates cache is keyed by the title, so a projection applied before `setCachedCandidates` would serve an ADMIN's full paths to the next delegate, or a delegate's names to the next ADMIN.
+
+    Rules:
+    - The dialogs only ever showed the file name (the path was a tooltip), so the delegate view loses nothing they used. The arr path match inside the route still uses the full path.
+    - `tests/fix-match-routes.test.mts` pins both routes for a delegate and the cached answer for both roles.
 38. **`'unsafe-eval'` in the CSP is gated on `NODE_ENV === "development"` and NEVER widens. Don't delete the branch either.**
 
     Why:
@@ -961,6 +1006,22 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - `SERVER_ONLY_AREAS` (`apiAdmin`/`apiAuth`/`apiUser`) are never sent; `ADMIN_ONLY_AREAS` (admin queue/arr/manage, settings, trash) go only to a session passing the admin layout's gate (computed in the root layout from the session claims). A new area is sent to everyone unless it is added to one of those lists.
     - NEVER read a server-only key from a module a client component imports, and NEVER read an admin-only key from non-admin client code: the key renders as the raw string. `tests/i18n-client-catalog.test.mts` walks the client import graph to prove both; a file-level false positive is allowlisted there WITH a reason (and a check that no client calls the server-only function).
     - Admin client UI belongs under `components/admin|settings` or `app/(app)/admin|settings`; a shared component that must show in non-admin views (`activity-ui`) keeps its area in the sent set (`adminActivity` is).
+
+40c. **"For You" is built from the VIEWER'S OWN records: the media servers' own history and Jellyfin favorites (`ServerWatchedTitle`), Trakt history and ratings, watchlist and requests. Cross-viewer co-watching (`CoWatchSuggestion`) is OPT-IN behind `feature.behavior.forYouCoWatch`, default OFF — and NEVER a play: nothing here writes or is read as `PlayHistory`.** [server-watch-history.ts](src/lib/server-watch-history.ts) (pure) + [server-watch-history-data.ts](src/lib/server-watch-history-data.ts) (phase 0 of the warm-recommendations run), taste and quit-show rules in [recommendations.ts](src/lib/recommendations.ts), co-watch build in [recommendation-graph.ts](src/lib/recommendation-graph.ts).
+
+    Detail and rationale: [docs/guardrails/40c.md](docs/guardrails/40c.md).
+
+    Why:
+    - PlayHistory starts the day Summonarr was installed (guardrail 19), so For You seeded from a sliver of a viewer's taste and recommended films they had watched years before.
+    - "Watched" is not "liked": a 3/10 seeded "Because you watched…", and two episodes of a 60-episode show read as a fan.
+
+    Rules:
+    - The import is INCREMENTAL and per identity: Plex is walked back only to the oldest identity's read point (`ServerWatchCursor`), each Jellyfin user is asked only what they played since theirs. An identity's rows and read point commit in ONE transaction, and a read point counts strictly AFTER itself — never at — so no play counts twice. A Jellyfin incremental read adds ONE play per item, never its lifetime `PlayCount`. An aborted walk writes nothing. Owner unknown ⇒ the owner's read point HOLDS (19e's rule).
+    - A rating ≤ 4 removes ONLY its own seed — never fanned out to similar titles (the 2026-08 audit rejected anti-seed neighbourhoods). Ratings ride the Trakt "use my history" switch and are deleted wherever the history is (switch off, disconnect, revoked grant, purge).
+    - Every seed keeps one of the three wire labels (`WATCH_HISTORY`/`WATCHLIST`/`REQUEST`); a loved-pool seed is `WATCH_HISTORY`. NEVER add a `RecommendationSeed` value for these — the iOS app decodes the enum.
+    - Co-watch OFF ⇒ the per-viewer pass reads no edge, the build DELETES any left, and the import reads and stores only identities LINKED to an account (an unlinked one costs no request). ON ⇒ every active identity is imported, since co-watching is built from everyone's viewing. ON ⇒ an edge needs ≥ 3 distinct people (an account counts once) who watched both, ≥ 2 people who did not, ≥ 5 people with history, and it never counts toward seed coverage (`conclusive` stays TMDB-only). Its picks wear the viewer's own "Because you watched X" line.
+    - `ServerWatchedTitle`/`ServerWatchCursor` FK `MediaServerUser` with `onDelete: Restrict` (28) and are deleted with a de-registered instance (35).
+    - `tests/server-watch-history.test.mts`, `tests/recommendations.test.mts` (the `40c` block) and `tests/trakt-user.test.mts` pin it; 20 of 21 mutations fail a named test (the survivor removes a redundant abort check). The co-watch SQL's floors were run against a real Postgres 17.
 
 41. **A `withAdvisoryLock` callback that can run for minutes MUST observe its AbortSignal.**
 

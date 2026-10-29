@@ -926,7 +926,9 @@ test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to 
     listVotes(votesReq(token, { method: "GET", query: "?mine=1&q=matrix&sort=bogus" }), undefined),
   );
   assert.equal(res.status, 200);
-  const paged = opsOf("deletionVote.groupBy")[0].args as {
+  // The PAGED call carries skip/take; the voted-titles read (the total and the
+  // guardrail-35 scope) runs first and carries neither.
+  const paged = opsOf("deletionVote.groupBy").find((o) => (o.args as { skip?: number }).skip !== undefined)!.args as {
     where: { userId?: string; title?: { contains: string; mode: string } };
     orderBy: unknown;
   };
@@ -955,7 +957,7 @@ test("GET ?sort=recent orders by newest vote and carries the same full-group-key
     listVotes(votesReq(token, { method: "GET", query: "?sort=recent" }), undefined),
   );
   assert.equal(res.status, 200);
-  const paged = opsOf("deletionVote.groupBy")[0].args as { orderBy: unknown };
+  const paged = opsOf("deletionVote.groupBy").find((o) => (o.args as { skip?: number }).skip !== undefined)!.args as { orderBy: unknown };
   assert.deepEqual(
     paged.orderBy,
     [{ _max: { createdAt: "desc" } }, { tmdbId: "asc" }, { mediaType: "asc" }],

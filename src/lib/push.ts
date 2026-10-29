@@ -129,18 +129,17 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
     if (hasPublic || hasPrivate) {
       throw new VapidPartialKeypairError();
     }
-    await Promise.all([
-      tx.setting.upsert({
-        where: { key: "vapidPublicKey" },
-        create: { key: "vapidPublicKey", value: generated.publicKey },
-        update: { value: generated.publicKey },
-      }),
-      tx.setting.upsert({
-        where: { key: "vapidPrivateKey" },
-        create: { key: "vapidPrivateKey", value: generated.privateKey },
-        update: { value: generated.privateKey },
-      }),
-    ]);
+    // One at a time: a transaction is one connection (guardrail 23c).
+    await tx.setting.upsert({
+      where: { key: "vapidPublicKey" },
+      create: { key: "vapidPublicKey", value: generated.publicKey },
+      update: { value: generated.publicKey },
+    });
+    await tx.setting.upsert({
+      where: { key: "vapidPrivateKey" },
+      create: { key: "vapidPrivateKey", value: generated.privateKey },
+      update: { value: generated.privateKey },
+    });
     });
   } catch (err) {
     if (err instanceof VapidPartialKeypairError) {
@@ -355,6 +354,14 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
         const retryAfter = res.headers.get("retry-after");
         console.error(
           `[push] APNs relay rate-limited (429${detail ? `: ${detail}` : ""})${retryAfter ? ` — retry after ${retryAfter}s` : ""}`,
+        );
+      } else if (res.status >= 500 && !detail) {
+        // The relay never answered. Its own 5xx replies are always JSON with a
+        // `reason` (plus `apnsReason` when Apple refused the push), so a 5xx
+        // without one is the reverse proxy in front of the relay (an HTML
+        // 502/503/504 page) saying it could not reach the relay.
+        console.error(
+          `[push] APNs relay unreachable: ${new URL(relay.url).host} answered HTTP ${res.status} without the relay's JSON reply, so the proxy in front of it responded and the relay itself is down — push not delivered, device kept`,
         );
       } else {
         console.error(`[push] APNs relay HTTP ${res.status}${detail ? `: ${detail}` : ""}`);

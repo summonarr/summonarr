@@ -846,7 +846,13 @@ async function handleCommand(interaction: any): Promise<void> {
           return;
         }
       }
-      const user = await prisma.user.findUnique({ where: { discordId: discordUserId } });
+      // A disabled account reads nothing (guardrail 33), exactly as every
+      // other command and button here refuses it; the answer stays "no
+      // requests", which is what a stranger's Discord id gets too.
+      const user = await prisma.user.findFirst({
+        where: { discordId: discordUserId, deactivatedAt: null },
+        select: { id: true },
+      });
       if (!user) {
         await editOriginal(appId, token, { content: t("notify.bot.status.none") });
         return;

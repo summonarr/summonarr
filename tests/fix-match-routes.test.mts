@@ -1453,6 +1453,29 @@ test("candidates?server=jellyfin: confirm-card payload from the INSTANCE row —
   );
 });
 
+test("candidates for a MANAGE_ISSUES delegate carries file NAMES only — fresh AND from the title-keyed cache (library-path-view)", async () => {
+  const a = await issueAdmin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/media/rem/wrong.mkv", jellyfinItemId: "bbbbbbbb" });
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/plex/wrong.mkv", plexRatingKey: "1001" });
+  tmdbCacheRows.set("movie:222:details", JSON.stringify({ title: "Correct Title", releaseYear: "2010" }));
+  const url = candidatesUrl({ server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222", serverInstance: "remote" });
+
+  const fresh = await (await candidates(req(url, { headers: a.header }), undefined)).json() as { jellyfinFilePath: string | null; plexFilePath: string | null };
+  assert.equal(fresh.jellyfinFilePath, "wrong.mkv");
+  assert.equal(fresh.plexFilePath, "wrong.mkv");
+  assert.ok(!JSON.stringify(fresh).includes("/media/"), JSON.stringify(fresh));
+
+  // The cache is keyed by the title, not the caller: the ADMIN's full-path
+  // answer it holds after this read must not be replayed to the delegate.
+  const boss = await admin();
+  const full = await (await candidates(req(url, { headers: boss.header }), undefined)).json() as { jellyfinFilePath: string | null };
+  assert.equal(full.jellyfinFilePath, "/media/rem/wrong.mkv", "an ADMIN sees the path (served from the cache)");
+  const again = await (await candidates(req(url, { headers: a.header }), undefined)).json() as { jellyfinFilePath: string | null; plexFilePath: string | null };
+  assert.equal(again.jellyfinFilePath, "wrong.mkv", "the delegate, from the same cache entry");
+  assert.equal(again.plexFilePath, "wrong.mkv");
+});
+
 test("candidates?server=jellyfin 404s when the instance has no row (re-sync first)", async () => {
   const a = await admin();
   configureServers();
@@ -1476,7 +1499,7 @@ function fileInfoUrl(params: Record<string, string>): string {
 }
 
 test("file-info?serverInstance=remote: paths come from the named instance, and every holder is enumerated", async () => {
-  const a = await issueAdmin();
+  const a = await admin();
   plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", plexRatingKey: "1001" });
   plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/rem.mkv", plexRatingKey: "2002" });
   jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/jf-rem.mkv", jellyfinItemId: "bbbbbbbb" });
@@ -1503,8 +1526,27 @@ test("file-info?serverInstance=remote: paths come from the named instance, and e
   assert.equal(enumerated.where.serverInstance, undefined, "the enumeration is deliberately cross-instance");
 });
 
-test("file-info with NO serverInstance resolves the default instance and reports a null side honestly", async () => {
+test("file-info for a MANAGE_ISSUES delegate carries file NAMES only — the mount layout is ADMIN data (library-path-view)", async () => {
   const a = await issueAdmin();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/mnt/media/plex/Def (2010)/def.mkv", plexRatingKey: "1001" });
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/srv/remote/rem.mkv", plexRatingKey: "2002" });
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "D:\\Media\\jf-rem.mkv", jellyfinItemId: "bbbbbbbb" });
+
+  const res = await fileInfo(req(fileInfoUrl({ tmdbId: "111", mediaType: "MOVIE", serverInstance: "remote" }), { headers: a.header }), undefined);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.plexFilePath, "rem.mkv");
+  assert.equal(body.jellyfinFilePath, "jf-rem.mkv", "a Windows path is reduced the same way");
+  assert.deepEqual(body.plexInstances, [
+    { serverInstance: "", filePath: "def.mkv" },
+    { serverInstance: "remote", filePath: "rem.mkv" },
+  ]);
+  assert.deepEqual(body.jellyfinInstances, [{ serverInstance: "remote", filePath: "jf-rem.mkv" }]);
+  assert.ok(!JSON.stringify(body).includes("/mnt/") && !JSON.stringify(body).includes("/srv/") && !JSON.stringify(body).includes("Media"), JSON.stringify(body));
+});
+
+test("file-info with NO serverInstance resolves the default instance and reports a null side honestly", async () => {
+  const a = await admin(); // the ADMIN view: full paths (a delegate gets file names — see below);
   // Named-first ordering again: an unscoped findFirst would surface /d/rem.mkv.
   plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/rem.mkv", plexRatingKey: "2002" });
   plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", plexRatingKey: "1001" });
@@ -1524,7 +1566,7 @@ test("file-info with NO serverInstance resolves the default instance and reports
 });
 
 test("file-info on a single-server deployment is byte-identical to the pre-multi-server response", async () => {
-  const a = await issueAdmin();
+  const a = await admin(); // the ADMIN view: full paths (a delegate gets file names — see below);
   plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", plexRatingKey: "1001" });
   jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/jf.mkv", jellyfinItemId: "aaaaaaaa" });
 

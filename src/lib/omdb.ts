@@ -4,6 +4,7 @@ import { getCacheStale, setCache, libraryDetailsTtl } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { tmdbAuth } from "./tmdb-auth";
+import { processSingleton } from "./process-singleton";
 
 const OMDB_BASE = "https://www.omdbapi.com";
 const OMDB_FETCH_TIMEOUT_MS = 10_000;
@@ -42,15 +43,19 @@ function isOmdbTransientError(msg: string | undefined): boolean {
 // In-memory quota lockout for the current process lifetime — does not survive restarts,
 // but stops the daily library prewarm and per-page lookups from hammering a key whose
 // free-tier quota (1,000 requests/day) is already exhausted. Mirrors mdblist.ts.
-let quotaLockoutUntil = 0;
+//
+// One copy for the whole server (guardrail 27a): Turbopack gives every server chunk
+// its own copy of a module-level `let`, so a lockout tripped by a cron route was
+// invisible to page renders, which kept calling and failing.
+const lockout = processSingleton("omdb:lockout", () => ({ until: 0, transportFailures: 0 }));
 const QUOTA_LOCKOUT_MS = 60 * 60 * 1000;
 
 export function isOmdbQuotaLocked(): boolean {
-  return Date.now() < quotaLockoutUntil;
+  return Date.now() < lockout.until;
 }
 
 function tripQuotaLockout(reason: string) {
-  quotaLockoutUntil = Date.now() + QUOTA_LOCKOUT_MS;
+  lockout.until = Date.now() + QUOTA_LOCKOUT_MS;
   console.warn(`[omdb] Quota lockout tripped (${sanitizeForLog(reason)}) — suspending calls for ${QUOTA_LOCKOUT_MS / 60000} min`);
 }
 
@@ -74,16 +79,15 @@ function tripQuotaLockout(reason: string) {
 // response at all — including a 4xx/5xx — proves the host is up and clears the
 // count.
 const TRANSPORT_FAILURE_LIMIT = 5;
-let consecutiveTransportFailures = 0;
 
 function noteTransportSuccess(): void {
-  consecutiveTransportFailures = 0;
+  lockout.transportFailures = 0;
 }
 
 function noteTransportFailure(reason: string): void {
-  consecutiveTransportFailures++;
-  if (consecutiveTransportFailures < TRANSPORT_FAILURE_LIMIT) return;
-  consecutiveTransportFailures = 0;
+  lockout.transportFailures++;
+  if (lockout.transportFailures < TRANSPORT_FAILURE_LIMIT) return;
+  lockout.transportFailures = 0;
   // Reuses the quota lockout rather than adding a second flag: every caller
   // already asks "should I skip OMDB right now", and unreachable and exhausted
   // are the same answer to that question.

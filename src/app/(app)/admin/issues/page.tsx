@@ -100,9 +100,9 @@ export default async function AdminIssuesPage({
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_ISSUES)) redirect("/");
   const currentUserId = session.user.id;
-  // "Replace file" deletes files, which only an ADMIN may (its route is
-  // withAdmin, a role check — mirrored here); MANAGE_ISSUES alone keeps
-  // Refetch and Replace. Read from the DB-checked authActive() session above.
+  // Fix file's read-and-delete of the files on disk is ADMIN-only (its route
+  // is withAdmin, a role check — mirrored here); MANAGE_ISSUES alone keeps the
+  // search and the release list. Read from the DB-checked authActive() session above.
   const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
   const t = await getTranslator();
 
@@ -139,7 +139,7 @@ export default async function AdminIssuesPage({
     isFeatureEnabled("feature.integration.sonarr").catch(() => false),
   ]);
 
-  // Configured-instance options for the Replace panel's instance picker.
+  // Configured-instance options for the Fix file window's instance picker.
   const radarrOptions = radarrInstances.map((i) => ({ slug: i.slug, name: i.name }));
   const sonarrOptions = sonarrInstances.map((i) => ({ slug: i.slug, name: i.name }));
   const instancesFor = (mediaType: string) => (mediaType === "MOVIE" ? radarrOptions : sonarrOptions);
@@ -298,43 +298,51 @@ export default async function AdminIssuesPage({
             {t("adminQueue.issues.claimedBy", { name: sel.claimedUser?.name ?? sel.claimedUser?.email ?? t("adminQueue.issues.unknown") })}
           </p>
         )}
-        <div className="flex items-center flex-wrap" style={{ gap: 8, marginTop: standalone ? 10 : 0 }}>
-          {standalone && sel.issueType === "WRONG_MATCH" && (
-            <IssueFixMatchButton
-              key={`fix-${sel.id}`}
+        {(() => {
+          const claim = (
+            <IssueClaimButton
+              key={`claim-${sel.id}`}
               issueId={sel.id}
-              tmdbId={sel.tmdbId}
-              mediaType={sel.mediaType}
-              title={sel.title}
-              onPlex={plexSet.has(key)}
-              onJellyfin={jellyfinSet.has(key)}
-              isAdmin={true}
+              claimedBy={sel.claimedBy}
+              claimerName={sel.claimedUser?.name ?? sel.claimedUser?.email ?? null}
+              currentUserId={currentUserId}
             />
-          )}
-          <IssueClaimButton
-            key={`claim-${sel.id}`}
-            issueId={sel.id}
-            claimedBy={sel.claimedBy}
-            claimerName={sel.claimedUser?.name ?? sel.claimedUser?.email ?? null}
-            currentUserId={currentUserId}
-          />
-          {standalone && (
-            <IssueActions
-              key={`actions-${sel.id}`}
-              issueId={sel.id}
-              currentStatus={sel.status}
-              mediaType={sel.mediaType}
-              tvdbId={sel.tvdbId}
-              scope={sel.scope}
-              seasonNumber={sel.seasonNumber}
-              episodeNumber={sel.episodeNumber}
-              libraryConfirmed={plexSet.has(key) || jellyfinSet.has(key)}
-              instances={instancesFor(sel.mediaType)}
-              isAdmin={isAdmin}
-              manage={manageFor(sel.tmdbId, sel.mediaType)}
-            />
-          )}
-        </div>
+          );
+          // The card above carries the issue's actions; only the claim is added here.
+          if (!standalone) return claim;
+          return (
+            <div style={{ marginTop: 10 }}>
+              <IssueActions
+                key={`actions-${sel.id}`}
+                issueId={sel.id}
+                currentStatus={sel.status}
+                mediaType={sel.mediaType}
+                tvdbId={sel.tvdbId}
+                scope={sel.scope}
+                seasonNumber={sel.seasonNumber}
+                episodeNumber={sel.episodeNumber}
+                libraryConfirmed={plexSet.has(key) || jellyfinSet.has(key)}
+                instances={instancesFor(sel.mediaType)}
+                isAdmin={isAdmin}
+                manage={manageFor(sel.tmdbId, sel.mediaType)}
+                align="start"
+                claim={claim}
+                fixMatch={sel.issueType === "WRONG_MATCH" ? (
+                  <IssueFixMatchButton
+                    key={`fix-${sel.id}`}
+                    issueId={sel.id}
+                    tmdbId={sel.tmdbId}
+                    mediaType={sel.mediaType}
+                    title={sel.title}
+                    onPlex={plexSet.has(key)}
+                    onJellyfin={jellyfinSet.has(key)}
+                    isAdmin={true}
+                  />
+                ) : undefined}
+              />
+            </div>
+          );
+        })()}
         {standalone && (
           <div style={{ marginTop: 12 }}>
             <IssueThread key={sel.id} issueId={sel.id} />
@@ -451,7 +459,7 @@ export default async function AdminIssuesPage({
 
                       {/* grow + a real basis, not flex-1: with a 0 basis the row
                           wrapped only once the actions ALONE overflowed it, so a
-                          ~490px action bar (Refetch · Replace file · In progress ·
+                          ~490px action bar (Fix file · Manage · In progress ·
                           Resolve) left the title ~100px at a 1024px viewport. */}
                       <Link
                         href={issueHref(issue.id)}
@@ -534,20 +542,6 @@ export default async function AdminIssuesPage({
                       </div>
 
                       <div className="contents xl:hidden">
-                        {issue.issueType === "WRONG_MATCH" && (() => {
-                          const key = `${issue.tmdbId}:${issue.mediaType}`;
-                          return (
-                            <IssueFixMatchButton
-                              issueId={issue.id}
-                              tmdbId={issue.tmdbId}
-                              mediaType={issue.mediaType}
-                              title={issue.title}
-                              onPlex={plexSet.has(key)}
-                              onJellyfin={jellyfinSet.has(key)}
-                              isAdmin={true}
-                            />
-                          );
-                        })()}
                         <IssueActions
                           issueId={issue.id}
                           currentStatus={issue.status}
@@ -560,6 +554,17 @@ export default async function AdminIssuesPage({
                           instances={instancesFor(issue.mediaType)}
                           isAdmin={isAdmin}
                           manage={manageFor(issue.tmdbId, issue.mediaType)}
+                          fixMatch={issue.issueType === "WRONG_MATCH" ? (
+                            <IssueFixMatchButton
+                              issueId={issue.id}
+                              tmdbId={issue.tmdbId}
+                              mediaType={issue.mediaType}
+                              title={issue.title}
+                              onPlex={plexSet.has(`${issue.tmdbId}:${issue.mediaType}`)}
+                              onJellyfin={jellyfinSet.has(`${issue.tmdbId}:${issue.mediaType}`)}
+                              isAdmin={true}
+                            />
+                          ) : undefined}
                         />
                       </div>
                     </IssueCardShell>
@@ -707,46 +712,48 @@ export default async function AdminIssuesPage({
                     </p>
                   )}
 
-                  <div
-                    className="flex items-center flex-wrap"
-                    style={{ gap: 8, marginTop: 16 }}
-                  >
-                    {selectedIssue.issueType === "WRONG_MATCH" && (() => {
+                  <div style={{ marginTop: 16 }}>
+                    {(() => {
                       const key = `${selectedIssue.tmdbId}:${selectedIssue.mediaType}`;
                       return (
-                        <IssueFixMatchButton
-                          key={`fix-${selectedIssue.id}`}
+                        <IssueActions
+                          key={`actions-${selectedIssue.id}`}
                           issueId={selectedIssue.id}
-                          tmdbId={selectedIssue.tmdbId}
+                          currentStatus={selectedIssue.status}
                           mediaType={selectedIssue.mediaType}
-                          title={selectedIssue.title}
-                          onPlex={plexSet.has(key)}
-                          onJellyfin={jellyfinSet.has(key)}
-                          isAdmin={true}
+                          tvdbId={selectedIssue.tvdbId}
+                          scope={selectedIssue.scope}
+                          seasonNumber={selectedIssue.seasonNumber}
+                          episodeNumber={selectedIssue.episodeNumber}
+                          libraryConfirmed={plexSet.has(key) || jellyfinSet.has(key)}
+                          instances={instancesFor(selectedIssue.mediaType)}
+                          isAdmin={isAdmin}
+                          manage={manageFor(selectedIssue.tmdbId, selectedIssue.mediaType)}
+                          align="start"
+                          claim={
+                            <IssueClaimButton
+                              key={`claim-${selectedIssue.id}`}
+                              issueId={selectedIssue.id}
+                              claimedBy={selectedIssue.claimedBy}
+                              claimerName={selectedIssue.claimedUser?.name ?? selectedIssue.claimedUser?.email ?? null}
+                              currentUserId={session.user.id}
+                            />
+                          }
+                          fixMatch={selectedIssue.issueType === "WRONG_MATCH" ? (
+                            <IssueFixMatchButton
+                              key={`fix-${selectedIssue.id}`}
+                              issueId={selectedIssue.id}
+                              tmdbId={selectedIssue.tmdbId}
+                              mediaType={selectedIssue.mediaType}
+                              title={selectedIssue.title}
+                              onPlex={plexSet.has(key)}
+                              onJellyfin={jellyfinSet.has(key)}
+                              isAdmin={true}
+                            />
+                          ) : undefined}
                         />
                       );
                     })()}
-                    <IssueClaimButton
-                      key={`claim-${selectedIssue.id}`}
-                      issueId={selectedIssue.id}
-                      claimedBy={selectedIssue.claimedBy}
-                      claimerName={selectedIssue.claimedUser?.name ?? selectedIssue.claimedUser?.email ?? null}
-                      currentUserId={session.user.id}
-                    />
-                    <IssueActions
-                      key={`actions-${selectedIssue.id}`}
-                      issueId={selectedIssue.id}
-                      currentStatus={selectedIssue.status}
-                      mediaType={selectedIssue.mediaType}
-                      tvdbId={selectedIssue.tvdbId}
-                      scope={selectedIssue.scope}
-                      seasonNumber={selectedIssue.seasonNumber}
-                      episodeNumber={selectedIssue.episodeNumber}
-                      libraryConfirmed={plexSet.has(`${selectedIssue.tmdbId}:${selectedIssue.mediaType}`) || jellyfinSet.has(`${selectedIssue.tmdbId}:${selectedIssue.mediaType}`)}
-                      instances={instancesFor(selectedIssue.mediaType)}
-                      isAdmin={isAdmin}
-                      manage={manageFor(selectedIssue.tmdbId, selectedIssue.mediaType)}
-                    />
                   </div>
                 </div>
                 <IssueThread key={selectedIssue.id} issueId={selectedIssue.id} variant="panel" />

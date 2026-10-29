@@ -108,6 +108,8 @@ const { HeadersAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapt
 // module-graph load (static imports would hoist above them).
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
+// These suites script a dead arr and assert ONE attempt: no retry backoff.
+(await import("../src/lib/arr.ts")).arrReadRetry.delaysMs = [];
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { Prisma } = await import("@/generated/prisma");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");

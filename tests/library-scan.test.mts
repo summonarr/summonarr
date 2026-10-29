@@ -6,7 +6,8 @@
 //     (one scan per burst). Past SCAN_MAX_WAIT_MS (2min) the timer is left
 //     alone so a sustained webhook burst can't postpone the scan forever.
 //   - QUEUE GATING: with a tmdbId hint the scan defers while THAT title is
-//     still in the arr queue (tv resolves tmdb→tvdb via /series/lookup first);
+//     still in the arr queue (tv matches the queue records' own tmdbId, and
+//     resolves tmdb→tvdb via /series/lookup only when a queued series has none);
 //     two different titles coalescing widens to a full-queue count with no
 //     per-title lookup. An unreadable queue (unconfigured arr on the count
 //     path returns null) reads as "still pending" — defer, don't scan blind —
@@ -233,7 +234,8 @@ test("tv tmdbId gating: series lookup + queue defer while downloading, scan once
   t.mock.timers.tick(DEBOUNCE);
   await flush();
 
-  // The per-title gate resolves tmdb→tvdb through Sonarr, then checks the queue.
+  // The queued series carries no tmdbId (the Sonarr v3 shape), so the per-title
+  // gate resolves tmdb→tvdb through Sonarr's lookup and matches the queue by tvdbId.
   const lookup = sent.find((s) => s.url.includes("/series/lookup"));
   assert.ok(lookup, "tmdbId hint triggers the per-title Sonarr lookup");
   assert.equal(lookup.url, "http://sonarr.t4.example:8989/api/v3/series/lookup?term=tmdb:1399");

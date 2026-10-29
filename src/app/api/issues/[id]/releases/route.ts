@@ -15,11 +15,11 @@ import {
   grabMovieRelease,
   grabSeriesRelease,
   resolveTvdbIdFromTmdbId,
-  isArrConfigured,
   type GrabProgress,
 } from "@/lib/arr";
 import { seriesReleaseScopeSearchable } from "@/lib/release-scope";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
+import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -84,7 +84,12 @@ async function resolveInstanceOr(
   if (!isValidInstanceSlug(instance)) {
     return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
   }
-  if (!(await isArrConfigured(service, instance))) {
+  // The registry decides which slugs exist (guardrail 32): a de-registered
+  // instance's Url/ApiKey rows can outlive it, and a bare isArrConfigured would
+  // turn any slug a MANAGE_ISSUES delegate guesses into those Setting reads —
+  // and then into searches and grabs on a server the admin removed.
+  const configured = await getSyncableArrInstances(service);
+  if (!configured.some((i) => i.slug === instance)) {
     const error = instance === ""
       ? t("apiUser.common.notConfigured", { name: service === "radarr" ? "Radarr" : "Sonarr" })
       : t("apiUser.issues.instanceNotConfigured", { service, instance });

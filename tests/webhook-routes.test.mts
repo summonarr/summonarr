@@ -1427,14 +1427,16 @@ test("sonarr Download by tmdbId: instance-scoped flip + wanted eviction + tvdbId
   assert.equal(animeRow.tvdbId, 777);
   assert.equal(defaultRow.tvdbId, 777);
 
-  // The verify (tmdb lookup + the tvdbId-filtered library read) hit the ANIME
-  // instance's URL with its own key — never the default's.
-  assert.equal(fetchCalls.length, 2);
+  // The verify hit the ANIME instance's URL with its own key — never the
+  // default's. Sonarr's library row carries tmdbId 888, which settles the
+  // ids check, so the slow internet-bound series/lookup is never called.
+  assert.equal(fetchCalls.length, 1);
   for (const c of fetchCalls) {
     assert.ok(c.url.startsWith(`${SONARR_ANIME_URL}/api/v3/series`), c.url);
     assert.equal(new Headers(c.init?.headers).get("x-api-key"), "sonarr-anime-key");
   }
-  assert.ok(fetchCalls[1].url.includes("tvdbId=777"), "the library read is the cheap ?tvdbId= filter, not a full-library fetch");
+  assert.ok(fetchCalls[0].url.includes("tvdbId=777"), "the library read is the cheap ?tvdbId= filter, not a full-library fetch");
+  assert.ok(!fetchCalls.some((c) => c.url.includes("/series/lookup")), "no lookup when the library row names its tmdbId");
 });
 
 test("sonarr Download by tvdbId only: the request is matched via tvdbId and the wanted row evicted via ITS tmdbId", async () => {
@@ -1763,12 +1765,30 @@ test("sonarr forgery rejection: Sonarr reports the series ABSENT → flip refuse
   assert.ok(warns.some((w) => w.includes("not confirmed downloaded in Sonarr") && w.endsWith("absent")), warns.join(" | "));
 });
 
-test("sonarr ids-disagree: a lookup row that MATCHES the payload's tmdbId but names another tvdbId is refused (the forgery shape)", async () => {
+test("sonarr ids-disagree: Sonarr's library row for the payload's tvdbId names a DIFFERENT tmdbId → refused (the forgery shape)", async () => {
+  // The secret holder pairs a tvdbId Sonarr really downloaded (777, whose own row
+  // says tmdbId 555) with another request's tmdbId (888).
+  const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  scriptSonarr({ series: () => completeSeries(777, 555) });
+
+  const { body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Paired" } } }),
+  );
+  assert.deepEqual(body, { ok: true, skipped: true, reason: "not_downloaded" });
+  assert.equal(row.status, "APPROVED");
+  assert.ok(warns.some((w) => w.includes("payload ids disagree") && w.includes("in Sonarr's library")), warns.join(" | "));
+  assert.ok(warns.some((w) => w.includes("not confirmed downloaded in Sonarr") && w.endsWith("ids-disagree")), warns.join(" | "));
+  assert.ok(!fetchCalls.some((c) => c.url.includes("/series/lookup")), "the library row decided it — no lookup");
+});
+
+test("sonarr ids-disagree (Sonarr v3 / unmapped row): the library row has no tmdbId, so the lookup decides — a row naming another tvdbId is refused", async () => {
   const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
   configureSonarr("");
   scriptSonarr({
     lookup: () => [{ tmdbId: 888, tvdbId: 99999 }], // Sonarr says tmdb 888 IS tvdb 99999, not the payload's 777
-    series: () => completeSeries(777, 888),
+    series: () => completeSeries(777), // no tmdbId on the row: v3, or a series Sonarr never mapped
   });
 
   const { body } = await post(
@@ -1785,12 +1805,13 @@ test("sonarr lone-row regression: a degraded lookup answering ONE row for a DIFF
   // Observed live: `term=tmdb:84503` came back as a single row whose tvdbId was
   // 84503 — a different show — and the ids-disagree guard then refused a real
   // Download for tvdbId 332335. pickSeriesByTmdbId must treat that row as no
-  // answer, so the verify proceeds on the payload's own tvdbId.
+  // answer, so the verify proceeds on the payload's own tvdbId. The library row
+  // carries no tmdbId here, so the lookup is what decides — the path this guards.
   const row = seedRequest({ tmdbId: 84503, tvdbId: 332335, mediaType: "TV", arrInstance: "" });
   configureSonarr("");
   scriptSonarr({
     lookup: () => [{ tmdbId: 4321, tvdbId: 84503 }],
-    series: (url) => (url.searchParams.get("tvdbId") === "332335" ? completeSeries(332335, 84503) : []),
+    series: (url) => (url.searchParams.get("tvdbId") === "332335" ? completeSeries(332335) : []),
   });
 
   const { body } = await post(
@@ -1801,6 +1822,7 @@ test("sonarr lone-row regression: a degraded lookup answering ONE row for a DIFF
   assert.equal(row.status, "AVAILABLE");
   assert.ok(!warns.some((w) => w.includes("payload ids disagree")), "a rejected lone row must not be reported as a disagreement");
   assert.ok(fetchCalls.some((c) => c.url.includes("tvdbId=332335")), "the library read used the payload's tvdbId");
+  assert.ok(fetchCalls.some((c) => c.url.includes("/series/lookup")), "the lookup ran — this test covers the picker, not the library-row path");
 });
 
 test("sonarr 14a: an UNVERIFIABLE verdict (Sonarr 503) never flips optimistically — it defers, and the after() task re-verifies once the scan settles and flips then", async () => {

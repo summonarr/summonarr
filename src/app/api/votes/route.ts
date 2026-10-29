@@ -14,7 +14,8 @@ import { verifyRequestToken } from "@/lib/request-token";
 import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
 import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
 import { isFeatureEnabled } from "@/lib/features";
-import { getVisibleServerInstances } from "@/lib/media-visibility";
+import { getVisibleServerInstances, titlesHiddenFromViewer } from "@/lib/media-visibility";
+import { scopeVotesWhere } from "@/lib/votes-visibility";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
@@ -63,29 +64,38 @@ export const GET = withAuth(async (req, _ctx, session) => {
       ? [{ _max: { createdAt: "desc" } }, { tmdbId: "asc" }, { mediaType: "asc" }]
       : [{ _count: { id: "desc" } }, { tmdbId: "asc" }, { mediaType: "asc" }];
 
-  const [grouped, totalItems] = await Promise.all([
-    prisma.deletionVote.groupBy({
-      by: ["tmdbId", "mediaType"],
-      where,
-      _count: { id: true },
-      _max: { createdAt: true },
-      orderBy,
-      skip: (page - 1) * PAGE_SIZE,
-      take: PAGE_SIZE,
-    }),
-    // NOTE: this second groupBy transports one row per voted title just to read
-    // `.length`. A `SELECT COUNT(*) FROM (… GROUP BY …)` would be cheaper, but it
-    // has to be raw SQL, and every route test stubs the prisma MODEL methods
-    // in-memory — a `$queryRaw` escapes the stub and tries to open a real
-    // connection, failing the suite. Keep the groupBy unless the tests grow a
-    // raw-SQL stub; the row count is bounded by the number of voted titles.
-    prisma.deletionVote.groupBy({
-      by: ["tmdbId", "mediaType"],
-      where,
-      _count: { id: true },
-    }),
-  ]);
-  const total = totalItems.length;
+  // NOTE: this groupBy transports one row per voted title. It used to serve
+  // `.length` alone (a `SELECT COUNT(*) FROM (… GROUP BY …)` would be cheaper,
+  // but it has to be raw SQL, and every route test stubs the prisma MODEL
+  // methods in-memory — a `$queryRaw` escapes the stub and tries to open a real
+  // connection, failing the suite); now it also feeds the visibility scope
+  // below, which must be known BEFORE paging. The row count is bounded by the
+  // number of voted titles.
+  const votedTitles = await prisma.deletionVote.groupBy({
+    by: ["tmdbId", "mediaType"],
+    where,
+    _count: { id: true },
+  });
+  // A title held only on servers this viewer holds no grant for is not on this
+  // list for them (guardrail 35): the POST gate below is per-grant, and the list
+  // must not tell an ungranted user what a restricted server holds — nor show
+  // them other voters' reasons about it. A title in no library at all stays (a
+  // vote outlives the copy). The web /votes page applies the same scope.
+  const hidden = await titlesHiddenFromViewer(
+    session,
+    votedTitles.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType })),
+  );
+  const scopedWhere = scopeVotesWhere(where, hidden);
+  const grouped = await prisma.deletionVote.groupBy({
+    by: ["tmdbId", "mediaType"],
+    where: scopedWhere,
+    _count: { id: true },
+    _max: { createdAt: true },
+    orderBy,
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
+  });
+  const total = votedTitles.length - hidden.length;
 
   if (grouped.length === 0) {
     return NextResponse.json({ items: [], total, page, pageSize: PAGE_SIZE });

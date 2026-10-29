@@ -114,6 +114,10 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
         data: { suggestionsRefreshedAt: null, suggestionCount: 0 },
       });
       edgesCleared = (await tx.titleSuggestion.deleteMany({})).count;
+      // The co-watch edges (guardrail 40c) carry the same denormalized TMDB
+      // display fields. They have no coverage stamp — the next warm run simply
+      // rebuilds them whole — so a plain delete is safe.
+      edgesCleared += (await tx.coWatchSuggestion.deleteMany({})).count;
     }, { timeout: BATCH_TX_TIMEOUT });
   }
 

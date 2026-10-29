@@ -57,10 +57,9 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     // Password-only (nothing was active when the step-up ran) must not remove
     // a factor that became active after that read.
     if (!proof.proved) {
-      const [totp, passkeys] = await Promise.all([
-        tx.userTotp.findUnique({ where: { userId: user.id }, select: { enabledAt: true } }),
-        tx.webAuthnCredential.count({ where: { userId: user.id } }),
-      ]);
+      // One at a time: a transaction is one connection (guardrail 23c).
+      const totp = await tx.userTotp.findUnique({ where: { userId: user.id }, select: { enabledAt: true } });
+      const passkeys = await tx.webAuthnCredential.count({ where: { userId: user.id } });
       if (totp?.enabledAt || passkeys > 0) return true;
     }
     await deleteAllMfaInTx(tx, user.id);

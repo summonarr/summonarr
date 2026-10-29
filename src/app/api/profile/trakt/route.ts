@@ -51,7 +51,11 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
           : {}),
       },
     });
-    if (historySeeds === false) await tx.traktWatchedItem.deleteMany({ where: { userId: session.user.id } });
+    if (historySeeds === false) {
+      // The ratings ride on the same switch (guardrail 40c): off drops both.
+      await tx.traktWatchedItem.deleteMany({ where: { userId: session.user.id } });
+      await tx.traktRating.deleteMany({ where: { userId: session.user.id } });
+    }
   });
   return NextResponse.json(await getTraktProfileState(session.user.id, session.user.permissions));
 });

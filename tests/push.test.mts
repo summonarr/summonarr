@@ -657,6 +657,38 @@ test("a relay 400 logs as a payload-validation rejection with the relay's error 
   assert.ok(!errors[0].includes("APNs relay HTTP 400"), "a 400 must not read as the generic transient line");
 });
 
+test("a 5xx without the relay's JSON logs as 'relay unreachable' (the proxy answered); the relay's own JSON 502 keeps its APNs reason; rows kept", async () => {
+  userRows = [{ id: "u-down", pushOnApproved: true }];
+  const htmlProxy = iosSub("u-down", "token-proxy-html");
+  const emptyProxy = iosSub("u-down", "token-proxy-empty");
+  const apnsRefused = iosSub("u-down", "token-relay-502");
+  subRows = [htmlProxy, emptyProxy, apnsRefused];
+  relayRespond = (call) => {
+    // e.g. NetBird/nginx/Cloudflare error page when the relay is down…
+    if (call.body.deviceToken === "token-proxy-html") {
+      return new Response("<!doctype html><title>Service Unavailable</title>", {
+        status: 502,
+        headers: { "content-type": "text/html" },
+      });
+    }
+    // …or a bare gateway status with no body at all (Caddy).
+    if (call.body.deviceToken === "token-proxy-empty") return new Response(null, { status: 503 });
+    // The relay itself answered: Apple refused the push.
+    return jsonResponse({ ok: false, reason: "error", apnsReason: "InvalidProviderToken" }, 502);
+  };
+
+  await notifyUserRequestApprovedPush({ userId: "u-down", title: "Dune", mediaType: "MOVIE" });
+
+  assert.equal(relayCalls.length, 3);
+  assert.deepEqual(subDeletes, []); // an outage is never the device's fault
+  assert.equal(errors.length, 3, errors.join("\n"));
+  const unreachable = errors.filter((e) => e.startsWith("[push] APNs relay unreachable: summonapns.gadgetusaf.com answered HTTP "));
+  assert.equal(unreachable.length, 2, errors.join("\n"));
+  assert.ok(unreachable.some((e) => e.includes("HTTP 502")) && unreachable.some((e) => e.includes("HTTP 503")), errors.join("\n"));
+  assert.ok(errors.some((e) => e === "[push] APNs relay HTTP 502: error; InvalidProviderToken"), errors.join("\n"));
+  assert.ok(!errors.some((e) => e.includes("<!doctype")), "the proxy's HTML must never reach the log");
+});
+
 // ── relay validation contract ───────────────────────────────────────────────
 // Mirrors the relay's payload rules (summonarr-push-relay). A cleartext alert or
 // url that breaks one is answered 400 for the whole category, so that category

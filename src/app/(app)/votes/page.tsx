@@ -12,6 +12,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
 import { Prisma } from "@/generated/prisma";
+import { hiddenVoteTitles, scopeVotesWhere } from "@/lib/votes-visibility";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
@@ -64,10 +65,18 @@ export default async function VotesPage({
     ? Prisma.sql`WHERE ${Prisma.join(conditions, " AND ")}`
     : Prisma.empty;
 
+  // A title held only on servers this viewer holds no grant for is not on this
+  // list for them (guardrail 35; the same scope as GET /api/votes). The voted
+  // titles are read only when something IS hidden from this viewer, so an
+  // unrestricted deployment keeps the raw COUNT below; when they were read,
+  // the count is theirs minus the hidden ones and the raw query is skipped.
+  const { hidden, votedTitles } = await hiddenVoteTitles(session, where);
+  const scopedWhere = scopeVotesWhere(where, hidden);
+
   const [grouped, [{ count }]] = await Promise.all([
     prisma.deletionVote.groupBy({
       by: ["tmdbId", "mediaType"],
-      where,
+      where: scopedWhere,
       _count: { id: true },
       _max: { createdAt: true },
       // Both sorts need a TIEBREAKER, because both are paginated with skip/take.
@@ -88,9 +97,11 @@ export default async function VotesPage({
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
-    prisma.$queryRaw<{ count: bigint }[]>(
-      Prisma.sql`SELECT COUNT(*)::bigint AS count FROM (SELECT 1 FROM "DeletionVote" ${whereSql} GROUP BY "tmdbId", "mediaType") AS g`,
-    ),
+    votedTitles !== null
+      ? Promise.resolve([{ count: BigInt(votedTitles - hidden.length) }])
+      : prisma.$queryRaw<{ count: bigint }[]>(
+          Prisma.sql`SELECT COUNT(*)::bigint AS count FROM (SELECT 1 FROM "DeletionVote" ${whereSql} GROUP BY "tmdbId", "mediaType") AS g`,
+        ),
   ]);
   const totalPages = Math.max(1, Math.ceil(Number(count) / PAGE_SIZE));
 

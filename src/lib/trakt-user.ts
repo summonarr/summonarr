@@ -25,9 +25,10 @@ import {
 //     library already has, which the request chokepoint answers "already
 //     available", so a Jellyfin-side watchlist can never file anything.
 //   - FOR YOU SEEDS: the cron imports their Trakt watch history into
-//     TraktWatchedItem, which the seed selection reads as watch history. The
-//     recommendation engine makes no upstream call (guardrail 40), so the
-//     history must be local before the warm run selects seeds.
+//     TraktWatchedItem and their own 1–10 ratings into TraktRating, which the
+//     seed selection reads as watch history and taste (guardrail 40c). The
+//     recommendation engine makes no upstream call (guardrail 40), so both
+//     must be local before the warm run selects seeds.
 //
 // CONNECTING. OAuth device-code flow: the user is shown a short code to enter at
 // trakt.tv/activate. No redirect URI to register — a self-hosted instance has no
@@ -369,12 +370,65 @@ export function selectTraktHistoryRows(rows: readonly TraktWatchedRow[], max: nu
     .slice(0, max);
 }
 
-// The watch-history stamp out of /sync/last_activities: the later of the movie
-// and episode watched_at. Null when neither is readable. Pure.
+// Ratings kept per user. A rating is a deliberate act, so real lists are a few
+// hundred; this only bounds a runaway response.
+export const MAX_TRAKT_RATINGS = 5_000;
+
+export interface TraktRatingRow {
+  tmdbId: number;
+  mediaType: "MOVIE" | "TV";
+  title: string;
+  // Trakt's 1–10 scale.
+  rating: number;
+  ratedAt: Date;
+}
+
+// One /sync/ratings/{movies|shows} entry → a rating row; null without a TMDB id,
+// a 1–10 integer rating or a date. Pure.
+export function parseTraktRatingEntry(entry: unknown, mediaType: "MOVIE" | "TV"): TraktRatingRow | null {
+  if (!entry || typeof entry !== "object") return null;
+  const e = entry as { rating?: unknown; rated_at?: unknown; movie?: unknown; show?: unknown };
+  const media = (mediaType === "MOVIE" ? e.movie : e.show) as { title?: unknown; ids?: { tmdb?: unknown } } | undefined;
+  if (!media || typeof media !== "object") return null;
+  const tmdbId = positiveInt(media.ids?.tmdb);
+  const ratedAt = parseDate(e.rated_at);
+  const rating = typeof e.rating === "number" && Number.isInteger(e.rating) && e.rating >= 1 && e.rating <= 10 ? e.rating : null;
+  if (tmdbId === null || ratedAt === null || rating === null) return null;
+  const title = typeof media.title === "string" && media.title.length > 0 ? media.title.slice(0, 500) : `TMDB #${tmdbId}`;
+  return { tmdbId, mediaType, title, rating, ratedAt };
+}
+
+// Newest-rated first, one row per title (the latest rating wins), at most `max`. Pure.
+export function selectTraktRatingRows(rows: readonly TraktRatingRow[], max: number = MAX_TRAKT_RATINGS): TraktRatingRow[] {
+  const byKey = new Map<string, TraktRatingRow>();
+  for (const r of rows) {
+    const key = `${r.mediaType}:${r.tmdbId}`;
+    const prior = byKey.get(key);
+    if (!prior || r.ratedAt > prior.ratedAt) byKey.set(key, r);
+  }
+  return [...byKey.values()]
+    .sort((a, b) => b.ratedAt.getTime() - a.ratedAt.getTime() || a.tmdbId - b.tmdbId)
+    .slice(0, max);
+}
+
+// The taste stamp out of /sync/last_activities: the latest of the movie and
+// episode watched_at AND the movie and show rated_at — the import re-reads the
+// history and the ratings when any of them moved, and skips both otherwise, so
+// adding ratings costs no request on a run where nothing changed. Null when
+// none is readable. Pure.
 export function traktHistoryActivityStamp(activities: unknown): Date | null {
   if (!activities || typeof activities !== "object") return null;
-  const a = activities as { movies?: { watched_at?: unknown }; episodes?: { watched_at?: unknown } };
-  const stamps = [parseDate(a.movies?.watched_at), parseDate(a.episodes?.watched_at)].filter((d): d is Date => d !== null);
+  const a = activities as {
+    movies?: { watched_at?: unknown; rated_at?: unknown };
+    episodes?: { watched_at?: unknown };
+    shows?: { rated_at?: unknown };
+  };
+  const stamps = [
+    parseDate(a.movies?.watched_at),
+    parseDate(a.episodes?.watched_at),
+    parseDate(a.movies?.rated_at),
+    parseDate(a.shows?.rated_at),
+  ].filter((d): d is Date => d !== null);
   if (stamps.length === 0) return null;
   return new Date(Math.max(...stamps.map((d) => d.getTime())));
 }
@@ -423,15 +477,30 @@ async function fetchWatchedHistory(client: TraktUserClient): Promise<TraktWatche
   return selectTraktHistoryRows(rows);
 }
 
-// Replace one user's imported history, newest MAX_TRAKT_HISTORY_ITEMS titles.
-// Full replace in one transaction (guardrail 4): an unwatch on Trakt drops the row.
+// The user's own 1–10 ratings, movies and shows. Episode and season ratings are
+// skipped: For You seeds whole titles.
+async function fetchRatings(client: TraktUserClient): Promise<TraktRatingRow[]> {
+  const rows: TraktRatingRow[] = [];
+  for (const [path, mediaType] of [["/sync/ratings/movies", "MOVIE"], ["/sync/ratings/shows", "TV"]] as const) {
+    const { body } = await client.get(path);
+    for (const e of Array.isArray(body) ? body : []) {
+      const row = parseTraktRatingEntry(e, mediaType);
+      if (row) rows.push(row);
+    }
+  }
+  return selectTraktRatingRows(rows);
+}
+
+// Replace one user's imported history (newest MAX_TRAKT_HISTORY_ITEMS titles)
+// and ratings. Full replace in one transaction (guardrail 4): an unwatch or an
+// unrate on Trakt drops the row.
 //
 // The history read takes seconds, and the user may switch the history off or
 // disconnect meanwhile — both of which delete these rows. So the transaction
 // LOCKS the connection row (FOR UPDATE: the toggle's update and the disconnect's
 // delete wait for it) and re-checks that the history is still wanted and the
 // grant still exists before writing. Returns false (nothing written) otherwise.
-async function replaceTraktHistory(userId: string, rows: TraktWatchedRow[]): Promise<boolean> {
+async function replaceTraktHistory(userId: string, rows: TraktWatchedRow[], ratings: TraktRatingRow[]): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
       // One Prisma.sql value, never a tagged template with a fragment (23a).
@@ -445,6 +514,11 @@ async function replaceTraktHistory(userId: string, rows: TraktWatchedRow[]): Pro
       await batchCreateMany(
         tx.traktWatchedItem,
         rows.map((r) => ({ userId, tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, plays: r.plays, lastWatchedAt: r.lastWatchedAt })),
+      );
+      await tx.traktRating.deleteMany({ where: { userId } });
+      await batchCreateMany(
+        tx.traktRating,
+        ratings.map((r) => ({ userId, tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, rating: r.rating, ratedAt: r.ratedAt })),
       );
       return true;
     },
@@ -678,6 +752,7 @@ export async function disconnectTrakt(userId: string): Promise<boolean> {
     prisma.account.deleteMany({ where: { userId, provider: "trakt" } }),
     prisma.traktConnection.deleteMany({ where: { userId } }),
     prisma.traktWatchedItem.deleteMany({ where: { userId } }),
+    prisma.traktRating.deleteMany({ where: { userId } }),
   ]);
   pendingDeviceAuth.delete(userId);
   const cfg = await getTraktOAuthConfig().catch(() => null);
@@ -776,9 +851,10 @@ export async function syncTraktUsers(opts: { signal?: AbortSignal } = {}): Promi
         // Unchanged since the last import ⇒ skip the (large) history read.
         if (stamp === null || historyActivityAt === null || stamp.getTime() !== historyActivityAt.getTime()) {
           const history = await fetchWatchedHistory(client);
+          const ratings = await fetchRatings(client);
           // False: switched off or disconnected mid-read — nothing written, and
           // the bookkeeping below must not claim an import either.
-          if (await replaceTraktHistory(row.userId, history)) {
+          if (await replaceTraktHistory(row.userId, history, ratings)) {
             historyActivityAt = stamp;
             historyImportedAt = new Date();
             result.historyImported++;
@@ -836,6 +912,7 @@ async function endRevokedConnection(userId: string): Promise<void> {
     await prisma.$transaction([
       prisma.account.deleteMany({ where: { userId, provider: "trakt" } }),
       prisma.traktWatchedItem.deleteMany({ where: { userId } }),
+      prisma.traktRating.deleteMany({ where: { userId } }),
       prisma.traktConnection.updateMany({ where: { userId }, data: { status: "reauth", historyActivityAt: null, historyImportedAt: null } }),
     ]);
   } catch (e) {
