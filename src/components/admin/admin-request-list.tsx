@@ -8,6 +8,7 @@ import Image from "next/image";
 import { Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
+import { RequestThread } from "@/components/requests/request-thread";
 import { OpenInArrLink, arrInstanceLabel } from "./open-in-arr";
 import { ManageTitleButton } from "./arr-title/title-manager";
 import { manageTabFor } from "@/lib/arr-manage-links";
@@ -33,6 +34,8 @@ export interface Requester {
   arrInstance: string;
   note: string | null;
   adminNote: string | null;
+  /** Comments on this request (RequestComment); the thread loads on open. */
+  commentCount: number;
   createdAt: string;
   userName: string | null;
   userEmail: string;
@@ -71,6 +74,8 @@ export interface GroupedRequestRow {
 }
 
 interface AdminRequestListProps {
+  /** A request id whose comment thread opens on load (?comments=). */
+  initialOpenThread?: string;
   requests: GroupedRequestRow[];
   page: number;
   total: number;
@@ -120,7 +125,7 @@ const BATCH_ID_CAP = 100; // /api/requests/batch rejects more ids than this per 
 
 // Admin request queue: groups requests by title, drives per-group + batch
 // approve/decline, and paginates. Live-refreshes on request:* SSE events.
-export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false, arrServices }: AdminRequestListProps) {
+export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false, arrServices, initialOpenThread }: AdminRequestListProps) {
   const router = useRouter();
   const mounted = useHasMounted();
   const t = useT();
@@ -884,6 +889,29 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                   existingAdminNote={representativeAdminNote}
                   groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
                 />
+              </div>
+
+              {/* One collapsed thread per requester: a group can hold several
+                  people's requests for the same title, and each conversation is
+                  private to its own requester. Nothing loads until it is opened. */}
+              <div className="basis-full">
+                {group.requesters.map((r) => (
+                  <div key={r.requestId} className="flex flex-col items-start">
+                    {group.requesters.length > 1 && (
+                      <span style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 6 }}>
+                        {formatUserLabel(r, t)}
+                      </span>
+                    )}
+                    <RequestThread
+                      requestId={r.requestId}
+                      viewerIsManager
+                      requestNote={r.note}
+                      declineNote={r.status === "DECLINED" ? r.adminNote : null}
+                      initialCount={r.commentCount}
+                      defaultOpen={initialOpenThread === r.requestId}
+                    />
+                  </div>
+                ))}
               </div>
             </div>
           );

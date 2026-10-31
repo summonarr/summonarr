@@ -1345,5 +1345,9 @@
   "adminManage.watchSync.progress.hint": "Copie aussi les positions en cours (par exemple « à 12 min ») dans le sens de l'association. Le côté le plus récent l'emporte ; rien de déjà vu n'est modifié. L'écriture des positions sur Plex est nouvelle : essayez d'abord sur une association.",
   "adminManage.watchSync.progress.result": "Points de reprise à la dernière exécution : {toJellyfin} vers Jellyfin, {toPlex} vers Plex",
   "adminManage.watchSync.run.inProgress": "Une synchro est en cours (démarrée le {date}). Cette page se met à jour à la fin.",
-  "adminManage.watchSync.run.syncingPair": "Synchro en cours…"
+  "adminManage.watchSync.run.syncingPair": "Synchro en cours…",
+  "adminManage.notif.comments": "Commentaires de demande",
+  "adminManage.audit.action.REQUEST_COMMENT": "Commentaire de demande",
+  "adminManage.audit.summary.commentByManager": "· commentaire d'un gestionnaire",
+  "adminManage.audit.summary.commentByRequester": "· commentaire du demandeur"
 }

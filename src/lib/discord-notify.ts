@@ -432,7 +432,7 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
 async function notifyUser(
   userId: string,
   build: (t: Translator, locale: Locale, title: string) => Embed,
-  prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue",
+  prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue" | "notifyOnComment",
   titleRef?: TitleRef,
 ): Promise<void> {
   try {
@@ -441,7 +441,7 @@ async function notifyUser(
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { discordId: true, notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true, notifyOnIssue: true, locale: true, deactivatedAt: true },
+      select: { discordId: true, notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true, notifyOnIssue: true, notifyOnComment: true, locale: true, deactivatedAt: true },
     });
     if (!user?.discordId) return;
     // Guardrail 33: a disabled account keeps its Discord link. Gated here, the single-user
@@ -612,6 +612,73 @@ export async function notifyAdminsIssueMessage(
     );
   } catch (err) {
     console.error("[discord-notify] Failed to send admin issue message notification:", err);
+  }
+}
+
+// A manager commented on the requester's request. DM (or the shared channel),
+// gated by the requester's own notifyOnComment.
+export async function notifyUserRequestComment(
+  userId: string,
+  title: string,
+  authorName: string,
+  body: string,
+  media?: { tmdbId?: number | null; mediaType?: string | null },
+): Promise<void> {
+  await notifyUser(userId, (t, _locale, local) => ({
+    color: 0x5865F2,
+    title: t("notify.discord.userRequestComment.title", { title: escMd(local) }),
+    description: `${t("notify.discord.userRequestComment.description", { user: escMd(authorName) })}\n\n> ${escMd(body)}`,
+    timestamp: new Date().toISOString(),
+  }), "notifyOnComment", { title, ...media });
+}
+
+// A requester commented: ping the managers in the shared channel (the same
+// audience and transport as a new-request alert — there is no per-manager DM).
+export async function notifyAdminsRequestComment(
+  title: string,
+  userName: string,
+  body: string,
+  opts: { excludeUserId?: string; tmdbId?: number | null; mediaType?: string | null } = {},
+): Promise<void> {
+  try {
+    const cfg = await getConfig();
+    if (!cfg) return;
+    if (!cfg.channelId) return;
+    if (!isValidSnowflake(cfg.channelId)) return;
+
+    const rows = await prisma.user.findMany({
+      where: {
+        discordId: { not: null },
+        notifyOnComment: true,
+        deactivatedAt: null, // guardrail 33: a disabled account keeps its Discord link
+        ...(opts.excludeUserId ? { id: { not: opts.excludeUserId } } : {}),
+      },
+      select: { discordId: true, role: true, permissions: true },
+    });
+    const managers = rows.filter((u) => {
+      const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
+      return hasPermission(perms, Permission.MANAGE_REQUESTS);
+    });
+    if (!managers.length) return;
+
+    const t = channelTranslator();
+    const localTitle = await localizedTitleFor({ title, tmdbId: opts.tmdbId, mediaType: opts.mediaType }, null);
+    const embed: Embed = {
+      color: 0xFEE75C,
+      title: t("notify.discord.adminRequestComment.title", { title: escMd(localTitle) }),
+      description: `${t("notify.discord.adminRequestComment.description", { user: escMd(userName) })}\n\n> ${escMd(body)}`,
+      timestamp: new Date().toISOString(),
+    };
+
+    await Promise.allSettled(
+      managers.map((a) =>
+        postToChannel(cfg.botToken, cfg.channelId!, a.discordId!, embed).catch((err) =>
+          console.error("[discord-notify] Failed to notify manager:", err)
+        )
+      )
+    );
+  } catch (err) {
+    console.error("[discord-notify] Failed to send request comment notification:", err);
   }
 }
 

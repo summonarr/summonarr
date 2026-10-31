@@ -194,5 +194,10 @@
   "apiUser.requests.searchSeriesNotInSonarr": "This series isn't in this request's Sonarr instance — re-push the request to add it again",
   "apiUser.common.arrTimeout": "Radarr/Sonarr didn't answer in time — try again later",
   "apiUser.common.arrUnreachable": "Couldn't reach Radarr/Sonarr — try again later",
-  "apiUser.common.arrFailed": "The Radarr/Sonarr request failed — the server log has the details"
+  "apiUser.common.arrFailed": "The Radarr/Sonarr request failed — the server log has the details",
+  "apiUser.comments.disabled": "Request comments are turned off.",
+  "apiUser.comments.rateLimited": "You're commenting too fast. Try again in a minute.",
+  "apiUser.comments.closed": "This request was declined for good, so it is closed to comments.",
+  "apiUser.comments.bodyRequired": "Write a comment first.",
+  "apiUser.comments.bodyTooLong": "Comments can be up to 2000 characters."
 }

@@ -45,6 +45,9 @@ const USER_SELECT = {
   pushOnAvailable: true,
   pushOnDeclined: true,
   notifyOnIssue: true,
+  notifyOnComment: true,
+  emailOnComment: true,
+  pushOnComment: true,
   _count: { select: { requests: true } },
 } satisfies Prisma.UserSelect;
 
@@ -93,6 +96,9 @@ function serializeUser(u: UserRow, hasOidcAccount: boolean) {
     pushOnAvailable: u.pushOnAvailable,
     pushOnDeclined: u.pushOnDeclined,
     notifyOnIssue: u.notifyOnIssue,
+    notifyOnComment: u.notifyOnComment,
+    emailOnComment: u.emailOnComment,
+    pushOnComment: u.pushOnComment,
     requestCount: u._count.requests,
   };
 }

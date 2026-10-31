@@ -221,6 +221,7 @@ const SETTINGS_SCHEMA = [
   ["feature.behavior.activeSessions", false],
   ["feature.behavior.activityCalendar", false],
   ["feature.behavior.watchGrades",    false],
+  ["feature.behavior.requestComments", false],
   ["feature.behavior.watchlistAutoRequest", false],
   ["feature.behavior.forYouCoWatch", false],
   ["feature.integration.plex",        false],

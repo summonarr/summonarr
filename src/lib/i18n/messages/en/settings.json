@@ -433,5 +433,7 @@
   "settings.featureLabel.admin_watchSync": "Watch Sync page",
   "settings.featureDesc.admin_watchSync": "Show the /admin/watch-sync page: pair a Plex account with a Jellyfin user and pick a direction, and what one server counts as watched is marked played on the other, including history from before the pair was made. Add-only: nothing is ever marked unplayed. Off by default.",
   "settings.cron.job.watchSync.name": "Watch Sync",
-  "settings.cron.job.watchSync.description": "Keep each admin-paired Plex and Jellyfin account's watched status in step, in the direction chosen for the pair"
+  "settings.cron.job.watchSync.description": "Keep each admin-paired Plex and Jellyfin account's watched status in step, in the direction chosen for the pair",
+  "settings.featureLabel.behavior_requestComments": "Request comments",
+  "settings.featureDesc.behavior_requestComments": "Let a requester and the people who manage requests exchange comments on a request (\"need a different version?\"). Each side is notified through their notification preferences. Turn off to hide the threads and refuse new comments from requesters; managers can still post."
 }

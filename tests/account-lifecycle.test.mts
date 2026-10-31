@@ -389,7 +389,8 @@ test("purge reads THIS account's request ids and scrubs their moderation rows by
     .filter((w) => typeof w.target === "object" && w.target !== null && "in" in w.target);
   assert.equal(exact.length, 1, "one exact-target read for one chunk of ids");
   assert.deepEqual(exact[0].target, { in: ["request:req-1", "request:req-2"] });
-  assert.deepEqual(exact[0].action, { in: ["REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE"] });
+  // REQUEST_COMMENT rows (guardrail 14e) name the requester by id like the moderation rows, so the purge scrubs them too.
+  assert.deepEqual(exact[0].action, { in: ["REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE", "REQUEST_COMMENT"] });
   // Inside the purge transaction, before the row's own scrub.
   assert.ok(opNames().indexOf("mediaRequest.findMany") < opNames().indexOf("user.updateMany"));
 });

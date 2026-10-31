@@ -433,5 +433,7 @@
   "settings.featureLabel.admin_watchSync": "Seite Gesehen-Sync",
   "settings.featureDesc.admin_watchSync": "Zeigt die Seite /admin/watch-sync: Verknüpfe ein Plex-Konto mit einem Jellyfin-Benutzer und wähle eine Richtung, und was ein Server als gesehen zählt, wird auf dem anderen als gesehen markiert – einschließlich des Verlaufs von vor der Verknüpfung. Nur hinzufügend: Nichts wird je als ungesehen markiert. Standardmäßig aus.",
   "settings.cron.job.watchSync.name": "Gesehen-Sync",
-  "settings.cron.job.watchSync.description": "Den Gesehen-Status jedes vom Admin verknüpften Plex- und Jellyfin-Kontos abgleichen, in der für die Verknüpfung gewählten Richtung"
+  "settings.cron.job.watchSync.description": "Den Gesehen-Status jedes vom Admin verknüpften Plex- und Jellyfin-Kontos abgleichen, in der für die Verknüpfung gewählten Richtung",
+  "settings.featureLabel.behavior_requestComments": "Anfragekommentare",
+  "settings.featureDesc.behavior_requestComments": "Ermöglicht dem Anfragenden und den Personen, die Anfragen verwalten, Kommentare zu einer Anfrage auszutauschen („andere Version gewünscht?“). Jede Seite wird gemäß den eigenen Benachrichtigungseinstellungen informiert. Ausgeschaltet werden die Threads ausgeblendet und neue Kommentare von Anfragenden abgelehnt; Verwalter können weiterhin schreiben."
 }

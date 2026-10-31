@@ -21,5 +21,11 @@
   "requests.empty.filteredDescription": "Aucune demande ne correspond à ces filtres.",
   "requests.empty.noneTitle": "Aucune demande pour l'instant",
   "requests.empty.noneDescription": "Trouvez quelque chose dans Découvrir, Films ou Séries et cliquez sur Demander.",
-  "requests.empty.browseMovies": "Parcourir les films"
+  "requests.empty.browseMovies": "Parcourir les films",
+  "requests.thread.show": "Commentaires",
+  "requests.thread.showCount": "Commentaires ({count})",
+  "requests.thread.hide": "Masquer les commentaires",
+  "requests.thread.requestNote": "Note d'origine",
+  "requests.thread.declineReason": "Motif du refus",
+  "requests.thread.closed": "Cette demande est fermée aux commentaires."
 }

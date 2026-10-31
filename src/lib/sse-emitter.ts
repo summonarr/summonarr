@@ -25,6 +25,9 @@ export type SSEEvent =
   | { type: "request:new"; requestId: string; userId: string }
   | { type: "request:updated"; requestId: string; status: string; userId: string }
   | { type: "request:deleted"; requestId: string; userId: string }
+  // Named request:* on purpose: the /api/events delivery rule keys on that prefix, so the
+  // requester (userId match) and every MANAGE_REQUESTS holder get it and nobody else.
+  | { type: "request:comment"; requestId: string; userId: string }
   | { type: "issue:new"; issueId: string; userId: string }
   | { type: "issue:updated"; issueId: string; status: string; userId: string }
   | { type: "issue:deleted"; issueId: string; userId: string }

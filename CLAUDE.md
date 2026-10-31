@@ -466,6 +466,19 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Upstream evidence is READ-ONLY
     - Seasons are reported only for shows that HAVE been watched
     - "Eligible" on the report is exactly the delete dry run's selection
+14e. **A request comment fans out ONLY through `announceRequestComment` ([request-comment-notify.ts](src/lib/request-comment-notify.ts)), after the commit, and the thread is private to the requester and `MANAGE_REQUESTS` holders.** Rules in [request-comments.ts](src/lib/request-comments.ts), route `/api/requests/[id]/comments`.
+
+    Detail and rationale: [docs/architecture/request-comments.md](docs/architecture/request-comments.md).
+
+    Why:
+    - A comment is user text delivered to other people's devices. A recipient who is deactivated (guardrail 33) must get nothing — the inbox included — and a name-less manager's email must never reach the requester.
+
+    Rules:
+    - `fromAdmin` is derived from `MANAGE_REQUESTS` on the server; the author's `email` is selected for managers only; the requester's row is read once and fails CLOSED.
+    - The SSE event is `request:comment` so `/api/events` scopes it to the requester and request managers. NEVER rename it outside the `request:` prefix.
+    - The comment push uses the generic `request_comment` APNs category (alert text in `notify.push.apnsTitle/apnsBody.request_comment`, pinned to the relay's alert rules for every locale). The title, text and author never ride the relay in cleartext. The relay is outside this repo — it must accept the category.
+    - Every comment writes a `REQUEST_COMMENT` audit row (ids and title only, never the body) with `logAudit` after the commit; it is a request-moderation action, so the purge scrubs it by request id.
+    - `tests/request-comments.test.mts` and `tests/request-comments-route.test.mts` pin it; five mutations (deactivated gate, email select, closed rule, `fromAdmin`, feature gate) each fail a named test.
 15. **The `stillPending` snapshot is taken once per sync run.** If you add a third source to the orchestrator, remember that changes made by the Plex pass won't be visible to the Jellyfin pass within the same run — that's intentional. Within a source the marking likewise runs once, over the already-unioned map, so no instance can shadow another's rows.
 16. **NEVER call `Date.now()` or `new Date()` inside the render path of a `"use client"` component.** Module-level constants and direct calls in JSX are both render-time evaluations.
 

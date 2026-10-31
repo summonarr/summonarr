@@ -260,5 +260,9 @@
   "profile.trakt.error.denied": "Die Verbindung wurde bei Trakt abgelehnt.",
   "profile.trakt.error.conflict": "Dieses Trakt-Konto ist hier bereits mit einem anderen Konto verbunden.",
   "profile.trakt.error.expired": "Der Code ist abgelaufen, bevor er freigegeben wurde. Bitte beginnen Sie erneut.",
-  "profile.trakt.error.disconnect": "Trakt konnte nicht getrennt werden. Bitte versuchen Sie es erneut."
+  "profile.trakt.error.disconnect": "Trakt konnte nicht getrennt werden. Bitte versuchen Sie es erneut.",
+  "profile.notifications.comments": "Anfragekommentare",
+  "profile.notifications.discord.comments": "Auf Discord benachrichtigen, wenn in einer Anfrageunterhaltung, an der ich beteiligt bin, ein Kommentar hinzugefügt wird",
+  "profile.notifications.email.comments": "Per E-Mail benachrichtigen, wenn in einer Anfrageunterhaltung, an der ich beteiligt bin, ein Kommentar hinzugefügt wird",
+  "profile.notifications.push.comments": "Push-Benachrichtigung, wenn in einer Anfrageunterhaltung, an der ich beteiligt bin, ein Kommentar hinzugefügt wird"
 }

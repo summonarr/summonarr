@@ -27,6 +27,7 @@ export const BACKUP_TABLES = [
   "DiscordLinkToken",
   "DiscordMergeCode",
   "MediaRequest",
+  "RequestComment",
   "Issue",
   "IssueMessage",
   "IssueGrab",

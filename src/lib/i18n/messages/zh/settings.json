@@ -433,5 +433,7 @@
   "settings.featureLabel.admin_watchSync": "观看同步页面",
   "settings.featureDesc.admin_watchSync": "显示 /admin/watch-sync 页面：将一个 Plex 账户与一个 Jellyfin 用户配对并选择方向，一台服务器计为已观看的内容（包括配对之前的历史记录）会在另一台上标记为已播放。只增不减：不会将任何内容标记为未播放。默认关闭。",
   "settings.cron.job.watchSync.name": "观看同步",
-  "settings.cron.job.watchSync.description": "按配对所选方向，让管理员配对的每个 Plex 与 Jellyfin 账户的观看状态保持一致"
+  "settings.cron.job.watchSync.description": "按配对所选方向，让管理员配对的每个 Plex 与 Jellyfin 账户的观看状态保持一致",
+  "settings.featureLabel.behavior_requestComments": "请求评论",
+  "settings.featureDesc.behavior_requestComments": "允许请求者与管理请求的人员在请求下交流评论（例如“需要其他版本吗？”）。双方都会按各自的通知偏好收到提醒。关闭后将隐藏评论串并拒绝请求者的新评论；管理人员仍可发表。"
 }

@@ -21,5 +21,11 @@
   "requests.empty.filteredDescription": "No requests match these filters.",
   "requests.empty.noneTitle": "No requests yet",
   "requests.empty.noneDescription": "Find something on Discover, Movies, or TV and hit Request.",
-  "requests.empty.browseMovies": "Browse movies"
+  "requests.empty.browseMovies": "Browse movies",
+  "requests.thread.show": "Comments",
+  "requests.thread.showCount": "Comments ({count})",
+  "requests.thread.hide": "Hide comments",
+  "requests.thread.requestNote": "Original note",
+  "requests.thread.declineReason": "Decline reason",
+  "requests.thread.closed": "This request is closed to comments."
 }

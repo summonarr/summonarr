@@ -142,6 +142,8 @@ const {
   notifyAdminsManualInteractionRequiredPush,
   notifyUserIssueMessagePush,
   notifyUserIssueResolvedPush,
+  notifyUserRequestCommentPush,
+  notifyAdminsRequestCommentPush,
   notifyUserRequestApprovedPush,
   notifyUserRequestDeclinedPush,
   notifyUsersRequestsAvailablePush,
@@ -209,7 +211,7 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
 // PushSubscription: rows are filtered through a matcher covering exactly the
 // where-shapes push.ts issues, so recipient assertions are behavior-derived;
 // the raw args are captured for exact where-shape pins.
-type UserMeta = { role: string; permissions: bigint; notifyOnIssue?: boolean; locale?: string | null };
+type UserMeta = { role: string; permissions: bigint; notifyOnIssue?: boolean; pushOnComment?: boolean; locale?: string | null };
 type SubRow = {
   id: string;
   userId: string;
@@ -225,7 +227,7 @@ type SubRow = {
 type SubWhere = {
   userId?: string | { in?: string[]; not?: string };
   platform?: string;
-  user?: { notifyOnIssue?: boolean };
+  user?: { notifyOnIssue?: boolean; pushOnComment?: boolean };
 };
 type SubFindManyArgs = { where?: SubWhere; include?: unknown };
 
@@ -238,6 +240,7 @@ function subMatches(row: SubRow, where: SubWhere | undefined): boolean {
   }
   if (where.platform !== undefined && row.platform !== where.platform) return false;
   if (where.user?.notifyOnIssue === true && row.user?.notifyOnIssue !== true) return false;
+  if (where.user?.pushOnComment === true && row.user?.pushOnComment !== true) return false;
   return true;
 }
 
@@ -742,6 +745,45 @@ test("the relay-rule checkers themselves reject what the relay rejects (so the p
   }
 });
 
+// ── Request comments (guardrail 14e) ────────────────────────────────────────
+
+test("a request comment reaches the requester's iOS device as the generic request_comment alert — no title, no text, no author", async () => {
+  subRows = [
+    iosSub("u-req", "apns-token-req", { user: { role: "USER", permissions: 0n, pushOnComment: true } }),
+    iosSub("u-other", "apns-token-other", { user: { role: "USER", permissions: 0n, pushOnComment: true } }),
+  ];
+  await notifyUserRequestCommentPush({ userId: "u-req", title: "Dune", body: "Need the 4K cut?", requestId: "req-9" });
+  assert.equal(relayCalls.length, 1);
+  assert.deepEqual(relayCalls[0].body, {
+    deviceToken: "apns-token-req",
+    payload: {
+      aps: { alert: { title: "New comment", body: "There's a new comment on a request" }, sound: "default" },
+      url: "/requests?comments=req-9",
+    },
+    collapseId: "request_comment",
+  });
+  const raw = JSON.stringify(relayCalls[0].body);
+  assert.ok(!raw.includes("Dune") && !raw.includes("Need the 4K"), "rich text must never reach the relay in cleartext");
+  assert.deepEqual(errors, []);
+});
+
+test("a requester who switched pushOnComment off gets no comment push on any platform", async () => {
+  subRows = [iosSub("u-req", "apns-token-off", { user: { role: "USER", permissions: 0n, pushOnComment: false } })];
+  await notifyUserRequestCommentPush({ userId: "u-req", title: "Dune", body: "hello", requestId: "req-9" });
+  assert.equal(relayCalls.length, 0);
+});
+
+test("a requester's comment pushes MANAGE_REQUESTS holders with pushOnComment on, never the author or a non-manager", async () => {
+  subRows = [
+    iosSub("u-mgr", "apns-token-mgr", { user: { role: "ADMIN", permissions: 0n, pushOnComment: true } }),
+    iosSub("u-mgr-off", "apns-token-mgr-off", { user: { role: "ADMIN", permissions: 0n, pushOnComment: false } }),
+    iosSub("u-author", "apns-token-author", { user: { role: "ADMIN", permissions: 0n, pushOnComment: true } }),
+    iosSub("u-plain", "apns-token-plain", { user: { role: "USER", permissions: 0n, pushOnComment: true } }),
+  ];
+  await notifyAdminsRequestCommentPush({ title: "Dune", userName: "alice", body: "hi", requestId: "req-9", excludeUserId: "u-author" });
+  assert.deepEqual(relayCalls.map((c) => (c.body as { deviceToken: string }).deviceToken), ["apns-token-mgr"]);
+});
+
 test("every APNS_ALERTS entry satisfies the relay's alert rules", () => {
   const entries = Object.entries(APNS_ALERTS);
   assert.ok(entries.length >= 12, "APNS_ALERTS unexpectedly small — is the export the real table?");
@@ -823,7 +865,7 @@ test("an English recipient's title costs no translation read even when a transla
 test("every cleartext url a helper sends passes the relay's url rules — every category covered", async () => {
   const issueAdmin: UserMeta = { role: "ADMIN", permissions: 0n, notifyOnIssue: true };
   userRows = [{ id: "u-all", pushOnApproved: true, pushOnDeclined: true, pushOnAvailable: true }];
-  subRows = [iosSub("u-all", "token-all", { user: issueAdmin })];
+  subRows = [iosSub("u-all", "token-all", { user: { ...issueAdmin, pushOnComment: true } })];
   // A real Issue id is cuid2 (schema.prisma: @default(cuid(2))) — 24 lowercase
   // alphanumerics; it rides the cleartext url verbatim.
   const issueId = "k8x2m9q4r7t1v3w5y6z0a2b4";
@@ -835,6 +877,8 @@ test("every cleartext url a helper sends passes the relay's url rules — every 
     await notifyAdminsIssueMessagePush({ title: "Dune", userName: "alice", body: "hi", issueId: id });
     await notifyAdminsNewIssuePush({ title: "Dune", issueType: "PLAYBACK", reportedBy: "alice", issueId: id });
   }
+  await notifyUserRequestCommentPush({ userId: "u-all", title: "Dune", body: "hi", requestId: "k8x2m9q4r7t1v3w5y6z0a2b4" });
+  await notifyAdminsRequestCommentPush({ title: "Dune", userName: "alice", body: "hi", requestId: "k8x2m9q4r7t1v3w5y6z0a2b4" });
   await notifyAdminGrabCompletedPush({ userId: "u-all", title: "Dune", scope: "MOVIE", issueId });
   await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title: "Dune" });
   await notifyAdminsDeletionVoteThresholdPush({ title: "Dune", mediaType: "MOVIE", voteCount: 5, tmdbId: 438631 });

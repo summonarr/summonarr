@@ -453,5 +453,6 @@
   "settings.form.plex.disconnectConfirm": "¿Desconectar Plex? Para volver a conectar hará falta iniciar sesión de nuevo en plex.tv.",
   "settings.form.plex.disconnectConfirmAction": "Sí, desconectar",
   "settings.form.apiKey.traktSecret.label": "Client Secret de Trakt",
-  "settings.form.apiKey.traktSecret.help": "Permite que los usuarios conecten sus propias cuentas de Trakt en su perfil para solicitar automáticamente desde su lista de seguimiento de Trakt y usar su historial de Trakt en las recomendaciones. Copia el Client Secret de la misma app en {link}."
+  "settings.form.apiKey.traktSecret.help": "Permite que los usuarios conecten sus propias cuentas de Trakt en su perfil para solicitar automáticamente desde su lista de seguimiento de Trakt y usar su historial de Trakt en las recomendaciones. Copia el Client Secret de la misma app en {link}.",
+  "settings.form.agents.event.request.comment": "Comentario de solicitud"
 }

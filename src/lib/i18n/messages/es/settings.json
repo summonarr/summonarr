@@ -433,5 +433,7 @@
   "settings.featureLabel.admin_watchSync": "Página de sincronización de vistos",
   "settings.featureDesc.admin_watchSync": "Muestra la página /admin/watch-sync: empareja una cuenta de Plex con un usuario de Jellyfin y elige una dirección, y lo que un servidor cuenta como visto se marca como visto en el otro, incluido el historial anterior al emparejamiento. Solo añade: nunca se marca nada como no visto. Desactivada por defecto.",
   "settings.cron.job.watchSync.name": "Sincronización de vistos",
-  "settings.cron.job.watchSync.description": "Mantiene sincronizado el estado de visto de cada cuenta de Plex y Jellyfin emparejada por un administrador, en la dirección elegida para el par"
+  "settings.cron.job.watchSync.description": "Mantiene sincronizado el estado de visto de cada cuenta de Plex y Jellyfin emparejada por un administrador, en la dirección elegida para el par",
+  "settings.featureLabel.behavior_requestComments": "Comentarios en solicitudes",
+  "settings.featureDesc.behavior_requestComments": "Permite que quien solicita y quienes gestionan las solicitudes intercambien comentarios en una solicitud («¿necesitas otra versión?»). Cada parte recibe avisos según sus preferencias de notificación. Al desactivarlo se ocultan los hilos y se rechazan comentarios nuevos de quien solicita; los gestores aún pueden publicar."
 }

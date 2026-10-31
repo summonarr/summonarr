@@ -260,5 +260,9 @@
   "profile.trakt.error.denied": "La conexión se rechazó en Trakt.",
   "profile.trakt.error.conflict": "Esa cuenta de Trakt ya está conectada a otra cuenta de este sitio.",
   "profile.trakt.error.expired": "El código caducó antes de aprobarse. Vuelve a empezar.",
-  "profile.trakt.error.disconnect": "No se pudo desconectar Trakt. Inténtalo de nuevo."
+  "profile.trakt.error.disconnect": "No se pudo desconectar Trakt. Inténtalo de nuevo.",
+  "profile.notifications.comments": "Comentarios en solicitudes",
+  "profile.notifications.discord.comments": "Avisarme en Discord cuando se añada un comentario a una conversación de solicitud en la que participo",
+  "profile.notifications.email.comments": "Enviarme un correo cuando se añada un comentario a una conversación de solicitud en la que participo",
+  "profile.notifications.push.comments": "Notificación push cuando se añada un comentario a una conversación de solicitud en la que participo"
 }

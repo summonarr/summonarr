@@ -165,6 +165,7 @@ type ApnsCategory =
   | "declined"
   | "available"
   | "issue_reply"
+  | "request_comment"
   | "issue_resolved"
   | "new_issue"
   | "grab_complete"
@@ -195,6 +196,7 @@ const APNS_CATEGORIES: readonly ApnsCategory[] = [
   "declined",
   "available",
   "issue_reply",
+  "request_comment",
   "issue_resolved",
   "new_issue",
   "grab_complete",
@@ -460,14 +462,14 @@ async function pushContext(): Promise<{ keys: VapidKeys | null } | null> {
   return { keys: await getVapidKeysRaw() };
 }
 
-async function getAdminSubscriptions(excludeUserId?: string) {
+async function getAdminSubscriptions(excludeUserId?: string, userWhere: { pushOnComment?: true } = {}) {
   // Recipients are users whose permissions include MANAGE_REQUESTS (used for
   // new requests, deletion votes and manual *arr imports).
   const subs = await prisma.pushSubscription.findMany({
     // A disabled account keeps its PushSubscription rows (guardrail 33 — the
     // deactivate write set is exactly two fields), so its devices would keep
     // buzzing with other people's requests indefinitely.
-    where: { user: { deactivatedAt: null }, ...(excludeUserId ? { userId: { not: excludeUserId } } : {}) },
+    where: { user: { deactivatedAt: null, ...userWhere }, ...(excludeUserId ? { userId: { not: excludeUserId } } : {}) },
     include: { user: { select: { role: true, permissions: true, locale: true } } },
   });
   return subs.filter((s) => {
@@ -612,6 +614,70 @@ export async function notifyUserIssueMessagePush(data: {
     await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
   } catch (err) {
     console.error("[push] Failed to notify user (issue message):", err);
+  }
+}
+
+export async function notifyUserRequestCommentPush(data: {
+  userId: string;
+  title: string;
+  tmdbId?: number;
+  mediaType?: string;
+  body: string;
+  requestId: string;
+}) {
+  try {
+    const ctx = await pushContext();
+    if (!ctx) return;
+
+    const subs = await prisma.pushSubscription.findMany({
+      where: { userId: data.userId, user: { pushOnComment: true, deactivatedAt: null } }, // guardrail 33
+      include: WITH_LOCALE,
+    });
+    if (!subs.length) return;
+
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => ({
+      title: t("notify.push.userRequestComment.title", { title: resolve(data, locale) }),
+      body: data.body.length > 100 ? data.body.slice(0, 97) + "…" : data.body,
+      url: `/requests?comments=${data.requestId}`,
+      category: "request_comment",
+      deepLink: requestDeepLink(data.requestId),
+    }));
+
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
+  } catch (err) {
+    console.error("[push] Failed to notify user (request comment):", err);
+  }
+}
+
+export async function notifyAdminsRequestCommentPush(data: {
+  title: string;
+  tmdbId?: number;
+  mediaType?: string;
+  userName: string;
+  body: string;
+  requestId: string;
+  excludeUserId?: string;
+}) {
+  try {
+    const ctx = await pushContext();
+    if (!ctx) return;
+
+    const subs = await getAdminSubscriptions(data.excludeUserId, { pushOnComment: true });
+    if (!subs.length) return;
+
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => ({
+      title: t("notify.push.adminRequestComment.title", { title: resolve(data, locale) }),
+      body: `${data.userName}: ${data.body.length > 80 ? data.body.slice(0, 77) + "…" : data.body}`,
+      url: `/admin?comments=${data.requestId}`,
+      category: "request_comment",
+      deepLink: requestDeepLink(data.requestId),
+    }));
+
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
+  } catch (err) {
+    console.error("[push] Failed to notify admins (request comment):", err);
   }
 }
 

@@ -22,7 +22,7 @@ import type { Translator } from "./i18n/translate";
 export type NotificationData =
   | { v: 1 } // REQUEST_APPROVED | REQUEST_AVAILABLE | REQUEST_DECLINED (body from type + mediaType)
   | { v: 1; resolution: string | null } // ISSUE_RESOLVED
-  | { v: 1; author: string; text: string }; // ISSUE_REPLY
+  | { v: 1; author: string; text: string }; // ISSUE_REPLY | REQUEST_COMMENT
 
 export interface RenderableNotification {
   type: string;
@@ -84,6 +84,10 @@ function renderBody(n: RenderableNotification, t: Translator): string | null {
   if (n.type === "ISSUE_REPLY") {
     if (typeof data.author !== "string" || typeof data.text !== "string") return null;
     return t("notify.inApp.issueReply", { author: data.author, text: data.text });
+  }
+  if (n.type === "REQUEST_COMMENT") {
+    if (typeof data.author !== "string" || typeof data.text !== "string") return null;
+    return t("notify.inApp.requestComment", { author: data.author, text: data.text });
   }
   return null;
 }
