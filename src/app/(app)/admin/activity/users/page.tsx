@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
 import { getCachedPlexAllowlist } from "@/lib/plex-membership";
+import { getLiveJellyfinUsers } from "@/lib/jellyfin-live-members";
 import { Chip, PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown } from "@/components/icons";
@@ -87,6 +88,16 @@ function SortHeader({
   );
 }
 
+function jellyfinOnServer(
+  u: { active: boolean; serverInstance: string; sourceUserId: string },
+  live: Awaited<ReturnType<typeof getLiveJellyfinUsers>> | null,
+): boolean {
+  const users = live?.get(u.serverInstance);
+  if (!users) return u.active;
+  const disabled = users.get(u.sourceUserId);
+  return disabled !== undefined && !disabled;
+}
+
 export default async function UsersActivityPage({
   searchParams,
 }: {
@@ -113,17 +124,20 @@ export default async function UsersActivityPage({
 
   const allStats = await getAllUsersStats();
 
-  // "Still on the server": Jellyfin rows carry it in `active` (the hourly user
-  // sync soft-deletes departed users). Nothing marks a Plex user inactive, so
-  // Plex rows are checked against the plex.tv share list the sign-in gate uses.
-  // A null list means "can't tell" — fail open, as every other caller does.
-  const plexMembers = status === "all" ? null : await getCachedPlexAllowlist();
+  // "Still on the server" is read live from each server, not from the stored
+  // `active` flag alone: nothing marks a Plex user inactive, and the hourly
+  // Jellyfin sync can lag or refuse a shrink. Plex rows are checked against the
+  // plex.tv share list the sign-in gate uses (null = can't tell, fail open);
+  // Jellyfin rows against that server's current /Users, falling back to
+  // `active` for a server that couldn't be read.
+  const [plexMembers, jellyfinLive] =
+    status === "all" ? [null, null] : await Promise.all([getCachedPlexAllowlist(), getLiveJellyfinUsers()]);
   let users = allStats.map((u) => ({
     ...u,
     onServer:
       u.source === "plex"
         ? u.isServerAdmin || plexMembers === null || plexMembers.ids.has(u.sourceUserId)
-        : u.active,
+        : jellyfinOnServer(u, jellyfinLive),
   }));
 
   if (status !== "all") users = users.filter((u) => u.onServer === (status === "active"));

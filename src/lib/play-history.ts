@@ -1378,6 +1378,7 @@ export async function getAllUsersStats() {
       thumbUrl: string | null;
       active: boolean;
       sourceUserId: string;
+      serverInstance: string;
       isServerAdmin: boolean;
       createdAt: Date;
       plays: bigint;
@@ -1395,6 +1396,7 @@ export async function getAllUsersStats() {
       m."thumbUrl",
       m."active",
       m."sourceUserId",
+      m."serverInstance",
       m."isServerAdmin",
       m."createdAt",
       COUNT(p."id") FILTER (WHERE p."watched" = true)::bigint AS plays,
@@ -1410,7 +1412,7 @@ export async function getAllUsersStats() {
       COUNT(p."id") FILTER (WHERE p."playMethod" = 'Transcode')::bigint AS transcodes
     FROM "MediaServerUser" m
     LEFT JOIN "PlayHistory" p ON p."mediaServerUserId" = m."id"
-    GROUP BY m."id", m."username", m."source", m."thumbUrl", m."active", m."sourceUserId", m."isServerAdmin", m."createdAt"
+    GROUP BY m."id", m."username", m."source", m."thumbUrl", m."active", m."sourceUserId", m."serverInstance", m."isServerAdmin", m."createdAt"
     ORDER BY plays DESC
   `;
 
@@ -1426,6 +1428,7 @@ export async function getAllUsersStats() {
       thumbUrl: r.thumbUrl,
       active: r.active,
       sourceUserId: r.sourceUserId,
+      serverInstance: r.serverInstance,
       isServerAdmin: r.isServerAdmin,
       createdAt: r.createdAt,
       plays,
