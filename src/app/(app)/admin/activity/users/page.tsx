@@ -5,6 +5,7 @@ import { requireFeature } from "@/lib/features";
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
+import { getCachedPlexAllowlist } from "@/lib/plex-membership";
 import { Chip, PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown } from "@/components/icons";
@@ -110,9 +111,22 @@ export default async function UsersActivityPage({
     : "plays";
   const dir: SortDir = dirParam === "asc" ? "asc" : dirParam === "desc" ? "desc" : DEFAULT_DIR[sort];
 
-  let users = await getAllUsersStats();
+  const allStats = await getAllUsersStats();
 
-  if (status !== "all") users = users.filter((u) => u.active === (status === "active"));
+  // "Still on the server": Jellyfin rows carry it in `active` (the hourly user
+  // sync soft-deletes departed users). Nothing marks a Plex user inactive, so
+  // Plex rows are checked against the plex.tv share list the sign-in gate uses.
+  // A null list means "can't tell" — fail open, as every other caller does.
+  const plexMembers = status === "all" ? null : await getCachedPlexAllowlist();
+  let users = allStats.map((u) => ({
+    ...u,
+    onServer:
+      u.source === "plex"
+        ? u.isServerAdmin || plexMembers === null || plexMembers.ids.has(u.sourceUserId)
+        : u.active,
+  }));
+
+  if (status !== "all") users = users.filter((u) => u.onServer === (status === "active"));
 
   if (search) {
     const q = search.toLowerCase();
