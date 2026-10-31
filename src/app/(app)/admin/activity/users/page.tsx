@@ -18,6 +18,9 @@ const SORT_FIELDS = ["user", "source", "plays", "hours", "lastActive"] as const;
 type SortField = (typeof SORT_FIELDS)[number];
 type SortDir = "asc" | "desc";
 
+const STATUS_FILTERS = ["all", "active", "removed"] as const;
+type StatusFilter = (typeof STATUS_FILTERS)[number];
+
 const DEFAULT_DIR: Record<SortField, SortDir> = {
   user: "asc",
   source: "asc",
@@ -32,6 +35,7 @@ function SortHeader({
   currentSort,
   currentDir,
   search,
+  status,
   align = "left",
 }: {
   label: string;
@@ -39,6 +43,7 @@ function SortHeader({
   currentSort: SortField;
   currentDir: SortDir;
   search: string | undefined;
+  status: StatusFilter;
   align?: "left" | "right";
 }) {
   const isActive = currentSort === field;
@@ -50,6 +55,7 @@ function SortHeader({
 
   const params = new URLSearchParams();
   if (search) params.set("search", search);
+  if (status !== "all") params.set("status", status);
   params.set("sort", field);
   params.set("dir", nextDir);
 
@@ -83,16 +89,20 @@ function SortHeader({
 export default async function UsersActivityPage({
   searchParams,
 }: {
-  searchParams: Promise<{ search?: string | string[]; sort?: string; dir?: string }>;
+  searchParams: Promise<{ search?: string | string[]; sort?: string; dir?: string; status?: string | string[] }>;
 }) {
   await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const { search: searchRaw, sort: sortParam, dir: dirParam } = await searchParams;
+  const { search: searchRaw, sort: sortParam, dir: dirParam, status: statusRaw } = await searchParams;
   // A repeated ?search= arrives as an array at runtime; `.toLowerCase()` on it
   // would 500 the page. Take the first value.
   const search = Array.isArray(searchRaw) ? searchRaw[0] : searchRaw;
+  const statusParam = Array.isArray(statusRaw) ? statusRaw[0] : statusRaw;
+  const status: StatusFilter = (STATUS_FILTERS as readonly string[]).includes(statusParam ?? "")
+    ? (statusParam as StatusFilter)
+    : "all";
   const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
 
   const sort: SortField = (SORT_FIELDS as readonly string[]).includes(sortParam ?? "")
@@ -101,6 +111,8 @@ export default async function UsersActivityPage({
   const dir: SortDir = dirParam === "asc" ? "asc" : dirParam === "desc" ? "desc" : DEFAULT_DIR[sort];
 
   let users = await getAllUsersStats();
+
+  if (status !== "all") users = users.filter((u) => u.active === (status === "active"));
 
   if (search) {
     const q = search.toLowerCase();
@@ -135,9 +147,35 @@ export default async function UsersActivityPage({
 
       <ActivityFilterBar />
 
+      <nav aria-label={t("adminActivity.users.statusAria")} className="mb-3 flex flex-wrap gap-2">
+        {STATUS_FILTERS.map((f) => {
+          const params = new URLSearchParams();
+          if (search) params.set("search", search);
+          if (f !== "all") params.set("status", f);
+          params.set("sort", sort);
+          params.set("dir", dir);
+          const selected = f === status;
+          return (
+            <Link
+              key={f}
+              href={`/admin/activity/users?${params.toString()}`}
+              aria-current={selected ? "true" : undefined}
+              className={`px-3 py-1 text-xs rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)] ${
+                selected
+                  ? "bg-zinc-700 border-zinc-600 text-zinc-100"
+                  : "border-zinc-700 text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              {t(`adminActivity.users.status.${f}`)}
+            </Link>
+          );
+        })}
+      </nav>
+
       <form method="GET" className="mb-4">
         <input type="hidden" name="sort" value={sort} />
         <input type="hidden" name="dir" value={dir} />
+        {status !== "all" && <input type="hidden" name="status" value={status} />}
         <input
           type="search"
           name="search"
@@ -153,11 +191,11 @@ export default async function UsersActivityPage({
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800">
-                <SortHeader label={t("adminActivity.field.user")} field="user" currentSort={sort} currentDir={dir} search={search} />
-                <SortHeader label={t("adminActivity.filter.source")} field="source" currentSort={sort} currentDir={dir} search={search} />
-                <SortHeader label={t("adminActivity.stat.plays")} field="plays" currentSort={sort} currentDir={dir} search={search} align="right" />
-                <SortHeader label={t("adminActivity.kpi.watchTime")} field="hours" currentSort={sort} currentDir={dir} search={search} align="right" />
-                <SortHeader label={t("adminActivity.user.lastActive")} field="lastActive" currentSort={sort} currentDir={dir} search={search} />
+                <SortHeader label={t("adminActivity.field.user")} field="user" currentSort={sort} currentDir={dir} search={search} status={status} />
+                <SortHeader label={t("adminActivity.filter.source")} field="source" currentSort={sort} currentDir={dir} search={search} status={status} />
+                <SortHeader label={t("adminActivity.stat.plays")} field="plays" currentSort={sort} currentDir={dir} search={search} status={status} align="right" />
+                <SortHeader label={t("adminActivity.kpi.watchTime")} field="hours" currentSort={sort} currentDir={dir} search={search} status={status} align="right" />
+                <SortHeader label={t("adminActivity.user.lastActive")} field="lastActive" currentSort={sort} currentDir={dir} search={search} status={status} />
                 {/* Hide Fav Platform + Direct % below the sm breakpoint — the
                     7-col table sums to ~831 px (≈1.9× a 440 px viewport). The
                     two hidden columns are the lowest-information for a mobile
