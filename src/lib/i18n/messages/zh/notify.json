@@ -382,5 +382,8 @@
   "notify.agent.request.comment.body": "{user} 发表了评论。",
   "notify.agent.request.comment.bodyWithText": "{user} 发表了评论：{text}",
   "notify.push.apnsTitle.request_comment": "新评论",
-  "notify.push.apnsBody.request_comment": "有一条请求收到了新评论"
+  "notify.push.apnsBody.request_comment": "有一条请求收到了新评论",
+  "notify.agent.stream.concurrent.title": "同时播放过多：{user}",
+  "notify.agent.stream.concurrent.body": "{user} 超过了同时播放上限。",
+  "notify.agent.stream.concurrent.bodyWithText": "{user} 超过了同时播放上限：{text}"
 }

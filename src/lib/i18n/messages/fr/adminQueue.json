@@ -416,5 +416,8 @@
   "adminQueue.issueActions.searchSent": "Recherche envoyée à {service}",
   "adminQueue.issueActions.back": "Retour",
   "adminQueue.issueActions.notBetter": "Pas mieux que le fichier actuel",
-  "adminQueue.issueActions.notBetterNote": "Les releases marquées « Pas mieux que le fichier actuel » sont tout de même téléchargées, mais {service} n'en importe une que si elle est au moins aussi bonne que le fichier qu'elle remplace."
+  "adminQueue.issueActions.notBetterNote": "Les releases marquées « Pas mieux que le fichier actuel » sont tout de même téléchargées, mais {service} n'en importe une que si elle est au moins aussi bonne que le fichier qu'elle remplace.",
+  "adminQueue.issues.playback.lastPlay": "Dernière lecture du signaleur",
+  "adminQueue.issues.playback.otherEpisode": "un autre épisode de ce titre",
+  "adminQueue.issues.playback.why": "Raison du transcodage : {reason}"
 }

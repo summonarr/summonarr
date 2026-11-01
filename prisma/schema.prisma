@@ -869,6 +869,11 @@ model Issue {
   // stand in for it).
   resolvedAt DateTime?
 
+  // The reporter's most recent play of this title, snapshotted when the issue was
+  // filed (src/lib/issue-playback-context.ts, version-tagged JSON). Never an IP.
+  // Null: no linked identity, no recent play, or issues filed before the column.
+  playbackContext Json?
+
   messages IssueMessage[]
   grabs    IssueGrab[]
 

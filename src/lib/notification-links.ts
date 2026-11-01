@@ -14,6 +14,8 @@ export function notificationHref(n: NotificationLinkFields): string {
   if (n.type.startsWith("ISSUE")) return "/issues";
   // A comment lives on the request, not the title page.
   if (n.type === "REQUEST_COMMENT") return "/requests";
+  // A concurrent-stream alert is for admins; the live sessions are on Activity.
+  if (n.type === "STREAM_LIMIT") return "/admin/activity";
   if (n.tmdbId && n.mediaType === "MOVIE") return `/movie/${n.tmdbId}`;
   if (n.tmdbId && n.mediaType === "TV") return `/tv/${n.tmdbId}`;
   return "/requests";

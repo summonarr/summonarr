@@ -22,6 +22,7 @@ export function PlayHistorySettingsForm({
   initialArcGapDays,
   initialPollingInterval,
   initialRetentionDays,
+  initialConcurrentStreamLimit,
 }: {
   initialEnabled: string;
   initialPlexEnabled: string;
@@ -31,6 +32,7 @@ export function PlayHistorySettingsForm({
   initialArcGapDays: string;
   initialPollingInterval: string;
   initialRetentionDays: string;
+  initialConcurrentStreamLimit: string;
 }) {
   const [enabled, setEnabled] = useState(initialEnabled === "true");
   const [plexEnabled, setPlexEnabled] = useState(initialPlexEnabled === "true");
@@ -40,6 +42,7 @@ export function PlayHistorySettingsForm({
   const [arcGapDays, setArcGapDays] = useState(initialArcGapDays);
   const [pollingInterval, setPollingInterval] = useState(initialPollingInterval);
   const [retentionDays, setRetentionDays] = useState(initialRetentionDays);
+  const [concurrentLimit, setConcurrentLimit] = useState(initialConcurrentStreamLimit);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const t = useT();
@@ -64,6 +67,7 @@ export function PlayHistorySettingsForm({
           playHistoryArcGapDays: arcGapDays,
           playHistoryPollingInterval: pollingInterval,
           playHistoryRetentionDays: retentionDays,
+          concurrentStreamLimit: concurrentLimit,
         }),
       });
       const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
@@ -173,6 +177,20 @@ export function PlayHistorySettingsForm({
               className="bg-zinc-800 border-zinc-700 w-32"
             />
             <p className="text-xs text-zinc-500">{t("settings.playHistory.retentionHelp")}</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="concurrent-stream-limit">{t("settings.playHistory.concurrentLimit")}</Label>
+            <Input
+              id="concurrent-stream-limit"
+              type="number"
+              min={0}
+              max={50}
+              value={concurrentLimit}
+              onChange={(e) => { setConcurrentLimit(e.target.value); setStatus("idle"); }}
+              className="bg-zinc-800 border-zinc-700 w-32"
+            />
+            <p className="text-xs text-zinc-500">{t("settings.playHistory.concurrentLimitHelp")}</p>
           </div>
 
           <div className="space-y-2 pt-2 border-t border-zinc-800">

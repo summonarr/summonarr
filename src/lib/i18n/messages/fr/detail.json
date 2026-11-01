@@ -90,5 +90,8 @@
   "detail.status.pilot": "Pilote",
   "detail.seasons.numbered": "Saison {number}",
   "detail.seasons.specials": "Épisodes spéciaux",
-  "detail.seasons.episodeAbbrev": "E{number}"
+  "detail.seasons.episodeAbbrev": "E{number}",
+  "detail.studios": "Studios et chaînes",
+  "detail.browseMoviesFrom": "Parcourir les films de {name}",
+  "detail.browseTvFrom": "Parcourir les séries de {name}"
 }

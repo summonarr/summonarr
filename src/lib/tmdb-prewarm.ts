@@ -8,6 +8,7 @@ import type { LibraryItem } from "./library-iterator";
 import { tmdbAuth } from "./tmdb-auth";
 import type { TmdbMedia } from "./tmdb-types";
 import { extractHomeReleaseDates } from "./home-release-dates";
+import { buildStudioList } from "./studio-list";
 
 const CONCURRENCY = 5;
 const BATCH_DELAY_MS = 250;
@@ -311,6 +312,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     genres:          genreObjs.map((g) => g.name),
     genreList:       genreObjs,
     studios:         studios.map((c) => c.name),
+    studioList:      buildStudioList(mediaType, raw.networks, raw.production_companies),
     tagline:         raw.tagline ?? null,
     status:          raw.status ?? null,
     // /tv carries no top-level imdb_id — it lives in the appended external_ids,

@@ -454,5 +454,6 @@
   "settings.form.plex.disconnectConfirmAction": "Oui, déconnecter",
   "settings.form.apiKey.traktSecret.label": "Client Secret Trakt",
   "settings.form.apiKey.traktSecret.help": "Permet aux utilisateurs de connecter leur propre compte Trakt depuis leur profil, pour demander automatiquement depuis leur liste de suivi Trakt et utiliser leur historique Trakt dans les recommandations. Copiez le Client Secret de la même application sur {link}.",
-  "settings.form.agents.event.request.comment": "Commentaire de demande"
+  "settings.form.agents.event.request.comment": "Commentaire de demande",
+  "settings.form.agents.event.stream.concurrent": "Flux simultanés"
 }

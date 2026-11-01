@@ -416,5 +416,8 @@
   "adminQueue.issueActions.searchSent": "Búsqueda enviada a {service}",
   "adminQueue.issueActions.back": "Atrás",
   "adminQueue.issueActions.notBetter": "No es mejor que lo que hay en disco",
-  "adminQueue.issueActions.notBetterNote": "Las versiones marcadas como «No es mejor que lo que hay en disco» se descargan igualmente, pero {service} solo importa una si es al menos tan buena como el archivo que reemplaza."
+  "adminQueue.issueActions.notBetterNote": "Las versiones marcadas como «No es mejor que lo que hay en disco» se descargan igualmente, pero {service} solo importa una si es al menos tan buena como el archivo que reemplaza.",
+  "adminQueue.issues.playback.lastPlay": "Última reproducción de quien reporta",
+  "adminQueue.issues.playback.otherEpisode": "otro episodio de este título",
+  "adminQueue.issues.playback.why": "Motivo de la transcodificación: {reason}"
 }

@@ -382,5 +382,8 @@
   "notify.agent.request.comment.body": "{user} comentó.",
   "notify.agent.request.comment.bodyWithText": "{user} comentó: {text}",
   "notify.push.apnsTitle.request_comment": "Nuevo comentario",
-  "notify.push.apnsBody.request_comment": "Hay un nuevo comentario en una solicitud"
+  "notify.push.apnsBody.request_comment": "Hay un nuevo comentario en una solicitud",
+  "notify.agent.stream.concurrent.title": "Demasiadas transmisiones simultáneas: {user}",
+  "notify.agent.stream.concurrent.body": "{user} supera el límite de transmisiones simultáneas.",
+  "notify.agent.stream.concurrent.bodyWithText": "{user} supera el límite de transmisiones simultáneas: {text}"
 }

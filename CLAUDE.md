@@ -282,6 +282,19 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - A merge that folds records into one row dedupes through a Set too: a Sonarr pack's episodes are keyed `season:episode` (`mergeInto`), because the folded list has no cap.
     - NEVER `x.push(...list)` over anything an arr sent: a spread throws RangeError past ~125k elements. A paged read appends at most one page's worth per page, one by one (`batch.slice(0, PAGE_SIZE)`); a per-instance merge (`loadCalendar`, the Missing `loadReport`) and a planner (`planSeriesSearch`) append their capped list one by one.
     - `tests/arr-projection-bounds.test.mts` pins every cap, scan bound and Set dedupe without timing (a Proxy counts element reads), and the three paged readers against 200k-record pages.
+5j. **An issue's playback context is the reporter's last play, snapshotted at filing, with NO network identifier; auto-resolve closes ONLY on the first claim of a fresh grab, for a movie or a single episode, and never for a season or series.** [issue-playback-context.ts](src/lib/issue-playback-context.ts) (pure) + [-data.ts](src/lib/issue-playback-context-data.ts), [issue-auto-resolve.ts](src/lib/issue-auto-resolve.ts), called from the Radarr/Sonarr Download webhooks.
+
+    Detail and rationale: [docs/architecture/issue-context-and-auto-resolve.md](docs/architecture/issue-context-and-auto-resolve.md).
+
+    Why:
+    - The context is a copy of one person's viewing, and the admin needs the client and the decision, not where the reporter was. A season grab matches ANY delivered episode of the season (5f), so its first import does not mean the season is fixed.
+
+    Rules:
+    - Identity goes through the shared linkage rule (guardrail 34); bitrate through `bitrateToKbps` source normalization (19a); the transcode reason is stored as recorded and translated at read (19c). Never `ipAddress`, never `location`-level detail beyond lan/wan/relay.
+    - An account purge nulls `Issue.playbackContext` on that account's issues (the issues themselves survive, 33).
+    - Auto-resolve is a compare-and-swap on OPEN/IN_PROGRESS, audited as `ISSUE_STATUS_CHANGE` with trigger `auto-resolve-replacement` and actor `system`, and sets NO resolution text. It runs only on the webhook's FIRST claim of a grab (never the push-retry path), within 30 days of the grab, and tells the reporter through one deactivatedAt read (33), skipping the admin whose grab landed.
+    - `feature.behavior.issueAutoResolve` (default ON) switches it off without touching the grab notifications.
+    - `tests/issue-playback-context.test.mts` and `tests/issue-auto-resolve.test.mts` pin it; nine mutations each fail a named test.
 6. **Route all cron/sync handlers through `isCronAuthorized` (or its actor-returning form `getCronActor`).** Do not re-implement `CRON_SECRET` checks inline. `getCronActor` ([cron-auth.ts](src/lib/cron-auth.ts)) is the SAME chokepoint — `isCronAuthorized` is just `getCronActor(...) !== null` — and returns who is driving the run (`{ trigger: "admin", userId, userName }` or `CRON_SYSTEM_ACTOR`) so a route needing audit attribution reads the session ONCE instead of gating with `isCronAuthorized` and then re-reading it. `scripts/audit-routes.mts` accepts either name as the cron guard.
 6a. **User-session API routes must wrap their handlers with `withAuth`/`withAdmin`/`withIssueAdmin` from [src/lib/api-auth.ts](src/lib/api-auth.ts).** The wrapper runs the auth check before the handler body and returns 401/403 itself, so the guard can never be forgotten or mis-returned (the failure mode that the older inline `requireAuth(...) + if (session instanceof NextResponse) return session;` pattern allowed). Do not re-implement `auth() + isTokenExpired() + role` boilerplate inline. Callsite:
 
@@ -576,6 +589,16 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - RESUME POINTS (`syncProgress`, per pair, default OFF) follow the same direction. Discovery is each side's in-progress list (Jellyfin `IsResumable`, the Plex account's On Deck); then every copy's state is read on BOTH sides as the user and `decideProgress` picks the write: only a real resume point (≥ 60 s, < 95%), the NEWER side wins, nothing within 30 s, never onto a target with newer activity, never onto a watched item. Jellyfin positions are written as USER DATA ONLY (`POST UserItems/{id}/UserData`, `PlaybackPositionTicks`) — NEVER the Sessions/Playing routes, which create a session the poller records (19). Plex uses `/:/progress … state=stopped` with the user's token; it is unverified whether that ever surfaces as a session, which is why the switch is per pair and off.
     - A suggestion (a Plex and a Jellyfin identity linked to one Summonarr account) is only a button. Removing a pair unmarks nothing.
     - `tests/watch-sync.test.mts`, `tests/watch-sync-data.test.mts` and the token-parser tests in `tests/plex.test.mts` pin it; every rule here is mutation-verified.
+19f. **The concurrent-stream limit is an ALERT, never an enforcement: it counts per OWNER (the linked Summonarr account, else the identity), exempts server-admin accounts, and fires on the transition over the limit with a cooldown.** [stream-limit.ts](src/lib/stream-limit.ts) (pure) + [stream-limit-data.ts](src/lib/stream-limit-data.ts), called once per poll by the 5s play-history poller; setting `concurrentStreamLimit` (0 = off).
+
+    Why:
+    - The poller ticks every 5 seconds, so an alert on STATE would repeat 720 times an hour for one person over the limit. Nothing here may stop a stream: terminating someone's playback is an admin decision (`PLEX_SESSION_TERMINATE`).
+
+    Rules:
+    - The transition state is a `processSingleton` (27a); a restart may alert once for streams already over the limit.
+    - The limit is read with `setting.findUnique` ONLY, like the rest of the poller's config (35). The evaluation never throws into the poll.
+    - Alerts go to the outbound agents (`stream.concurrent`, 14c) and an inbox row per ADMIN (`STREAM_LIMIT`); web push/Discord/email for it are not wired.
+    - `tests/stream-limit.test.mts` pins it; the exemption, the cooldown and the transition each fail a named test when removed.
 20. **The Plex stall anchor (`progressUpdatedAt`) must track playhead MOVEMENT, not strict forward advance — in BOTH writers (SSE and the 5s poller).**
 
     Why:

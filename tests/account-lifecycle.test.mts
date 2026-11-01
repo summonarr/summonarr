@@ -97,6 +97,7 @@ const baseTx = {
   watchlistItem: { deleteMany: record("watchlistItem", "deleteMany") },
   hiddenItem: { deleteMany: record("hiddenItem", "deleteMany") },
   notification: { deleteMany: record("notification", "deleteMany") },
+  issue: { updateMany: record("issue", "updateMany") },
   userRecommendation: { deleteMany: record("userRecommendation", "deleteMany") },
   traktWatchedItem: { deleteMany: record("traktWatchedItem", "deleteMany") },
   traktRating: { deleteMany: record("traktRating", "deleteMany") },
@@ -201,6 +202,8 @@ const PURGE_OPS = [
   "watchlistItem.deleteMany",
   "hiddenItem.deleteMany",
   "notification.deleteMany",
+  // The reporter's playback-context snapshot on their issues (issue-playback-context.ts).
+  "issue.updateMany",
   "userRecommendation.deleteMany",
   // Trakt (guardrail 34c): the imported history, ratings (40c) and the connection row.
   "traktWatchedItem.deleteMany",

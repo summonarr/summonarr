@@ -90,5 +90,8 @@
   "detail.status.pilot": "试播集",
   "detail.seasons.numbered": "第 {number} 季",
   "detail.seasons.specials": "特别篇",
-  "detail.seasons.episodeAbbrev": "第{number}集"
+  "detail.seasons.episodeAbbrev": "第{number}集",
+  "detail.studios": "制片公司与电视网",
+  "detail.browseMoviesFrom": "浏览 {name} 的电影",
+  "detail.browseTvFrom": "浏览 {name} 的剧集"
 }

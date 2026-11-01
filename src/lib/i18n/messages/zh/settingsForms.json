@@ -454,5 +454,6 @@
   "settings.form.plex.disconnectConfirmAction": "是，断开连接",
   "settings.form.apiKey.traktSecret.label": "Trakt Client Secret",
   "settings.form.apiKey.traktSecret.help": "允许用户在个人资料中连接自己的 Trakt 账户，以便从其 Trakt 待看清单自动请求，并将其 Trakt 观看记录用于推荐。请在 {link} 中从同一应用复制 Client Secret。",
-  "settings.form.agents.event.request.comment": "请求评论"
+  "settings.form.agents.event.request.comment": "请求评论",
+  "settings.form.agents.event.stream.concurrent": "同时播放"
 }

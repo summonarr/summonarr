@@ -90,7 +90,7 @@ export function browseHasFilters(f: DiscoverFilters, ratingFilter?: string): boo
   // watchRegion is deliberately excluded — it only qualifies watchProvider and
   // must not by itself flip the query from "popular" to "discover".
   return !!(
-    f.genreId || f.keywordId || f.minRating || ratingFilter || f.minVoteCount ||
+    f.genreId || f.keywordId || f.companyId || f.networkId || f.certification || f.minRating || ratingFilter || f.minVoteCount ||
     f.fromYear || f.toYear || f.sortBy || f.watchProvider
   );
 }

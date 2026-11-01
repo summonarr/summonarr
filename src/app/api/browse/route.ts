@@ -17,6 +17,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const page          = parsePageParam(sp);
   const genreId       = sp.get("genreId") || undefined;
   const keywordId     = sp.get("keywordId") || undefined;
+  const companyId     = sp.get("companyId") || undefined;
+  const networkId     = sp.get("networkId") || undefined;
+  const certification = sp.get("certification") || undefined;
   const minRating     = sp.get("minRating") || undefined;
   const ratingFilter  = sp.get("ratingFilter") || undefined;
   const minVoteCount  = sp.get("minVoteCount") || undefined;
@@ -26,7 +29,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const watchProvider = sp.get("watchProvider") || undefined;
   const watchRegion   = sp.get("watchRegion") || undefined;
   const hideAvailable = sp.get("hideAvailable") === "1";
-  const filters: DiscoverFilters = { genreId, keywordId, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
+  const filters: DiscoverFilters = { genreId, keywordId, companyId, networkId, certification, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
 
   try {
     // Shared with /movies and /tv — see src/lib/browse-query.ts. The helper

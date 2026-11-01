@@ -435,5 +435,9 @@
   "settings.cron.job.watchSync.name": "Gesehen-Sync",
   "settings.cron.job.watchSync.description": "Den Gesehen-Status jedes vom Admin verknüpften Plex- und Jellyfin-Kontos abgleichen, in der für die Verknüpfung gewählten Richtung",
   "settings.featureLabel.behavior_requestComments": "Anfragekommentare",
-  "settings.featureDesc.behavior_requestComments": "Ermöglicht dem Anfragenden und den Personen, die Anfragen verwalten, Kommentare zu einer Anfrage auszutauschen („andere Version gewünscht?“). Jede Seite wird gemäß den eigenen Benachrichtigungseinstellungen informiert. Ausgeschaltet werden die Threads ausgeblendet und neue Kommentare von Anfragenden abgelehnt; Verwalter können weiterhin schreiben."
+  "settings.featureDesc.behavior_requestComments": "Ermöglicht dem Anfragenden und den Personen, die Anfragen verwalten, Kommentare zu einer Anfrage auszutauschen („andere Version gewünscht?“). Jede Seite wird gemäß den eigenen Benachrichtigungseinstellungen informiert. Ausgeschaltet werden die Threads ausgeblendet und neue Kommentare von Anfragenden abgelehnt; Verwalter können weiterhin schreiben.",
+  "settings.playHistory.concurrentLimit": "Warnung bei gleichzeitigen Streams",
+  "settings.playHistory.concurrentLimitHelp": "Warnt, wenn eine Person mehr Titel gleichzeitig streamt als hier eingestellt (Plex und Jellyfin zählen zusammen). 0 schaltet die Funktion aus. Es werden nur Admins benachrichtigt (Posteingang und Ihre Benachrichtigungskanäle); nichts wird gestoppt. Konten der Serverbesitzer werden nie gezählt.",
+  "settings.featureLabel.behavior_issueAutoResolve": "Probleme automatisch lösen",
+  "settings.featureDesc.behavior_issueAutoResolve": "Wenn der vom Admin angeforderte Ersatz (Datei reparieren, Release wählen oder Neu laden) von Radarr/Sonarr importiert wurde, wird das Problem als gelöst markiert und der Melder informiert. Nur Filme und Einzelfolgen-Probleme – ein Staffel- oder Serienproblem bleibt für einen Admin offen. Eine Antwort des Melders öffnet es erneut."
 }

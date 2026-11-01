@@ -7,6 +7,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { resolveTvdbIdFromTmdbId } from "@/lib/arr";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeOptional } from "@/lib/sanitize";
+import { loadPlaybackContext } from "@/lib/issue-playback-context-data";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import type { SummonarrSession } from "@/lib/api-auth";
 import type { Translator } from "@/lib/i18n/translate";
@@ -119,6 +120,18 @@ export async function createIssue(
   ]);
   if (!plexHit && !jellyfinHit) return refuse(422, t("apiUser.issues.notInLibrary"));
 
+  // Best effort (never throws): what the reporter's last play of this title looked like.
+  const playbackContext = await loadPlaybackContext(
+    session.user.id,
+    { tmdbId, mediaType: mt },
+    {
+      scope: resolvedScope,
+      seasonNumber: resolvedScope !== "FULL" ? ((seasonNumber as number | undefined) ?? null) : null,
+      episodeNumber: resolvedScope === "EPISODE" ? ((episodeNumber as number | undefined) ?? null) : null,
+    },
+    new Date(),
+  );
+
   const issue = await prisma.issue.create({
     data: {
       reportedBy: session.user.id,
@@ -132,6 +145,7 @@ export async function createIssue(
       seasonNumber: resolvedScope !== "FULL" ? ((seasonNumber as number | undefined) ?? null) : null,
       episodeNumber: resolvedScope === "EPISODE" ? ((episodeNumber as number | undefined) ?? null) : null,
       note: sanitizedNote ?? null,
+      ...(playbackContext ? { playbackContext } : {}),
     },
   });
 

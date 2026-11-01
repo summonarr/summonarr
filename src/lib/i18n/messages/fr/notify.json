@@ -382,5 +382,8 @@
   "notify.agent.request.comment.body": "{user} a commenté.",
   "notify.agent.request.comment.bodyWithText": "{user} a commenté : {text}",
   "notify.push.apnsTitle.request_comment": "Nouveau commentaire",
-  "notify.push.apnsBody.request_comment": "Il y a un nouveau commentaire sur une demande"
+  "notify.push.apnsBody.request_comment": "Il y a un nouveau commentaire sur une demande",
+  "notify.agent.stream.concurrent.title": "Trop de flux simultanés : {user}",
+  "notify.agent.stream.concurrent.body": "{user} dépasse la limite de flux simultanés.",
+  "notify.agent.stream.concurrent.bodyWithText": "{user} dépasse la limite de flux simultanés : {text}"
 }

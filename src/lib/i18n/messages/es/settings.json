@@ -435,5 +435,9 @@
   "settings.cron.job.watchSync.name": "Sincronización de vistos",
   "settings.cron.job.watchSync.description": "Mantiene sincronizado el estado de visto de cada cuenta de Plex y Jellyfin emparejada por un administrador, en la dirección elegida para el par",
   "settings.featureLabel.behavior_requestComments": "Comentarios en solicitudes",
-  "settings.featureDesc.behavior_requestComments": "Permite que quien solicita y quienes gestionan las solicitudes intercambien comentarios en una solicitud («¿necesitas otra versión?»). Cada parte recibe avisos según sus preferencias de notificación. Al desactivarlo se ocultan los hilos y se rechazan comentarios nuevos de quien solicita; los gestores aún pueden publicar."
+  "settings.featureDesc.behavior_requestComments": "Permite que quien solicita y quienes gestionan las solicitudes intercambien comentarios en una solicitud («¿necesitas otra versión?»). Cada parte recibe avisos según sus preferencias de notificación. Al desactivarlo se ocultan los hilos y se rechazan comentarios nuevos de quien solicita; los gestores aún pueden publicar.",
+  "settings.playHistory.concurrentLimit": "Alerta de transmisiones simultáneas",
+  "settings.playHistory.concurrentLimitHelp": "Avisa cuando una persona reproduce más títulos a la vez que este número (Plex y Jellyfin cuentan juntos). 0 lo desactiva. Solo notifica a los administradores (bandeja y tus canales de notificación); no se detiene nada. Las cuentas de propietario del servidor nunca cuentan.",
+  "settings.featureLabel.behavior_issueAutoResolve": "Resolver incidencias automáticamente",
+  "settings.featureDesc.behavior_issueAutoResolve": "Cuando Radarr/Sonarr importa el reemplazo que pidió un administrador (Reparar archivo, Elegir versión o Reintentar), la incidencia se marca como resuelta y se avisa a quien la reportó. Solo películas e incidencias de un episodio: una de temporada o de serie completa queda abierta para un administrador. Si quien reportó responde, se reabre."
 }

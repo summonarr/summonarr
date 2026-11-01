@@ -860,7 +860,7 @@ test("discover movies: junk filters are sanitized out of BOTH the wire params an
   assert.equal(result.totalPages, 500); // 812 clamped
   // The sanitized values — not the raw junk — form the cache key, so junk
   // inputs can't mint unbounded distinct TmdbCache rows.
-  assert.equal(cacheUpserts[0]?.key, "discover:movie:popularity.desc:28,12::7.5:::2030:8:US:page:1");
+  assert.equal(cacheUpserts[0]?.key, "discover:movie:popularity.desc:28,12:::::7.5:::2030:8:US:page:1");
 });
 
 test("discover TV: first_air_date param family, allowlisted sort passes through, minRating clamps to 10", async () => {
@@ -879,7 +879,7 @@ test("discover TV: first_air_date param family, allowlisted sort passes through,
   assert.equal(sp.get("primary_release_date.gte"), null); // the movie param family never leaks into TV
   assert.equal(sp.get("vote_average.gte"), "10"); // 15 clamped into 0..10
   assert.equal(result.totalPages, 3); // under the cap → untouched
-  assert.equal(cacheUpserts[0]?.key, "discover:tv:first_air_date.desc:16::10::1999:2001:::page:2");
+  assert.equal(cacheUpserts[0]?.key, "discover:tv:first_air_date.desc:16:::::10::1999:2001:::page:2");
 });
 
 test("discover TV: movie-only sorts are translated to the TV field (Newest/Oldest → first_air_date) in BOTH the wire param and cache key", async () => {

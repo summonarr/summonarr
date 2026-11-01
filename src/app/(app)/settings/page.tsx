@@ -191,7 +191,7 @@ const ALL_KEYS = [
   "jellyfinRestrictSignIn",
   "enableMachineSession", "machineSessionAllowedIps",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
-  "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
+  "concurrentStreamLimit", "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
   "playHistoryPollingInterval", "playHistoryRetentionDays",
   "watchGradeGraceDays", "watchGradeWindowDays", "watchGradeTvPercent", "watchGradeOtherViewers",
   "watchGradeBandA", "watchGradeBandB", "watchGradeBandC", "watchGradeBandD", "watchGradeMinRequests",
@@ -812,6 +812,7 @@ export default async function SettingsPage({
                 initialArcGapDays={cfg.playHistoryArcGapDays ?? "14"}
                 initialPollingInterval={cfg.playHistoryPollingInterval ?? "5"}
                 initialRetentionDays={cfg.playHistoryRetentionDays ?? "0"}
+                initialConcurrentStreamLimit={cfg.concurrentStreamLimit ?? "0"}
               />
             </SettingsCard>
 

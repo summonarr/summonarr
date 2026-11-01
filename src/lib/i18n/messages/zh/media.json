@@ -77,5 +77,10 @@
   "media.ratings.jellyfin": "Jellyfin 社区评分",
   "media.ratings.tmdb": "TMDB 评分",
   "media.pager.label": "分页",
-  "media.filter.audienceScore": "观众评分 {pct}%+"
+  "media.filter.audienceScore": "观众评分 {pct}%+",
+  "media.filter.certLabel": "最高内容分级",
+  "media.filter.certAny": "任意分级",
+  "media.filter.certUpTo": "最高 {rating}",
+  "media.filter.studio": "制片公司",
+  "media.filter.network": "电视网"
 }

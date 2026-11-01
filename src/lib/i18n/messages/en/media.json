@@ -77,5 +77,10 @@
   "media.ratings.jellyfin": "Jellyfin community rating",
   "media.ratings.tmdb": "TMDB score",
   "media.pager.label": "Pagination",
-  "media.filter.audienceScore": "Audience {pct}%+"
+  "media.filter.audienceScore": "Audience {pct}%+",
+  "media.filter.certLabel": "Maximum content rating",
+  "media.filter.certAny": "Any rating",
+  "media.filter.certUpTo": "Up to {rating}",
+  "media.filter.studio": "Studio",
+  "media.filter.network": "Network"
 }

@@ -90,5 +90,8 @@
   "detail.status.pilot": "Pilota",
   "detail.seasons.numbered": "Stagione {number}",
   "detail.seasons.specials": "Speciali",
-  "detail.seasons.episodeAbbrev": "E{number}"
+  "detail.seasons.episodeAbbrev": "E{number}",
+  "detail.studios": "Studi e reti",
+  "detail.browseMoviesFrom": "Sfoglia i film di {name}",
+  "detail.browseTvFrom": "Sfoglia le serie di {name}"
 }

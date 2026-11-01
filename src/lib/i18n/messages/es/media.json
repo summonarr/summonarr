@@ -77,5 +77,10 @@
   "media.ratings.jellyfin": "Valoración de la comunidad de Jellyfin",
   "media.ratings.tmdb": "Puntuación de TMDB",
   "media.pager.label": "Paginación",
-  "media.filter.audienceScore": "Público {pct}%+"
+  "media.filter.audienceScore": "Público {pct}%+",
+  "media.filter.certLabel": "Clasificación máxima",
+  "media.filter.certAny": "Cualquier clasificación",
+  "media.filter.certUpTo": "Hasta {rating}",
+  "media.filter.studio": "Estudio",
+  "media.filter.network": "Cadena"
 }

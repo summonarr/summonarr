@@ -123,6 +123,7 @@ const AGENT_TEXT_KEYS: Record<NotifyEvent["event"], { title: string; body: strin
   "arr.disk_ok": { title: "notify.agent.arr.disk_ok.title", body: "notify.agent.arr.disk_ok.body", noTotal: "notify.agent.arr.disk_ok.bodyNoTotal" },
   "arr.download_failed": { title: "notify.agent.arr.download_failed.title", body: "notify.agent.arr.download_failed.body", withText: "notify.agent.arr.download_failed.bodyWithText" },
   "arr.queue_attention": { title: "notify.agent.arr.queue_attention.title", body: "notify.agent.arr.queue_attention.body", withText: "notify.agent.arr.queue_attention.bodyWithText" },
+  "stream.concurrent": { title: "notify.agent.stream.concurrent.title", body: "notify.agent.stream.concurrent.body", withText: "notify.agent.stream.concurrent.bodyWithText" },
   "agent.test": { title: "notify.agent.agent.test.title", body: "notify.agent.agent.test.body" },
 };
 

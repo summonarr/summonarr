@@ -28,6 +28,9 @@ export const NOTIFY_EVENT_KEYS = [
   "arr.disk_ok",
   "arr.download_failed",
   "arr.queue_attention",
+  // The play-history poller (stream-limit-data.ts): one account streaming more
+  // titles at once than the admin allows. An alert only — nothing is stopped.
+  "stream.concurrent",
 ] as const;
 export type SubscribableEvent = (typeof NOTIFY_EVENT_KEYS)[number];
 export type NotifyEventKey = SubscribableEvent | "agent.test";
@@ -362,6 +365,7 @@ const NTFY_TAGS: Record<NotifyEventKey, string> = {
   "arr.disk_ok": "white_check_mark",
   "arr.download_failed": "x",
   "arr.queue_attention": "warning",
+  "stream.concurrent": "busts_in_silhouette",
   "agent.test": "bell",
 };
 

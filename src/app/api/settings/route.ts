@@ -171,6 +171,7 @@ const SETTINGS_SCHEMA = [
   ["playHistoryPlexEnabled",         false],
   ["playHistoryJellyfinEnabled",     false],
   ["playHistoryWatchedThreshold",    false],
+  ["concurrentStreamLimit",          false],
   ["playHistoryCompletionThreshold", false],
   ["playHistoryArcGapDays",          false],
   ["playHistoryPollingInterval",     false],
@@ -222,6 +223,7 @@ const SETTINGS_SCHEMA = [
   ["feature.behavior.activityCalendar", false],
   ["feature.behavior.watchGrades",    false],
   ["feature.behavior.requestComments", false],
+  ["feature.behavior.issueAutoResolve", false],
   ["feature.behavior.watchlistAutoRequest", false],
   ["feature.behavior.forYouCoWatch", false],
   ["feature.integration.plex",        false],
@@ -373,6 +375,8 @@ const MAX_SESSION_SECONDS = 7_776_000;
 // sibling integer checks: parseInt would read "1e3" as 1.
 const NUMERIC_BOUNDS: Partial<Record<AllowedKey, readonly [min: number, max: number]>> = {
   playHistoryWatchedThreshold: [0, 100],
+  // 0 = off. An alert threshold (stream-limit.ts), not an enforcement.
+  concurrentStreamLimit: [0, 50],
   playHistoryCompletionThreshold: [0, 100],
   playHistoryArcGapDays: [1, 365],
   playHistoryRetentionDays: [0, 3650],

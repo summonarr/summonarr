@@ -325,6 +325,9 @@ const spec = {
           { name: "sortBy", in: "query", schema: { type: "string" } },
           { name: "genreId", in: "query", schema: { type: "string" } },
           { name: "keywordId", in: "query", schema: { type: "string" } },
+          { name: "companyId", in: "query", schema: { type: "string" }, description: "TMDB production company id(s), digits separated by , or |. Movies and TV." },
+          { name: "networkId", in: "query", schema: { type: "string" }, description: "TMDB TV network id(s), digits separated by , or |. Ignored for movies." },
+          { name: "certification", in: "query", schema: { type: "string", enum: ["G", "PG", "PG-13", "R", "NC-17"] }, description: "Highest US certification to include. Movies only (ignored for TV); titles with no US rating are excluded." },
           { name: "fromYear", in: "query", schema: { type: "integer" } },
           { name: "toYear", in: "query", schema: { type: "integer" } },
           { name: "minRating", in: "query", schema: { type: "number" } },
@@ -4910,7 +4913,7 @@ const spec = {
                     type: "array",
                     items: {
                       type: "string",
-                      enum: ["request.created", "request.approved", "request.declined", "request.available", "request.comment", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored", "arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention"],
+                      enum: ["request.created", "request.approved", "request.declined", "request.available", "request.comment", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored", "arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention", "stream.concurrent"],
                     },
                   },
                   config: { type: "object" },
@@ -4940,7 +4943,7 @@ const spec = {
                     type: "array",
                     items: {
                       type: "string",
-                      enum: ["request.created", "request.approved", "request.declined", "request.available", "request.comment", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored", "arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention"],
+                      enum: ["request.created", "request.approved", "request.declined", "request.available", "request.comment", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored", "arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention", "stream.concurrent"],
                     },
                   },
                   config: { type: "object" },
