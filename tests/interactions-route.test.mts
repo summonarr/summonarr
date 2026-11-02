@@ -1088,9 +1088,19 @@ test("every refusal path answers before any command work runs", async () => {
 });
 
 test("the route source contains no console.log (guardrail 7)", async () => {
-  const { readFileSync } = await import("node:fs");
-  const code = readFileSync("src/app/api/interactions/route.ts", "utf-8")
-    .split("\n")
+  const { readFileSync, readdirSync } = await import("node:fs");
+  // The route plus every module it delegates to (src/lib/discord-interactions/**).
+  const files = ["src/app/api/interactions/route.ts"];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) walk(`${dir}/${e.name}`);
+      else if (e.name.endsWith(".ts")) files.push(`${dir}/${e.name}`);
+    }
+  };
+  walk("src/lib/discord-interactions");
+  assert.ok(files.length > 10, "the module tree was found");
+  const code = files
+    .flatMap((f) => readFileSync(f, "utf-8").split("\n"))
     .map((l) => { const i = l.indexOf("//"); return i === -1 ? l : l.slice(0, i); });
   assert.ok(!code.some((l) => /console\.log\s*\(/.test(l)));
 });

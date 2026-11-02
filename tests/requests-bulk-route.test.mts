@@ -51,7 +51,7 @@ test("every 'already greenlit' mirror lookup in src/ excludes stamped (cleanedUp
   // request-create.ts (web + watchlist auto-request), the Discord /request
   // path and bulk each copy a greenlit peer's status. One copy without the
   // term re-opens the re-download path for a removed title.
-  const files = ["src/lib/request-create.ts", "src/app/api/interactions/route.ts", "src/app/api/requests/bulk/route.ts"];
+  const files = ["src/lib/request-create.ts", "src/lib/discord-interactions/components/pick.ts", "src/app/api/requests/bulk/route.ts"];
   for (const f of files) {
     const code = readFileSync(join(ROOT, f), "utf8").split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
     const lookups = code.split("\n").filter((l) => l.includes('status: { in: ["APPROVED", "AVAILABLE"] }'));
