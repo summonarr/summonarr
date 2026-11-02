@@ -36,6 +36,16 @@ const TABLES = [
   "PlexLibraryItemStaging",
   "JellyfinLibraryItem",
   "JellyfinLibraryItemStaging",
+  "AuthSession",
+  "Issue",
+  "AutoRequestLedger",
+  "RadarrWantedItem",
+  "RadarrAvailableItem",
+  "SonarrWantedItem",
+  "SonarrAvailableItem",
+  "TVEpisodeCache",
+  "MediaServerUser",
+  "PlayHistory",
 ];
 
 export async function resetDb(): Promise<void> {
@@ -67,6 +77,26 @@ export async function makeRequests(
   }
   return out;
 }
+
+// One request with arbitrary columns; tmdbId defaults to a fresh value so the
+// (tmdbId, mediaType, requestedBy, arrInstance) unique key never collides.
+export async function makeRequest(
+  requestedBy: string,
+  over: Record<string, unknown> = {},
+): Promise<{ id: string }> {
+  return prisma.mediaRequest.create({
+    data: {
+      mediaType: "MOVIE",
+      tmdbId: 500000 + ++seq,
+      title: `Req ${seq}`,
+      requestedBy,
+      ...over,
+    } as Parameters<typeof prisma.mediaRequest.create>[0]["data"],
+    select: { id: true },
+  });
+}
+
+export const daysAgo = (d: number): Date => new Date(Date.now() - d * 86_400_000);
 
 export async function closeDb(): Promise<void> {
   await prisma.$disconnect();
