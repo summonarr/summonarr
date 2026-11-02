@@ -1,5 +1,5 @@
-// Route-level unit tests for all seventeen POST /api/cron/* handlers:
-//   arr-watch, purge-auth-sessions, refresh-arr-snapshots, refresh-upstream-watch, scrub-audit-pii, sync-download-policies,
+// Route-level unit tests for all eighteen POST /api/cron/* handlers:
+//   arr-watch, purge-auth-sessions, purge-notifications, refresh-arr-snapshots, refresh-upstream-watch, scrub-audit-pii, sync-download-policies,
 //   sync-plex-watchlists, sync-trakt, trash-diagnostic, trash-sync, warm-activity, warm-library,
 //   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations, watch-sync
 //
@@ -229,6 +229,7 @@ const AL = await import("../src/lib/advisory-lock.ts");
 const ROUTES: CronRoute[] = [
   await load("arr-watch", AL.ARR_WATCH_LOCK_ID),
   await load("purge-auth-sessions", 2001),
+  await load("purge-notifications", AL.PURGE_NOTIFICATIONS_LOCK_ID),
   await load("refresh-arr-snapshots", AL.ARR_SNAPSHOT_LOCK_ID),
   await load("refresh-upstream-watch", AL.UPSTREAM_WATCH_LOCK_ID),
   await load("scrub-audit-pii", 2002),
@@ -294,8 +295,8 @@ beforeEach(async () => {
 
 // ── the matrix itself must not pass vacuously ────────────────────────────────
 
-test("all seventeen cron routes loaded and expose a POST handler", () => {
-  assert.equal(ROUTES.length, 17);
+test("all eighteen cron routes loaded and expose a POST handler", () => {
+  assert.equal(ROUTES.length, 18);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
 });
 

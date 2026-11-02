@@ -169,6 +169,9 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `WARM_OMDB_INTERVAL`         | `86400` | OMDB cache warmer.                                                 |
 | `PLAY_HISTORY_SYNC_INTERVAL` | `5`     | Active-session poll (fast loop, decoupled from the 60s main tick). |
 | `PURGE_SESSIONS_INTERVAL`    | `86400` | Expired auth-session purge.                                        |
+| `PURGE_NOTIFICATIONS_INTERVAL` | `86400` | Notification inbox retention purge.                              |
+| `NOTIFICATION_READ_RETENTION_DAYS` | `90` | Read notifications older than this are deleted (minimum 7).   |
+| `NOTIFICATION_RETENTION_DAYS` | `365`  | Any notification, read or not, older than this is deleted (minimum 7; never below the read value). |
 | `SCRUB_AUDIT_PII_INTERVAL`   | `86400` | Audit-log PII scrubber.                                            |
 | `TRASH_SYNC_INTERVAL`        | `86400` | TRaSH-Guides quality profile refresh.                              |
 | `PLEX_WATCHLIST_SYNC_INTERVAL` | `1800` | Plex watchlist auto-request (a no-op unless *Watchlist auto-request* is enabled in Features). |

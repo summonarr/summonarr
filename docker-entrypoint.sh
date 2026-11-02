@@ -433,6 +433,7 @@ _cron_loop() {
   WARM_RECOMMENDATIONS_NEXT=$((NOW_INIT + 480))
   WARM_LIBRARY_NEXT=$((NOW_INIT + 720))
   PURGE_SESSIONS_NEXT=$((NOW_INIT + 600))
+  PURGE_NOTIFICATIONS_NEXT=$((NOW_INIT + 840))
   SCRUB_AUDIT_PII_NEXT=$((NOW_INIT + 900))
   TRASH_SYNC_NEXT=$((NOW_INIT + 360))
   PLEX_WATCHLIST_NEXT=$((NOW_INIT + 420))
@@ -442,7 +443,7 @@ _cron_loop() {
   ARR_WATCH_NEXT=$((NOW_INIT + 660))
   ARR_SNAPSHOT_NEXT=$((NOW_INIT + 300))
 
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s  UpstreamWatch: ${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}s  WatchSync: ${WATCH_SYNC_INTERVAL:-300}s  ArrWatch: ${ARR_WATCH_INTERVAL:-900}s  ArrPages: ${ARR_SNAPSHOT_INTERVAL:-300}s"
+  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  PurgeNotifications: ${PURGE_NOTIFICATIONS_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s  UpstreamWatch: ${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}s  WatchSync: ${WATCH_SYNC_INTERVAL:-300}s  ArrWatch: ${ARR_WATCH_INTERVAL:-900}s  ArrPages: ${ARR_SNAPSHOT_INTERVAL:-300}s"
   while true; do
     sleep 60
     NOW=$(date +%s)
@@ -461,6 +462,10 @@ _cron_loop() {
     if [ "$NOW" -ge "$PURGE_SESSIONS_NEXT" ]; then
       _cron_sync "${PURGE_SESSIONS_URL:-${CRON_BASE}/api/cron/purge-auth-sessions}" "purge-sessions" && rc=0 || rc=$?
       PURGE_SESSIONS_NEXT=$(_cron_next "$rc" "$NOW" "${PURGE_SESSIONS_INTERVAL:-86400}" 86400)
+    fi
+    if [ "$NOW" -ge "$PURGE_NOTIFICATIONS_NEXT" ]; then
+      _cron_sync "${PURGE_NOTIFICATIONS_URL:-${CRON_BASE}/api/cron/purge-notifications}" "purge-notifications" && rc=0 || rc=$?
+      PURGE_NOTIFICATIONS_NEXT=$(_cron_next "$rc" "$NOW" "${PURGE_NOTIFICATIONS_INTERVAL:-86400}" 86400)
     fi
     if [ "$NOW" -ge "$LIST_CACHE_NEXT" ]; then
       _cron_sync "${LIST_CACHE_SYNC_URL:-${CRON_BASE}/api/cron/warm-list-cache}" "warm-list-cache" && rc=0 || rc=$?
