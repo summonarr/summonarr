@@ -533,6 +533,11 @@ const fakePrisma = {
     // instance (no rows) is distinguishable from one whose token an admin cleared.
     findFirst: async (args?: { where?: { serverInstance?: { in?: string[] } } }) =>
       preservedRowHit("plexLibraryItem", args?.where?.serverInstance?.in),
+    // The empty-answer guard's "does this instance already hold rows?" count.
+    // Answers from preservedRowSlugs but is NOT recorded in preservedRowFindFirsts,
+    // so the demote guard's probe pins stay about the demote guard alone.
+    count: async (args?: { where?: { serverInstance?: string } }) =>
+      preservedRowSlugs.plexLibraryItem.has(args?.where?.serverInstance ?? "") ? 1 : 0,
     // The end-of-run sweep for de-registered instances (top-level, not in a tx).
     deleteMany: async (args?: { where?: Record<string, unknown> }) => {
       orphanSweepDeletes.push({ model: "plexLibraryItem", where: args?.where });
@@ -1865,6 +1870,45 @@ test("multi-server PARTIAL failure: one instance's library fetch failing preserv
     "a partial run must not stamp lastPlexSyncSucceededAt",
   );
   assert.deepEqual(b.failedSources, ["plex"]);
+});
+
+test("an EMPTY Plex answer for an instance that holds stored rows is held back — rows survive, no success stamp, source reported degraded", async () => {
+  configureBothServers();
+  preservedRowSlugs.plexLibraryItem.add(""); // the default instance already has library rows
+  respond = bothServersRespond([], [550]); // Plex answers 200 with zero titles (stale selection / mid-scan)
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(
+    txTouching("plexLibraryItem").length,
+    0,
+    "an empty answer must not run the scoped delete+rewrite that would wipe the instance's rows",
+  );
+  assert.equal(
+    txTouching("tVEpisodeCache").filter((t) => t.ops.some((o) => o.method === "deleteMany" && JSON.stringify(o.args).includes('"plex"'))).length,
+    0,
+    "the Plex episode rewrite is vetoed while an instance is held back",
+  );
+  assert.ok(
+    !settingUpserts.some((u) => u.key === "lastPlexSyncSucceededAt"),
+    "an empty answer must not stamp lastPlexSyncSucceededAt",
+  );
+  assert.ok((b.failedSources as string[]).includes("plex"), "the Plex source is reported degraded");
+  assert.ok(warns.some((w) => w.includes("returned no movies or shows")), "the hold-back is warned once");
+});
+
+test("an EMPTY Plex answer for an instance with NO stored rows still proceeds — a genuinely new or empty server is not blocked", async () => {
+  configureBothServers();
+  respond = bothServersRespond([], [550]);
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(txTouching("plexLibraryItem").length, 1, "nothing to protect, so the (empty) replace runs as before");
 });
 
 test("multi-server PARTIAL failure still marks a request the HEALTHY instance holds — presence needs no complete union", async () => {

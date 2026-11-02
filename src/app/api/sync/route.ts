@@ -775,6 +775,26 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
             ]);
             mergeResolvedLegacyItems(resolvedMovies, movieIds);
             mergeResolvedLegacyItems(resolvedTv, tvIds, ratingKeyToTmdb);
+            // An EMPTY answer for a server we already hold rows for is not a
+            // complete picture: a saved library selection that no longer matches
+            // any section, or a Plex that is mid-scan or just started, both come
+            // back as zero titles with no error. Treated as a success it would
+            // wipe the instance's rows and demote AVAILABLE requests. Hold the
+            // instance back like a failed fetch (its rows stay, the run is not
+            // stamped clean); a library that really was emptied is cleared by the
+            // admin's Resync on the Plex source.
+            if (movieIds.size === 0 && tvIds.size === 0) {
+              const held = await prisma.plexLibraryItem.count({ where: { serverInstance: instance.slug } });
+              if (held > 0) {
+                warnOnChange(
+                  `sync:plex-empty:${instance.slug}`,
+                  "empty",
+                  `[sync] Plex instance "${instance.slug}" returned no movies or shows but has stored library rows — keeping them (check the selected libraries, or whether Plex is still scanning)`,
+                );
+                return { slug: instance.slug, result: null };
+              }
+            }
+            forgetWarnOnChange(`sync:plex-empty:${instance.slug}`);
             return { slug: instance.slug, result: { serverUrl, token, sections, movieIds, tvIds, ratingKeyToTmdb } };
           } catch (err) {
             console.error(`[sync] Plex check failed for instance "${instance.slug}":`, err);
