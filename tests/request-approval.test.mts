@@ -181,7 +181,10 @@ test("instrumentation awaits the backfill before the fire-and-forget startup wor
 // ═══ structural pins over the source ═════════════════════════════════════════
 
 const DECISION_ROUTES = [
-  "src/app/api/interactions/route.ts",
+  // The Discord bot's decision paths, split out of src/app/api/interactions/route.ts:
+  // the /request result pick (auto-approve + mirror) and the admin approve/decline buttons.
+  "src/lib/discord-interactions/components/pick.ts",
+  "src/lib/discord-interactions/components/admin-decision.ts",
   "src/app/api/requests/[id]/route.ts",
   "src/app/api/requests/batch/route.ts",
   "src/app/api/requests/bulk/route.ts",
@@ -401,7 +404,7 @@ test("computed-status writes: a copy records no approval of its own, batch follo
     return (ts.isPropertyAccessExpression(init) && init.getText().endsWith(".status")) ||
       (ts.isIdentifier(init) && init.text === "mirrorStatus");
   });
-  assert.deepEqual(copies.map((w) => w.file).sort(), ["src/app/api/interactions/route.ts", "src/lib/request-create.ts"]);
+  assert.deepEqual(copies.map((w) => w.file).sort(), ["src/lib/discord-interactions/components/pick.ts", "src/lib/request-create.ts"]);
 
   const batch = byFile.get("src/app/api/requests/batch/route.ts")!;
   assert.equal(

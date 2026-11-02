@@ -574,12 +574,13 @@ function walkSrc(dir = "src", out: string[] = []): string[] {
 }
 
 test("the Discord admin-approve button schedules the check, not just the pendingNotifyAt flag", () => {
-  const text = src("src/app/api/interactions/route.ts");
+  // The admin_approve/decline handler lives in src/lib/discord-interactions/components/admin-decision.ts.
+  const text = src("src/lib/discord-interactions/components/admin-decision.ts");
   const start = text.indexOf('if (action === "admin_approve")');
   assert.ok(start > 0, "the admin_approve branch moved — update this pin");
   // Bounded to the approve arm: the sibling decline arm starts at the `} else {`
   // that closes it, and the /request auto-approve path is far earlier in the file.
-  const branch = text.slice(start, text.indexOf("\n      } else {", start));
+  const branch = text.slice(start, text.indexOf("\n  } else {", start));
   assert.match(branch, /pendingNotifyAt: new Date\(Date\.now\(\) \+ 90_000\)/);
   assert.match(
     branch,
@@ -598,7 +599,7 @@ test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
   // watchlist auto-request files through the same chokepoint — an approval path
   // like the routes, so it is scanned with them.
   const arming = walkSrc()
-    .filter((f) => f.startsWith("src/app/api/") || f === "src/lib/request-create.ts")
+    .filter((f) => f.startsWith("src/app/api/") || f.startsWith("src/lib/discord-interactions/") || f === "src/lib/request-create.ts")
     .filter((f) => {
       const text = src(f);
       return text.includes("pendingNotifyAt") && /\+ 90_000/.test(text);
@@ -607,10 +608,11 @@ test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
   // Guards the pin itself: if the arming literal is ever reformatted, the regex
   // matches nothing and the assertion below passes vacuously.
   assert.deepEqual(arming.sort(), [
-    "src/app/api/interactions/route.ts",
     "src/app/api/requests/[id]/route.ts",
     "src/app/api/requests/batch/route.ts",
     "src/app/api/requests/bulk/route.ts",
+    "src/lib/discord-interactions/components/admin-decision.ts",
+    "src/lib/discord-interactions/components/pick.ts",
     "src/lib/request-create.ts",
   ], "an approval path was added or removed — confirm it schedules, then update this roster");
 
