@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.37.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.37.1 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -171,6 +171,20 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.37.1
+
+**Added**
+
+- Requests: a private comment thread between the requester and request managers, under each request row. Choose per channel (in-app, email, push) whether you hear about new comments; managers can turn the feature off.
+- Issues now carry the reporter's last play (client, method, codec, bitrate, transcode reason, never an IP) for admins, and an issue closes itself when the Radarr/Sonarr import of its replacement lands (movies and single episodes). Switch it off with `feature.behavior.issueAutoResolve`.
+- Browse movies and TV by studio, TV network and certification; detail pages link studios and networks.
+- Simultaneous-stream alert (`concurrentStreamLimit`, alert only): counts per person, server admins exempt, fires when someone goes over the limit.
+- Admin → Server users: filter by whether the user is still on the server (Plex through the plex.tv share list, Jellyfin read live).
+
+**Fixed**
+
+- Sync: a Plex server that answers with no movies or shows while Summonarr still holds its library no longer has that library wiped and its available requests moved back to approved. The server is held back like a failed fetch and the run is not reported clean.
 
 ### v0.37.0
 
