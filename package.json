@@ -19,6 +19,7 @@
     "audit:routes": "node scripts/audit-routes.mts",
     "audit:openapi": "node scripts/audit-openapi.mts",
     "audit:tw-merge": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/audit-tw-merge.mts",
+    "test:db": "bash scripts/test-db.sh",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs --test tests/*.test.mts",
     "smoke:security": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs scripts/smoke-test-security.ts",
     "licenses:generate": "node scripts/generate-licenses.mts",
