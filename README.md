@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.37.1 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.38.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -171,6 +171,24 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.38.0
+
+**Added**
+
+- Old inbox notifications are cleaned up daily: read ones after 90 days, any after 365. Set `NOTIFICATION_READ_RETENTION_DAYS`, `NOTIFICATION_RETENTION_DAYS` and `PURGE_NOTIFICATIONS_INTERVAL` to change it.
+- Optional safety dump before an upgrade that changes the database schema. Set `SUMMONARR_PRE_UPGRADE_DUMP_DIR` to a mounted folder to turn it on; it keeps the newest 3 dumps and never stops a boot. The Docker README now has a rollback procedure, and the image includes the Postgres 17 client tools (about 4 MB) for it.
+
+**Changed**
+
+- With `SUMMONARR_ACCEPT_DATA_LOSS=true` set, every boot now logs a warning, since the setting applies to every boot until you remove it.
+- Dependency updates: jose 6.2.14, @types/node 26.6.6, and CI action bumps (CodeQL 4.39.1, zizmor 0.8.0, docker/login 4.7.0).
+
+**Fixed**
+
+- Security: outbound requests now connect only to the addresses that were checked, so a hostile DNS answer can no longer redirect a request to an internal address after the check.
+- Development-only: minimatch is pinned to 11.0.1 or later (GHSA-g3hv-75wg-m249).
+- An intermittent test failure in the watch-history merge test.
 
 ### v0.37.1
 
