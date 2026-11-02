@@ -20,6 +20,75 @@ fi
 ENCODED_PASSWORD=$(node -e "process.stdout.write(encodeURIComponent(process.env.POSTGRES_PASSWORD))")
 export DATABASE_URL="postgresql://summonarr:${ENCODED_PASSWORD}@postgres:5432/summonarr"
 
+# ── Pre-upgrade safety dump (opt-in, best-effort) ─────────────────────────────
+# `prisma db push` below is the ONLY upgrade mechanism: no migration history, no
+# rollback. When SUMMONARR_PRE_UPGRADE_DUMP_DIR names a writable directory (mount
+# a volume there — /data is NOT a volume by default) and a push is about to
+# change the schema, take a pg_dump first so a bad upgrade can be rolled back
+# (docker-container/README.md → "Rolling back an upgrade").
+#
+#   SUMMONARR_PRE_UPGRADE_DUMP_DIR      unset/empty = OFF (the default)
+#   SUMMONARR_PRE_UPGRADE_DUMP_KEEP     newest dumps to keep (default 3)
+#   SUMMONARR_PRE_UPGRADE_DUMP_TIMEOUT  seconds before the dump is abandoned (default 900)
+#
+# "A push is about to change the schema" = `prisma migrate diff` (live DB →
+# schema.prisma) has statements other than the TmdbCache_key_idx drop/create
+# pair, which Prisma reports on EVERY run (the text_pattern_ops index never
+# round-trips through introspection) and which `db push` itself ignores. A fresh
+# database (no "User" table) has nothing to protect and is skipped.
+#
+# NEVER blocks boot: every failure is a warning and the function returns 0.
+_pre_upgrade_dump() {
+  _dir="${SUMMONARR_PRE_UPGRADE_DUMP_DIR:-}"
+  [ -z "$_dir" ] && return 0
+  if ! command -v pg_dump >/dev/null 2>&1 || ! command -v psql >/dev/null 2>&1; then
+    echo "[entrypoint] WARNING: SUMMONARR_PRE_UPGRADE_DUMP_DIR is set but pg_dump/psql are not in this image — no pre-upgrade dump taken."
+    return 0
+  fi
+  if [ ! -d "$_dir" ] || [ ! -w "$_dir" ]; then
+    echo "[entrypoint] WARNING: SUMMONARR_PRE_UPGRADE_DUMP_DIR=$_dir is not a writable directory — no pre-upgrade dump taken."
+    return 0
+  fi
+  _keep="${SUMMONARR_PRE_UPGRADE_DUMP_KEEP:-3}"
+  case "$_keep" in ''|*[!0-9]*) _keep=3 ;; esac
+  [ "$_keep" -lt 1 ] && _keep=1
+  _tmo="${SUMMONARR_PRE_UPGRADE_DUMP_TIMEOUT:-900}"
+  case "$_tmo" in ''|*[!0-9]*) _tmo=900 ;; esac
+  [ "$_tmo" -lt 1 ] && _tmo=900
+
+  _has_user=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -h postgres -U summonarr -d summonarr -tAqc "SELECT to_regclass('\"User\"') IS NOT NULL" 2>/dev/null) || _has_user=""
+  if [ "$_has_user" = "f" ]; then
+    return 0
+  elif [ "$_has_user" != "t" ]; then
+    echo "[entrypoint] WARNING: pre-upgrade dump skipped — could not query the database."
+    return 0
+  fi
+
+  _diff=$(node node_modules/prisma/build/index.js migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script 2>/dev/null) || {
+    echo "[entrypoint] WARNING: pre-upgrade dump skipped — could not compute the schema diff."
+    return 0
+  }
+  _pending=$(printf '%s\n' "$_diff" | grep -v '^--' | grep -v '^[[:space:]]*$' | grep -v 'TmdbCache_key_idx' || true)
+  [ -z "$_pending" ] && return 0
+
+  _stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  _out="$_dir/summonarr-pre-upgrade-$_stamp.dump"
+  echo "[entrypoint] Schema changes pending — writing pre-upgrade dump to $_out"
+  if (umask 077; PGPASSWORD="$POSTGRES_PASSWORD" timeout "$_tmo" pg_dump -h postgres -U summonarr -d summonarr -Fc -f "$_out.partial") 2>&1; then
+    mv "$_out.partial" "$_out" || { rm -f "$_out.partial"; echo "[entrypoint] WARNING: could not finalize the pre-upgrade dump."; return 0; }
+    echo "[entrypoint] Pre-upgrade dump written."
+    # Newest first (names sort by UTC timestamp); drop everything past KEEP.
+    ls -1 "$_dir"/summonarr-pre-upgrade-*.dump 2>/dev/null | sort -r | tail -n +$((_keep + 1)) | while IFS= read -r _old; do
+      rm -f "$_old"
+    done
+  else
+    rm -f "$_out.partial"
+    echo "[entrypoint] WARNING: pre-upgrade dump FAILED (or timed out after ${_tmo}s) — continuing boot without it."
+  fi
+  return 0
+}
+_pre_upgrade_dump || echo "[entrypoint] WARNING: pre-upgrade dump step errored — continuing boot."
+
 echo "Deduplicating PlayHistory before schema sync..."
 node --input-type=module <<'DEDUP_EOF'
 const { DATABASE_URL } = process.env;
@@ -258,8 +327,7 @@ echo "Syncing database schema..."
 #      apply with --accept-data-loss directly (operator-acknowledged override).
 
 if [ "${SUMMONARR_ACCEPT_DATA_LOSS:-}" = "true" ]; then
-  echo "[entrypoint] SUMMONARR_ACCEPT_DATA_LOSS=true — applying with --accept-data-loss."
-  echo "[entrypoint] Unset this env var after the boot succeeds; leaving it on hides destructive changes."
+  echo "[entrypoint] WARNING: SUMMONARR_ACCEPT_DATA_LOSS=true is set — EVERY boot applies schema changes with --accept-data-loss, including column and table drops. Unset it once this boot succeeds."
   node node_modules/prisma/build/index.js db push --accept-data-loss
 else
   # Disable set -e around the capture: under POSIX `sh -e`, $(...) failures

@@ -191,6 +191,8 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
 | `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.37.1` (no `v` — the published tags are bare semver).                                                                                                   |
+| `SUMMONARR_PRE_UPGRADE_DUMP_DIR` | writable dir in the container; default unset (off) | Take a `pg_dump` here before a schema-changing upgrade. Mount a volume at it. See [Pre-upgrade safety dump](#pre-upgrade-safety-dump-opt-in). `SUMMONARR_PRE_UPGRADE_DUMP_KEEP` (default `3`) and `SUMMONARR_PRE_UPGRADE_DUMP_TIMEOUT` (seconds, default `900`) tune it. |
+| `SUMMONARR_ACCEPT_DATA_LOSS`   | `true` to enable; default unset  | Apply schema changes with `--accept-data-loss`. Applies on **every** boot while set (a warning is logged each time) — unset it after the boot that needs it. |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -634,6 +636,55 @@ docker compose logs -f summonarr   # watch prisma db push apply any schema chang
 > **Sign-in identity binding (since the 2026-10-17 auth hardening).** A Jellyfin account is now bound to the Jellyfin server it was first seen on, and signing in to it through a *different* configured Jellyfin server is refused; an OIDC account is bound to its issuer. Existing accounts are migrated automatically (at boot, or on their next sign-in) — nothing to do. If the boot log reports accounts that "carry a jellyfin-<id>@jellyfin.local address but were not bound", those rows also have a password, a Plex id or an OIDC login, and that Jellyfin user's sign-in is refused until you sort out which account is theirs.
 
 Schema changes are applied on every container start via `prisma db push` (no migrations directory, no manual step). Destructive schema changes (dropped columns, narrowed types) will **fail fast at boot** instead of silently clobbering data — apply those by hand with explicit intent when they come up.
+
+> **`SUMMONARR_ACCEPT_DATA_LOSS=true` is not a one-time switch.** While it is in `.env`, *every* boot applies schema changes with `--accept-data-loss` (column and table drops included) and prints a `WARNING` line saying so. Set it for the one boot that needs it, then remove it.
+
+### Pre-upgrade safety dump (opt-in)
+
+`prisma db push` has no migration history and no rollback, so the entrypoint can take a `pg_dump` first. It is **off by default**; set `SUMMONARR_PRE_UPGRADE_DUMP_DIR` to a directory inside the container that is backed by a volume — `/data` exists in the image but is **not** a volume, so mount one yourself:
+
+```yaml
+# docker-compose.yml, under the summonarr service
+    volumes:
+      - ./upgrade-dumps:/dumps
+```
+
+```dotenv
+SUMMONARR_PRE_UPGRADE_DUMP_DIR=/dumps
+# SUMMONARR_PRE_UPGRADE_DUMP_KEEP=3       # newest dumps kept (default 3)
+# SUMMONARR_PRE_UPGRADE_DUMP_TIMEOUT=900  # seconds before an unfinished dump is abandoned (default 900)
+```
+
+```bash
+mkdir -p upgrade-dumps && sudo chown 1001:1001 upgrade-dumps   # the app runs as UID 1001
+```
+
+- A dump (`summonarr-pre-upgrade-<UTC timestamp>.dump`, `pg_dump -Fc`, mode 600) is written **only when the schema is about to change**: the entrypoint compares the live database with `schema.prisma` first. A boot with nothing to apply, and a brand-new empty database, take none. The dump runs before the entrypoint's own data fix-ups and before `db push`.
+- It is **best-effort and never blocks boot.** A missing/unwritable directory, an unreachable database, a failed or timed-out dump each log a `WARNING` and the boot continues without it. Check `docker compose logs summonarr | grep "pre-upgrade dump"` after an upgrade to confirm one was written.
+- The dump contains your whole database (password hashes, encrypted tokens, play history). Protect the directory like a backup, and keep `TOKEN_ENCRYPTION_KEY` — encrypted settings in it are unreadable without that key.
+
+### Rolling back an upgrade
+
+If an upgrade misbehaves and you have a pre-upgrade dump (or any `pg_dump -Fc` backup):
+
+```bash
+cd /path/to/summonarr
+docker compose stop summonarr                      # leave postgres running
+
+# 1. Pin the previous image — bare semver, NO "v" (tags are 0.37.0, not v0.37.0)
+#    edit .env:  SUMMONARR_VERSION=0.37.0
+
+# 2. Replace the database with the dump
+docker compose exec -T postgres psql -U summonarr -d postgres \
+  -c 'DROP DATABASE summonarr WITH (FORCE)' -c 'CREATE DATABASE summonarr OWNER summonarr'
+docker compose exec -T postgres pg_restore -U summonarr -d summonarr --no-owner < upgrade-dumps/summonarr-pre-upgrade-<timestamp>.dump
+
+# 3. Start the pinned version
+docker compose up -d summonarr
+docker compose logs -f summonarr
+```
+
+Notes: restoring discards everything written since the dump (requests, votes, play history). Use the dump taken just before the upgrade you are undoing, not an older one. If the restore fails, the database is empty — `pg_restore` errors are printed, and the dump file is untouched, so re-run it. An older image running against a newer schema (without restoring) is **not** supported: `db push` would try to drop the new columns. Keep `SUMMONARR_VERSION` pinned until you are ready to move forward again.
 
 Before upgrading across a minor version, skim the commit history for `feat`/`perf` entries under the `sync`, `plex`, `jellyfin`, or `arr` scopes — those are the changes most likely to affect external-service wiring.
 
