@@ -332,13 +332,12 @@ export async function resolveToSafeUrl(
 // Re-resolve `host` FRESH and verify every currently-resolving address is safe
 // under the chosen policy. Returns true on success.
 //
-// This is the TOCTOU mitigation for the gap between the initial SSRF resolve
-// and the actual fetch() connect: `fetch()` hands the hostname to undici and
-// undici re-resolves at connect time, so a hostile DNS server can flip the
-// answer mid-request ("DNS rebinding"). We can't pin the IP at the dispatcher
-// layer without re-introducing the npm-undici-vs-Node-bundled-undici Dispatcher
-// incompatibility (see safe-fetch.ts), so we instead re-resolve immediately
-// before fetch() and refuse if any address now points somewhere unsafe.
+// This is the fallback TOCTOU mitigation for the one path that still hands the
+// hostname to fetch() (the env-proxy path in safe-fetch.ts, where the proxy
+// resolves the name and the connection cannot be pinned): re-resolve
+// immediately before fetch() and refuse if any address now points somewhere
+// unsafe. The normal path does not rely on this — it connects to the addresses
+// `resolveSafeAddrsFresh` returns, so there is no later lookup to rebind.
 //
 // This re-resolves FRESH (bypassing the 5-minute cache) so it genuinely queries
 // DNS again immediately before fetch(), rather than echoing the answer the
@@ -367,4 +366,18 @@ export async function verifyResolvedHost(
 
   const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
   return addrs.every(check);
+}
+
+// Resolve `host` FRESH (bypassing the cache) and return the addresses ONLY if
+// every one is safe under the policy, else null. safe-fetch connects to exactly
+// these addresses (a pinned `lookup`), so what was validated is what is dialled.
+export async function resolveSafeAddrsFresh(
+  host: string,
+  opts: ResolveSafeUrlOptions = {},
+): Promise<string[] | null> {
+  const h = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  const addrs = isIP(h) ? [h] : await lookupHostCached(h, /* bypassCache */ true);
+  if (addrs.length === 0) return null;
+  const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
+  return addrs.every(check) ? addrs : null;
 }

@@ -65,8 +65,9 @@ The unit suite (`npm test`, Node's built-in `node:test`, files in [tests/](tests
 - Body cap was raised from 10 MB because libraries with >3k movies were being silently truncated. Do not lower it.
 
 **safe-fetch helpers** — [src/lib/safe-fetch.ts](src/lib/safe-fetch.ts)
-- `safeFetch(url)` — full SSRF policy (resolve+pin, blocks RFC1918/loopback/link-local/CGNAT/multicast). For user-supplied URLs.
-- `safeFetchTrusted(url, { allowedHosts })` — required hostname allowlist; still runs the DNS-based SSRF check (resolve + per-address public-IP check, `allowPrivate=false`, so a DNS rebind to a private address is blocked). For fixed third-party APIs (TMDB, plex.tv, discord.com, ipinfo.io, api.trakt.tv, api.github.com, raw.githubusercontent.com, www.omdbapi.com, api.mdblist.com, api.resend.com).
+- All three helpers resolve the host, require EVERY address to pass the mode's policy, then send the request over `node:http(s)` with a `lookup` that returns only those validated addresses (`pinnedFetch`, `makePinnedLookup`) — the connect cannot be rebound. TLS SNI/cert verification and `Host` keep the original hostname; each request uses its own agent. Exception: with `NODE_USE_ENV_PROXY` + a proxy variable the proxy dials the target, so it falls back to a fresh re-resolve check and `fetch()` by hostname. `tests/safe-fetch-pin.test.mts` pins it.
+- `safeFetch(url)` — full SSRF policy (resolved addresses pinned, blocks RFC1918/loopback/link-local/CGNAT/multicast). For user-supplied URLs.
+- `safeFetchTrusted(url, { allowedHosts })` — required hostname allowlist; still runs the DNS-based SSRF check (resolve + per-address public-IP check, `allowPrivate=false`, and the connection is pinned to those addresses, so a DNS rebind to a private address is blocked). For fixed third-party APIs (TMDB, plex.tv, discord.com, ipinfo.io, api.trakt.tv, api.github.com, raw.githubusercontent.com, www.omdbapi.com, api.mdblist.com, api.resend.com).
 - `safeFetchAdminConfigured(url)` — runs SSRF policy with `allowPrivate=true` (RFC1918/ULA/loopback OK; link-local + 0.0.0.0 still blocked). For URLs persisted in `Setting` (Radarr/Sonarr/Jellyfin/Plex server).
 
 **Webhook auth** — [src/app/api/webhooks/](src/app/api/webhooks/) (**sonarr, radarr only**)
