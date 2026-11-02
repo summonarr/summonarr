@@ -137,7 +137,7 @@ export async function scrubLegacySessionRevokePii(db: AuditDb, userId: string, e
 // The audit actions that moderate ONE request, under a `request:<id>` target.
 // (A batch is written under these actions too, but under `batch:<n>`, and it
 // names no requester.)
-const REQUEST_MODERATION_ACTIONS: AuditAction[] = ["REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE"];
+const REQUEST_MODERATION_ACTIONS: AuditAction[] = ["REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE", "REQUEST_COMMENT"];
 
 // How a request-moderation audit row names the requester: by id, plus the
 // display name only when the account has one — never the email, so the purge

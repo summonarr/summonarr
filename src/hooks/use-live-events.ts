@@ -10,6 +10,7 @@ export type LiveEvent =
   | { type: "request:new"; requestId: string }
   | { type: "request:updated"; requestId: string; status: string }
   | { type: "request:deleted"; requestId: string }
+  | { type: "request:comment"; requestId: string }
   | { type: "issue:new"; issueId: string }
   | { type: "issue:updated"; issueId: string; status: string }
   | { type: "issue:deleted"; issueId: string }

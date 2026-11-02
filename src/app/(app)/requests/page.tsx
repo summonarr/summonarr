@@ -17,6 +17,7 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
 import { LocalDateText } from "@/components/local-date";
 import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
+import { RequestThread } from "@/components/requests/request-thread";
 import { getTranslator } from "@/lib/i18n/server";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
@@ -37,12 +38,14 @@ const STATUS_LABEL_KEY: Record<string, string> = {
 export default async function RequestsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string; status?: string; sort?: string; q?: string | string[] }>;
+  searchParams: Promise<{ page?: string; status?: string; sort?: string; q?: string | string[]; comments?: string | string[] }>;
 }) {
   const session = await requireAppSession();
   const t = await getTranslator();
 
-  const { page: pageParam, status: statusParam, sort: sortParam, q: qRaw } = await searchParams;
+  const { page: pageParam, status: statusParam, sort: sortParam, q: qRaw, comments: commentsRaw } = await searchParams;
+  // ?comments=<requestId> (from a comment notification) opens that row's thread.
+  const openCommentsId = Array.isArray(commentsRaw) ? commentsRaw[0] : commentsRaw;
   // A repeated query key (?q=a&q=b) arrives as an array at runtime, and `.trim()`
   // on it would 500 the whole page (the same guard /votes carries).
   const qParam = Array.isArray(qRaw) ? qRaw[0] : qRaw;
@@ -73,7 +76,9 @@ export default async function RequestsPage({
       select: {
         id: true, mediaType: true, tmdbId: true, title: true,
         posterPath: true, releaseYear: true, status: true, note: true,
+        adminNote: true, permanentlyDeclined: true,
         createdAt: true, updatedAt: true,
+        _count: { select: { comments: true } },
       },
       orderBy: { createdAt: sort === "oldest" ? "asc" : "desc" },
       skip,
@@ -96,6 +101,8 @@ export default async function RequestsPage({
   const totalAllStatuses = statusCountsRaw.reduce((s, r) => s + r._count.status, 0);
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
+
+  const commentsEnabled = await isFeatureEnabled("feature.behavior.requestComments");
 
   const [plexEnabled, jellyfinEnabled] = await Promise.all([
     isFeatureEnabled("feature.integration.plex"),
@@ -222,8 +229,8 @@ export default async function RequestsPage({
                 `${r.tmdbId}:${r.mediaType === "MOVIE" ? "movie" : "tv"}`,
               );
               return (
+                <div key={r.id}>
                 <div
-                  key={r.id}
                   className="flex items-start transition-colors bg-[var(--ds-bg-2)] hover:bg-[var(--ds-bg-3)] border border-[var(--ds-border)]"
                   style={{
                     gap: 14,
@@ -334,6 +341,18 @@ export default async function RequestsPage({
                   <Chip tone={REQUEST_STATUS_TONE[r.status]}>
                     {STATUS_LABEL_KEY[r.status] ? t(STATUS_LABEL_KEY[r.status]) : r.status}
                   </Chip>
+                </div>
+                {commentsEnabled && (
+                  <RequestThread
+                    requestId={r.id}
+                    viewerIsManager={false}
+                    requestNote={r.note}
+                    declineNote={r.status === "DECLINED" ? r.adminNote : null}
+                    closed={r.permanentlyDeclined}
+                    initialCount={r._count.comments}
+                    defaultOpen={openCommentsId === r.id}
+                  />
+                )}
                 </div>
               );
             })}

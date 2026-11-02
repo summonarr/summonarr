@@ -110,6 +110,7 @@ const AGENT_TEXT_KEYS: Record<NotifyEvent["event"], { title: string; body: strin
   "request.approved": { title: "notify.agent.request.approved.title", body: "notify.agent.request.approved.body" },
   "request.declined": { title: "notify.agent.request.declined.title", body: "notify.agent.request.declined.body", withText: "notify.agent.request.declined.bodyWithText" },
   "request.available": { title: "notify.agent.request.available.title", body: "notify.agent.request.available.body" },
+  "request.comment": { title: "notify.agent.request.comment.title", body: "notify.agent.request.comment.body", withText: "notify.agent.request.comment.bodyWithText" },
   "issue.created": { title: "notify.agent.issue.created.title", body: "notify.agent.issue.created.body", withText: "notify.agent.issue.created.bodyWithText" },
   "issue.reply": { title: "notify.agent.issue.reply.title", body: "notify.agent.issue.reply.body", withText: "notify.agent.issue.reply.bodyWithText" },
   "issue.resolved": { title: "notify.agent.issue.resolved.title", body: "notify.agent.issue.resolved.body", withText: "notify.agent.issue.resolved.bodyWithText" },
@@ -122,6 +123,7 @@ const AGENT_TEXT_KEYS: Record<NotifyEvent["event"], { title: string; body: strin
   "arr.disk_ok": { title: "notify.agent.arr.disk_ok.title", body: "notify.agent.arr.disk_ok.body", noTotal: "notify.agent.arr.disk_ok.bodyNoTotal" },
   "arr.download_failed": { title: "notify.agent.arr.download_failed.title", body: "notify.agent.arr.download_failed.body", withText: "notify.agent.arr.download_failed.bodyWithText" },
   "arr.queue_attention": { title: "notify.agent.arr.queue_attention.title", body: "notify.agent.arr.queue_attention.body", withText: "notify.agent.arr.queue_attention.bodyWithText" },
+  "stream.concurrent": { title: "notify.agent.stream.concurrent.title", body: "notify.agent.stream.concurrent.body", withText: "notify.agent.stream.concurrent.bodyWithText" },
   "agent.test": { title: "notify.agent.agent.test.title", body: "notify.agent.agent.test.body" },
 };
 

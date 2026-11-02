@@ -573,6 +573,13 @@ function formatSummary(action: string, d: Record<string, unknown>, t: Translator
   const targetUser = d.targetUser ?? d.targetUserId;
   const requester = d.requestedBy ?? d.requesterId;
   switch (action) {
+    case "REQUEST_COMMENT":
+      return [
+        d.title && `"${d.title}"`,
+        media(),
+        d.fromAdmin ? t("adminManage.audit.summary.commentByManager") : t("adminManage.audit.summary.commentByRequester"),
+        requester && t("adminManage.audit.summary.requestedBy", { user: String(requester) }),
+      ].filter(Boolean).join(" ") || null;
     case "REQUEST_APPROVE":
     case "REQUEST_DECLINE":
     case "REQUEST_DELETE":

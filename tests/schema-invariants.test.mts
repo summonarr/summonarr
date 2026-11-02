@@ -389,6 +389,8 @@ test("no Json column may hold a top-level array — db-export discriminates arra
     "NotificationAgent.config",
     // Always a WatchSyncPairResult object ({ pairId, queued, … } — watch-sync-data.ts).
     "WatchSyncPair.lastResult",
+    // Always a PlaybackContext object ({ v: 1, … } — issue-playback-context.ts).
+    "Issue.playbackContext",
   ]);
   for (const field of jsonFields) {
     assert.ok(

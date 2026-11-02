@@ -103,6 +103,7 @@ const fakeTx = {
   },
   issue: { updateMany: record("issue", "updateMany") },
   issueMessage: { updateMany: record("issueMessage", "updateMany") },
+  requestComment: { updateMany: record("requestComment", "updateMany") },
   issueGrab: { updateMany: record("issueGrab", "updateMany") },
   deletionVote: {
     findMany: async (args: { where: { userId: string } }) => {
@@ -343,6 +344,10 @@ test("issues, issue messages, and issue grabs ALWAYS migrate to the web user", a
     data: { reportedBy: WEB },
   });
   assert.deepEqual(opArgs("issueMessage.updateMany"), {
+    where: { authorId: SHADOW },
+    data: { authorId: WEB },
+  });
+  assert.deepEqual(opArgs("requestComment.updateMany"), {
     where: { authorId: SHADOW },
     data: { authorId: WEB },
   });

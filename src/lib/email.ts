@@ -257,7 +257,7 @@ function safeHeader(str: string): string {
   return str.replace(/[\r\n]+/g, " ");
 }
 
-async function getAdminEmails(excludeUserId?: string): Promise<Recipient[]> {
+async function getAdminEmails(excludeUserId?: string, userWhere: { emailOnComment?: true } = {}): Promise<Recipient[]> {
   // Bitmask authoritative: any holder of MANAGE_REQUESTS (or ADMIN superbit).
   // Includes custom-granted users; falls back correctly for legacy rows.
   const rows = await prisma.user.findMany({
@@ -266,7 +266,7 @@ async function getAdminEmails(excludeUserId?: string): Promise<Recipient[]> {
     // receiving admin mail forever. A PURGED row is worse: its tombstone address
     // (deleted-<id>@deleted.invalid) hard-bounces on every send. This is the
     // admin-side chokepoint — the requester fan-out has its own two gates.
-    where: { deactivatedAt: null, ...(excludeUserId ? { id: { not: excludeUserId } } : {}) },
+    where: { deactivatedAt: null, ...userWhere, ...(excludeUserId ? { id: { not: excludeUserId } } : {}) },
     select: { email: true, notificationEmail: true, role: true, permissions: true, locale: true },
   });
   return rows
@@ -631,6 +631,86 @@ export async function notifyAdminsIssueMessageEmail(data: {
     }, [{ title: data.issueTitle, tmdbId: data.tmdbId, mediaType: data.mediaType }]);
   } catch (err) {
     console.error("[email] Failed to send admin issue-message notification:", err instanceof Error ? err.message : err);
+  }
+}
+
+export async function notifyAdminsRequestCommentEmail(data: {
+  title: string;
+  tmdbId?: number;
+  mediaType?: string;
+  userName: string;
+  body: string;
+  requestId: string;
+  excludeUserId?: string;
+}): Promise<void> {
+  try {
+    const cfg = await getEmailConfig();
+    if (!cfg || !isBackendConfigured(cfg)) return;
+
+    const to = await getAdminEmails(data.excludeUserId, { emailOnComment: true });
+    if (!to.length) return;
+
+    await sendManyLocalized(cfg, to, (lang) => {
+      const { t } = lang;
+      const title = lang.title({ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType });
+      const html = richEmailHtml({
+        lang,
+        preheader: t("notify.email.adminRequestComment.preheader", { user: data.userName, title }),
+        accent: "amber",
+        heading: t("notify.email.adminRequestComment.heading"),
+        subheading: t("notify.email.adminRequestComment.subheading", { user: esc(data.userName) }),
+        details: [
+          [t("notify.email.detail.request"), esc(title)],
+          [t("notify.email.detail.from"), esc(data.userName)],
+        ],
+        bodyHtml: noteBlockHtml(data.body, t("notify.email.note.message")),
+        ctaLabel: t("notify.email.cta.viewRequestQueue"),
+        ctaHref: buildSiteUrl(cfg.siteUrl, `/admin?comments=${data.requestId}`),
+        siteUrl: cfg.siteUrl,
+      });
+      return { subject: t("notify.email.adminRequestComment.subject", { title }), html };
+    }, [{ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }]);
+  } catch (err) {
+    console.error("[email] Failed to send admin request-comment notification:", err instanceof Error ? err.message : err);
+  }
+}
+
+export async function notifyUserRequestCommentEmail(data: {
+  toEmail: string;
+  title: string;
+  tmdbId?: number;
+  mediaType?: string;
+  authorName: string;
+  body: string;
+  requestId: string;
+  /** The recipient's stored User.locale (null → the instance default). */
+  locale?: string | null;
+}): Promise<void> {
+  try {
+    const cfg = await getEmailConfig();
+    if (!cfg || !isBackendConfigured(cfg)) return;
+
+    const lang = langFor(data.locale);
+    const title = await localizedTitleFor({ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, data.locale);
+    const { t } = lang;
+    const html = richEmailHtml({
+      lang,
+      preheader: t("notify.email.userRequestComment.preheader", { user: data.authorName, title }),
+      accent: "indigo",
+      heading: t("notify.email.userRequestComment.heading"),
+      subheading: t("notify.email.userRequestComment.subheading", { user: esc(data.authorName) }),
+      details: [
+        [t("notify.email.detail.request"), esc(title)],
+        [t("notify.email.detail.from"), esc(data.authorName)],
+      ],
+      bodyHtml: noteBlockHtml(data.body, t("notify.email.note.message")),
+      ctaLabel: t("notify.email.cta.viewRequests"),
+      ctaHref: buildSiteUrl(cfg.siteUrl, `/requests?comments=${data.requestId}`),
+      siteUrl: cfg.siteUrl,
+    });
+    await sendOne(cfg, data.toEmail, t("notify.email.userRequestComment.subject", { title }), html);
+  } catch (err) {
+    console.error("[email] Failed to send user request-comment notification:", err instanceof Error ? err.message : err);
   }
 }
 

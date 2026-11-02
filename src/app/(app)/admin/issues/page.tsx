@@ -8,6 +8,7 @@ import { IssueActions } from "@/components/admin/issue-actions";
 import { IssueCardShell } from "@/components/admin/issue-card-shell";
 import { IssueClaimButton } from "@/components/admin/issue-claim-button";
 import { IssueThread } from "@/components/issues/issue-thread";
+import { IssuePlaybackContext } from "@/components/issues/issue-playback-context";
 import Image from "next/image";
 import { Film, Tv2, MessageSquare } from "@/components/icons";
 import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
@@ -520,6 +521,7 @@ export default async function AdminIssuesPage({
                             {issue.note}
                           </p>
                         )}
+                        <IssuePlaybackContext value={issue.playbackContext} t={t} />
                         {issue.resolution && (
                           <p
                             className="italic"

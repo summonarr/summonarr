@@ -61,6 +61,8 @@ export interface TmdbMedia {
   // deep-link into filtered browse. `genres` (names) stays for back-compat.
   genreList?: { id: number; name: string }[];
   studios?: string[];
+  /** Studios and networks with their TMDB ids, for the detail page's browse links (src/lib/studio-list.ts). */
+  studioList?: { id: number; name: string; kind: "company" | "network" }[];
   tagline?: string | null;
   status?: string | null;
   runtime?: number | null;
@@ -217,6 +219,12 @@ export interface DiscoverFilters {
   sortBy?: string;
   watchProvider?: string;
   watchRegion?: string;
+  /** TMDB production company id(s) — movies and TV. */
+  companyId?: string;
+  /** TMDB TV network id(s) — TV only. */
+  networkId?: string;
+  /** Highest US certification to include — movies only (TMDB cannot filter TV by rating). */
+  certification?: string;
 }
 
 export interface WatchProvider {

@@ -30,6 +30,10 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
   const homepage = safeExternalHref(media.homepage) ?? null;
   const hasProviders = providers.length > 0;
   const hasKeywords = keywords.length > 0;
+  // Studios/networks carry TMDB ids only on titles cached after studioList landed;
+  // older cache rows render no links until they refresh.
+  const studioList = media.studioList ?? [];
+  const hasStudios = studioList.length > 0;
   // Movies: TMDB's Digital (type 4) / Physical (type 5) dates, Digital falling
   // back to MDBList's. TV: TMDB has no release types for TV, so Digital is
   // MDBList's alone and Physical never has a source.
@@ -37,7 +41,7 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
   const physicalRaw = mediaType === "movie" ? (media.physicalReleaseDate ?? null) : null;
   const hasReleases = !!(digitalRaw || physicalRaw);
 
-  if (!hasProviders && !hasKeywords && !homepage && !hasReleases) return null;
+  if (!hasProviders && !hasKeywords && !hasStudios && !homepage && !hasReleases) return null;
   const t = await getTranslator();
   const locale = await getLocale();
   const releases = [
@@ -107,6 +111,31 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
                 </div>
               </div>
             ))}
+          </div>
+        </section>
+      )}
+
+      {hasStudios && (
+        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
+            {t("detail.studios")}
+          </h3>
+          <div className="flex flex-wrap" style={{ gap: 6 }}>
+            {studioList.map((s) => {
+              // A network is TV-only; a company browses either type.
+              const href = s.kind === "network"
+                ? `/tv?networkId=${s.id}&networkName=${encodeURIComponent(s.name)}`
+                : `${browseBase}?companyId=${s.id}&companyName=${encodeURIComponent(s.name)}`;
+              return (
+                <Link
+                  key={`${s.kind}:${s.id}`}
+                  href={href}
+                  aria-label={t(mediaType === "tv" ? "detail.browseTvFrom" : "detail.browseMoviesFrom", { name: s.name })}
+                >
+                  <Chip className="ds-chip-link">{s.name}</Chip>
+                </Link>
+              );
+            })}
           </div>
         </section>
       )}

@@ -36,6 +36,9 @@ interface NotificationPrefsProps {
   pushOnAvailable: boolean;
   pushOnDeclined: boolean;
   notifyOnIssue: boolean;
+  notifyOnComment: boolean;
+  emailOnComment: boolean;
+  pushOnComment: boolean;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -89,6 +92,9 @@ export function NotificationPrefs({
   pushOnAvailable,
   pushOnDeclined,
   notifyOnIssue,
+  notifyOnComment,
+  emailOnComment,
+  pushOnComment,
 }: NotificationPrefsProps) {
   const t = useT();
   const router = useRouter();
@@ -103,6 +109,9 @@ export function NotificationPrefs({
     pushOnAvailable,
     pushOnDeclined,
     notifyOnIssue,
+    notifyOnComment,
+    emailOnComment,
+    pushOnComment,
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -305,6 +314,13 @@ export function NotificationPrefs({
             onChange={() => toggle("notifyOnDeclined")}
             disabled={saving}
           />
+          <ToggleRow
+            label={t("profile.notifications.comments")}
+            description={t("profile.notifications.discord.comments")}
+            checked={prefs.notifyOnComment}
+            onChange={() => toggle("notifyOnComment")}
+            disabled={saving}
+          />
         </div>
       )}
 
@@ -430,6 +446,13 @@ export function NotificationPrefs({
             onChange={() => toggle("emailOnDeclined")}
             disabled={saving}
           />
+          <ToggleRow
+            label={t("profile.notifications.comments")}
+            description={t("profile.notifications.email.comments")}
+            checked={prefs.emailOnComment}
+            onChange={() => toggle("emailOnComment")}
+            disabled={saving}
+          />
         </div>
       )}
 
@@ -457,6 +480,13 @@ export function NotificationPrefs({
           description={t("profile.notifications.push.declined")}
           checked={prefs.pushOnDeclined}
           onChange={() => toggle("pushOnDeclined")}
+          disabled={saving}
+        />
+        <ToggleRow
+          label={t("profile.notifications.comments")}
+          description={t("profile.notifications.push.comments")}
+          checked={prefs.pushOnComment}
+          onChange={() => toggle("pushOnComment")}
           disabled={saving}
         />
         <p className="mt-2 flex items-start gap-2 text-xs text-zinc-500">

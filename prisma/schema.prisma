@@ -140,6 +140,13 @@ model User {
   // Admin/issue-admin notification preferences
   notifyOnIssue Boolean @default(true)
 
+  // Request comment threads (RequestComment): one switch per channel, same defaults
+  // as the request-status switches above. Gates BOTH audiences — a requester told
+  // of a manager's comment, and managers told of a requester's.
+  notifyOnComment Boolean @default(true)
+  emailOnComment  Boolean @default(false)
+  pushOnComment   Boolean @default(true)
+
   // Push notification preferences (opt-in by default)
   pushOnApproved  Boolean @default(true)
   pushOnAvailable Boolean @default(true)
@@ -186,6 +193,7 @@ model User {
   issues            Issue[]            @relation(name: "IssueReporter")
   claimedIssues     Issue[]            @relation(name: "IssueClaimer")
   issueMessages     IssueMessage[]
+  requestComments   RequestComment[]
   issueGrabs        IssueGrab[]
   pushSubscriptions PushSubscription[]
   deletionVotes     DeletionVote[]
@@ -457,6 +465,8 @@ model MediaRequest {
 
   requestedBy String
   user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
+
+  comments RequestComment[]
 
   // The account that FILED this request when it was made on someone else's
   // behalf (POST /api/requests/bulk with onBehalfOfUserId); null for a user's
@@ -859,6 +869,11 @@ model Issue {
   // stand in for it).
   resolvedAt DateTime?
 
+  // The reporter's most recent play of this title, snapshotted when the issue was
+  // filed (src/lib/issue-playback-context.ts, version-tagged JSON). Never an IP.
+  // Null: no linked identity, no recent play, or issues filed before the column.
+  playbackContext Json?
+
   messages IssueMessage[]
   grabs    IssueGrab[]
 
@@ -881,6 +896,31 @@ model IssueMessage {
   fromAdmin Boolean @default(false)
 
   @@index([issueId])
+  @@index([authorId])
+}
+
+// ─── Request Comments ────────────────────────────────────────────────────────
+// A private conversation between a requester and the people who manage requests
+// (src/lib/request-comments.ts). Separate from MediaRequest.note (the requester's
+// original note) and adminNote (the decline reason), which stay as they were:
+// Discord, the iOS app and the arr push read them. Deleted with the request
+// (cascade); a purged account's rows are scrubbed by purgeUserDataInTx (guardrail 33).
+
+model RequestComment {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+
+  requestId String
+  request   MediaRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  authorId String
+  author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  body      String  @db.VarChar(2000)
+  // Set from MANAGE_REQUESTS at write time, like IssueMessage.fromAdmin.
+  fromAdmin Boolean @default(false)
+
+  @@index([requestId, createdAt])
   @@index([authorId])
 }
 
@@ -1112,6 +1152,7 @@ enum AuditAction {
   REQUEST_DECLINE
   REQUEST_DELETE
   REQUEST_ON_BEHALF
+  REQUEST_COMMENT
   USER_CREATE
   USER_ROLE_CHANGE
   USER_PERMISSIONS_CHANGE

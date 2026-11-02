@@ -21,5 +21,11 @@
   "requests.empty.filteredDescription": "Ninguna solicitud coincide con estos filtros.",
   "requests.empty.noneTitle": "Aún no tienes solicitudes",
   "requests.empty.noneDescription": "Busca algo en Descubrir, Películas o Series y pulsa Solicitar.",
-  "requests.empty.browseMovies": "Explorar películas"
+  "requests.empty.browseMovies": "Explorar películas",
+  "requests.thread.show": "Comentarios",
+  "requests.thread.showCount": "Comentarios ({count})",
+  "requests.thread.hide": "Ocultar comentarios",
+  "requests.thread.requestNote": "Nota original",
+  "requests.thread.declineReason": "Motivo del rechazo",
+  "requests.thread.closed": "Esta solicitud está cerrada a comentarios."
 }

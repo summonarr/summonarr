@@ -52,6 +52,7 @@ const EVENT_LABEL_KEYS: Record<(typeof NOTIFY_EVENT_KEYS)[number], string> = {
   "request.approved": "settings.form.agents.event.request.approved",
   "request.declined": "settings.form.agents.event.request.declined",
   "request.available": "settings.form.agents.event.request.available",
+  "request.comment": "settings.form.agents.event.request.comment",
   "issue.created": "settings.form.agents.event.issue.created",
   "issue.reply": "settings.form.agents.event.issue.reply",
   "issue.resolved": "settings.form.agents.event.issue.resolved",
@@ -64,6 +65,7 @@ const EVENT_LABEL_KEYS: Record<(typeof NOTIFY_EVENT_KEYS)[number], string> = {
   "arr.disk_ok": "settings.form.agents.event.arr.disk_ok",
   "arr.download_failed": "settings.form.agents.event.arr.download_failed",
   "arr.queue_attention": "settings.form.agents.event.arr.queue_attention",
+  "stream.concurrent": "settings.form.agents.event.stream.concurrent",
 };
 
 const DEFAULT_PRIORITY: Record<AgentKind, string> = { webhook: "", ntfy: "3", gotify: "5" };

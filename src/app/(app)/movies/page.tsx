@@ -25,6 +25,9 @@ export default async function MoviesPage({
   const [sp, session, t] = await Promise.all([searchParams, requireAppSession(), getTranslator()]);
   const genreId        = sp.genreId        || undefined;
   const keywordId      = sp.keywordId      || undefined;
+  const companyId      = sp.companyId      || undefined;
+  const networkId      = sp.networkId      || undefined;
+  const certification  = sp.certification  || undefined;
   const minRating      = sp.minRating      || undefined;
   const ratingFilter   = sp.ratingFilter   || undefined;
   const minVoteCount   = sp.minVoteCount   || undefined;
@@ -36,7 +39,7 @@ export default async function MoviesPage({
   const hideAvailable  = sp.hideAvailable === "1";
   const requestedPage  = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
-  const filters: DiscoverFilters = { genreId, keywordId, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
+  const filters: DiscoverFilters = { genreId, keywordId, companyId, networkId, certification, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
 
   // Shared with /api/browse — see src/lib/browse-query.ts. The helper THROWS on
   // a first-page failure; a server component has no prior state to preserve, so
@@ -72,7 +75,7 @@ export default async function MoviesPage({
   // deliberately leaves watchRegion out — a region alone narrows nothing the
   // user asked for); the grid used to render this line itself and pull it up
   // under the header with a negative margin.
-  const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
+  const hasFilters = !!(genreId || keywordId || companyId || networkId || certification || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
   // `items` is ONE TMDB page (~20), not the result set, so a bare count would
   // read "20 results" above a pager offering hundreds of pages. Page-scoped when
   // there is more than one page; a count only when this page is everything.

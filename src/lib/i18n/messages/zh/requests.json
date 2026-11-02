@@ -21,5 +21,11 @@
   "requests.empty.filteredDescription": "没有符合这些筛选条件的请求。",
   "requests.empty.noneTitle": "还没有请求",
   "requests.empty.noneDescription": "在“发现”、“电影”或“剧集”中找到想看的内容，然后点击“请求”。",
-  "requests.empty.browseMovies": "浏览电影"
+  "requests.empty.browseMovies": "浏览电影",
+  "requests.thread.show": "评论",
+  "requests.thread.showCount": "评论（{count}）",
+  "requests.thread.hide": "隐藏评论",
+  "requests.thread.requestNote": "原始备注",
+  "requests.thread.declineReason": "拒绝原因",
+  "requests.thread.closed": "此请求不再接受评论。"
 }

@@ -194,5 +194,10 @@
   "apiUser.requests.searchSeriesNotInSonarr": "Diese Serie ist nicht in der Sonarr-Instanz dieser Anfrage – senden Sie die Anfrage erneut, um sie wieder hinzuzufügen",
   "apiUser.common.arrTimeout": "Radarr/Sonarr hat nicht rechtzeitig geantwortet – versuchen Sie es später erneut",
   "apiUser.common.arrUnreachable": "Radarr/Sonarr ist nicht erreichbar – versuchen Sie es später erneut",
-  "apiUser.common.arrFailed": "Die Radarr/Sonarr-Anfrage ist fehlgeschlagen – Details stehen im Serverprotokoll"
+  "apiUser.common.arrFailed": "Die Radarr/Sonarr-Anfrage ist fehlgeschlagen – Details stehen im Serverprotokoll",
+  "apiUser.comments.disabled": "Anfragekommentare sind deaktiviert.",
+  "apiUser.comments.rateLimited": "Sie kommentieren zu schnell. Versuchen Sie es in einer Minute erneut.",
+  "apiUser.comments.closed": "Diese Anfrage wurde endgültig abgelehnt und ist für Kommentare gesperrt.",
+  "apiUser.comments.bodyRequired": "Schreiben Sie zuerst einen Kommentar.",
+  "apiUser.comments.bodyTooLong": "Kommentare dürfen höchstens 2000 Zeichen lang sein."
 }

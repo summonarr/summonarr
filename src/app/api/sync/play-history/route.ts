@@ -24,6 +24,7 @@ import { type MediaInstanceKey, activeSessionId, mediaInstanceLabel, parseActive
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { mapLimit } from "@/lib/concurrency";
 import { emitSSE } from "@/lib/sse-emitter";
+import { evaluateConcurrentStreams } from "@/lib/stream-limit-data";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import {
   PLEX_STALL_THRESHOLD_MS,
@@ -1098,6 +1099,8 @@ async function syncPlayHistory(request: NextRequest) {
     }
 
     await emitActiveSessionsSnapshot();
+    // Never throws: an alert failure must not fail the poll.
+    await evaluateConcurrentStreams();
 
     // Guardrail 21: cleanupStaleSessions measures off lastSeenAt exactly like
     // the two per-source absence sweeps, which skip when the boot re-anchor

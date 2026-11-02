@@ -16,7 +16,7 @@ import { useModalA11y } from "@/hooks/use-modal-a11y";
 import { AdminToggleRow, type User } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 
-type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue";
+type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue" | "notifyOnComment" | "emailOnComment" | "pushOnComment";
 
 export function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const t = useT();
@@ -32,6 +32,9 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
     pushOnAvailable: u.pushOnAvailable,
     pushOnDeclined: u.pushOnDeclined,
     notifyOnIssue: u.notifyOnIssue,
+    notifyOnComment: u.notifyOnComment,
+    emailOnComment: u.emailOnComment,
+    pushOnComment: u.pushOnComment,
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +120,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
             <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.notifyOnApproved} onChange={() => toggle("notifyOnApproved")} busy={saving} />
             <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.notifyOnAvailable} onChange={() => toggle("notifyOnAvailable")} busy={saving} />
             <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.notifyOnDeclined} onChange={() => toggle("notifyOnDeclined")} busy={saving} />
+            <AdminToggleRow label={t("adminManage.notif.comments")} checked={prefs.notifyOnComment} onChange={() => toggle("notifyOnComment")} busy={saving} />
           </div>
         ) : (
           <p className="text-xs text-zinc-500 mb-3 italic">{t("adminManage.notif.discordNotLinked")}</p>
@@ -129,6 +133,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
           <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.emailOnApproved} onChange={() => toggle("emailOnApproved")} busy={saving} />
           <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.emailOnAvailable} onChange={() => toggle("emailOnAvailable")} busy={saving} />
           <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.emailOnDeclined} onChange={() => toggle("emailOnDeclined")} busy={saving} />
+          <AdminToggleRow label={t("adminManage.notif.comments")} checked={prefs.emailOnComment} onChange={() => toggle("emailOnComment")} busy={saving} />
         </div>
 
         <div className="mt-3">
@@ -138,6 +143,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
           <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.pushOnApproved} onChange={() => toggle("pushOnApproved")} busy={saving} />
           <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.pushOnAvailable} onChange={() => toggle("pushOnAvailable")} busy={saving} />
           <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.pushOnDeclined} onChange={() => toggle("pushOnDeclined")} busy={saving} />
+          <AdminToggleRow label={t("adminManage.notif.comments")} checked={prefs.pushOnComment} onChange={() => toggle("pushOnComment")} busy={saving} />
         </div>
 
         <div className="mt-3">

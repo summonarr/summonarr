@@ -433,5 +433,11 @@
   "settings.featureLabel.admin_watchSync": "Página de sincronização de vistos",
   "settings.featureDesc.admin_watchSync": "Mostra a página /admin/watch-sync: associe uma conta do Plex a um usuário do Jellyfin e escolha uma direção, e o que um servidor conta como visto é marcado como visto no outro, incluindo o histórico anterior à associação. Só adiciona: nada é marcado como não visto. Desativada por padrão.",
   "settings.cron.job.watchSync.name": "Sincronização de vistos",
-  "settings.cron.job.watchSync.description": "Manter sincronizado o status de visto de cada conta do Plex e do Jellyfin associada por um administrador, na direção escolhida para a associação"
+  "settings.cron.job.watchSync.description": "Manter sincronizado o status de visto de cada conta do Plex e do Jellyfin associada por um administrador, na direção escolhida para a associação",
+  "settings.featureLabel.behavior_requestComments": "Comentários em pedidos",
+  "settings.featureDesc.behavior_requestComments": "Permite que quem pede e quem gerencia os pedidos troquem comentários sobre um pedido (“precisa de outra versão?”). Cada lado é avisado conforme suas preferências de notificação. Desativado, os tópicos ficam ocultos e novos comentários de quem pede são recusados; os gerentes ainda podem publicar.",
+  "settings.playHistory.concurrentLimit": "Alerta de transmissões simultâneas",
+  "settings.playHistory.concurrentLimitHelp": "Avisa quando uma pessoa transmite mais títulos ao mesmo tempo do que este valor (Plex e Jellyfin contam juntos). 0 desativa. Só notifica os administradores (caixa de entrada e seus canais de notificação); nada é interrompido. Contas de proprietário do servidor nunca são contadas.",
+  "settings.featureLabel.behavior_issueAutoResolve": "Resolver problemas automaticamente",
+  "settings.featureDesc.behavior_issueAutoResolve": "Quando o substituto pedido por um administrador (Corrigir arquivo, Escolher versão ou Repetir) é importado pelo Radarr/Sonarr, o problema é marcado como resolvido e quem reportou é avisado. Só filmes e problemas de um único episódio — um problema de temporada ou da série inteira continua aberto para um administrador. Se quem reportou responder, ele reabre."
 }

@@ -56,6 +56,11 @@ export function BrowseGrid({
   const genreId       = searchParams.get("genreId") || undefined;
   const keywordId     = searchParams.get("keywordId") || undefined;
   const keywordName   = searchParams.get("keywordName") || undefined;
+  const companyId     = searchParams.get("companyId") || undefined;
+  const companyName   = searchParams.get("companyName") || undefined;
+  const networkId     = searchParams.get("networkId") || undefined;
+  const networkName   = searchParams.get("networkName") || undefined;
+  const certification = searchParams.get("certification") || undefined;
   const minRating     = searchParams.get("minRating") || undefined;
   const ratingFilter  = searchParams.get("ratingFilter") || undefined;
   const minVoteCount  = searchParams.get("minVoteCount") || undefined;
@@ -83,7 +88,7 @@ export function BrowseGrid({
 
   // The "N results" / "Popular right now" line lives in the page's PageHeader
   // subtitle (movies/page.tsx, tv/page.tsx), not here.
-  const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
+  const hasFilters = !!(genreId || keywordId || companyId || networkId || certification || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
 
   return (
     <>
@@ -93,6 +98,12 @@ export function BrowseGrid({
         activeGenreId={genreId}
         activeKeywordId={keywordId}
         activeKeywordName={keywordName}
+        activeCompanyId={companyId}
+        activeCompanyName={companyName}
+        activeNetworkId={networkId}
+        activeNetworkName={networkName}
+        activeCertification={certification}
+        showCertification={!pathname.startsWith("/tv")}
         activeMinRating={minRating}
         activeRatingFilter={ratingFilter}
         activeMinVoteCount={minVoteCount}

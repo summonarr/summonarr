@@ -194,5 +194,10 @@
   "apiUser.requests.searchSeriesNotInSonarr": "此剧集不在此请求的 Sonarr 实例中——请重新推送该请求以再次添加",
   "apiUser.common.arrTimeout": "Radarr/Sonarr 未能及时响应——请稍后重试",
   "apiUser.common.arrUnreachable": "无法连接 Radarr/Sonarr——请稍后重试",
-  "apiUser.common.arrFailed": "Radarr/Sonarr 请求失败——详细信息见服务器日志"
+  "apiUser.common.arrFailed": "Radarr/Sonarr 请求失败——详细信息见服务器日志",
+  "apiUser.comments.disabled": "请求评论已关闭。",
+  "apiUser.comments.rateLimited": "评论过于频繁，请一分钟后再试。",
+  "apiUser.comments.closed": "此请求已被永久拒绝，不再接受评论。",
+  "apiUser.comments.bodyRequired": "请先输入评论内容。",
+  "apiUser.comments.bodyTooLong": "评论最多 2000 个字符。"
 }

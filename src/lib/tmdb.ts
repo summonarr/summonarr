@@ -18,6 +18,7 @@ import type {
 // detail pages use the same exports, in the viewer's locale). Don't add a private copy here.
 import { languageName, regionName } from "./tmdb-types";
 import { extractHomeReleaseDates } from "./home-release-dates";
+import { buildStudioList, isCertificationCap } from "./studio-list";
 
 // Merge a unified ratings payload (fetchUnifiedRatings) onto a media object.
 // `trailerUrl` must never displace an already-extracted TMDB YouTube trailerKey
@@ -307,7 +308,10 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
     media.genres = r.genres.map((g) => g.name);
     media.genreList = r.genres.map((g) => ({ id: g.id, name: g.name }));
   }
-  if (r.production_companies?.length) media.studios = r.production_companies.map((c) => c.name);
+  if (r.production_companies?.length) {
+    media.studios = r.production_companies.map((c) => c.name);
+    media.studioList = buildStudioList("MOVIE", null, r.production_companies);
+  }
   if (r.tagline) media.tagline = r.tagline;
   if (r.status) media.status = r.status;
   if (r.runtime != null) media.runtime = r.runtime;
@@ -349,7 +353,10 @@ function normalizeTV(r: RawTV): TmdbMedia {
     media.genreList = r.genres.map((g) => ({ id: g.id, name: g.name }));
   }
   const studios = (r.networks?.length ? r.networks : r.production_companies) ?? [];
-  if (studios.length) media.studios = studios.map((c) => c.name);
+  if (studios.length) {
+    media.studios = studios.map((c) => c.name);
+    media.studioList = buildStudioList("TV", r.networks, r.production_companies);
+  }
   if (r.tagline) media.tagline = r.tagline;
   if (r.status) media.status = r.status;
   if (r.episode_run_time?.length) media.runtime = r.episode_run_time[0];
@@ -417,6 +424,9 @@ function discoverKey(type: "movie" | "tv", filters: DiscoverFilters): string {
     filters.sortBy ?? "popularity.desc",
     filters.genreId ?? "",
     filters.keywordId ?? "",
+    filters.companyId ?? "",
+    filters.networkId ?? "",
+    filters.certification ?? "",
     filters.minRating ?? "",
     filters.minVoteCount ?? "",
     filters.fromYear ?? "",
@@ -1524,6 +1534,9 @@ function discoverSortFor(mediaType: "movie" | "tv", sortBy: string): string {
 function sanitizeDiscoverFilters(filters: DiscoverFilters): DiscoverFilters {
   const genreId = filters.genreId && /^[\d|,]+$/.test(filters.genreId) ? filters.genreId : undefined;
   const keywordId = filters.keywordId && /^[\d|,]+$/.test(filters.keywordId) ? filters.keywordId : undefined;
+  const companyId = filters.companyId && /^[\d|,]+$/.test(filters.companyId) ? filters.companyId : undefined;
+  const networkId = filters.networkId && /^[\d|,]+$/.test(filters.networkId) ? filters.networkId : undefined;
+  const certification = isCertificationCap(filters.certification) ? filters.certification : undefined;
   const minVoteCount = filters.minVoteCount && /^\d+$/.test(filters.minVoteCount) ? filters.minVoteCount : undefined;
   const watchProvider = filters.watchProvider && /^[\d|]+$/.test(filters.watchProvider) ? filters.watchProvider : undefined;
   // watch_region only reaches TMDB inside the `if (filters.watchProvider)` branch below,
@@ -1549,6 +1562,9 @@ function sanitizeDiscoverFilters(filters: DiscoverFilters): DiscoverFilters {
     sortBy: allowedDiscoverSort(filters.sortBy),
     genreId,
     keywordId,
+    companyId,
+    networkId,
+    certification,
     minVoteCount,
     watchProvider,
     watchRegion,
@@ -1563,6 +1579,8 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
   const p = Math.min(Math.max(1, page), 500);
   // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
   filters = sanitizeDiscoverFilters(filters);
+  // A TV network means nothing for movies; dropped so it cannot mint a distinct cache key.
+  filters = { ...filters, networkId: undefined };
   filters = { ...filters, sortBy: discoverSortFor("movie", filters.sortBy ?? "popularity.desc") };
   const key = `${discoverKey("movie", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
@@ -1577,6 +1595,9 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
   };
   if (filters.genreId)       params["with_genres"] = filters.genreId;
   if (filters.keywordId)     params["with_keywords"] = filters.keywordId;
+  if (filters.companyId)     params["with_companies"] = filters.companyId;
+  // US certification cap. TMDB drops titles with no US rating once this is set.
+  if (filters.certification) { params["certification_country"] = "US"; params["certification.lte"] = filters.certification; }
   if (filters.minRating)     params["vote_average.gte"] = filters.minRating;
   if (filters.minVoteCount)  params["vote_count.gte"] = filters.minVoteCount;
   if (filters.fromYear)      params["primary_release_date.gte"] = `${filters.fromYear}-01-01`;
@@ -1599,6 +1620,8 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
   const p = Math.min(Math.max(1, page), 500);
   // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
   filters = sanitizeDiscoverFilters(filters);
+  // TMDB cannot cap a TV discover by rating; dropped so it cannot mint a distinct cache key.
+  filters = { ...filters, certification: undefined };
   filters = { ...filters, sortBy: discoverSortFor("tv", filters.sortBy ?? "popularity.desc") };
   const key = `${discoverKey("tv", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
@@ -1613,6 +1636,8 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
   };
   if (filters.genreId)       params["with_genres"] = filters.genreId;
   if (filters.keywordId)     params["with_keywords"] = filters.keywordId;
+  if (filters.companyId)     params["with_companies"] = filters.companyId;
+  if (filters.networkId)     params["with_networks"] = filters.networkId;
   if (filters.minRating)     params["vote_average.gte"] = filters.minRating;
   if (filters.minVoteCount)  params["vote_count.gte"] = filters.minVoteCount;
   if (filters.fromYear)      params["first_air_date.gte"] = `${filters.fromYear}-01-01`;

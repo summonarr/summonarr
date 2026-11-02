@@ -77,6 +77,9 @@ export interface User {
   pushOnAvailable: boolean;
   pushOnDeclined: boolean;
   notifyOnIssue: boolean;
+  notifyOnComment: boolean;
+  emailOnComment: boolean;
+  pushOnComment: boolean;
   _count: { requests: number };
   // Request watch grade (src/lib/watch-grade.ts). null when the feature or play
   // history tracking is off — the table then shows no grade at all.

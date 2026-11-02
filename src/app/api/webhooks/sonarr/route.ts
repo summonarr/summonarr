@@ -3,6 +3,7 @@ import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
+import { autoResolveIssueForGrab } from "@/lib/issue-auto-resolve";
 import { CLAIMABLE_GRAB_ISSUE } from "@/lib/issue-grab";
 import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
@@ -555,6 +556,8 @@ export async function POST(req: NextRequest) {
               media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
               request: { instance: grab.arrInstance },
             });
+            // First claim only: the replacement landed, so close the issue (when enabled).
+            void autoResolveIssueForGrab(grab, now);
           }
 
           const outcome = await notifyAdminGrabCompletedPush({

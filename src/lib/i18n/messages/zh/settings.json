@@ -433,5 +433,11 @@
   "settings.featureLabel.admin_watchSync": "观看同步页面",
   "settings.featureDesc.admin_watchSync": "显示 /admin/watch-sync 页面：将一个 Plex 账户与一个 Jellyfin 用户配对并选择方向，一台服务器计为已观看的内容（包括配对之前的历史记录）会在另一台上标记为已播放。只增不减：不会将任何内容标记为未播放。默认关闭。",
   "settings.cron.job.watchSync.name": "观看同步",
-  "settings.cron.job.watchSync.description": "按配对所选方向，让管理员配对的每个 Plex 与 Jellyfin 账户的观看状态保持一致"
+  "settings.cron.job.watchSync.description": "按配对所选方向，让管理员配对的每个 Plex 与 Jellyfin 账户的观看状态保持一致",
+  "settings.featureLabel.behavior_requestComments": "请求评论",
+  "settings.featureDesc.behavior_requestComments": "允许请求者与管理请求的人员在请求下交流评论（例如“需要其他版本吗？”）。双方都会按各自的通知偏好收到提醒。关闭后将隐藏评论串并拒绝请求者的新评论；管理人员仍可发表。",
+  "settings.playHistory.concurrentLimit": "同时播放提醒",
+  "settings.playHistory.concurrentLimitHelp": "当一个人同时播放的片目超过此数量时发出提醒（Plex 与 Jellyfin 合并计算）。0 表示关闭。仅通知管理员（收件箱和你的通知渠道），不会中断任何播放。服务器所有者账户不计入。",
+  "settings.featureLabel.behavior_issueAutoResolve": "自动解决问题",
+  "settings.featureDesc.behavior_issueAutoResolve": "当管理员要求的替换文件（修复文件、选择版本或重新获取）被 Radarr/Sonarr 导入后，自动将问题标记为已解决并通知报告者。仅限电影和单集问题——整季或整部剧的问题仍由管理员处理。报告者回复后会重新打开。"
 }

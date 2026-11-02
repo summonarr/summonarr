@@ -416,5 +416,8 @@
   "adminQueue.issueActions.searchSent": "已向 {service} 发送搜索",
   "adminQueue.issueActions.back": "返回",
   "adminQueue.issueActions.notBetter": "不比磁盘上的文件好",
-  "adminQueue.issueActions.notBetterNote": "标记为“不比磁盘上的文件好”的发布仍会下载，但只有至少与它替换的文件一样好时，{service} 才会导入。"
+  "adminQueue.issueActions.notBetterNote": "标记为“不比磁盘上的文件好”的发布仍会下载，但只有至少与它替换的文件一样好时，{service} 才会导入。",
+  "adminQueue.issues.playback.lastPlay": "报告者的最近一次播放",
+  "adminQueue.issues.playback.otherEpisode": "该作品的其他一集",
+  "adminQueue.issues.playback.why": "转码原因：{reason}"
 }

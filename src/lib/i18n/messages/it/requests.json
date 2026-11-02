@@ -21,5 +21,11 @@
   "requests.empty.filteredDescription": "Nessuna richiesta corrisponde a questi filtri.",
   "requests.empty.noneTitle": "Ancora nessuna richiesta",
   "requests.empty.noneDescription": "Trova qualcosa in Scopri, Film o Serie TV e premi Richiedi.",
-  "requests.empty.browseMovies": "Sfoglia i film"
+  "requests.empty.browseMovies": "Sfoglia i film",
+  "requests.thread.show": "Commenti",
+  "requests.thread.showCount": "Commenti ({count})",
+  "requests.thread.hide": "Nascondi commenti",
+  "requests.thread.requestNote": "Nota originale",
+  "requests.thread.declineReason": "Motivo del rifiuto",
+  "requests.thread.closed": "Questa richiesta è chiusa ai commenti."
 }

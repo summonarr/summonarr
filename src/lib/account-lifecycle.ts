@@ -5,6 +5,7 @@ import { verifyIdentifierPrefixFor } from "./notification-email-verify";
 import { deleteAllMfaInTx } from "./mfa/mfa-store";
 import { scrubTargetPiiFromAudit, scrubLegacySessionRevokePii, scrubOwnedRequestPii, scrubRequesterPii } from "./audit-scrub";
 import { REDACTED_USER_NAME } from "./audit";
+import { Prisma } from "@/generated/prisma";
 
 // The encryption extension in ./prisma changes the client's type, so the
 // generated Prisma.TransactionClient is NOT assignable to the interactive-tx
@@ -234,6 +235,9 @@ export async function purgeUserDataInTx(
   await tx.watchlistItem.deleteMany({ where: { userId: id } });
   await tx.hiddenItem.deleteMany({ where: { userId: id } });
   await tx.notification.deleteMany({ where: { userId: id } });
+  // The issues stay (other people read them), but the snapshot of what THIS person
+  // was playing — client, device, when — is their viewing data, not the issue's.
+  await tx.issue.updateMany({ where: { reportedBy: id, playbackContext: { not: Prisma.DbNull } }, data: { playbackContext: Prisma.DbNull } });
   // Recommendations are the same class of private per-user data as the two above —
   // a DERIVED taste profile (what to watch next, computed from this person's watch
   // history and watchlist), not shared content anyone else can see. The User model

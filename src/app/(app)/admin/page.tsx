@@ -34,12 +34,14 @@ const STATUS_RANK: Record<string, number> = {
 export default async function AdminPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string; status?: string; sort?: string; type?: string }>;
+  searchParams: Promise<{ page?: string; status?: string; sort?: string; type?: string; comments?: string | string[] }>;
 }) {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS)) redirect("/");
 
-  const { page: pageParam, status: statusParam, sort: sortParam, type: typeParam } = await searchParams;
+  const { page: pageParam, status: statusParam, sort: sortParam, type: typeParam, comments: commentsRaw } = await searchParams;
+  // ?comments=<requestId> (from a comment notification) opens that request's thread.
+  const openCommentsId = Array.isArray(commentsRaw) ? commentsRaw[0] : commentsRaw;
   // The page the URL asks for. It is clamped to the last real page once the
   // group count is known (below) — approving the last items on page 2 fires an
   // SSE-driven refresh that otherwise re-rendered a blank list with no pager.
@@ -124,7 +126,7 @@ export default async function AdminPage({
     ? await Promise.all([
         prisma.mediaRequest.findMany({
           where: { OR: pairs, ...(statusFilter ? { status: statusFilter } : {}) },
-          include: { user: { select: { name: true, email: true, discordId: true } } },
+          include: { user: { select: { name: true, email: true, discordId: true } }, _count: { select: { comments: true } } },
           orderBy: { createdAt: "desc" },
         }),
         prisma.plexLibraryItem.findMany({ where: { OR: pairs } }),
@@ -246,6 +248,7 @@ export default async function AdminPage({
         arrInstance: r.arrInstance,
         note: r.note,
         adminNote: r.adminNote,
+        commentCount: r._count.comments,
         createdAt: r.createdAt.toISOString(),
         userName: r.user.name,
         userEmail: r.user.email,
@@ -320,6 +323,7 @@ export default async function AdminPage({
           // Radarr is off and a show's while Sonarr is.
           canOpenArr={hasPermission(session.user.permissions, Permission.ADMIN) && (radarrOn || sonarrOn)}
           arrServices={{ radarr: radarrOn, sonarr: sonarrOn }}
+          initialOpenThread={openCommentsId}
         />
       )}
     </div>

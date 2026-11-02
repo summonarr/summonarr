@@ -116,6 +116,11 @@ export async function mergeDiscordIntoWebAccount(
         data: { authorId: webUserId },
       });
 
+      await tx.requestComment.updateMany({
+        where: { authorId: existing.id },
+        data: { authorId: webUserId },
+      });
+
       await tx.issueGrab.updateMany({
         where: { triggeredById: existing.id },
         data: { triggeredById: webUserId },

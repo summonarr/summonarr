@@ -416,5 +416,8 @@
   "adminQueue.issueActions.searchSent": "Search sent to {service}",
   "adminQueue.issueActions.back": "Back",
   "adminQueue.issueActions.notBetter": "Not better than what's on disk",
-  "adminQueue.issueActions.notBetterNote": "Releases marked “Not better than what's on disk” still download, but {service} imports one only if it's at least as good as the file it replaces."
+  "adminQueue.issueActions.notBetterNote": "Releases marked “Not better than what's on disk” still download, but {service} imports one only if it's at least as good as the file it replaces.",
+  "adminQueue.issues.playback.lastPlay": "Reporter's last play",
+  "adminQueue.issues.playback.otherEpisode": "a different episode of this title",
+  "adminQueue.issues.playback.why": "Why it transcoded: {reason}"
 }

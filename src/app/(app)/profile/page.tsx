@@ -50,6 +50,7 @@ export default async function ProfilePage() {
         emailOnApproved: true, emailOnAvailable: true, emailOnDeclined: true,
         pushOnApproved: true, pushOnAvailable: true, pushOnDeclined: true,
         notifyOnIssue: true,
+        notifyOnComment: true, emailOnComment: true, pushOnComment: true,
         plexWatchlistAutoRequest: true, plexWatchlistOptInAt: true,
         calendarTokenHash: true, calendarTokenCreatedAt: true,
       },
@@ -300,6 +301,9 @@ export default async function ProfilePage() {
               pushOnAvailable={user?.pushOnAvailable ?? true}
               pushOnDeclined={user?.pushOnDeclined ?? true}
               notifyOnIssue={user?.notifyOnIssue ?? true}
+              notifyOnComment={user?.notifyOnComment ?? true}
+              emailOnComment={user?.emailOnComment ?? false}
+              pushOnComment={user?.pushOnComment ?? true}
             />
           </ProfileCard>
 

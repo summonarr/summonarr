@@ -186,6 +186,60 @@ jobs:
         run: npm run audit:deps
         continue-on-error: true
 
+  # The unit suite stubs Prisma. tests/db/ runs the app's own client against a
+  # real Postgres, so transaction rollback, UPDATE … RETURNING races, advisory
+  # locks and the staged library swap are exercised for real (docs/testing.md).
+  # Blocking — a failure here is a data-layer defect the stubs cannot show.
+  db-tests:
+    name: Real-Postgres tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: summonarr_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # scripts/test-db.sh uses this instead of starting its own container.
+      # The harness refuses a database whose name lacks "test" or "ci".
+      TEST_DATABASE_URL: "postgresql://ci:ci@localhost:5432/summonarr_test?schema=public"
+      # prisma.config.ts reads DATABASE_URL while generating; test-db.sh
+      # re-exports it from TEST_DATABASE_URL for the push and the tests.
+      DATABASE_URL: "postgresql://ci:ci@localhost:5432/summonarr_test?schema=public"
+      TOKEN_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      NEXTAUTH_SECRET: "ci-nextauth-secret-placeholder-not-real-do-not-use"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Real-Postgres tests
+        run: npm run test:db
+
   docker-build:
     name: Docker build
     runs-on: ubuntu-latest

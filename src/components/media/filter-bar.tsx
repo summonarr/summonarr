@@ -8,6 +8,7 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { FilterBar as SortSegments } from "@/components/ui/design";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
+import { CERTIFICATION_CAPS } from "@/lib/studio-list";
 
 interface FilterBarProps {
   genres: Genre[];
@@ -15,6 +16,13 @@ interface FilterBarProps {
   activeGenreId?: string;
   activeKeywordId?: string;
   activeKeywordName?: string;
+  activeCompanyId?: string;
+  activeCompanyName?: string;
+  activeNetworkId?: string;
+  activeNetworkName?: string;
+  activeCertification?: string;
+  // Movies only: TMDB cannot cap a TV discover by content rating.
+  showCertification?: boolean;
   activeMinRating?: string;
   activeRatingFilter?: string;
   activeMinVoteCount?: string;
@@ -125,6 +133,12 @@ export function FilterBar({
   activeGenreId,
   activeKeywordId,
   activeKeywordName,
+  activeCompanyId,
+  activeCompanyName,
+  activeNetworkId,
+  activeNetworkName,
+  activeCertification,
+  showCertification = false,
   activeMinRating,
   activeRatingFilter,
   activeMinVoteCount,
@@ -213,7 +227,7 @@ export function FilterBar({
     }
   }
 
-  const hasFilters = !!(activeGenreId || activeKeywordId || activeMinRating || activeRatingFilter || activeMinVoteCount || activeFromYear || activeToYear || activeSortBy || activeWatchProvider || activeHideAvailable);
+  const hasFilters = !!(activeGenreId || activeKeywordId || activeCompanyId || activeNetworkId || activeCertification || activeMinRating || activeRatingFilter || activeMinVoteCount || activeFromYear || activeToYear || activeSortBy || activeWatchProvider || activeHideAvailable);
   const chipLabel = ratingChipLabel(t, activeMinRating, activeRatingFilter);
 
   const sortedProviders = (watchProviders ?? []).slice().sort((a, b) => {
@@ -270,6 +284,20 @@ export function FilterBar({
             <option value="">{t("media.filter.allServices")}</option>
             {sortedProviders.map((p) => (
               <option key={p.provider_id} value={String(p.provider_id)}>{p.provider_name}</option>
+            ))}
+          </StyledSelect>
+        )}
+
+        {showCertification && (
+          <StyledSelect
+            compact
+            aria-label={t("media.filter.certLabel")}
+            value={activeCertification ?? ""}
+            onChange={(e) => push({ certification: e.target.value || undefined })}
+          >
+            <option value="">{t("media.filter.certAny")}</option>
+            {CERTIFICATION_CAPS.map((c) => (
+              <option key={c} value={c}>{t("media.filter.certUpTo", { rating: c })}</option>
             ))}
           </StyledSelect>
         )}
@@ -370,6 +398,15 @@ export function FilterBar({
           )}
           {activeKeywordId && (
             <Chip label={activeKeywordName ?? t("media.filter.keyword")} onRemove={() => push({ keywordId: undefined, keywordName: undefined })} />
+          )}
+          {activeCompanyId && (
+            <Chip label={activeCompanyName ?? t("media.filter.studio")} onRemove={() => push({ companyId: undefined, companyName: undefined })} />
+          )}
+          {activeNetworkId && (
+            <Chip label={activeNetworkName ?? t("media.filter.network")} onRemove={() => push({ networkId: undefined, networkName: undefined })} />
+          )}
+          {activeCertification && showCertification && (
+            <Chip label={t("media.filter.certUpTo", { rating: activeCertification })} onRemove={() => push({ certification: undefined })} />
           )}
           {chipLabel && (
             <Chip label={chipLabel} onRemove={() => push({ minRating: undefined, ratingFilter: undefined })} />

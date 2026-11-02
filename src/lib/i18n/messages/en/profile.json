@@ -260,5 +260,9 @@
   "profile.trakt.error.denied": "The connection was declined on Trakt.",
   "profile.trakt.error.conflict": "That Trakt account is already connected to another account here.",
   "profile.trakt.error.expired": "The code expired before it was approved. Please start again.",
-  "profile.trakt.error.disconnect": "Couldn't disconnect Trakt. Please try again."
+  "profile.trakt.error.disconnect": "Couldn't disconnect Trakt. Please try again.",
+  "profile.notifications.comments": "Request Comments",
+  "profile.notifications.discord.comments": "Notify me on Discord when a comment is added to a request conversation I'm part of",
+  "profile.notifications.email.comments": "Email me when a comment is added to a request conversation I'm part of",
+  "profile.notifications.push.comments": "Push notification when a comment is added to a request conversation I'm part of"
 }

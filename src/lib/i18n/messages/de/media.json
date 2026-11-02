@@ -77,5 +77,10 @@
   "media.ratings.jellyfin": "Jellyfin-Communitybewertung",
   "media.ratings.tmdb": "TMDB-Wertung",
   "media.pager.label": "Seitennavigation",
-  "media.filter.audienceScore": "Publikum {pct} %+"
+  "media.filter.audienceScore": "Publikum {pct} %+",
+  "media.filter.certLabel": "Höchste Altersfreigabe",
+  "media.filter.certAny": "Jede Freigabe",
+  "media.filter.certUpTo": "Bis {rating}",
+  "media.filter.studio": "Studio",
+  "media.filter.network": "Sender"
 }

@@ -21,5 +21,11 @@
   "requests.empty.filteredDescription": "Nenhuma solicitação corresponde a esses filtros.",
   "requests.empty.noneTitle": "Nenhuma solicitação ainda",
   "requests.empty.noneDescription": "Encontre algo em Descobrir, Filmes ou Séries e clique em Solicitar.",
-  "requests.empty.browseMovies": "Explorar filmes"
+  "requests.empty.browseMovies": "Explorar filmes",
+  "requests.thread.show": "Comentários",
+  "requests.thread.showCount": "Comentários ({count})",
+  "requests.thread.hide": "Ocultar comentários",
+  "requests.thread.requestNote": "Nota original",
+  "requests.thread.declineReason": "Motivo da recusa",
+  "requests.thread.closed": "Este pedido está fechado para comentários."
 }

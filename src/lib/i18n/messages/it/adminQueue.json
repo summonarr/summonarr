@@ -416,5 +416,8 @@
   "adminQueue.issueActions.searchSent": "Ricerca inviata a {service}",
   "adminQueue.issueActions.back": "Indietro",
   "adminQueue.issueActions.notBetter": "Non migliore del file su disco",
-  "adminQueue.issueActions.notBetterNote": "Le release segnate «Non migliore del file su disco» vengono comunque scaricate, ma {service} ne importa una solo se è buona almeno quanto il file che sostituisce."
+  "adminQueue.issueActions.notBetterNote": "Le release segnate «Non migliore del file su disco» vengono comunque scaricate, ma {service} ne importa una solo se è buona almeno quanto il file che sostituisce.",
+  "adminQueue.issues.playback.lastPlay": "Ultima riproduzione di chi segnala",
+  "adminQueue.issues.playback.otherEpisode": "un altro episodio di questo titolo",
+  "adminQueue.issues.playback.why": "Motivo della transcodifica: {reason}"
 }

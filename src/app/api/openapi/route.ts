@@ -325,6 +325,9 @@ const spec = {
           { name: "sortBy", in: "query", schema: { type: "string" } },
           { name: "genreId", in: "query", schema: { type: "string" } },
           { name: "keywordId", in: "query", schema: { type: "string" } },
+          { name: "companyId", in: "query", schema: { type: "string" }, description: "TMDB production company id(s), digits separated by , or |. Movies and TV." },
+          { name: "networkId", in: "query", schema: { type: "string" }, description: "TMDB TV network id(s), digits separated by , or |. Ignored for movies." },
+          { name: "certification", in: "query", schema: { type: "string", enum: ["G", "PG", "PG-13", "R", "NC-17"] }, description: "Highest US certification to include. Movies only (ignored for TV); titles with no US rating are excluded." },
           { name: "fromYear", in: "query", schema: { type: "integer" } },
           { name: "toYear", in: "query", schema: { type: "integer" } },
           { name: "minRating", in: "query", schema: { type: "number" } },
@@ -996,6 +999,44 @@ const spec = {
           "400": { description: "Missing/non-string/empty body, or over 2000 characters" },
           "403": { description: "Not the reporter and no MANAGE_ISSUES, or issue reporting is disabled (non-admins)" },
           "404": { description: "No such issue" },
+          "429": { description: "Rate limited (10/min per user)" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
+        },
+      },
+    },
+    "/requests/{id}/comments": {
+      get: {
+        tags: ["Requests"],
+        summary: "List comments on a request",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Comments oldest first (max 500), each with author { name, role } (+ email for MANAGE_REQUESTS callers) and fromAdmin" },
+          "403": { description: "Not the requester and no MANAGE_REQUESTS, or request comments are turned off (non-managers)" },
+          "404": { description: "No such request" },
+        },
+      },
+      post: {
+        tags: ["Requests"],
+        summary: "Add a comment to a request",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["body"],
+                properties: { body: { type: "string", maxLength: 2000 } },
+              },
+            },
+          },
+        },
+        description: "Private to the requester and MANAGE_REQUESTS holders. A manager's comment notifies the requester; the requester's notifies the managers (per each person's notification preferences). A requester cannot comment on a permanently declined request.",
+        responses: {
+          "201": { description: "Comment added (the new comment with its author)" },
+          "400": { description: "Missing/non-string/empty body, or over 2000 characters" },
+          "403": { description: "Not the requester and no MANAGE_REQUESTS, request closed to comments, or the feature is off (requesters)" },
+          "404": { description: "No such request" },
           "429": { description: "Rate limited (10/min per user)" },
           "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
@@ -1874,7 +1915,7 @@ const spec = {
                     pushOnApproved: { type: "boolean" },
                     pushOnAvailable: { type: "boolean" },
                     pushOnDeclined: { type: "boolean" },
-                    notifyOnIssue: { type: "boolean" },
+                    notifyOnIssue: { type: "boolean" }, notifyOnComment: { type: "boolean" }, emailOnComment: { type: "boolean" }, pushOnComment: { type: "boolean" },
                     notificationEmail: { type: "string", nullable: true },
                     emailEnabled: {
                       type: "boolean",
@@ -1907,7 +1948,7 @@ const spec = {
                   pushOnApproved: { type: "boolean" },
                   pushOnAvailable: { type: "boolean" },
                   pushOnDeclined: { type: "boolean" },
-                  notifyOnIssue: { type: "boolean" },
+                  notifyOnIssue: { type: "boolean" }, notifyOnComment: { type: "boolean" }, emailOnComment: { type: "boolean" }, pushOnComment: { type: "boolean" },
                   notificationEmail: {
                     type: "string", nullable: true,
                     description: "Jellyfin-provider accounts only — any other provider gets 403. Null or blank clears it. A NEW address is also 403: it must be verified through POST /api/profile/notification-email (mails a one-time token, bound on /confirm); only a write-back of the currently stored address is accepted here.",
@@ -2451,7 +2492,7 @@ const spec = {
         tags: ["Admin – Users"],
         summary: "List users (MANAGE_USERS)",
         description: "Up to 1000 users, ordered by name then email.",
-        responses: { "200": { description: "User list", content: { "application/json": { schema: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string", nullable: true }, email: { type: "string", nullable: true }, role: { $ref: "#/components/schemas/UserRole" }, createdAt: { type: "string", format: "date-time" }, deactivatedAt: { type: "string", format: "date-time", nullable: true }, purgedAt: { type: "string", format: "date-time", nullable: true }, mediaServer: { type: "string", nullable: true }, maxContentRating: { type: "string", nullable: true }, source: { type: "string", description: "local | oidc | jellyfin | plex | discord (additive set)" }, movieQuotaLimit: { type: "integer", nullable: true }, movieQuotaDays: { type: "integer", nullable: true }, tvQuotaLimit: { type: "integer", nullable: true }, tvQuotaDays: { type: "integer", nullable: true }, permissions: { type: "string", description: "Decimal bitmask" }, notifyOnApproved: { type: "boolean" }, notifyOnAvailable: { type: "boolean" }, notifyOnDeclined: { type: "boolean" }, emailOnApproved: { type: "boolean" }, emailOnAvailable: { type: "boolean" }, emailOnDeclined: { type: "boolean" }, pushOnApproved: { type: "boolean" }, pushOnAvailable: { type: "boolean" }, pushOnDeclined: { type: "boolean" }, notifyOnIssue: { type: "boolean" }, requestCount: { type: "integer" } } } } } } } },
+        responses: { "200": { description: "User list", content: { "application/json": { schema: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string", nullable: true }, email: { type: "string", nullable: true }, role: { $ref: "#/components/schemas/UserRole" }, createdAt: { type: "string", format: "date-time" }, deactivatedAt: { type: "string", format: "date-time", nullable: true }, purgedAt: { type: "string", format: "date-time", nullable: true }, mediaServer: { type: "string", nullable: true }, maxContentRating: { type: "string", nullable: true }, source: { type: "string", description: "local | oidc | jellyfin | plex | discord (additive set)" }, movieQuotaLimit: { type: "integer", nullable: true }, movieQuotaDays: { type: "integer", nullable: true }, tvQuotaLimit: { type: "integer", nullable: true }, tvQuotaDays: { type: "integer", nullable: true }, permissions: { type: "string", description: "Decimal bitmask" }, notifyOnApproved: { type: "boolean" }, notifyOnAvailable: { type: "boolean" }, notifyOnDeclined: { type: "boolean" }, emailOnApproved: { type: "boolean" }, emailOnAvailable: { type: "boolean" }, emailOnDeclined: { type: "boolean" }, pushOnApproved: { type: "boolean" }, pushOnAvailable: { type: "boolean" }, pushOnDeclined: { type: "boolean" }, notifyOnIssue: { type: "boolean" }, notifyOnComment: { type: "boolean" }, emailOnComment: { type: "boolean" }, pushOnComment: { type: "boolean" }, requestCount: { type: "integer" } } } } } } } },
       },
       post: {
         tags: ["Admin – Users"],
@@ -2475,7 +2516,7 @@ const spec = {
           },
         },
         responses: {
-          "201": { description: "User created (same shape as a list item)", content: { "application/json": { schema: { type: "object", properties: { id: { type: "string" }, name: { type: "string", nullable: true }, email: { type: "string", nullable: true }, role: { $ref: "#/components/schemas/UserRole" }, createdAt: { type: "string", format: "date-time" }, deactivatedAt: { type: "string", format: "date-time", nullable: true }, purgedAt: { type: "string", format: "date-time", nullable: true }, mediaServer: { type: "string", nullable: true }, maxContentRating: { type: "string", nullable: true }, source: { type: "string", description: "local | oidc | jellyfin | plex | discord (additive set)" }, movieQuotaLimit: { type: "integer", nullable: true }, movieQuotaDays: { type: "integer", nullable: true }, tvQuotaLimit: { type: "integer", nullable: true }, tvQuotaDays: { type: "integer", nullable: true }, permissions: { type: "string", description: "Decimal bitmask" }, notifyOnApproved: { type: "boolean" }, notifyOnAvailable: { type: "boolean" }, notifyOnDeclined: { type: "boolean" }, emailOnApproved: { type: "boolean" }, emailOnAvailable: { type: "boolean" }, emailOnDeclined: { type: "boolean" }, pushOnApproved: { type: "boolean" }, pushOnAvailable: { type: "boolean" }, pushOnDeclined: { type: "boolean" }, notifyOnIssue: { type: "boolean" }, requestCount: { type: "integer" } } } } } },
+          "201": { description: "User created (same shape as a list item)", content: { "application/json": { schema: { type: "object", properties: { id: { type: "string" }, name: { type: "string", nullable: true }, email: { type: "string", nullable: true }, role: { $ref: "#/components/schemas/UserRole" }, createdAt: { type: "string", format: "date-time" }, deactivatedAt: { type: "string", format: "date-time", nullable: true }, purgedAt: { type: "string", format: "date-time", nullable: true }, mediaServer: { type: "string", nullable: true }, maxContentRating: { type: "string", nullable: true }, source: { type: "string", description: "local | oidc | jellyfin | plex | discord (additive set)" }, movieQuotaLimit: { type: "integer", nullable: true }, movieQuotaDays: { type: "integer", nullable: true }, tvQuotaLimit: { type: "integer", nullable: true }, tvQuotaDays: { type: "integer", nullable: true }, permissions: { type: "string", description: "Decimal bitmask" }, notifyOnApproved: { type: "boolean" }, notifyOnAvailable: { type: "boolean" }, notifyOnDeclined: { type: "boolean" }, emailOnApproved: { type: "boolean" }, emailOnAvailable: { type: "boolean" }, emailOnDeclined: { type: "boolean" }, pushOnApproved: { type: "boolean" }, pushOnAvailable: { type: "boolean" }, pushOnDeclined: { type: "boolean" }, notifyOnIssue: { type: "boolean" }, notifyOnComment: { type: "boolean" }, emailOnComment: { type: "boolean" }, pushOnComment: { type: "boolean" }, requestCount: { type: "integer" } } } } } },
           "400": { description: "Validation error, or a reserved email domain" },
           "403": { description: "Creating an ADMIN requires the ADMIN bit" },
           "409": { description: "Email already in use" },
@@ -2511,7 +2552,7 @@ const spec = {
                   pushOnApproved: { type: "boolean" },
                   pushOnAvailable: { type: "boolean" },
                   pushOnDeclined: { type: "boolean" },
-                  notifyOnIssue: { type: "boolean" },
+                  notifyOnIssue: { type: "boolean" }, notifyOnComment: { type: "boolean" }, emailOnComment: { type: "boolean" }, pushOnComment: { type: "boolean" },
                   maxContentRating: { type: "string", nullable: true, description: "Content-rating cap; null or empty clears it" },
                   mediaServerGrants: {
                     type: "object",
@@ -4872,7 +4913,7 @@ const spec = {
                     type: "array",
                     items: {
                       type: "string",
-                      enum: ["request.created", "request.approved", "request.declined", "request.available", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored", "arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention"],
+                      enum: ["request.created", "request.approved", "request.declined", "request.available", "request.comment", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored", "arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention", "stream.concurrent"],
                     },
                   },
                   config: { type: "object" },
@@ -4902,7 +4943,7 @@ const spec = {
                     type: "array",
                     items: {
                       type: "string",
-                      enum: ["request.created", "request.approved", "request.declined", "request.available", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored", "arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention"],
+                      enum: ["request.created", "request.approved", "request.declined", "request.available", "request.comment", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored", "arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention", "stream.concurrent"],
                     },
                   },
                   config: { type: "object" },

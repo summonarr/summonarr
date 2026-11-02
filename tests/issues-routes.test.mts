@@ -326,6 +326,11 @@ shadowPrismaModel(prisma, "tmdbCache", {
   deleteMany: async () => ({ count: 0 }),
 });
 
+// Playback context (issue-playback-context-data.ts): the reporter has no linked media-server
+// identity in these tests, so the lookup finds nothing and writes no context.
+shadowPrismaModel(prisma, "mediaServerUser", { findMany: async () => [] });
+shadowPrismaModel(prisma, "playHistory", { findMany: async () => [] });
+
 shadowPrismaModel(prisma, "pushSubscription", {
   findMany: async () => [],
 });

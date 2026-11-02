@@ -21,5 +21,11 @@
   "requests.empty.filteredDescription": "Keine Anfragen entsprechen diesen Filtern.",
   "requests.empty.noneTitle": "Noch keine Anfragen",
   "requests.empty.noneDescription": "Finden Sie etwas unter Entdecken, Filme oder Serien und klicken Sie auf Anfragen.",
-  "requests.empty.browseMovies": "Filme durchsuchen"
+  "requests.empty.browseMovies": "Filme durchsuchen",
+  "requests.thread.show": "Kommentare",
+  "requests.thread.showCount": "Kommentare ({count})",
+  "requests.thread.hide": "Kommentare ausblenden",
+  "requests.thread.requestNote": "Ursprüngliche Notiz",
+  "requests.thread.declineReason": "Ablehnungsgrund",
+  "requests.thread.closed": "Diese Anfrage ist für Kommentare gesperrt."
 }

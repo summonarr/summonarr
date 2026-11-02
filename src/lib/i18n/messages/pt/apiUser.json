@@ -194,5 +194,10 @@
   "apiUser.requests.searchSeriesNotInSonarr": "Esta série não está na instância do Sonarr desta solicitação — reenvie a solicitação para adicioná-la de novo",
   "apiUser.common.arrTimeout": "O Radarr/Sonarr não respondeu a tempo — tente novamente mais tarde",
   "apiUser.common.arrUnreachable": "Não foi possível conectar ao Radarr/Sonarr — tente novamente mais tarde",
-  "apiUser.common.arrFailed": "A requisição ao Radarr/Sonarr falhou — os detalhes estão no log do servidor"
+  "apiUser.common.arrFailed": "A requisição ao Radarr/Sonarr falhou — os detalhes estão no log do servidor",
+  "apiUser.comments.disabled": "Os comentários em pedidos estão desativados.",
+  "apiUser.comments.rateLimited": "Você está comentando rápido demais. Tente novamente em um minuto.",
+  "apiUser.comments.closed": "Este pedido foi recusado em definitivo e está fechado para comentários.",
+  "apiUser.comments.bodyRequired": "Escreva um comentário primeiro.",
+  "apiUser.comments.bodyTooLong": "Os comentários podem ter até 2000 caracteres."
 }

@@ -133,6 +133,20 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     defaultEnabled: false,
   },
   {
+    key: "feature.behavior.issueAutoResolve",
+    label: "Auto-resolve issues",
+    description: "When the replacement an admin asked for (Fix file, Pick release or Refetch) is imported by Radarr/Sonarr, mark the issue resolved and tell the reporter. Movies and single-episode issues only — a season or whole-series issue stays open for an admin. The reporter replying reopens it.",
+    category: "behaviors",
+    defaultEnabled: true,
+  },
+  {
+    key: "feature.behavior.requestComments",
+    label: "Request comments",
+    description: "Let a requester and the people who manage requests exchange comments on a request (\"need a different version?\"). Each side is notified through their notification preferences. Turn off to hide the threads and refuse new comments from requesters; managers can still post.",
+    category: "behaviors",
+    defaultEnabled: true,
+  },
+  {
     // Guardrail 40c. OFF by default on purpose: For You is then built ONLY
     // from each viewer's own records. Turning it off again deletes the shared
     // edges on the next warm run.

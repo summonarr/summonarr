@@ -97,6 +97,7 @@ const baseTx = {
   watchlistItem: { deleteMany: record("watchlistItem", "deleteMany") },
   hiddenItem: { deleteMany: record("hiddenItem", "deleteMany") },
   notification: { deleteMany: record("notification", "deleteMany") },
+  issue: { updateMany: record("issue", "updateMany") },
   userRecommendation: { deleteMany: record("userRecommendation", "deleteMany") },
   traktWatchedItem: { deleteMany: record("traktWatchedItem", "deleteMany") },
   traktRating: { deleteMany: record("traktRating", "deleteMany") },
@@ -201,6 +202,8 @@ const PURGE_OPS = [
   "watchlistItem.deleteMany",
   "hiddenItem.deleteMany",
   "notification.deleteMany",
+  // The reporter's playback-context snapshot on their issues (issue-playback-context.ts).
+  "issue.updateMany",
   "userRecommendation.deleteMany",
   // Trakt (guardrail 34c): the imported history, ratings (40c) and the connection row.
   "traktWatchedItem.deleteMany",
@@ -389,7 +392,8 @@ test("purge reads THIS account's request ids and scrubs their moderation rows by
     .filter((w) => typeof w.target === "object" && w.target !== null && "in" in w.target);
   assert.equal(exact.length, 1, "one exact-target read for one chunk of ids");
   assert.deepEqual(exact[0].target, { in: ["request:req-1", "request:req-2"] });
-  assert.deepEqual(exact[0].action, { in: ["REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE"] });
+  // REQUEST_COMMENT rows (guardrail 14e) name the requester by id like the moderation rows, so the purge scrubs them too.
+  assert.deepEqual(exact[0].action, { in: ["REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE", "REQUEST_COMMENT"] });
   // Inside the purge transaction, before the row's own scrub.
   assert.ok(opNames().indexOf("mediaRequest.findMany") < opNames().indexOf("user.updateMany"));
 });

@@ -416,5 +416,8 @@
   "adminQueue.issueActions.searchSent": "Suche an {service} gesendet",
   "adminQueue.issueActions.back": "Zurück",
   "adminQueue.issueActions.notBetter": "Nicht besser als die vorhandene Datei",
-  "adminQueue.issueActions.notBetterNote": "Als „Nicht besser als die vorhandene Datei“ markierte Releases werden trotzdem heruntergeladen, aber {service} importiert eines nur, wenn es mindestens so gut ist wie die Datei, die es ersetzt."
+  "adminQueue.issueActions.notBetterNote": "Als „Nicht besser als die vorhandene Datei“ markierte Releases werden trotzdem heruntergeladen, aber {service} importiert eines nur, wenn es mindestens so gut ist wie die Datei, die es ersetzt.",
+  "adminQueue.issues.playback.lastPlay": "Letzte Wiedergabe des Melders",
+  "adminQueue.issues.playback.otherEpisode": "eine andere Folge dieses Titels",
+  "adminQueue.issues.playback.why": "Grund für das Transcoding: {reason}"
 }

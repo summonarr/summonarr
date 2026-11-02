@@ -27,6 +27,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
         emailOnApproved:  true, emailOnAvailable:  true, emailOnDeclined:  true,
         pushOnApproved:   true, pushOnAvailable:   true, pushOnDeclined:   true,
         notifyOnIssue:    true, notificationEmail: true,
+        notifyOnComment:  true, emailOnComment:  true, pushOnComment:  true,
       },
     }),
     isNotificationEmailEnabled(),
@@ -46,6 +47,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     emailOnApproved?: boolean;  emailOnAvailable?: boolean;  emailOnDeclined?: boolean;
     pushOnApproved?: boolean;   pushOnAvailable?: boolean;   pushOnDeclined?: boolean;
     notifyOnIssue?: boolean;
+    notifyOnComment?: boolean; emailOnComment?: boolean; pushOnComment?: boolean;
     notificationEmail?: string | null;
   }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -62,6 +64,9 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   if (typeof body.pushOnAvailable === "boolean")  data.pushOnAvailable  = body.pushOnAvailable;
   if (typeof body.pushOnDeclined === "boolean")   data.pushOnDeclined   = body.pushOnDeclined;
   if (typeof body.notifyOnIssue === "boolean")    data.notifyOnIssue    = body.notifyOnIssue;
+  if (typeof body.notifyOnComment === "boolean")  data.notifyOnComment  = body.notifyOnComment;
+  if (typeof body.emailOnComment === "boolean")   data.emailOnComment   = body.emailOnComment;
+  if (typeof body.pushOnComment === "boolean")    data.pushOnComment    = body.pushOnComment;
 
   // notificationEmail is Jellyfin-users-only: Plex and OIDC notificationEmail values are
   // owned by the auth provider and synced on every sign-in in src/lib/auth.ts. Allowing
