@@ -20,6 +20,16 @@
 //
 // This file must stay dependency-free and side-effect-free beyond hook
 // registration: every test child process loads it.
+// The one deliberate side effect (besides the hooks): ~170 suites intercept
+// outbound HTTP by replacing globalThis.fetch, and safe-fetch.ts dials through
+// node:http(s) so it can pin the connection (guardrail 5a). This flag makes it
+// honour a REPLACED globalThis.fetch — and only under the test harness, never in
+// a production bundle (see transportIsFetchSeam in safe-fetch.ts).
+process.env.SUMMONARR_TEST_FETCH_SEAM = "1";
+// Captured here, before any test file can replace it (a suite may swap fetch
+// before safe-fetch.ts is even imported, so safe-fetch can't capture it itself).
+globalThis.__summonarrNativeFetch = globalThis.fetch;
+
 import { registerHooks } from "node:module";
 import { statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
