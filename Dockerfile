@@ -150,10 +150,14 @@ WORKDIR /app
 # amd64 image and the release never published. A re-run replays the same
 # cache, so only a change to this RUN string gets a rebuilt layer; the floor
 # also fails the build loudly if a mirror cannot supply the patched version.
+# postgresql17-client (~4 MB: pg_dump, psql, pg_restore) is for the entrypoint's
+# opt-in pre-upgrade dump (SUMMONARR_PRE_UPGRADE_DUMP_DIR); the Postgres sidecar
+# is 17, and pg_dump must not be older than the server.
 # Remove npm and npx — the entrypoint uses node directly; no npm needed at runtime.
 # This eliminates the entire class of npm-bundled CVEs (picomatch, brace-expansion, etc).
 RUN apk upgrade --no-cache && \
-    apk add --no-cache 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0' 'zlib>=1.3.2-r1' && \
+    apk add --no-cache 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0' 'zlib>=1.3.2-r1' \
+        postgresql17-client && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 ENV NODE_ENV=production
