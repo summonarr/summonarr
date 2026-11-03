@@ -431,7 +431,10 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
 // channel, the user's own language in a DM (guardrail 40a). `build` receives it.
 async function notifyUser(
   userId: string,
-  build: (t: Translator, locale: Locale, title: string) => Embed,
+  // `shared`: the post lands in the shared notification channel every linked user
+  // can read, not a DM — a builder carrying private text (a request comment,
+  // guardrail 14e) leaves it out there.
+  build: (t: Translator, locale: Locale, title: string, shared: boolean) => Embed,
   prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue" | "notifyOnComment",
   titleRef?: TitleRef,
 ): Promise<void> {
@@ -451,7 +454,7 @@ async function notifyUser(
 
     const locale = recipientLocale(!!cfg.channelId, user);
     const title = titleRef ? (await titleResolver([titleRef], [locale]))(titleRef, locale) : "";
-    const embed = build(translatorFor(locale), locale, title);
+    const embed = build(translatorFor(locale), locale, title, !!cfg.channelId);
     if (cfg.channelId) {
       await postToChannel(cfg.botToken, cfg.channelId, user.discordId, embed);
     } else {
@@ -616,7 +619,9 @@ export async function notifyAdminsIssueMessage(
 }
 
 // A manager commented on the requester's request. DM (or the shared channel),
-// gated by the requester's own notifyOnComment.
+// gated by the requester's own notifyOnComment. The thread is private to the
+// requester and request managers (guardrail 14e): a DM carries the text, a post
+// in the shared channel only pings them to read it in Summonarr.
 export async function notifyUserRequestComment(
   userId: string,
   title: string,
@@ -624,16 +629,21 @@ export async function notifyUserRequestComment(
   body: string,
   media?: { tmdbId?: number | null; mediaType?: string | null },
 ): Promise<void> {
-  await notifyUser(userId, (t, _locale, local) => ({
+  await notifyUser(userId, (t, _locale, local, shared) => ({
     color: 0x5865F2,
     title: t("notify.discord.userRequestComment.title", { title: escMd(local) }),
-    description: `${t("notify.discord.userRequestComment.description", { user: escMd(authorName) })}\n\n> ${escMd(body)}`,
+    description: shared
+      ? t("notify.discord.userRequestComment.descriptionShared", { user: escMd(authorName) })
+      : `${t("notify.discord.userRequestComment.description", { user: escMd(authorName) })}\n\n> ${escMd(body)}`,
     timestamp: new Date().toISOString(),
   }), "notifyOnComment", { title, ...media });
 }
 
-// A requester commented: ping the managers in the shared channel (the same
-// audience and transport as a new-request alert — there is no per-manager DM).
+// A requester commented: ping the managers in the ADMIN request channel — the
+// same channel as a new-request alert (there is no per-manager DM). Never the
+// shared notification channel every linked user reads: the thread is private to
+// the requester and request managers (guardrail 14e), and the managers' name for
+// the author falls back to the requester's email.
 export async function notifyAdminsRequestComment(
   title: string,
   userName: string,
@@ -641,10 +651,15 @@ export async function notifyAdminsRequestComment(
   opts: { excludeUserId?: string; tmdbId?: number | null; mediaType?: string | null } = {},
 ): Promise<void> {
   try {
-    const cfg = await getConfig();
-    if (!cfg) return;
-    if (!cfg.channelId) return;
-    if (!isValidSnowflake(cfg.channelId)) return;
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
+    const cfgRows = await prisma.setting.findMany({
+      where: { key: { in: ["discordBotToken", "discordAdminRequestChannelId"] } },
+    });
+    const cfgMap = Object.fromEntries(cfgRows.map((r) => [r.key, r.value]));
+    const botToken = cfgMap.discordBotToken;
+    const channelId = cfgMap.discordAdminRequestChannelId;
+    if (!botToken || !channelId) return;
+    if (!isValidSnowflake(channelId)) return;
 
     const rows = await prisma.user.findMany({
       where: {
@@ -672,7 +687,7 @@ export async function notifyAdminsRequestComment(
 
     await Promise.allSettled(
       managers.map((a) =>
-        postToChannel(cfg.botToken, cfg.channelId!, a.discordId!, embed).catch((err) =>
+        postToChannel(botToken, channelId, a.discordId!, embed).catch((err) =>
           console.error("[discord-notify] Failed to notify manager:", err)
         )
       )

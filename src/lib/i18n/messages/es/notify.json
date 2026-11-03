@@ -376,6 +376,7 @@
   "notify.push.adminRequestComment.title": "Comentario en la solicitud: {title}",
   "notify.discord.userRequestComment.title": "💬 Comentario en tu solicitud — {title}",
   "notify.discord.userRequestComment.description": "**{user}** comentó tu solicitud:",
+  "notify.discord.userRequestComment.descriptionShared": "**{user}** comentó tu solicitud. Ábrela en Summonarr para leer el comentario.",
   "notify.discord.adminRequestComment.title": "💬 Comentario en la solicitud — {title}",
   "notify.discord.adminRequestComment.description": "**{user}** añadió un comentario:",
   "notify.agent.request.comment.title": "Nuevo comentario en la solicitud: {title}",

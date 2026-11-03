@@ -92,6 +92,8 @@ const {
   notifyUserRequestApproved,
   notifyUserRequestAvailable,
   notifyUsersRequestsApproved,
+  notifyAdminsRequestComment,
+  notifyUserRequestComment,
 } = await import("../src/lib/discord-notify.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -702,4 +704,51 @@ test("bulk approve: an empty batch is a pure no-op (no config read, no query, no
   await notifyUsersRequestsApproved([]);
   assert.equal(sent.length, 0);
   assert.equal(userFindManyWheres.length, 0);
+});
+
+// ── request comments (guardrail 14e: the thread is private) ─────────────────
+
+test("a requester's comment pings managers in the ADMIN channel — never the shared notification channel", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL, discordAdminRequestChannelId: ADMIN_CHANNEL });
+  userFindManyRows = [
+    { discordId: "555555555555555555", role: "ADMIN", permissions: 1n },
+    { discordId: "666666666666666666", role: "USER", permissions: 0n }, // no MANAGE_REQUESTS
+  ];
+
+  await notifyAdminsRequestComment("Dune", "user@example.com", "my phone is 555", { excludeUserId: "u-req" });
+
+  assert.equal(sent.length, 1, "one targeted post per request manager");
+  assert.equal(sent[0].url, `${API}/channels/${ADMIN_CHANNEL}/messages`);
+  assert.ok(!sent.some((r) => r.url.includes(CHANNEL)), "the comment text never reaches the shared channel");
+  assert.equal(sent[0].body?.content, "<@555555555555555555>");
+  assert.deepEqual(sent[0].body?.allowed_mentions, { parse: [], users: ["555555555555555555"] });
+});
+
+test("a requester's comment with NO admin channel configured posts nowhere, even with a shared channel set", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindManyRows = [{ discordId: "555555555555555555", role: "ADMIN", permissions: 1n }];
+
+  await notifyAdminsRequestComment("Dune", "bob", "private text");
+
+  assert.equal(sent.length, 0);
+  assert.equal(userFindManyWheres.length, 0, "short-circuits before the manager read");
+});
+
+test("a manager's reply in the SHARED channel pings the requester without the comment text; a DM carries it", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser({ notifyOnComment: true });
+
+  await notifyUserRequestComment("u1", "Dune", "Admin", "the private reply");
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, `${API}/channels/${CHANNEL}/messages`);
+  assert.equal(sent[0].body?.content, `<@${DID}>`, "the requester is still pinged");
+  const shared = JSON.stringify(sent[0].body);
+  assert.ok(!shared.includes("the private reply"), "no comment text in a channel every linked user reads");
+
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT }); // no channel ⇒ DM
+  await notifyUserRequestComment("u1", "Dune", "Admin", "the private reply");
+  const dm = sent.find((r) => r.url.endsWith("/messages"));
+  assert.ok(dm && JSON.stringify(dm.body).includes("the private reply"), "a DM is private, so it carries the text");
 });

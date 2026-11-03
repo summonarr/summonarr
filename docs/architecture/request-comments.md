@@ -20,8 +20,8 @@ A private conversation between a requester and the people who manage requests, u
 
 `announceRequestComment` runs after the commit (guardrail 26), best effort:
 
-- Manager comments ⇒ the requester: Discord DM (`notifyOnComment`), web push (`pushOnComment`), email (`emailOnComment`, default off) and an unconditional inbox row (`REQUEST_COMMENT`, re-rendered in the reader's language from `data`).
-- Requester comments ⇒ every other `MANAGE_REQUESTS` holder through the same three preferences (Discord uses the shared channel, like new-request alerts). Managers get no inbox row.
+- Manager comments ⇒ the requester: Discord DM (`notifyOnComment`; when a shared notification channel is set, the post there pings them WITHOUT the comment text — every linked user reads that channel), web push (`pushOnComment`), email (`emailOnComment`, default off) and an unconditional inbox row (`REQUEST_COMMENT`, re-rendered in the reader's language from `data`).
+- Requester comments ⇒ every other `MANAGE_REQUESTS` holder through the same three preferences (Discord uses the ADMIN request channel, `discordAdminRequestChannelId`, like new-request alerts — never the shared notification channel; no admin channel ⇒ no Discord ping). Managers get no inbox row.
 - A manager commenting on their own request counts as the requester (managers are told, nobody is self-notified).
 - The requester's row is read once and fails CLOSED: a missing or deactivated account gets nothing, the inbox included (guardrail 33).
 - Every comment emits the outbound `request.comment` event (webhook / ntfy / Gotify).

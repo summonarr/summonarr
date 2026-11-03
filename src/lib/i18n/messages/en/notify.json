@@ -376,6 +376,7 @@
   "notify.push.adminRequestComment.title": "Comment on request: {title}",
   "notify.discord.userRequestComment.title": "💬 Comment on Your Request — {title}",
   "notify.discord.userRequestComment.description": "**{user}** commented on your request:",
+  "notify.discord.userRequestComment.descriptionShared": "**{user}** commented on your request. Open it in Summonarr to read the comment.",
   "notify.discord.adminRequestComment.title": "💬 Comment on Request — {title}",
   "notify.discord.adminRequestComment.description": "**{user}** added a comment:",
   "notify.agent.request.comment.title": "New comment on request: {title}",

@@ -376,6 +376,7 @@
   "notify.push.adminRequestComment.title": "请求有评论：{title}",
   "notify.discord.userRequestComment.title": "💬 您的请求有评论 — {title}",
   "notify.discord.userRequestComment.description": "**{user}** 评论了您的请求：",
+  "notify.discord.userRequestComment.descriptionShared": "**{user}** 评论了您的请求。请在 Summonarr 中打开查看评论。",
   "notify.discord.adminRequestComment.title": "💬 请求评论 — {title}",
   "notify.discord.adminRequestComment.description": "**{user}** 添加了评论：",
   "notify.agent.request.comment.title": "请求有新评论：{title}",
