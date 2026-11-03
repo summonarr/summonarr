@@ -78,6 +78,11 @@ export default async function RootLayout({
         user: {
           id: summonarrSessionClaims.id,
           role: summonarrSessionClaims.role,
+          // The provider fetches /api/auth/me only when this is null, so a field
+          // left out here is missing on every full page load: without it the nav
+          // fell back to the role preset and a role=USER delegate (MANAGE_* bits)
+          // lost the Admin menu on reload.
+          permissions: summonarrSessionClaims.permissions ?? undefined,
           email: summonarrSessionClaims.email ?? null,
           name: summonarrSessionClaims.name ?? null,
           provider: summonarrSessionClaims.provider,
