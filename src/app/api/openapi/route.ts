@@ -5908,6 +5908,18 @@ const spec = {
         },
       },
     },
+    "/cron/purge-notifications": {
+      post: {
+        tags: ["Cron"],
+        summary: "Delete old notification inbox rows",
+        security: [{ cronSecret: [] }],
+        responses: {
+          "200": { description: "{ ok, deleted, aborted, timestamp } — or { skipped: true, reason } when another run holds the lock (X-Cron-Skipped). Deletes read notifications older than NOTIFICATION_READ_RETENTION_DAYS (90) and any older than NOTIFICATION_RETENTION_DAYS (365), in batches" },
+          "401": { description: "Neither an admin session nor the cron secret" },
+          "500": { description: "{ ok: false, error } — the purge failed" },
+        },
+      },
+    },
     "/cron/scrub-audit-pii": {
       post: {
         tags: ["Cron"],

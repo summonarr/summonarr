@@ -30,6 +30,9 @@ export const LIBRARY_MATCH_CHECK_LOCK_ID = 2071;
 // Watch sync, Plex → Jellyfin (watch-sync cron + the admin page's "Run now"
 // share it, src/lib/watch-sync-data.ts). Same reasoning: a parallel-branch-safe id.
 export const WATCH_SYNC_LOCK_ID = 2081;
+// Notification inbox retention (purge-notifications cron). Same reasoning: a
+// parallel-branch-safe id, not the next free one.
+export const PURGE_NOTIFICATIONS_LOCK_ID = 2091;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

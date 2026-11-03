@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.37.1",
+  "version": "0.38.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -30,7 +30,7 @@
     "@base-ui/react": "^1.9.0",
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
-    "jose": "^6.2.13",
+    "jose": "^6.2.14",
     "next": "16.4.3",
     "openid-client": "^6.8.8",
     "pg": "^8.23.1",
@@ -42,6 +42,7 @@
     "@babel/core": "^7.29.6",
     "brace-expansion@5": "^5.0.12",
     "minimatch": {
+      ".": "^11.0.1",
       "brace-expansion": "^5.0.12"
     },
     "fast-uri": "^3.1.8",
@@ -54,7 +55,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",

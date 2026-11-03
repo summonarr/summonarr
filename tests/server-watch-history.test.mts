@@ -295,12 +295,13 @@ test("mergeServerWatchedRows: plays add, the later date wins, favorites set only
     { tmdbId: 1, mediaType: "MOVIE" as const, title: "One", plays: 2, lastWatchedAt: t0, favorite: true },
     { tmdbId: 2, mediaType: "MOVIE" as const, title: "Two", plays: 0, lastWatchedAt: null, favorite: true },
   ];
-  const deltas = new Map([["1:MOVIE", { tmdbId: 1, mediaType: "MOVIE" as const, plays: 1, lastWatchedAt: ago(1) }]]);
+  const oneDayAgo = ago(1); // read the clock once: two ago(1) calls can straddle a millisecond tick
+  const deltas = new Map([["1:MOVIE", { tmdbId: 1, mediaType: "MOVIE" as const, plays: 1, lastWatchedAt: oneDayAgo }]]);
   const name = () => "named";
   // Favorites not read this run: every stored flag stands.
   const kept = pure.mergeServerWatchedRows(existing, deltas, null, name);
   assert.deepEqual(kept.map((r) => [r.tmdbId, r.plays, r.favorite]), [[1, 3, true], [2, 0, true]]);
-  assert.equal(kept[0].lastWatchedAt!.getTime(), ago(1).getTime());
+  assert.equal(kept[0].lastWatchedAt!.getTime(), oneDayAgo.getTime());
   // Favorites read: 2 is no longer one, so its play-less row goes; 3 is new.
   const read = pure.mergeServerWatchedRows(existing, deltas, new Set(["3:TV"]), name);
   assert.deepEqual(read.map((r) => [r.tmdbId, r.mediaType, r.plays, r.favorite]).sort(), [[1, "MOVIE", 3, false], [3, "TV", 0, true]]);
