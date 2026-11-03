@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import dns from "node:dns/promises";
 import http from "node:http";
 import zlib from "node:zlib";
+import net from "node:net";
 import type { AddressInfo } from "node:net";
 import {
   safeFetch,
@@ -21,6 +22,9 @@ import {
   SafeFetchError,
   makePinnedLookup,
   buildPinnedRequestOptions,
+  PINNED_CONNECT_TIMEOUT_MS,
+  PINNED_IDLE_TIMEOUT_MS,
+  MAX_CONTENT_ENCODINGS,
 } from "../src/lib/safe-fetch.ts";
 
 type LookupFn = typeof dns.lookup;
@@ -268,6 +272,142 @@ test("caller AbortSignal cancels the request", async () => {
   const p = safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { signal: ac.signal, timeoutMs: 5000 });
   setTimeout(() => ac.abort(), 50);
   await rejection(p);
+});
+
+// ---------------------------------------------------------------------------
+// fetch parity: the pinned transport keeps undici's connect and idle timeouts
+// and its lenient decoding, so moving off fetch() changed no failure mode.
+// ---------------------------------------------------------------------------
+
+test("defaults are fetch's: 10s connect, 300s idle, at most 5 content-codings", () => {
+  assert.equal(PINNED_CONNECT_TIMEOUT_MS, 10_000);
+  assert.equal(PINNED_IDLE_TIMEOUT_MS, 300_000);
+  assert.equal(MAX_CONTENT_ENCODINGS, 5);
+});
+
+test("connect timeout: a TLS handshake that never completes fails as network after connectTimeoutMs, not the whole budget", async () => {
+  // Accepts the TCP connection and never answers the ClientHello.
+  const sockets: net.Socket[] = [];
+  const silent = net.createServer((s) => { sockets.push(s); });
+  await new Promise<void>((r) => silent.listen(0, "127.0.0.1", r));
+  try {
+    const port = (silent.address() as AddressInfo).port;
+    const t0 = Date.now();
+    const err = await rejection(safeFetchAdminConfigured(`https://127.0.0.1:${port}/`, { connectTimeoutMs: 200, timeoutMs: 5000 }));
+    assert.equal(err.reason, "network");
+    assert.match(err.message, /Connect Timeout Error/);
+    assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+  } finally {
+    for (const s of sockets) s.destroy();
+    silent.close();
+  }
+});
+
+test("connect timeout stops once connected: a slow answer is not cut by it", async () => {
+  const { port } = await listen((_q, r) => { setTimeout(() => r.end("late"), 600); });
+  const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { connectTimeoutMs: 200, timeoutMs: 5000 });
+  assert.equal(await res.text(), "late");
+});
+
+test("idle timeout: no response headers within idleTimeoutMs fails as network (Headers Timeout)", async () => {
+  const { port } = await listen(() => { /* never respond */ });
+  const t0 = Date.now();
+  const err = await rejection(safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { idleTimeoutMs: 200, timeoutMs: 5000 }));
+  assert.equal(err.reason, "network");
+  assert.match(err.message, /Headers Timeout Error/);
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+});
+
+test("idle timeout: a body that goes silent errors on read (Body Timeout) long before the total budget", async () => {
+  const { port } = await listen((_q, r) => { r.write("partial"); /* then silence, connection held open */ });
+  const t0 = Date.now();
+  const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { idleTimeoutMs: 200, timeoutMs: 5000 });
+  await assert.rejects(res.text(), (e: unknown) =>
+    e instanceof SafeFetchError && e.reason === "network" && /Body Timeout Error/.test(e.message));
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+});
+
+test("idle timeout counts silence, not total time: a slow but steady body completes", async () => {
+  const { port } = await listen((_q, r) => {
+    let n = 0;
+    const tick = setInterval(() => {
+      r.write(`c${n}`);
+      if (++n === 8) { clearInterval(tick); r.end(); }
+    }, 80);
+  });
+  const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { idleTimeoutMs: 250, timeoutMs: 5000 });
+  assert.equal(await res.text(), "c0c1c2c3c4c5c6c7");
+});
+
+const JSON_BODY = JSON.stringify({ ok: true, items: Array.from({ length: 50 }, (_, i) => ({ i, name: "n".repeat(20) })) });
+
+test("decoding is as lenient as fetch: a missing gzip trailer and raw DEFLATE under 'deflate' still decode", async () => {
+  const { port } = await listen((req, r) => {
+    const src = Buffer.from(JSON_BODY);
+    if (req.url === "/truncated-gzip") {
+      const gz = zlib.gzipSync(src);
+      r.setHeader("content-encoding", "gzip");
+      r.end(gz.subarray(0, gz.length - 8)); // CRC32 + ISIZE trailer dropped
+    } else if (req.url === "/raw-deflate") {
+      r.setHeader("content-encoding", "deflate");
+      r.end(zlib.deflateRawSync(src));
+    } else {
+      r.setHeader("content-encoding", "deflate");
+      r.end(zlib.deflateSync(src));
+    }
+  });
+  for (const p of ["/truncated-gzip", "/raw-deflate", "/zlib-deflate"]) {
+    const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}${p}`);
+    assert.equal(await res.text(), JSON_BODY, p);
+  }
+});
+
+test("a short brotli tail yields what decoded instead of erroring, as fetch does", async () => {
+  const { port } = await listen((_q, r) => {
+    const br = zlib.brotliCompressSync(Buffer.from(JSON_BODY));
+    r.setHeader("content-encoding", "br");
+    r.end(br.subarray(0, br.length - 3));
+  });
+  const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}/`);
+  const text = await res.text();
+  assert.ok(JSON_BODY.startsWith(text), "decoded prefix of the original");
+});
+
+test("five stacked content-codings decode; a sixth is refused, as fetch refuses it", async () => {
+  const { port } = await listen((req, r) => {
+    const n = Number(req.url!.slice(1));
+    let b = Buffer.from(JSON_BODY);
+    for (let i = 0; i < n; i++) b = zlib.gzipSync(b);
+    r.setHeader("content-encoding", Array(n).fill("gzip").join(", "));
+    r.end(b);
+  });
+  assert.equal(await (await safeFetchAdminConfigured(`http://127.0.0.1:${port}/5`)).text(), JSON_BODY);
+  const err = await rejection(safeFetchAdminConfigured(`http://127.0.0.1:${port}/6`));
+  assert.equal(err.reason, "network");
+  assert.match(err.message, /too many content-encodings in response: 6, maximum allowed is 5/);
+});
+
+test("an unknown coding in the chain passes the body through raw, as fetch does", async () => {
+  const gz = zlib.gzipSync(Buffer.from(JSON_BODY));
+  const { port } = await listen((_q, r) => {
+    r.setHeader("content-encoding", "gzip, x-unknown");
+    r.end(gz);
+  });
+  const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}/`);
+  assert.deepEqual(Buffer.from(await res.arrayBuffer()), gz);
+});
+
+test("a decode failure keeps its reason in the error message", async () => {
+  const { port } = await listen((_q, r) => {
+    const gz = zlib.gzipSync(Buffer.from(JSON_BODY));
+    gz[20] ^= 0xff; gz[21] ^= 0xff; gz[22] ^= 0xff;
+    r.setHeader("content-encoding", "gzip");
+    r.end(gz);
+  });
+  const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}/`);
+  // Readable.toWeb used to blank a coded (zlib) error, leaving "…failed for <url>: ".
+  await assert.rejects(res.text(), (e: unknown) =>
+    e instanceof SafeFetchError && e.reason === "network" && /^Response body read failed for \S+: \S.*$/.test(e.message));
 });
 
 test("redirects are refused, never followed", async () => {

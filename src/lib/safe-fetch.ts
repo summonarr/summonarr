@@ -2,7 +2,7 @@ import http from "node:http";
 import https from "node:https";
 import zlib from "node:zlib";
 import { isIP } from "node:net";
-import { PassThrough, Readable } from "node:stream";
+import { PassThrough, Readable, Transform } from "node:stream";
 
 import { resolveToSafeUrlWithAddrs, resolveSafeAddrsFresh, verifyResolvedHost } from "@/lib/ssrf";
 
@@ -59,7 +59,24 @@ export class SafeFetchError extends Error {
 export interface SafeFetchOptions extends Omit<RequestInit, "redirect"> {
   timeoutMs?: number;
   maxResponseBytes?: number;
+  /** Give up connecting (TCP + TLS handshake) after this. Default: fetch's 10s. */
+  connectTimeoutMs?: number;
+  /** Drop a connection that receives nothing for this long while waiting for
+   *  headers or reading the body. Default: fetch's 300s. */
+  idleTimeoutMs?: number;
 }
+
+// Node's fetch (undici) defaults, kept by the pinned transport so a dead or
+// silent host fails the way it did under fetch: a host that never answers is
+// "network" after 10s, not a "timeout" after the caller's whole budget, and a
+// long-lived stream (the Plex SSE feed) whose peer vanished is dropped after 5
+// minutes of silence instead of hanging until its own recycle. The env-proxy
+// path still uses fetch(), where undici applies the same values itself.
+export const PINNED_CONNECT_TIMEOUT_MS = 10_000;
+export const PINNED_IDLE_TIMEOUT_MS = 300_000;
+// fetch refuses a response that stacks more content-codings than this: each one
+// is another decompressor, so an unbounded chain is a memory/CPU sink.
+export const MAX_CONTENT_ENCODINGS = 5;
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
@@ -211,7 +228,7 @@ async function doFetch(
   const headers = new Headers(opts.headers);
   if (!headers.has("user-agent")) headers.set("user-agent", USER_AGENT);
 
-  const { timeoutMs: _t, maxResponseBytes: _m, ...rest } = opts;
+  const { timeoutMs: _t, maxResponseBytes: _m, connectTimeoutMs, idleTimeoutMs, ...rest } = opts;
   void _t; void _m;
 
   const init: RequestInit = {
@@ -247,7 +264,12 @@ async function doFetch(
 
   let res: Response;
   try {
-    res = viaProxy ? await fetch(targetUrl, init) : await pinnedFetch(targetUrl, init, pinnedAddrs, signal);
+    res = viaProxy
+      ? await fetch(targetUrl, init)
+      : await pinnedFetch(targetUrl, init, pinnedAddrs, signal, {
+          connectTimeoutMs: connectTimeoutMs ?? PINNED_CONNECT_TIMEOUT_MS,
+          idleTimeoutMs: idleTimeoutMs ?? PINNED_IDLE_TIMEOUT_MS,
+        });
   } catch (err) {
       if (err instanceof Error) {
 
@@ -397,29 +419,81 @@ export function buildPinnedRequestOptions(
   };
 }
 
-function decoderFor(encoding: string): NodeJS.ReadWriteStream | null {
+// Decoders are as lenient as fetch's (and curl's): sync-flush, so a body with a
+// missing or short trailer still yields what it decoded instead of erroring.
+const ZLIB_LENIENT = { flush: zlib.constants.Z_SYNC_FLUSH, finishFlush: zlib.constants.Z_SYNC_FLUSH };
+const BROTLI_LENIENT = {
+  flush: zlib.constants.BROTLI_OPERATION_FLUSH,
+  finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH,
+};
+
+// "deflate" should be zlib-wrapped, but some servers send raw DEFLATE under it.
+// Like fetch, pick the decoder from the first byte: a zlib header's low nibble
+// is 8 (CM=deflate).
+function createDeflateDecoder(): Transform {
+  let inner: zlib.Inflate | zlib.InflateRaw | null = null;
+  const t: Transform = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      if (!inner) {
+        if (chunk.length === 0) { cb(); return; }
+        inner = (chunk[0] & 0x0f) === 0x08 ? zlib.createInflate(ZLIB_LENIENT) : zlib.createInflateRaw(ZLIB_LENIENT);
+        inner.on("data", (d: Buffer) => t.push(d));
+        inner.on("error", (err) => t.destroy(err));
+      }
+      inner.write(chunk, () => cb());
+    },
+    flush(cb) {
+      if (!inner) { cb(); return; }
+      inner.once("end", () => cb());
+      inner.end();
+    },
+    destroy(err, cb) {
+      inner?.destroy();
+      cb(err);
+    },
+  });
+  return t;
+}
+
+function decoderFor(encoding: string): Transform | null {
   switch (encoding) {
     case "gzip":
     case "x-gzip":
-      return zlib.createGunzip();
+      return zlib.createGunzip(ZLIB_LENIENT);
     case "deflate":
-      return zlib.createInflate();
+      return createDeflateDecoder();
     case "br":
-      return zlib.createBrotliDecompress();
+      return zlib.createBrotliDecompress(BROTLI_LENIENT);
     default:
       return null;
   }
 }
 
+// Readable.toWeb replaces an error that carries a `code` (every zlib and socket
+// error does) with a TypeError whose message is EMPTY, so a failed decode read
+// as "Response body read failed for …: " with no reason. Hand the stream a
+// plain Error with the message and keep the original as its cause.
+function streamError(err: unknown): Error {
+  if (err instanceof Error && !("code" in err)) return err;
+  const message = err instanceof Error ? err.message : String(err);
+  return new Error(message || "response body failed", { cause: err });
+}
+
+function transportTimeout(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
 // A fetch() look-alike over node:http(s) that dials ONLY `addrs`. Preserves what
 // the rest of doFetch relies on: redirect:"error" semantics, transparent
 // gzip/deflate/br decoding (the size cap sees decoded bytes), abort/timeout via
-// `signal` (rejecting with signal.reason, like fetch), and a standard Response.
+// `signal` (rejecting with signal.reason, like fetch), fetch's connect and idle
+// timeouts, and a standard Response.
 async function pinnedFetch(
   targetUrl: string,
   init: RequestInit,
   addrs: readonly string[],
   signal: AbortSignal,
+  limits: { connectTimeoutMs: number; idleTimeoutMs: number },
 ): Promise<Response> {
   // Request() normalises body/headers exactly as fetch would (and throws the same
   // TypeErrors, e.g. URL credentials, GET with a body).
@@ -434,13 +508,19 @@ async function pinnedFetch(
   if (body && !("content-length" in headers)) headers["content-length"] = String(body.byteLength);
 
   const opts = buildPinnedRequestOptions(url, addrs, { method: request.method, headers, signal });
-  const transport = url.protocol === "https:" ? https : http;
+  const isHttps = url.protocol === "https:";
+  const transport = isHttps ? https : http;
 
   return await new Promise<Response>((resolve, reject) => {
+    // Set when this transport ends the connection itself (a connect or idle
+    // timeout), so THAT is the error callers see, not the socket reset it causes.
+    let ownError: Error | null = null;
+    let gotHeaders = false;
     const fail = (err: unknown) => {
-      reject(signal.aborted ? signal.reason : new TypeError("fetch failed", { cause: err }));
+      reject(signal.aborted ? signal.reason : new TypeError("fetch failed", { cause: ownError ?? err }));
     };
     const creq = transport.request(opts, (res) => {
+      gotHeaders = true;
       const status = res.statusCode ?? 0;
       if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
         res.destroy();
@@ -462,19 +542,38 @@ async function pinnedFetch(
         return;
       }
 
+      // Codings are listed in the order they were applied, so undo them last to
+      // first. Like fetch: more than MAX_CONTENT_ENCODINGS is refused, and an
+      // unknown coding anywhere means none can be undone, so the body is passed
+      // through raw.
       const encodings = (res.headers["content-encoding"] ?? "")
         .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s && s !== "identity").reverse();
+      if (encodings.length > MAX_CONTENT_ENCODINGS) {
+        res.destroy();
+        reject(new TypeError("fetch failed", {
+          cause: new Error(`too many content-encodings in response: ${encodings.length}, maximum allowed is ${MAX_CONTENT_ENCODINGS}`),
+        }));
+        return;
+      }
+      const decoders: Transform[] = [];
+      for (const enc of encodings) {
+        const d = decoderFor(enc);
+        if (!d) {
+          for (const x of decoders) x.destroy();
+          decoders.length = 0;
+          break;
+        }
+        decoders.push(d);
+      }
       const stages: NodeJS.ReadableStream[] = [res];
       const out = new PassThrough();
       const destroyAll = (err?: unknown) => {
-        const e = err === undefined ? undefined : (signal.aborted ? signal.reason : err);
+        const e = err === undefined ? undefined : (signal.aborted ? signal.reason : streamError(ownError ?? err));
         out.destroy(e as Error | undefined);
         for (const s of stages) (s as Readable).destroy();
       };
       let last: NodeJS.ReadableStream = res;
-      for (const enc of encodings) {
-        const d = decoderFor(enc);
-        if (!d) continue;
+      for (const d of decoders) {
         d.on("error", destroyAll);
         last = last.pipe(d);
         stages.push(d);
@@ -489,6 +588,27 @@ async function pinnedFetch(
         statusText: res.statusMessage ?? "",
         headers: respHeaders,
       }));
+    });
+    const kill = (err: Error) => {
+      ownError ??= err;
+      creq.destroy(err);
+    };
+    // Connect timeout: TCP connect plus, for https, the TLS handshake. The socket
+    // is always fresh (agent:false), so it is still connecting when it arrives.
+    creq.once("socket", (socket) => {
+      const timer = setTimeout(() => {
+        kill(transportTimeout(`Connect Timeout Error (timeout: ${limits.connectTimeoutMs}ms)`, "UND_ERR_CONNECT_TIMEOUT"));
+      }, limits.connectTimeoutMs);
+      const clear = () => clearTimeout(timer);
+      socket.once(isHttps ? "secureConnect" : "connect", clear);
+      socket.once("close", clear);
+    });
+    // Idle timeout: socket inactivity, armed once connected — covers waiting for
+    // the headers and every gap between body chunks.
+    creq.setTimeout(limits.idleTimeoutMs, () => {
+      kill(gotHeaders
+        ? transportTimeout(`Body Timeout Error (no data for ${limits.idleTimeoutMs}ms)`, "UND_ERR_BODY_TIMEOUT")
+        : transportTimeout(`Headers Timeout Error (no response for ${limits.idleTimeoutMs}ms)`, "UND_ERR_HEADERS_TIMEOUT"));
     });
     creq.on("error", fail);
     creq.end(body);
