@@ -54,7 +54,8 @@ test("every 'already greenlit' mirror lookup in src/ excludes stamped (cleanedUp
   const files = ["src/lib/request-create.ts", "src/lib/discord-interactions/components/pick.ts", "src/app/api/requests/bulk/route.ts"];
   for (const f of files) {
     const code = readFileSync(join(ROOT, f), "utf8").split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
-    const lookups = code.split("\n").filter((l) => l.includes('status: { in: ["APPROVED", "AVAILABLE"] }'));
+    const lookups = code.split("\n").filter((l) =>
+      l.includes('status: { in: ["APPROVED", "AVAILABLE"] }') || l.includes("status: { in: greenlitPeerStatuses("));
     assert.ok(lookups.length >= 1, `${f}: the mirror lookup moved — update this pin`);
     for (const l of lookups) assert.match(l, /cleanedUpAt: null/, `${f}: ${l.trim()}`);
   }
@@ -108,4 +109,18 @@ test("bulk: an on-behalf non-ADMIN filer must hold the named-instance request/au
   assert.equal((CODE.match(/filerMay\(/g) ?? []).length >= 4, true, "request gate, remap, and both auto-approve sites");
   assert.match(CODE, /canAutoApproveInstance\(session\.user\.permissions, inst, filerGrants/);
   assert.match(CODE, /targetVisible\.plex\.filter\(\(x\) => filerVisible\.plex\.includes\(x\)\)/);
+});
+
+test("bulk: an AVAILABLE peer is a greenlight only with the routed instance's *arr-available row (greenlitPeerStatuses)", () => {
+  // AVAILABLE is not an approval: the library pass flips a PENDING request
+  // AVAILABLE off a restricted server or the HD copy of a 4K request. Mirrored as
+  // APPROVED without the *arr holding it, the sync's re-push downloads it with no
+  // admin decision. The lookup still reads both statuses (the *arr answer differs
+  // per item); the filter decides per key.
+  assert.match(CODE, /import \{ greenlitPeerStatuses \} from "@\/lib\/request-mirror"/);
+  assert.match(
+    CODE,
+    /for \(const g of greenlit\) \{\s*const k = keyOf\(g\.tmdbId, g\.mediaType\);\s*if \(\(greenlitPeerStatuses\(arrAvailSet\.has\(k\)\) as string\[\]\)\.includes\(g\.status\)\) greenlitKeys\.add\(k\);\s*\}/,
+  );
+  assert.doesNotMatch(CODE, /for \(const g of greenlit\) greenlitKeys\.add/, "an unfiltered add is the old mirror-any-peer shape");
 });

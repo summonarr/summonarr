@@ -352,7 +352,9 @@ shadowPrismaModel(prisma, "mediaRequest", {
   findMany: async (args: unknown) => { rec("mediaRequest.findMany", args); return []; },
   findFirst: async (args: { where: { status?: { in?: string[] } } }) => {
     rec("mediaRequest.findFirst", args.where);
-    return args.where.status?.in?.includes("AVAILABLE") ? greenlitPeer : null;
+    // Honour the queried status list, like the real lookup: a peer whose status
+    // the caller did not ask for is not found.
+    return greenlitPeer && args.where.status?.in?.includes(greenlitPeer.status) ? greenlitPeer : null;
   },
   count: async () => 0,
   groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
@@ -1258,7 +1260,10 @@ test("pick: the arr row alone does NOT short-circuit a user who cannot auto-appr
   assert.equal(opsOf("mediaRequest.create").length, 1, "a plain requester still files a (pending) request");
 });
 
-test("pick mirror: an AVAILABLE peer with NO arr row for the instance is copied as APPROVED without availableAt", async () => {
+test("pick mirror: an AVAILABLE peer with NO arr row for the instance is not a greenlight — the pick goes PENDING", async () => {
+  // AVAILABLE is not an approval: the library pass flips a PENDING request
+  // AVAILABLE off a restricted server or the HD copy of a 4K request. Copied as
+  // APPROVED, the sync's re-push would download it with no admin decision.
   const sid = seedPick("USER");
   greenlitPeer = { status: "AVAILABLE" };
   await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
@@ -1266,8 +1271,18 @@ test("pick mirror: an AVAILABLE peer with NO arr row for the instance is copied 
   const creates = opsOf("mediaRequest.create");
   assert.equal(creates.length, 1);
   const data = (creates[0].args as { data: Record<string, unknown> }).data;
-  assert.equal(data.status, "APPROVED", "no visible library copy and no arr row ⇒ the peer's AVAILABLE is not true for THIS requester");
-  assert.ok(!("availableAt" in data), "an APPROVED copy carries no availableAt");
+  assert.ok(!("status" in data), "the pending create: the schema default, never a copied APPROVED");
+  assert.ok(!("availableAt" in data));
+  assert.ok(!("approvedAt" in data));
+});
+
+test("pick mirror: an APPROVED peer is still copied as APPROVED, arr row or not", async () => {
+  const sid = seedPick("USER");
+  greenlitPeer = { status: "APPROVED" };
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  const data = (opsOf("mediaRequest.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(data.status, "APPROVED");
   assert.ok(!("approvedAt" in data), "a copy records no approval of its own (guardrail 34a)");
 });
 

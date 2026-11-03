@@ -30,6 +30,7 @@ import { mapLimit } from "@/lib/concurrency";
 import { readJsonCapped } from "@/lib/body-size";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { greenlitPeerStatuses } from "@/lib/request-mirror";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
 // "request on behalf of" flow. A single self-item or whole collection both go
@@ -637,16 +638,21 @@ export const POST = withPermission([
               where: { status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null, OR: createPairs },
               select: { tmdbId: true, mediaType: true, status: true },
             });
-            // An AVAILABLE peer is mirrored as APPROVED, matching the single route
-            // (request-create.ts): the peer may have been marked off a restricted
-            // server this target holds no grant for (guardrail 35). Every item here
-            // has ALREADY been found absent from the target's visible libraries AND
-            // (for an auto-approver) from the routed instance's *arr-available cache.
-            // Mirroring APPROVED is always safe: the sync's marking passes promote
-            // it. The grant-gated sync marking pass
-            // promotes (and notifies) the row once the title is visible to them.
+            // Which peers count is greenlitPeerStatuses, the single route's rule
+            // (request-create.ts): an APPROVED peer always; an AVAILABLE one only when
+            // the routed instance's *arr-available cache holds the title. Without that
+            // the peer may have been marked off a restricted server this target has no
+            // grant for (guardrail 35) or off the HD copy of a 4K request — not an
+            // approval, and an APPROVED copy of it would be re-pushed by the sync with
+            // no admin decision. Every item here has already been found absent from
+            // the target's visible libraries. A copy is always created APPROVED (never
+            // AVAILABLE): with the *arr holding the title the sync's arr marking pass
+            // promotes and notifies it, and the re-push skips it.
             const greenlitKeys = new Set<string>();
-            for (const g of greenlit) greenlitKeys.add(keyOf(g.tmdbId, g.mediaType));
+            for (const g of greenlit) {
+              const k = keyOf(g.tmdbId, g.mediaType);
+              if ((greenlitPeerStatuses(arrAvailSet.has(k)) as string[]).includes(g.status)) greenlitKeys.add(k);
+            }
             mirroredKeys.clear();
             const now = new Date();
             await tx.mediaRequest.createMany({

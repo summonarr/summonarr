@@ -297,7 +297,9 @@ const mediaRequestModel = {
     if (w.status && typeof w.status === "object" && "in" in (w.status as object)) {
       // A lookup carrying `cleanedUpAt: null` never sees a stamped (removed) peer.
       if (w.cleanedUpAt === null && greenlitRow?.cleanedUpAt) return null;
-      return greenlitRow;
+      // Honour the queried status list, like the real lookup.
+      const wanted = (w.status as { in: string[] }).in;
+      return greenlitRow && wanted.includes(greenlitRow.status) ? greenlitRow : null;
     }
     if (w.id && typeof w.id === "object" && "not" in (w.id as object)) return earlierPendingRow;
     return null;
@@ -999,18 +1001,35 @@ test("a greenlit peer is mirrored: APPROVED copies the status, AVAILABLE also st
   assert.equal(createdData().approvedAt, undefined, "a copy records no approval of its own");
 });
 
-test("an AVAILABLE peer with no evidence the title is available to THIS requester is mirrored as APPROVED (guardrail 35)", async () => {
-  // The peer was marked AVAILABLE off a restricted server this caller holds no grant
-  // for: no visible library copy (else alreadyAvailable), no *arr-available row.
+test("an AVAILABLE peer with no *arr-available row is NOT a greenlight: the request goes PENDING and alerts admins", async () => {
+  // The peer was marked AVAILABLE by the library pass — off a restricted server this
+  // caller holds no grant for (guardrail 35), or off the HD copy of a 4K request —
+  // with no admin ever approving it. No visible library copy (else alreadyAvailable),
+  // no *arr-available row. Copied as APPROVED, the sync's re-push of APPROVED rows
+  // the *arr lacks would download the title with no admin decision.
   greenlitRow = { status: "AVAILABLE" };
   radarrHas = false;
   const a = await mintSession();
   const res = await post(a.token, requestBody(a.userId));
   assert.equal(res.status, 201);
-  assert.equal(createdData().status, "APPROVED", "the grant-gated sync marking pass must be the one to promote it");
-  assert.equal(createdData().availableAt, undefined);
+  const lookup = opsOf("mediaRequest.findFirst").map((o) => (o.args as { where: Record<string, unknown> }).where)
+    .find((w) => w.status && typeof w.status === "object" && "in" in (w.status as object));
+  assert.deepEqual((lookup?.status as { in: string[] }).in, ["APPROVED"], "without the arr row only an APPROVED peer is a greenlight");
+  assert.equal(createdData().status, undefined, "the pending branch: the schema default, never a copied APPROVED");
+  assert.equal(((await res.json()) as { status: string }).status, "PENDING");
+  assert.equal(createdData().approvedAt, undefined);
+  assert.equal(afterTasks.length, 1, "a request nobody approved goes to the admins for review");
+});
+
+test("an APPROVED peer is still a greenlight without an *arr-available row", async () => {
+  greenlitRow = { status: "APPROVED" };
+  radarrHas = false;
+  const a = await mintSession();
+  const res = await post(a.token, requestBody(a.userId));
+  assert.equal(res.status, 201);
+  assert.equal(createdData().status, "APPROVED");
   assert.equal(createdData().approvedAt, undefined, "a copy records no approval of its own");
-  assert.equal(afterTasks.length, 0, "still nothing to review ⇒ no admin alert");
+  assert.equal(afterTasks.length, 0, "an approved title has nothing to review");
 });
 
 test("a peer stamped cleanedUpAt is a REMOVAL, not a greenlight: the request goes PENDING and alerts admins (guardrail 14b)", async () => {

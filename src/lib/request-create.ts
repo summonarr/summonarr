@@ -23,6 +23,7 @@ import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
+import { greenlitPeerStatuses } from "@/lib/request-mirror";
 
 // The request chokepoint — everything POST /api/requests does once the caller is
 // authenticated, rate-limited and its body validated: instance resolution and
@@ -459,12 +460,12 @@ export async function createMediaRequest(
         return;
       }
 
-      // If another request for this exact title (+ same instance) is already APPROVED
-      // or AVAILABLE, the content is already greenlit / being fulfilled — there is
-      // nothing for an admin to review. Mirror that status so this requester is
-      // tracked and still receives the "now available" notification (the sync
-      // notifies every APPROVED row's requester), while skipping the admin
-      // "new request" alert.
+      // If another request for this exact title (+ same instance) is already
+      // greenlit (greenlitPeerStatuses: APPROVED, or AVAILABLE with this instance's
+      // *arr holding it), there is nothing for an admin to review. Mirror that status
+      // so this requester is tracked and still receives the "now available"
+      // notification (the sync notifies every APPROVED row's requester), while
+      // skipping the admin "new request" alert.
       //
       // No approvedAt: the copy made no decision of its own. The watch grade
       // counts it through the approval of the request it copied (per title).
@@ -473,18 +474,18 @@ export async function createMediaRequest(
       // 14b): an admin deliberately took the title off this instance. Copying it
       // would create an APPROVED row the sync re-pushes, re-downloading what was
       // deleted with no admin decision — so it goes to review like any request.
+      //
+      // An AVAILABLE peer counts only when the title is available to THIS requester:
+      // no visible library copy exists (that returned above), so the instance's
+      // *arr-available cache is the remaining evidence. Without it the peer may have
+      // been marked off a restricted server (guardrail 35) or off the HD copy of a 4K
+      // request — not an approval, so this request goes to review like any other.
       const greenlit = await tx.mediaRequest.findFirst({
-        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null },
+        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: greenlitPeerStatuses(arrHasInstance) }, cleanedUpAt: null },
         select: { status: true },
       });
       if (greenlit) {
-        // An AVAILABLE peer is copied only when the title is available to THIS requester:
-        // the peer may have been marked off a restricted server this requester holds no
-        // grant for (guardrail 35). No visible library copy exists (that returned above),
-        // so the instance's *arr-available cache is the remaining evidence — the same
-        // ungated signal the sync's arr marking pass uses. Otherwise mirror APPROVED and
-        // let the grant-gated sync marking pass promote (and notify) it.
-        const mirrorStatus = greenlit.status === "AVAILABLE" && !arrHasInstance ? "APPROVED" : greenlit.status;
+        const mirrorStatus = greenlit.status;
         createdRequest = await tx.mediaRequest.create({
           data: {
             ...baseData,

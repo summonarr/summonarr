@@ -16,6 +16,7 @@ import { resolveUserQuota, parseQuotaLimit, quotaUsageWhere, type ResolvedQuota 
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
+import { greenlitPeerStatuses } from "@/lib/request-mirror";
 import { TMDB_POSTER_BASE, editOriginal, quotaWindowLabel, releaseYearOf } from "../reply";
 import type { ComponentContext, PendingSearch } from "../types";
 
@@ -527,20 +528,20 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
           // counts it through the approval of the request it copied. A row
           // stamped `cleanedUpAt` records a deliberate removal, not a
           // greenlight (guardrail 14b) — never copied, or the sync re-pushes it.
+          //
+          // An AVAILABLE peer counts only when the title is available to THIS
+          // requester: no visible library copy exists (that returned above), so the
+          // instance's *arr-available cache is the remaining evidence. Without it the
+          // peer may have been marked off a restricted server (guardrail 35) or off
+          // the HD copy of a 4K request — not an approval, so the pick goes to review.
+          // The same rule as request-create.ts (greenlitPeerStatuses).
           const alreadyGreenlit = await tx.mediaRequest.findFirst({
-            where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null },
+            where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: greenlitPeerStatuses(arrHasInstance) }, cleanedUpAt: null },
             select: { status: true },
           });
           if (alreadyGreenlit) {
             mirrored = true;
-            // An AVAILABLE peer is copied only when the title is available to THIS
-            // requester: the peer may have been marked off a restricted server this
-            // requester holds no grant for (guardrail 35). No visible library copy
-            // exists (that returned above), so the instance's *arr-available cache is
-            // the remaining evidence. Otherwise mirror APPROVED (no availableAt) and
-            // let the grant-gated sync marking pass promote and notify it — the same
-            // rule as request-create.ts.
-            const mirrorStatus = alreadyGreenlit.status === "AVAILABLE" && !arrHasInstance ? "APPROVED" : alreadyGreenlit.status;
+            const mirrorStatus = alreadyGreenlit.status;
             // Mirror availableAt when the copied status is AVAILABLE, matching the
             // alreadyAvailable branch — otherwise an AVAILABLE mirror row has a null
             // availableAt and looks freshly approved.
