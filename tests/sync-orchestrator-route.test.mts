@@ -1911,6 +1911,89 @@ test("an EMPTY Plex answer for an instance with NO stored rows still proceeds �
   assert.equal(txTouching("plexLibraryItem").length, 1, "nothing to protect, so the (empty) replace runs as before");
 });
 
+// Plex with an explicit section list; each listed key answers its own titles
+// (movies as tmdb-guid movie rows, an empty list for a show section).
+function plexSectionsResponder(
+  sections: Array<{ key: string; type: "movie" | "show" }>,
+  moviesByKey: Record<string, number[]>,
+): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: sections.map((s) => ({ key: s.key, title: `Lib ${s.key}`, type: s.type })) } });
+    }
+    const m = /^\/library\/sections\/(\w+)\/all$/.exec(url.pathname);
+    if (m && sections.some((s) => s.key === m[1])) {
+      const ids = moviesByKey[m[1]] ?? [];
+      return okJson({
+        MediaContainer: {
+          totalSize: ids.length,
+          Metadata: ids.map((id) => ({ ratingKey: `rk${id}`, type: "movie", title: `Movie ${id}`, Guid: [{ id: `tmdb://${id}` }] })),
+        },
+      });
+    }
+    throw new Error(`unexpected Plex fetch ${url.pathname}`);
+  };
+}
+
+test("a selected Plex library that is no longer on the server (recreated under a new key) holds the instance back — the TV rows are not wiped", async () => {
+  // The admin recreated the TV library: it was section 2, Plex now calls it 3,
+  // and the saved selection still says "1,2". Movies still come back, TV comes
+  // back empty with no error — the old both-empty guard let this through and the
+  // scoped replace deleted every TV row and the episode cache, hourly.
+  configureBothServers();
+  settings.set("plexLibraries", "1,2");
+  preservedRowSlugs.plexLibraryItem.add("");
+  const plex = plexSectionsResponder([{ key: "1", type: "movie" }, { key: "3", type: "show" }], { "1": [300] });
+  const jf = jellyfinResponder([550]);
+  respond = (url) => (url.origin === PLEX_ORIGIN ? plex(url) : jf(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(txTouching("plexLibraryItem").length, 0, "a stale selection must not run the scoped delete+rewrite");
+  assert.equal(
+    txTouching("tVEpisodeCache").filter((t) => t.ops.some((o) => o.method === "deleteMany" && JSON.stringify(o.args).includes('"plex"'))).length,
+    0,
+    "the Plex episode rewrite is vetoed too",
+  );
+  assert.ok((b.failedSources as string[]).includes("plex"), "the Plex source is reported degraded");
+  assert.ok(warns.some((w) => w.includes("no longer on the server") && w.includes("section 2")), "the warning names the missing section");
+});
+
+test("a selected Plex section of one type that answers EMPTY (mid-scan) holds the instance back while the other type still answers", async () => {
+  configureBothServers();
+  preservedRowSlugs.plexLibraryItem.add("");
+  const plex = plexSectionsResponder([{ key: "1", type: "movie" }, { key: "2", type: "show" }], { "1": [300] });
+  const jf = jellyfinResponder([550]);
+  respond = (url) => (url.origin === PLEX_ORIGIN ? plex(url) : jf(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(txTouching("plexLibraryItem").length, 0, "an empty show section must not wipe the stored show rows");
+  assert.ok((b.failedSources as string[]).includes("plex"));
+  assert.ok(warns.some((w) => w.includes("returned no shows")));
+});
+
+test("DESELECTING a Plex library on purpose is not held — the instance is replaced without it", async () => {
+  configureBothServers();
+  settings.set("plexLibraries", "1"); // the show section 3 still exists but is no longer selected
+  preservedRowSlugs.plexLibraryItem.add("");
+  const plex = plexSectionsResponder([{ key: "1", type: "movie" }, { key: "3", type: "show" }], { "1": [300] });
+  const jf = jellyfinResponder([550]);
+  respond = (url) => (url.origin === PLEX_ORIGIN ? plex(url) : jf(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(txTouching("plexLibraryItem").length, 1, "the replace runs: dropping a deselected library is what the admin asked for");
+  assert.ok(!((b.failedSources as string[] | undefined) ?? []).includes("plex"));
+});
+
 test("multi-server PARTIAL failure still marks a request the HEALTHY instance holds — presence needs no complete union", async () => {
   // plexSyncSucceeded is false on a partial run (above), but the healthy
   // instance's rows DID land. Gating marking on that flag left every title on

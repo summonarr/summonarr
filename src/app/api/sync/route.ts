@@ -29,6 +29,7 @@ import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions"
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
+import { plexHoldNeedsCounts, plexHoldReason } from "@/lib/plex-sync-guard";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -775,21 +776,30 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
             ]);
             mergeResolvedLegacyItems(resolvedMovies, movieIds);
             mergeResolvedLegacyItems(resolvedTv, tvIds, ratingKeyToTmdb);
-            // An EMPTY answer for a server we already hold rows for is not a
-            // complete picture: a saved library selection that no longer matches
-            // any section, or a Plex that is mid-scan or just started, both come
-            // back as zero titles with no error. Treated as a success it would
-            // wipe the instance's rows and demote AVAILABLE requests. Hold the
-            // instance back like a failed fetch (its rows stay, the run is not
-            // stamped clean); a library that really was emptied is cleared by the
-            // admin's Resync on the Plex source.
-            if (movieIds.size === 0 && tvIds.size === 0) {
-              const held = await prisma.plexLibraryItem.count({ where: { serverInstance: instance.slug } });
-              if (held > 0) {
+            // A SHORT answer for a server we already hold rows for is not a
+            // complete picture: a saved selection naming a library Plex recreated
+            // under a new key, or a Plex that is mid-scan or just started, comes
+            // back with one type (or both) empty and no error. Treated as a
+            // success it would wipe those rows and demote AVAILABLE requests.
+            // Hold the instance back like a failed fetch (its rows stay, the run
+            // is not stamped clean); a library that really was emptied is cleared
+            // by the admin's Resync on the Plex source. Rules: plex-sync-guard.ts.
+            const holdInput = { selectedKeys: selectedPlexKeys, sections, movieCount: movieIds.size, tvCount: tvIds.size };
+            if (plexHoldNeedsCounts(holdInput)) {
+              const [heldMovieRows, heldTvRows] = await Promise.all([
+                prisma.plexLibraryItem.count({ where: { serverInstance: instance.slug, mediaType: "MOVIE" } }),
+                prisma.plexLibraryItem.count({ where: { serverInstance: instance.slug, mediaType: "TV" } }),
+              ]);
+              const hold = plexHoldReason({ ...holdInput, heldMovieRows, heldTvRows });
+              if (hold) {
                 warnOnChange(
                   `sync:plex-empty:${instance.slug}`,
-                  "empty",
-                  `[sync] Plex instance "${instance.slug}" returned no movies or shows but has stored library rows — keeping them (check the selected libraries, or whether Plex is still scanning)`,
+                  hold.kind === "missing-section" ? `missing:${hold.mediaType}:${hold.keys.join(",")}` : hold.kind === "empty-type" ? `empty:${hold.mediaType}` : "empty",
+                  hold.kind === "missing-section"
+                    ? `[sync] Plex instance "${instance.slug}" returned no ${hold.mediaType === "MOVIE" ? "movies" : "shows"} and a selected library is no longer on the server (section ${hold.keys.join(", ")}) — keeping its stored rows (a library recreated in Plex gets a new key: tick it in the Plex library settings; if it was removed on purpose, Resync the Plex source)`
+                    : hold.kind === "empty-type"
+                      ? `[sync] Plex instance "${instance.slug}" returned no ${hold.mediaType === "MOVIE" ? "movies" : "shows"} but has stored ${hold.mediaType === "MOVIE" ? "movie" : "show"} rows — keeping them (check whether Plex is still scanning; Resync clears a library that really was emptied)`
+                      : `[sync] Plex instance "${instance.slug}" returned no movies or shows but has stored library rows — keeping them (check the selected libraries, or whether Plex is still scanning)`,
                 );
                 return { slug: instance.slug, result: null };
               }
