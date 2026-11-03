@@ -559,11 +559,43 @@ function stillUpcoming(items: TmdbMedia[], today: string): TmdbMedia[] {
   return items.filter((m) => m.releaseDate != null && m.releaseDate >= today);
 }
 
+// An upcoming list and whether EVERY TMDB page answered (a cache hit is
+// complete). The page helpers absorb a failed page and keep going, so an outage
+// reads as an empty list; the cache-refresh cron must tell the two apart or it
+// replaces the stored list with nothing (sync/upcoming).
+interface UpcomingList {
+  items: TmdbMedia[];
+  complete: boolean;
+}
+
+/** Thrown by the *ForRefresh helpers when TMDB did not answer every page. */
+export class UpcomingIncompleteError extends Error {
+  constructor(list: "movies" | "tv") {
+    super(`TMDB upcoming ${list}: not every page answered — keeping the stored list`);
+    this.name = "UpcomingIncompleteError";
+  }
+}
+
 export async function getUpcomingMovies(): Promise<TmdbMedia[]> {
+  return (await loadUpcomingMovies()).items;
+}
+
+/**
+ * For the upcoming-cache refresh only: the list, or a throw when any TMDB page
+ * failed. A refresh must never replace the stored list with a partial or empty
+ * answer from an outage.
+ */
+export async function getUpcomingMoviesForRefresh(): Promise<TmdbMedia[]> {
+  const { items, complete } = await loadUpcomingMovies();
+  if (!complete) throw new UpcomingIncompleteError("movies");
+  return items;
+}
+
+async function loadUpcomingMovies(): Promise<UpcomingList> {
   const key = "movies:upcoming";
-  return coalesce(key, async () => {
+  return coalesce(key, async (): Promise<UpcomingList> => {
   const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return stillUpcoming(cached, new Date().toISOString().slice(0, 10));
+  if (cached?.length) return { items: stillUpcoming(cached, new Date().toISOString().slice(0, 10)), complete: true };
 
   const pages = await settleLimit(
     Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
@@ -584,9 +616,10 @@ export async function getUpcomingMovies(): Promise<TmdbMedia[]> {
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeMovie);
 
-  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  const complete = pages.every((p) => p.status === "fulfilled");
+  if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return result;
+  return { items: result, complete };
   });
 }
 
@@ -615,10 +648,21 @@ export async function getOnTheAirTV(): Promise<TmdbMedia[]> {
 }
 
 export async function getUpcomingTV(): Promise<TmdbMedia[]> {
+  return (await loadUpcomingTV()).items;
+}
+
+/** getUpcomingMoviesForRefresh's TV twin. */
+export async function getUpcomingTVForRefresh(): Promise<TmdbMedia[]> {
+  const { items, complete } = await loadUpcomingTV();
+  if (!complete) throw new UpcomingIncompleteError("tv");
+  return items;
+}
+
+async function loadUpcomingTV(): Promise<UpcomingList> {
   const key = "tv:upcoming";
-  return coalesce(key, async () => {
+  return coalesce(key, async (): Promise<UpcomingList> => {
   const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return stillUpcoming(cached, new Date().toISOString().slice(0, 10));
+  if (cached?.length) return { items: stillUpcoming(cached, new Date().toISOString().slice(0, 10)), complete: true };
 
   // /tv/on_the_air returns shows whose original first_air_date is often years past
   // (long-running shows currently airing new episodes). For "Upcoming" we want
@@ -645,9 +689,10 @@ export async function getUpcomingTV(): Promise<TmdbMedia[]> {
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
 
-  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  const complete = pages.every((p) => p.status === "fulfilled");
+  if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return result;
+  return { items: result, complete };
   });
 }
 

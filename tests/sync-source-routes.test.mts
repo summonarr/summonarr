@@ -84,6 +84,7 @@ let jellyfinOk = true;         // Jellyfin episodes
 let tmdbOk = true;             // TMDB list endpoints
 let tmdbTrendingResults: unknown[] = []; // /trending/ rows (ratings pre-warm pin)
 let tmdbUpcomingMovieResults: unknown[] = []; // /movie/upcoming rows (upcoming degraded pin)
+let tmdbUpcomingMovieDown = false; // /movie/upcoming answers 500 (one-source TMDB outage)
 let mdblistBatchOk = true;     // MDBList batch POST (ratings per-item awaited-twin pin)
 // Guardrail 31a pin: a stale ratings row's refresh is ONE upstream call — a TMDB
 // external_ids lookup (OMDB not-found sentinel), an OMDB call by stored imdbId
@@ -117,7 +118,10 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
     // Trending only — lets the ratings batch-pre-warm pin pool a known item
     // set without touching what the other list endpoints return.
     if (url.pathname.includes("/trending/")) return json({ page: 1, total_pages: 1, results: tmdbTrendingResults });
-    if (url.pathname.includes("/movie/upcoming")) return json({ page: 1, total_pages: 1, results: tmdbUpcomingMovieResults });
+    if (url.pathname.includes("/movie/upcoming")) {
+      if (tmdbUpcomingMovieDown) return json({ status_message: "TMDB DOWN" }, 500);
+      return json({ page: 1, total_pages: 1, results: tmdbUpcomingMovieResults });
+    }
     return json({ page: 1, total_pages: 1, results: [] });
   }
   if (url.hostname === "www.omdbapi.com") {
@@ -352,6 +356,7 @@ beforeEach(() => {
   tmdbOk = true;
   tmdbTrendingResults = [];
   tmdbUpcomingMovieResults = [];
+  tmdbUpcomingMovieDown = false;
   mdblistBatchOk = true;
   tmdbCacheThrowOnKey = null;
   refreshInFlight = 0;
@@ -750,10 +755,16 @@ test("a busy upcoming lock skips instead of running", async () => {
   assert.deepEqual(deletesOf("upcomingCacheItem"), []);
 });
 
-test("a TMDB failure is logged and does not throw out of the handler", async () => {
+test("a TMDB outage keeps BOTH stored upcoming lists and answers 502 — never a green run that emptied the cache", async () => {
+  // The page helpers absorb failed pages and resolve [], which the route used to
+  // read as "nothing upcoming": it deleted both media types, inserted nothing and
+  // answered 200 with errors: 0, so /upcoming stayed empty until the next daily run.
   tmdbOk = false;
   const res = await call(upcoming);
-  assert.equal(res.status, 200, "a fetch failure is a partial result, not a 500");
+  assert.equal(res.status, 502, "a total failure with nothing written is the 502 case");
+  assert.deepEqual(deletesOf("upcomingCacheItem"), [], "neither stored list is deleted");
+  const body = await res.json();
+  assert.equal(body.errors, 2, "both sources count as failed");
 });
 
 test("upcoming: ONE source failing while the other wrote rows is 200 but DEGRADED — X-Cron-Degraded + `error`, the orchestrator's shape", async () => {
@@ -777,6 +788,17 @@ test("upcoming: ONE source failing while the other wrote rows is 200 but DEGRADE
   assert.equal(body.error, "Sync degraded — tv failed to refresh", "the Run-now verdict reads `error`");
   // The movie half was still replaced — a degraded run is not a skipped one.
   assert.deepEqual(deletesOf("upcomingCacheItem").map((w) => w.mediaType), ["MOVIE"]);
+});
+
+test("upcoming: a TMDB endpoint failing for ONE type keeps that type's stored list and reports it degraded", async () => {
+  tmdbUpcomingMovieDown = true;
+  const res = await call(upcoming);
+  assert.deepEqual(deletesOf("upcomingCacheItem").map((w) => w.mediaType), ["TV"], "only the type that answered is replaced");
+  const body = await res.json();
+  assert.equal(body.errors, 1);
+  // The stub's TV list is empty, so nothing was written: the total-failure 502.
+  // (With TV rows written it is the 200 + X-Cron-Degraded case pinned below.)
+  assert.equal(res.status, 502);
 });
 
 test("upcoming: a clean run carries neither the degraded header nor `error`; a TOTAL failure stays 502", async () => {

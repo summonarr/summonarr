@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getUpcomingMovies, getUpcomingTV } from "@/lib/tmdb";
+import { getUpcomingMoviesForRefresh, getUpcomingTVForRefresh } from "@/lib/tmdb";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
@@ -18,7 +18,13 @@ export async function POST(request: NextRequest) {
     async (signal) => {
       const startTime = Date.now();
 
-      const [movies, tv] = await Promise.allSettled([getUpcomingMovies(), getUpcomingTV()]);
+      // The *ForRefresh helpers REJECT when any TMDB page failed. The page
+      // helpers absorb a failed page and return what answered, so during an
+      // outage they resolved [] — read below as "nothing upcoming", which
+      // deleted both media types and recorded a green run. A rejected type keeps
+      // its stored rows and the run reports it degraded (or 502 if nothing was
+      // written).
+      const [movies, tv] = await Promise.allSettled([getUpcomingMoviesForRefresh(), getUpcomingTVForRefresh()]);
       const movieItems = movies.status === "fulfilled" ? movies.value : [];
       const tvItems = tv.status === "fulfilled" ? tv.value : [];
 
@@ -55,9 +61,10 @@ export async function POST(request: NextRequest) {
       // A blanket deleteMany() would wipe the sibling type when only one source failed
       // (e.g. movies OK, TV rejected → TV cache erased). Concurrency is already
       // serialized by the outer withAdvisoryLock(2007); the tx still gives atomicity.
-      // NOTE: a fulfilled-but-empty fetch (0 rows) intentionally clears that media
-      // type's cache — for the upcoming list an empty TMDB result is a valid "nothing
-      // upcoming" state, and the cache re-warms on the next run. This deliberately
+      // NOTE: a fulfilled-but-empty fetch (0 rows, every TMDB page answered)
+      // intentionally clears that media type's cache — for the upcoming list an
+      // empty TMDB result is a valid "nothing upcoming" state, and the cache
+      // re-warms on the next run. A TMDB failure is NOT fulfilled (above). This deliberately
       // differs from the library-sync "skip delete on 0" anti-wipe guard (guardrails
       // 13/28), where 0 rows usually means a degraded fetch, not an empty library.
       await prisma.$transaction(async (tx) => {
