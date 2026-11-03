@@ -67,9 +67,13 @@ const model = (name: string) => ({
   },
   findUnique: async (args: unknown) => {
     ops.push({ op: `${name}.findUnique`, args });
-    return null;
+    if (name !== "setting") return null;
+    const key = (args as { where: { key: string } }).where.key;
+    const value = settingRows.get(key);
+    return value === undefined ? null : { key, value };
   },
 });
+const settingRows = new Map<string, string>();
 for (const m of ["mediaRequest", "user", "issue", "plexLibraryItem", "jellyfinLibraryItem", "tVEpisodeCache", "deletionVote", "setting"]) {
   shadowPrismaModel(prisma, m, model(m));
 }
@@ -80,6 +84,7 @@ beforeEach(() => {
   groupByResults.clear();
   countResults.length = 0;
   rawResponder = () => [];
+  settingRows.clear();
 });
 
 const norm = (s: string) => s.replace(/\s+/g, " ");
@@ -149,10 +154,29 @@ test("fulfillment only weighs APPROVED requests, and keeps backfilled approvals 
   await data.getFulfillmentStats(null);
   const sql = norm(rawCalls[0].sql);
   assert.match(sql, /WHERE r\."approvedAt" IS NOT NULL/, "an unapproved (mirrored / library-marked) request must not count");
-  assert.match(sql, /r\."approvedAt" = r\."createdAt" AS legacy/);
+  assert.match(sql, /false AS legacy/, "no backfill marker ⇒ no row is a backfilled one");
   assert.match(sql, /COUNT\(download_s\) FILTER \(WHERE NOT legacy\)/);
   assert.match(sql, /percentile_cont\(0\.5\)/, "a median, not just a mean");
   assert.ok(!/AND r\."createdAt" >=/.test(sql), "all time adds no window");
+});
+
+test("fulfillment: a backfilled row is approvedAt = createdAt AND created BEFORE the backfill ran — never an auto-approve from after it", async () => {
+  // Auto-approve sets approvedAt and Prisma fills createdAt in the same
+  // millisecond most of the time, so equality alone read most auto-approved
+  // requests as backfill and dropped them from the auto share and download times.
+  const ranAt = "2026-09-17T10:00:00.000Z";
+  settingRows.set("requestApprovedAtBackfillRanAt", ranAt);
+  await data.getFulfillmentStats(null);
+  const sql = norm(rawCalls[0].sql);
+  assert.match(sql, /\(r\."approvedAt" = r\."createdAt" AND r\."createdAt" < (\?|\$\d+)\) AS legacy/, "the fragment is composed into the text, not bound as a value");
+  assert.ok(rawCalls[0].values.some((v) => v instanceof Date && v.toISOString() === ranAt), "bounded by the marker's own time");
+  assert.ok(!/r\."approvedAt" = r\."createdAt" AS legacy/.test(sql), "bare equality is the old shape");
+});
+
+test("fulfillment: an unparseable backfill marker counts nothing as backfilled rather than failing the page", async () => {
+  settingRows.set("requestApprovedAtBackfillRanAt", "not a date");
+  await data.getFulfillmentStats(null);
+  assert.match(norm(rawCalls[0].sql), /false AS legacy/);
 });
 
 test("fulfillment applies the period window to createdAt", async () => {

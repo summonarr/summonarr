@@ -10,6 +10,7 @@ import { getMediaInstances } from "./media-instance-registry";
 import { isFeatureEnabled } from "./features";
 import { coalesce } from "./concurrency";
 import { processSingleton } from "./process-singleton";
+import { REQUEST_APPROVAL_BACKFILL_KEY } from "./request-approval";
 import { getCachedArrLibraryIndex, type ArrLibraryEntry } from "./library-cleanup-arr";
 import { CLEANUP_FEATURE_KEY, computeCleanupReport } from "./library-cleanup-data";
 import { getWatchGradeSummaries } from "./watch-grade-data";
@@ -103,13 +104,22 @@ const emptyDuration = (): DurationStat => ({ count: 0, medianSeconds: null, p90S
 //     available (approvedAt null, availableAt = its creation) and a PENDING
 //     request a library sync marked available (nobody approved it) used to land
 //     in the average as near-zero "fulfillments".
-//   - approvedAt = createdAt EXACTLY is the one-time backfill of rows older than
-//     the column (request-approval.ts): their approval time is unknown, so they
-//     sit out of the approve and download figures but still count request →
-//     available.
+//   - approvedAt = createdAt EXACTLY on a row created BEFORE the one-time
+//     backfill ran (request-approval.ts, its Setting marker) is a row older than
+//     the column: its approval time is unknown, so it sits out of the approve and
+//     download figures but still counts request → available. The marker bound is
+//     load-bearing: auto-approve sets approvedAt and Prisma fills createdAt in
+//     the same millisecond most of the time, so equality alone read most
+//     auto-approved requests as backfill and dropped them from every figure. No
+//     marker ⇒ the backfill never ran ⇒ no backfilled rows.
 // Known residue, accepted: availableAt is re-stamped when a title that left the
 // library comes back, so such a request reads slower than it was.
 export async function getFulfillmentStats(since: Date | null): Promise<FulfillmentStats> {
+  const marker = await prisma.setting.findUnique({ where: { key: REQUEST_APPROVAL_BACKFILL_KEY } });
+  const backfillRanAt = marker ? new Date(marker.value) : null;
+  const legacy = backfillRanAt && !Number.isNaN(backfillRanAt.getTime())
+    ? Prisma.sql`(r."approvedAt" = r."createdAt" AND r."createdAt" < ${backfillRanAt})`
+    : Prisma.sql`false`;
   const rows = await prisma.$queryRaw<Array<{
     media_type: Media | null;
     approve_n: bigint; approve_med: number | null; approve_p90: number | null;
@@ -120,7 +130,7 @@ export async function getFulfillmentStats(since: Date | null): Promise<Fulfillme
     WITH r AS (
       SELECT r."mediaType" AS media_type,
              EXTRACT(EPOCH FROM (r."approvedAt" - r."createdAt"))::float8 AS approve_s,
-             r."approvedAt" = r."createdAt" AS legacy,
+             ${legacy} AS legacy,
              CASE WHEN r.status = 'AVAILABLE' AND r."availableAt" > r."approvedAt"
                   THEN EXTRACT(EPOCH FROM (r."availableAt" - r."approvedAt"))::float8 END AS download_s,
              CASE WHEN r.status = 'AVAILABLE' AND r."availableAt" > r."createdAt"

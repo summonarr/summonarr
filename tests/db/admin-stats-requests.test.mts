@@ -33,6 +33,8 @@ async function seedFulfillment() {
   await makeRequest(u.id, { createdAt: b, approvedAt: plus(b, 1), status: "APPROVED" });
   const c = daysAgo(30); // TV, legacy backfill (approvedAt === createdAt), available a day later
   await makeRequest(u.id, { mediaType: "TV", createdAt: c, approvedAt: c, availableAt: plus(c, 86400), status: "AVAILABLE" });
+  // The one-time backfill ran after `c` was created (request-approval.ts marker).
+  await prisma.setting.create({ data: { key: "requestApprovedAtBackfillRanAt", value: daysAgo(20).toISOString() } });
   // never approved: must not appear in any figure
   await makeRequest(u.id, { createdAt: daysAgo(5), status: "PENDING" });
   await makeRequest(u.id, { createdAt: daysAgo(5), status: "AVAILABLE", availableAt: daysAgo(4) });
@@ -55,6 +57,27 @@ test("getFulfillmentStats without a window: medians, legacy rows, auto vs admin,
   assert.equal(s.byMediaType.TV.download.count, 0);
   assert.equal(s.byMediaType.TV.download.medianSeconds, null);
   assert.deepEqual(s.byMediaType.TV.total, { count: 1, medianSeconds: 86400, p90Seconds: 86400 });
+});
+
+test("getFulfillmentStats: an auto-approve stamped in the same millisecond as createdAt AFTER the backfill is auto-approved, not legacy", async () => {
+  // request-create.ts sets approvedAt: new Date() and Prisma fills createdAt in
+  // the same millisecond most of the time. Equality alone read these as backfill.
+  const u = await makeUser();
+  await prisma.setting.create({ data: { key: "requestApprovedAtBackfillRanAt", value: daysAgo(20).toISOString() } });
+  const d = daysAgo(3);
+  await makeRequest(u.id, { createdAt: d, approvedAt: d, availableAt: plus(d, 5400), status: "AVAILABLE" });
+  const s = await getFulfillmentStats(null);
+  assert.equal(s.autoApproved, 1, "counted as auto-approved");
+  assert.deepEqual(s.download, { count: 1, medianSeconds: 5400, p90Seconds: 5400 }, "its download time counts");
+});
+
+test("getFulfillmentStats with NO backfill marker counts no row as legacy", async () => {
+  const u = await makeUser();
+  const d = daysAgo(3);
+  await makeRequest(u.id, { createdAt: d, approvedAt: d, availableAt: plus(d, 600), status: "AVAILABLE" });
+  const s = await getFulfillmentStats(null);
+  assert.equal(s.autoApproved, 1);
+  assert.equal(s.download.count, 1);
 });
 
 test("getFulfillmentStats with a window: the optional since clause drops the old row", async () => {
