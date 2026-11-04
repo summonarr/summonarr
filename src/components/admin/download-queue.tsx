@@ -124,7 +124,7 @@ const COLUMNS: ReadonlyArray<{ id: ColumnId; label: string }> = [
   { id: "indexer", label: "adminManage.queue.col.indexer" },
   { id: "requestedBy", label: "adminManage.queue.col.requestedBy" },
 ];
-const DEFAULT_HIDDEN: ReadonlySet<ColumnId> = new Set<ColumnId>(["languages", "customFormats", "eta", "added"]);
+const DEFAULT_HIDDEN: ReadonlySet<ColumnId> = new Set<ColumnId>(["instance", "quality", "languages", "customFormats", "eta", "added", "size", "downloadClient", "indexer"]);
 const COLUMN_IDS = new Set<string>(COLUMNS.map((c) => c.id));
 const isColumnId = (v: unknown): v is ColumnId => typeof v === "string" && COLUMN_IDS.has(v);
 // Per-viewer convenience only: a blocked or empty store just means the defaults.
@@ -479,8 +479,8 @@ export function DownloadQueue({
         return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{arrLabel}</td>;
       case "status":
         return (
-          <td style={{ ...td, maxWidth: 280 }}>
-            <div className="flex flex-wrap items-center gap-1" style={{ minWidth: 150 }}>
+          <td style={{ ...td, maxWidth: 220 }}>
+            <div className="flex flex-wrap items-center gap-1" style={{ minWidth: 110 }}>
               <Chip tone={PHASE_TONE[r.phase]}>{t(`adminManage.queue.phase.${r.phase}`)}</Chip>
               {r.attention && (
                 <Chip tone="pending">
@@ -524,7 +524,7 @@ export function DownloadQueue({
               <div style={{ width: `${Math.round(r.progress * 100)}%`, height: "100%", background: r.attention ? "var(--ds-warning)" : "var(--ds-accent)" }} />
             </div>
             <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)", marginTop: 3, whiteSpace: "nowrap" }}>
-              {fmt.percent(r.progress)} · {fmt.size(r.size - r.sizeLeft)}
+              {fmt.percent(r.progress)} · {fmt.size(r.size - r.sizeLeft)} / {fmt.size(r.size)}
             </div>
           </td>
         );
@@ -781,7 +781,7 @@ export function DownloadQueue({
                 <tr style={{ background: "var(--ds-bg-2)", textAlign: "left", color: "var(--ds-fg-subtle)", fontSize: 11 }}>
                   <th style={th}>{t("adminManage.queue.col.title")}</th>
                   {shownColumns.map((c) => (
-                    <th key={c.id} style={{ ...th, whiteSpace: "nowrap", ...(c.id === "progress" ? { minWidth: 150 } : {}) }}>{t(c.label)}</th>
+                    <th key={c.id} style={{ ...th, whiteSpace: "nowrap", ...(c.id === "progress" ? { minWidth: 130 } : {}) }}>{t(c.label)}</th>
                   ))}
                   <th style={th} />
                 </tr>
@@ -838,15 +838,29 @@ export function DownloadQueue({
                                   {r.episodes.length > 1 && <span> · {t("adminManage.queue.episodeCount", { count: r.episodes.length })}</span>}
                                 </div>
                               )}
-                              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
-                                {r.title}
+                              {/* Chiplets stand in for every detail column the viewer has hidden, so the table stays narrow. */}
+                              <div className="flex flex-wrap items-center gap-1" style={{ marginTop: 3 }}>
+                                {multiInstance && hidden.has("instance") && <Chip>{arrLabel}</Chip>}
+                                {hidden.has("quality") && r.quality && <Chip>{r.quality}</Chip>}
+                                {hidden.has("quality") && r.qualityTags.map((q) => <Chip key={q}>{t(QUALITY_TAG_LABEL[q])}</Chip>)}
+                                {hidden.has("size") && r.size > 0 && <Chip>{fmt.size(r.size)}</Chip>}
+                                {hidden.has("downloadClient") && r.downloadClient && (
+                                  <Chip>{protocolIcon(r)} {r.downloadClient}</Chip>
+                                )}
+                                {hidden.has("indexer") && r.indexer && <Chip>{r.indexer}</Chip>}
+                                {hidden.has("languages") && r.languages.length > 0 && <Chip>{r.languages.join(", ")}</Chip>}
                               </div>
+                              {r.title !== title && (
+                                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
+                                  {r.title}
+                                </div>
+                              )}
                             </div>
                           </div>
                         </td>
                         {shownColumns.map((c) => <Fragment key={c.id}>{cell(c.id, r, arrLabel)}</Fragment>)}
                         <td style={{ ...td, textAlign: "right" }}>
-                          <div className="flex flex-wrap justify-end gap-1" style={{ minWidth: 150, maxWidth: 240, marginLeft: "auto" }}>
+                          <div className="flex flex-wrap justify-end gap-1" style={{ maxWidth: 170, marginLeft: "auto" }}>
                             {/* Unknown/unmatched downloads name no title on the instance — nothing to manage. */}
                             {arrId !== null && (
                               <Button
@@ -885,32 +899,32 @@ export function DownloadQueue({
                             {/* A held release was never downloaded — there is nothing to search a replacement FOR yet. */}
                             {!r.pending && (
                               <Button
-                                size="xs"
+                                size="icon-xs"
                                 variant="outline"
+                                title={t("adminManage.queue.action.blocklistSearch")}
                                 onClick={() => openRemove(r, "blocklistSearch")}
                                 aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
                               >
                                 <RotateCcw />
-                                {t("adminManage.queue.action.blocklistSearch")}
                               </Button>
                             )}
                             <Button
-                              size="xs"
+                              size="icon-xs"
                               variant="outline"
+                              title={t("adminManage.queue.action.blocklist")}
                               onClick={() => openRemove(r, "blocklist")}
                               aria-label={t("adminManage.queue.action.blocklistAria", { title: r.mediaTitle || r.title })}
                             >
                               <Ban />
-                              {t("adminManage.queue.action.blocklist")}
                             </Button>
                             <Button
-                              size="xs"
+                              size="icon-xs"
                               variant="ghost"
+                              title={t("adminManage.queue.remove.button")}
                               onClick={() => openRemove(r, "remove")}
                               aria-label={t("adminManage.queue.remove.aria", { title: r.mediaTitle || r.title })}
                             >
                               <Trash2 />
-                              {t("adminManage.queue.remove.button")}
                             </Button>
                           </div>
                         </td>
