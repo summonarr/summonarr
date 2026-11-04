@@ -47,6 +47,17 @@ export async function pingPlexToken(token: string, clientId?: string): Promise<b
   }
 }
 
+/** The account's servers from plex.tv, as plex.tv reports them (parse with parsePlexResources). */
+export async function getPlexResources(token: string): Promise<unknown> {
+  const res = await safeFetchTrusted("https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1", {
+    allowedHosts: PLEX_TV_HOSTS,
+    headers: { ...PLEX_HEADERS, "X-Plex-Token": token },
+    timeoutMs: 15_000,
+  });
+  if (!res.ok) throw new Error(`Failed to fetch Plex servers: ${res.status}`);
+  return res.json();
+}
+
 export async function getPlexUser(token: string, clientId?: string): Promise<PlexUser> {
   const res = await safeFetchTrusted("https://plex.tv/api/v2/user", {
     allowedHosts: PLEX_TV_HOSTS,

@@ -80,6 +80,7 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/admin/activity-warm", reason: "admin cache warm trigger" },
   { route: "/admin/blacklist", reason: "admin blacklist management" },
   { route: "/admin/ip-lookup", reason: "admin IP geolocation lookup" },
+  { route: "/admin/plex/servers", reason: "admin Plex server picker for settings" },
   { route: "/admin/mdblist-warm", reason: "admin cache warm trigger" },
   { route: "/admin/omdb-warm", reason: "admin cache warm trigger" },
   { route: "/admin/play-history/heatmap-cell", reason: "admin activity drill-down" },

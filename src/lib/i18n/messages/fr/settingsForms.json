@@ -455,5 +455,17 @@
   "settings.form.apiKey.traktSecret.label": "Client Secret Trakt",
   "settings.form.apiKey.traktSecret.help": "Permet aux utilisateurs de connecter leur propre compte Trakt depuis leur profil, pour demander automatiquement depuis leur liste de suivi Trakt et utiliser leur historique Trakt dans les recommandations. Copiez le Client Secret de la même application sur {link}.",
   "settings.form.agents.event.request.comment": "Commentaire de demande",
-  "settings.form.agents.event.stream.concurrent": "Flux simultanés"
+  "settings.form.agents.event.stream.concurrent": "Flux simultanés",
+  "settings.form.plex.loadServers": "Charger mes serveurs",
+  "settings.form.plex.loadingServers": "Chargement…",
+  "settings.form.plex.serversFailed": "Impossible de charger vos serveurs.",
+  "settings.form.plex.noServers": "Aucun serveur sur ce compte Plex.",
+  "settings.form.plex.useServer": "Utiliser",
+  "settings.form.plex.allowFallback": "Essayer d'autres adresses en cas d'échec",
+  "settings.form.plex.allowFallbackHelp": "Désactivé : seule l'adresse préférée est essayée. Activé : essaie LAN, distante, puis relais, et peut finir sur un relais lent à bande passante limitée.",
+  "settings.form.plex.relayWarning": "Adresse relais utilisée : lente et à bande passante limitée.",
+  "settings.form.plex.autoPick": "Auto",
+  "settings.form.plex.connLocal": "Locale",
+  "settings.form.plex.connRemote": "Distante",
+  "settings.form.plex.connRelay": "Relais (lent)"
 }

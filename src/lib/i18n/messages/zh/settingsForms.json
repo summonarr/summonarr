@@ -455,5 +455,17 @@
   "settings.form.apiKey.traktSecret.label": "Trakt Client Secret",
   "settings.form.apiKey.traktSecret.help": "允许用户在个人资料中连接自己的 Trakt 账户，以便从其 Trakt 待看清单自动请求，并将其 Trakt 观看记录用于推荐。请在 {link} 中从同一应用复制 Client Secret。",
   "settings.form.agents.event.request.comment": "请求评论",
-  "settings.form.agents.event.stream.concurrent": "同时播放"
+  "settings.form.agents.event.stream.concurrent": "同时播放",
+  "settings.form.plex.loadServers": "加载我的服务器",
+  "settings.form.plex.loadingServers": "加载中…",
+  "settings.form.plex.serversFailed": "无法加载你的服务器。",
+  "settings.form.plex.noServers": "此 Plex 账户下没有服务器。",
+  "settings.form.plex.useServer": "使用",
+  "settings.form.plex.allowFallback": "失败时回退到其他地址",
+  "settings.form.plex.allowFallbackHelp": "关闭：只尝试首选地址。开启：依次尝试局域网、远程、中继，可能最终使用缓慢且带宽受限的中继。",
+  "settings.form.plex.relayWarning": "正在使用中继地址——速度慢且带宽受限。",
+  "settings.form.plex.autoPick": "自动",
+  "settings.form.plex.connLocal": "本地",
+  "settings.form.plex.connRemote": "远程",
+  "settings.form.plex.connRelay": "中继（较慢）"
 }

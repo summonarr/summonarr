@@ -153,6 +153,14 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   const [serverStatus, setServerStatus] = useState<"idle" | "saving" | "testing" | "ok" | "error">("idle");
   const [serverErrorMessage, setServerErrorMessage] = useState<string>("");
   const [librariesCount, setLibrariesCount] = useState<number | null>(null);
+  // Account server picker: the list comes from plex.tv, and a pick is resolved to an
+  // address that answers from this server (the browser names the machine id only).
+  const [accountServers, setAccountServers] = useState<{ machineId: string; name: string; connections: { uri: string; local: boolean; relay: boolean }[] }[] | null>(null);
+  const [serversStatus, setServersStatus] = useState<"idle" | "loading" | "error">("idle");
+  const [serversError, setServersError] = useState("");
+  const [allowFallback, setAllowFallback] = useState(true);
+  const [resolving, setResolving] = useState<string | null>(null);
+  const [relayPicked, setRelayPicked] = useState(false);
   const [importStatus, setImportStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [importResult, setImportResult] = useState<{ marked: number; scanned: { movies: number; tv: number } } | null>(null);
 
@@ -255,6 +263,49 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
     }
     setError(t("settings.form.plex.disconnectFailed"));
     setStatus("error");
+  }
+
+  async function loadAccountServers() {
+    setServersStatus("loading");
+    setServersError("");
+    try {
+      const res = await fetch(withBasePath("/api/admin/plex/servers"));
+      const body = (await res.json().catch(() => ({}))) as { servers?: { machineId: string; name: string; connections: { uri: string; local: boolean; relay: boolean }[] }[]; error?: string };
+      if (!res.ok || !body.servers) {
+        setServersError(body.error ?? t("settings.form.plex.serversFailed"));
+        setServersStatus("error");
+        return;
+      }
+      setAccountServers(body.servers);
+      setServersStatus("idle");
+    } catch {
+      setServersError(t("settings.form.plex.serversFailed"));
+      setServersStatus("error");
+    }
+  }
+
+  async function pickAccountServer(machineId: string) {
+    setResolving(machineId);
+    setServersError("");
+    try {
+      const res = await fetch(withBasePath("/api/admin/plex/servers"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ machineId, fallback: allowFallback }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { url?: string; relay?: boolean; error?: string };
+      if (!res.ok || !body.url) {
+        setServersError(body.error ?? t("settings.form.plex.serversFailed"));
+      } else {
+        setServerUrl(body.url);
+        setRelayPicked(body.relay === true);
+        setServerStatus("idle");
+      }
+    } catch {
+      setServersError(t("settings.form.plex.serversFailed"));
+    } finally {
+      setResolving(null);
+    }
   }
 
   async function handleSaveServerUrl(e: React.FormEvent) {
@@ -399,13 +450,85 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                 id="plex-server-url"
                 type="url"
                 value={serverUrl}
-                onChange={(e) => { setServerUrl(e.target.value); setServerStatus("idle"); }}
+                onChange={(e) => { setServerUrl(e.target.value); setServerStatus("idle"); setRelayPicked(false); }}
                 placeholder="http://192.168.1.100:32400"
                 className="bg-zinc-800 border-zinc-700 font-mono"
               />
               <p className="text-xs text-zinc-500">
                 {t("settings.form.plex.serverUrlHelp")}
               </p>
+              {relayPicked && <p className="text-xs text-amber-400">{t("settings.form.plex.relayWarning")}</p>}
+            </div>
+            <div className="space-y-2 rounded-lg border border-zinc-800 p-3">
+              <div className="flex items-center gap-3 flex-wrap">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void loadAccountServers()}
+                  disabled={serversStatus === "loading"}
+                >
+                  {serversStatus === "loading" ? (
+                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.plex.loadingServers")}</>
+                  ) : (
+                    t("settings.form.plex.loadServers")
+                  )}
+                </Button>
+                <label className="flex items-center gap-2 text-xs text-zinc-400">
+                  <input type="checkbox" checked={allowFallback} onChange={(e) => setAllowFallback(e.target.checked)} />
+                  {t("settings.form.plex.allowFallback")}
+                </label>
+              </div>
+              <p className="text-xs text-zinc-500">{t("settings.form.plex.allowFallbackHelp")}</p>
+              {accountServers !== null && accountServers.length === 0 && (
+                <p className="text-xs text-zinc-500">{t("settings.form.plex.noServers")}</p>
+              )}
+              {accountServers !== null && accountServers.length > 0 && (
+                <ul className="m-0 list-none space-y-1 p-0">
+                  {accountServers.map((sv) => (
+                    <li key={sv.machineId} className="space-y-1">
+                      <div className="flex items-center justify-between gap-2 text-sm">
+                        <span className="min-w-0 truncate font-medium">{sv.name}</span>
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={resolving !== null}
+                          onClick={() => void pickAccountServer(sv.machineId)}
+                        >
+                          {resolving === sv.machineId ? <Loader2 className="animate-spin" /> : null}
+                          {t("settings.form.plex.autoPick")}
+                        </Button>
+                      </div>
+                      <ul className="m-0 list-none space-y-1 p-0 pl-3">
+                        {sv.connections.map((c) => (
+                          <li key={c.uri} className="flex items-center justify-between gap-2 text-xs">
+                            <span className="min-w-0 truncate">
+                              <span className={c.relay ? "text-amber-400" : "text-zinc-400"}>
+                                {t(c.relay ? "settings.form.plex.connRelay" : c.local ? "settings.form.plex.connLocal" : "settings.form.plex.connRemote")}
+                              </span>{" "}
+                              <span className="font-mono text-zinc-500">{c.uri}</span>
+                            </span>
+                            <Button
+                              type="button"
+                              size="xs"
+                              variant="ghost"
+                              onClick={() => { setServerUrl(c.uri); setRelayPicked(c.relay); setServerStatus("idle"); }}
+                            >
+                              {t("settings.form.plex.useServer")}
+                            </Button>
+                          </li>
+                        ))}
+                      </ul>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {serversError && (
+                <p role="alert" className="flex items-center gap-1.5 text-xs text-red-400">
+                  <XCircle className="w-3.5 h-3.5" />{serversError}
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-3 flex-wrap">
               <Button
