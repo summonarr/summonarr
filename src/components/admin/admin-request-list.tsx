@@ -572,7 +572,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
           return (
             <div
               key={group.groupKey}
-              className="flex flex-wrap xl:flex-nowrap items-start"
+              className="flex flex-col"
               style={{
                 gap: 14,
                 padding: 14,
@@ -581,6 +581,10 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 borderRadius: 8,
               }}
             >
+              {/* The row and the thread are separate flex children of the card: the
+                  thread used to sit INSIDE the xl:flex-nowrap row with basis-full, so at xl
+                  it claimed the whole width and squeezed the title column to ~100px. */}
+              <div className="flex flex-wrap xl:flex-nowrap items-start" style={{ gap: 14 }}>
               <div
                 className="flex items-center shrink-0"
                 style={{ height: TITLE_LINE_PX, width: 20 }}
@@ -896,10 +900,12 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 />
               </div>
 
+              </div>
+
               {/* One collapsed thread per requester: a group can hold several
                   people's requests for the same title, and each conversation is
                   private to its own requester. Nothing loads until it is opened. */}
-              <div className="basis-full">
+              <div>
                 {group.requesters.map((r) => (
                   <div key={r.requestId} className="flex flex-col items-start">
                     {group.requesters.length > 1 && (
