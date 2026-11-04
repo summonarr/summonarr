@@ -547,6 +547,9 @@ const fakePrisma = {
   jellyfinLibraryItem: {
     findFirst: async (args?: { where?: { serverInstance?: { in?: string[] } } }) =>
       preservedRowHit("jellyfinLibraryItem", args?.where?.serverInstance?.in),
+    // The empty-answer guard's "does this instance already hold rows?" count (the Plex twin above).
+    count: async (args?: { where?: { serverInstance?: string } }) =>
+      preservedRowSlugs.jellyfinLibraryItem.has(args?.where?.serverInstance ?? "") ? 1 : 0,
     deleteMany: async (args?: { where?: Record<string, unknown> }) => {
       orphanSweepDeletes.push({ model: "jellyfinLibraryItem", where: args?.where });
       return { count: 0 };
@@ -1898,6 +1901,53 @@ test("an EMPTY Plex answer for an instance that holds stored rows is held back �
   );
   assert.ok((b.failedSources as string[]).includes("plex"), "the Plex source is reported degraded");
   assert.ok(warns.some((w) => w.includes("returned no movies or shows")), "the hold-back is warned once");
+});
+
+// The Jellyfin twin of the Plex hold: Jellyfin answers 200 with no titles for a selected
+// library that was recreated under a new id, or while it is mid-scan.
+function jellyfinWithFolders(movieTmdbIds: number[], folders: Array<{ Id: string; Name: string; CollectionType: string }>): (url: URL) => Response {
+  const items = jellyfinResponder(movieTmdbIds);
+  return (url) => (url.pathname === "/Library/MediaFolders" ? okJson({ Items: folders }) : items(url));
+}
+
+test("an EMPTY Jellyfin answer for an instance that holds stored rows is held back — rows survive, no success stamp, source reported degraded", async () => {
+  configureBothServers();
+  preservedRowSlugs.jellyfinLibraryItem.add("");
+  const plex = plexResponder([300]);
+  const jf = jellyfinWithFolders([], [{ Id: "m1", Name: "Movies", CollectionType: "movies" }]);
+  respond = (url) => (url.origin === JF_BASE ? jf(url) : plex(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(
+    txTouching("jellyfinLibraryItem").length,
+    0,
+    "an empty answer must not run the scoped delete+rewrite that would wipe the instance's rows",
+  );
+  assert.equal(
+    txTouching("tVEpisodeCache").filter((t) => t.ops.some((o) => o.method === "deleteMany" && JSON.stringify(o.args).includes('"jellyfin"'))).length,
+    0,
+    "the Jellyfin episode rewrite is vetoed while an instance is held back",
+  );
+  assert.ok(!settingUpserts.some((u) => u.key === "lastJellyfinSyncSucceededAt"), "no success stamp");
+  assert.ok((b.failedSources as string[]).includes("jellyfin"), "the Jellyfin source is reported degraded");
+  assert.ok(warns.some((w) => w.includes('Jellyfin instance "') && w.includes("keeping")), "the hold-back is warned");
+});
+
+test("an EMPTY Jellyfin answer for an instance with NO stored rows still proceeds", async () => {
+  configureBothServers();
+  const plex = plexResponder([300]);
+  const jf = jellyfinWithFolders([], []);
+  respond = (url) => (url.origin === JF_BASE ? jf(url) : plex(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(txTouching("jellyfinLibraryItem").length, 1, "nothing to protect, so the (empty) replace runs as before");
 });
 
 test("an EMPTY Plex answer for an instance with NO stored rows still proceeds — a genuinely new or empty server is not blocked", async () => {

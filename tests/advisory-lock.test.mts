@@ -271,3 +271,42 @@ test("a failing unlock does not turn an otherwise-successful run into a failure"
   const result = await withAdvisoryLock(WARM_OMDB_LOCK_ID, async () => "ok", () => "busy");
   assert.equal(result, "ok");
 });
+
+test("a lost connection aborts the signal so the work stops while the lock is already free", async () => {
+  reset([{ acquired: true }]);
+  let seen: AbortSignal | null = null;
+  let release: () => void = () => {};
+  const pending = withAdvisoryLock(
+    WARM_OMDB_LOCK_ID,
+    (signal: AbortSignal) => {
+      seen = signal;
+      return new Promise<string>((resolve) => {
+        signal.addEventListener("abort", () => resolve("stopped"), { once: true });
+        release = () => resolve("finished");
+      });
+    },
+    () => "busy" as const,
+  );
+  await new Promise((r) => setImmediate(r));
+  assert.ok(lastClient, "client captured");
+  (lastClient as EventEmitter).emit("error", new Error("Connection terminated unexpectedly"));
+  assert.equal(await pending, "stopped");
+  assert.equal((seen as AbortSignal | null)?.aborted, true);
+  assert.equal(((seen as AbortSignal | null)?.reason as Error).name, "AdvisoryLockConnectionLostError");
+  release();
+});
+
+test("our own unlock and end() do not read as a lost connection", async () => {
+  reset([{ acquired: true }]);
+  let seen: AbortSignal | null = null;
+  await withAdvisoryLock(
+    WARM_OMDB_LOCK_ID,
+    async (signal: AbortSignal) => {
+      seen = signal;
+      return 1;
+    },
+    () => "busy" as const,
+  );
+  (lastClient as unknown as EventEmitter).emit("end");
+  assert.equal((seen as AbortSignal | null)?.aborted, false);
+});

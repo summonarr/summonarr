@@ -9,7 +9,7 @@ import {
 import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, plexLibraryRatingKeys, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "@/lib/plex";
 import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
-import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
+import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinMediaFolders, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
@@ -30,6 +30,7 @@ import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-vi
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
 import { plexHoldNeedsCounts, plexHoldReason } from "@/lib/plex-sync-guard";
+import { jellyfinHoldNeedsCounts, jellyfinHoldReason } from "@/lib/jellyfin-sync-guard";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -996,6 +997,36 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
               getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds),
               getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds),
             ]);
+            // A SHORT answer for a server we already hold rows for is not a complete
+            // picture (a library recreated under a new id, a server mid-scan): treated
+            // as a success it would wipe the rows and the episode cache and demote
+            // AVAILABLE requests. Hold the instance back like a failed fetch. The admin's
+            // Resync (/api/sync/jellyfin, full) is the deliberate unguarded way to empty
+            // a library. Rules: jellyfin-sync-guard.ts, the twin of the Plex hold above.
+            const holdInput = { selectedIds: selectedJellyfinIds, movieCount: movieIds.size, tvCount: tvIds.size };
+            if (jellyfinHoldNeedsCounts(holdInput)) {
+              const [heldMovieRows, heldTvRows] = await Promise.all([
+                prisma.jellyfinLibraryItem.count({ where: { serverInstance: instance.slug, mediaType: "MOVIE" } }),
+                prisma.jellyfinLibraryItem.count({ where: { serverInstance: instance.slug, mediaType: "TV" } }),
+              ]);
+              // The server's libraries only matter once something is stored to protect.
+              const folders = heldMovieRows > 0 || heldTvRows > 0 ? await getJellyfinMediaFolders(baseUrl, apiKey) : [];
+              const hold = jellyfinHoldReason({ ...holdInput, folders, heldMovieRows, heldTvRows });
+              if (hold) {
+                const noun = (mediaType: "MOVIE" | "TV") => (mediaType === "MOVIE" ? "movies" : "shows");
+                warnOnChange(
+                  `sync:jellyfin-empty:${instance.slug}`,
+                  hold.kind === "missing-library" ? `missing:${hold.mediaType}:${hold.ids.join(",")}` : hold.kind === "empty-type" ? `empty:${hold.mediaType}` : "empty",
+                  hold.kind === "missing-library"
+                    ? `[sync] Jellyfin instance "${instance.slug}" returned no ${noun(hold.mediaType)} and a selected library is no longer on the server (${hold.ids.join(", ")}) — keeping its stored rows (a library recreated in Jellyfin gets a new id: tick it in the Jellyfin library settings; if it was removed on purpose, Resync the Jellyfin source)`
+                    : hold.kind === "empty-type"
+                      ? `[sync] Jellyfin instance "${instance.slug}" returned no ${noun(hold.mediaType)} but has stored rows of them — keeping them (check whether Jellyfin is still scanning; Resync clears a library that really was emptied)`
+                      : `[sync] Jellyfin instance "${instance.slug}" returned no movies or shows but has stored library rows — keeping them (check the selected libraries, or whether Jellyfin is still scanning)`,
+                );
+                return { slug: instance.slug, result: null };
+              }
+            }
+            forgetWarnOnChange(`sync:jellyfin-empty:${instance.slug}`);
             return { slug: instance.slug, result: { baseUrl, apiKey, movieIds, tvIds } };
           } catch (err) {
             console.error(`[sync] Jellyfin check failed for instance "${instance.slug}":`, err);

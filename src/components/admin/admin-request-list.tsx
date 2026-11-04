@@ -95,6 +95,11 @@ interface AdminRequestListProps {
   arrServices?: { radarr: boolean; sonarr: boolean };
 }
 
+// The first line of every request card — the select checkbox, the title (with its
+// Open-in / Manage icons) and the status chip — shares this height and centres its
+// content in it, so the three sit on one line instead of each hanging from the top.
+const TITLE_LINE_PX = 24;
+
 function formatUserLabel(r: Requester, t: Translator) {
   if (r.userEmail.endsWith("@discord.local")) {
     return (
@@ -578,7 +583,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             >
               <div
                 className="flex items-center shrink-0"
-                style={{ paddingTop: 2, width: 20 }}
+                style={{ height: TITLE_LINE_PX, width: 20 }}
               >
                 {pendingIds.length > 0 ? (
                   // The label pads the 16px box out to a ~32px touch target
@@ -630,7 +635,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
               </div>
 
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1 min-w-0">
+                <div className="flex items-center gap-1 min-w-0" style={{ minHeight: TITLE_LINE_PX }}>
                 <Link
                   href={`/${group.mediaType === "MOVIE" ? "movie" : "tv"}/${group.tmdbId}`}
                   className="group inline-flex items-center gap-1 font-medium transition-colors truncate max-w-full"
@@ -869,7 +874,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 )}
               </div>
 
-              <div className="hidden sm:inline-flex shrink-0">
+              <div className="hidden sm:inline-flex items-center shrink-0" style={{ height: TITLE_LINE_PX }}>
                 <Chip tone={REQUEST_STATUS_TONE[group.aggregateStatus]}>
                   {t(`requests.status.${group.aggregateStatus.toLowerCase()}`)}
                 </Chip>

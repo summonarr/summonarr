@@ -44,6 +44,15 @@ export class AdvisoryLockTimeoutError extends Error {
   }
 }
 
+export class AdvisoryLockConnectionLostError extends Error {
+  constructor(lockId: number, reason: unknown) {
+    super(
+      `Advisory lock ${lockId} connection lost: ${reason instanceof Error ? reason.message : String(reason)}`,
+    );
+    this.name = "AdvisoryLockConnectionLostError";
+  }
+}
+
 export interface AdvisoryLockOptions {
   /** Hard cap on `work()` runtime; lock is released by the finally even if the timer wins. */
   timeoutMs?: number;
@@ -77,12 +86,28 @@ export async function withAdvisoryLock<T, U = T>(
   // exception, so an unhandled one here takes down the entire app process — not just
   // the cron run that opened it. Postgres releases session-scoped advisory locks when
   // the session dies, so by the time this fires the lock is already free.
+  //
+  // The lock being free is exactly why the work must STOP: the next cron tick can
+  // take it and start a second run while this one is still going. So a connection
+  // loss aborts the signal, and signal-aware work (the sync orchestrator's arm
+  // boundaries, guardrail 41) returns instead of racing its successor.
+  let releasing = false;
+  const onConnectionLost = (reason: unknown) => {
+    if (releasing) return;
+    if (!controller.signal.aborted) {
+      controller.abort(new AdvisoryLockConnectionLostError(lockId, reason));
+    }
+  };
   client.on("error", (err) => {
     console.error(
       `[advisory-lock] connection error while holding lock ${lockId}:`,
       err instanceof Error ? err.message : err,
     );
+    onConnectionLost(err);
   });
+  // A clean server-side close (pg_terminate_backend, a restart) emits 'end'
+  // without 'error' on some paths.
+  client.on("end", () => onConnectionLost(new Error("connection ended")));
   await client.connect();
   try {
     // Bound any single statement (and any transaction left idle) so a wedged query
@@ -119,6 +144,9 @@ export async function withAdvisoryLock<T, U = T>(
         if (timer) clearTimeout(timer);
       }
     } finally {
+      // From here the disconnect is ours: the unlock and end() below must not
+      // read as a lost connection.
+      releasing = true;
       // On a dead connection this rejects, and because it sits in a finally it would
       // REPLACE the error already propagating out of work() with a confusing
       // secondary one. Postgres has already released the lock in that case, so
