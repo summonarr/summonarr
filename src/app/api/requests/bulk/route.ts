@@ -31,6 +31,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { greenlitPeerStatuses } from "@/lib/request-mirror";
+import { dropStaleDeclinedMany, restoreThread } from "@/lib/request-comment-carry";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
 // "request on behalf of" flow. A single self-item or whole collection both go
@@ -584,18 +585,16 @@ export const POST = withPermission([
       createdRows = await runWithSerializableRetry(() =>
         prisma.$transaction(
           async (tx) => {
-            // First statement: drop the stale, non-permanent DECLINED rows the inserts
+            // First write: drop the stale, non-permanent DECLINED rows the inserts
             // below would otherwise collide with on the unique
             // (tmdbId, mediaType, requestedBy, arrInstance). CAS on status +
             // permanentlyDeclined so an admin who re-approved or made the decline
             // permanent since the snapshot keeps that row intact — createMany
             // skipDuplicates then simply doesn't recreate it, rather than orphaning
-            // its ARR grab or evading a permanent ban.
-            if (staleDeclinedIds.length > 0) {
-              await tx.mediaRequest.deleteMany({
-                where: { id: { in: staleDeclinedIds }, status: "DECLINED", permanentlyDeclined: false },
-              });
-            }
+            // its ARR grab or evading a permanent ban. Each dropped row's comment
+            // thread is read first (it would cascade) and restored below onto the
+            // row created for the same key (request-comment-carry.ts).
+            const carriedThreads = await dropStaleDeclinedMany(tx, staleDeclinedIds);
             for (const mt of ["MOVIE", "TV"] as MediaType[]) {
               const n = prepared.filter((p) => p.mediaType === mt).length;
               if (n === 0) continue;
@@ -690,7 +689,14 @@ export const POST = withPermission([
               where: { requestedBy: targetUserId, OR: createPairs },
               select: { id: true, tmdbId: true, mediaType: true, status: true },
             });
-            return after.filter((r) => !beforeIds.has(r.id));
+            const created = after.filter((r) => !beforeIds.has(r.id));
+            // Only a row this call created can take a thread: while the old row
+            // still holds the key, skipDuplicates creates nothing for it.
+            for (const r of created) {
+              const staleId = staleDeclinedIdByKey.get(keyOf(r.tmdbId, r.mediaType));
+              if (staleId) await restoreThread(tx, r.id, carriedThreads.get(staleId));
+            }
+            return created;
           },
           { isolationLevel: "Serializable" },
         ),

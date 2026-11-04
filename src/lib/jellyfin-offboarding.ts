@@ -6,10 +6,11 @@
 // Summonarr session it already holds stays valid: a browser's until its
 // configured deadline, the iOS app's forever (guardrail 6c). The hourly Jellyfin
 // user sync (download-policy.ts) is the one place that learns of the departure,
-// so it hands every identity it just marked inactive to this module, and the
-// account whose SIGN-IN identity it is — User.jellyfinUserId, which only the
-// Jellyfin and QuickConnect sign-ins write — is signed out everywhere through
-// revokeAllUserSessions, with an audit row.
+// so it puts every identity it marks inactive on this module's pending ledger
+// the moment that write commits (noteJellyfinDepartures). Once every server has
+// synced, the account whose SIGN-IN identity it is — User.jellyfinUserId, which
+// only the Jellyfin and QuickConnect sign-ins write — is signed out everywhere
+// through revokeAllUserSessions, with an audit row.
 //
 // Rules:
 //   - Only when the identity is gone from EVERY configured Jellyfin server
@@ -28,6 +29,10 @@
 //     42 (the role-change lock) inside the revoke's own transaction.
 //   - Never a hard delete (guardrail 28). The sessions go; the account and every
 //     MediaServerUser row stay.
+//   - An identity enters the pending ledger as soon as its inactive write
+//     commits (guardrail 27: the mark follows the write), not when the run ends.
+//     Offboarding acts on the active→inactive transition, which the sync sees
+//     once: a run that then threw before handing the id over lost it for good.
 //   - An identity leaves the pending ledger only once DECIDED (revoked, exempt,
 //     still a member, or no account), and only after the revoke committed
 //     (guardrail 27), so a failed revoke or a poisoned run retries next hour.
@@ -59,14 +64,21 @@ export interface OffboardRunResult {
   deferred: boolean;
 }
 
+/**
+ * Jellyfin user ids the sync just wrote inactive (removed or disabled). Call it
+ * right after that write commits, never before (guardrail 27), and never defer it
+ * to the end of the run: a throw in between would drop the departure for good.
+ */
+export function noteJellyfinDepartures(ids: readonly string[]): void {
+  const pending = pendingIds();
+  for (const id of ids) pending.add(id);
+}
+
 export async function offboardJellyfinIdentities(input: {
-  /** Jellyfin user ids this run turned inactive (removed or disabled). */
-  departed: string[];
   /** Configured servers whose user fetch failed or came back empty this run. */
   noOpinion: MediaInstanceKey[];
 }): Promise<OffboardRunResult> {
   const pending = pendingIds();
-  for (const id of input.departed) pending.add(id);
   const result: OffboardRunResult = { revoked: 0, errors: 0, deferred: false };
   if (pending.size === 0) return result;
 

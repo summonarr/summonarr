@@ -1,7 +1,9 @@
 import "server-only";
 import { prisma } from "./prisma";
-import type { MediaType } from "@/generated/prisma";
-import { getSyncableMediaInstances } from "./media-instance-registry";
+import { Prisma, type MediaType } from "@/generated/prisma";
+import { buildMediaInstanceRegistryWrite, getSyncableMediaInstances } from "./media-instance-registry";
+import { DEFAULT_MEDIA_INSTANCE } from "./media-instances";
+import { linkedIdentityBranches } from "./my-watch-history";
 import { getPlexConfig } from "./plex-config";
 import { getJellyfinConfig } from "./jellyfin-config";
 import { getPlexUser, getPlexWatchHistory } from "./plex";
@@ -41,7 +43,14 @@ import {
 // imported: a shelf is built from its own viewer's records, so an unlinked
 // identity's history would be stored for nothing (and a Jellyfin one would cost
 // a request each run). With it ON, every active identity is imported, because
-// the server's co-watching is built from everyone's viewing.
+// the server's co-watching is built from everyone's viewing. "Linked" is the
+// For You read side's own rule (linkedIdentityBranches, guardrail 34): the FK,
+// or an account's provider subject on a row an admin has not pinned.
+//
+// A NAMED server removed while its import is in flight writes nothing after the
+// removal: each identity's commit locks the registry row and re-checks the slug
+// (stillRegisteredInTx, the upstream-watch-data.ts twin). The removal writes
+// that row first, in the same transaction that deletes these rows.
 
 // The import's own share of the warm run. A first import of a big Plex history
 // is the long case (~1,000 records per request); later runs take seconds. On
@@ -65,9 +74,35 @@ export interface ServerHistoryImportResult {
   aborted: boolean;
 }
 
-// The where clause for whose history is read (see above).
-function identityScope(source: "plex" | "jellyfin", slug: string, everyone: boolean) {
-  return { source, serverInstance: slug, active: true, ...(everyone ? {} : { userId: { not: null } }) };
+type Source = "plex" | "jellyfin";
+
+// Every account's provider subject on this source, through the read side's own
+// linkage rule (linkedIdentityBranches): the second way an identity is linked.
+// The 5s poller sets a Plex row's FK only at that person's next play, so a
+// friend who signed up since their last one is linked here and not by the FK.
+async function accountSubjects(source: Source): Promise<Set<string>> {
+  const users = await prisma.user.findMany({
+    where: source === "plex" ? { plexUserId: { not: null } } : { jellyfinUserId: { not: null } },
+    select: { id: true, plexUserId: true, jellyfinUserId: true },
+  });
+  const out = new Set<string>();
+  for (const u of users) {
+    for (const b of linkedIdentityBranches(u)) {
+      if ("source" in b && b.source === source) out.add(b.sourceUserId);
+    }
+  }
+  return out;
+}
+
+// The where clause for whose history is read (see above). The subject branch
+// carries manualUserLink: false, as linkedIdentityBranches' does: an admin's pin
+// (or unpin) wins over a subject match.
+function identityScope(source: Source, slug: string, everyone: boolean, subjects: ReadonlySet<string>): Prisma.MediaServerUserWhereInput {
+  const base = { source, serverInstance: slug, active: true };
+  if (everyone) return base;
+  const linked: Prisma.MediaServerUserWhereInput[] = [{ userId: { not: null } }];
+  if (subjects.size > 0) linked.push({ manualUserLink: false, sourceUserId: { in: [...subjects] } });
+  return { ...base, OR: linked };
 }
 
 interface IdentityRow {
@@ -75,8 +110,23 @@ interface IdentityRow {
   sourceUserId: string;
   isServerAdmin: boolean;
   userId: string | null;
+  manualUserLink: boolean;
   watchCursor: { readTo: Date | null } | null;
 }
+
+// The same rule, for one row already read (identityScope's two branches).
+function isLinked(identity: IdentityRow, subjects: ReadonlySet<string>): boolean {
+  return identity.userId !== null || (!identity.manualUserLink && subjects.has(identity.sourceUserId));
+}
+
+const IDENTITY_SELECT = {
+  id: true,
+  sourceUserId: true,
+  isServerAdmin: true,
+  userId: true,
+  manualUserLink: true,
+  watchCursor: { select: { readTo: true } },
+} as const;
 
 interface ResolvedTitle extends WatchTitle {
   title: string;
@@ -90,18 +140,45 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// The interactive-tx client of the EXTENDED prisma (upstream-watch-data.ts's shape).
+type TxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+
+// Whether a NAMED instance is still registered, read with its service's registry
+// row LOCKED so a concurrent removal is ordered against this write (see the
+// header). The default instance can never be removed. A missing or unreadable
+// registry lists nothing. Mirrors stillRegisteredInTx in upstream-watch-data.ts.
+async function stillRegisteredInTx(tx: TxClient, source: Source, slug: string): Promise<boolean> {
+  if (slug === DEFAULT_MEDIA_INSTANCE) return true;
+  const { key } = buildMediaInstanceRegistryWrite(source, []);
+  const rows = await tx.$queryRaw<Array<{ value: string }>>(
+    Prisma.sql`SELECT "value" FROM "Setting" WHERE "key" = ${key} FOR UPDATE`,
+  );
+  const raw = rows[0]?.value;
+  if (!raw) return false;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.some((e) => !!e && typeof e === "object" && (e as { slug?: unknown }).slug === slug);
+  } catch {
+    return false;
+  }
+}
+
 // Write one identity's merged rows and its read point together, so a failure
 // leaves both as they were and the same plays are read — and counted — once.
 // The stored rows are read INSIDE the transaction: the merge adds to them.
+// Returns false, having written nothing, when the server was removed meanwhile.
 async function commitIdentity(
+  source: Source,
+  slug: string,
   identityId: string,
   deltas: ReadonlyMap<string, PlayDelta>,
   favorites: ReadonlySet<string> | null,
   names: ReadonlyMap<string, string>,
   readTo: Date | null,
-): Promise<void> {
-  await prisma.$transaction(
+): Promise<boolean> {
+  return prisma.$transaction(
     async (tx) => {
+      if (!(await stillRegisteredInTx(tx, source, slug))) return false;
       if (deltas.size > 0 || favorites !== null) {
         const existing: WatchedTitleRow[] = await tx.serverWatchedTitle.findMany({
           where: { mediaServerUserId: identityId },
@@ -123,6 +200,7 @@ async function commitIdentity(
         create: { mediaServerUserId: identityId, readTo, importedAt: new Date() },
         update: { readTo, importedAt: new Date() },
       });
+      return true;
     },
     { timeout: BATCH_TX_TIMEOUT },
   );
@@ -183,9 +261,11 @@ async function importPlexServer(slug: string, everyone: boolean, signal: AbortSi
   const token = cfg.token?.trim();
   if (!url || !token) return;
 
+  // Plex reads no favorites, so co-watch ON needs no subjects.
+  const subjects = everyone ? new Set<string>() : await accountSubjects("plex");
   const identities: IdentityRow[] = await prisma.mediaServerUser.findMany({
-    where: identityScope("plex", slug, everyone),
-    select: { id: true, sourceUserId: true, isServerAdmin: true, userId: true, watchCursor: { select: { readTo: true } } },
+    where: identityScope("plex", slug, everyone, subjects),
+    select: IDENTITY_SELECT,
   });
   if (identities.length === 0) return;
   result.servers++;
@@ -251,7 +331,8 @@ async function importPlexServer(slug: string, everyone: boolean, signal: AbortSi
     const next = nextReadTo(readTo, [walkNewest]) ?? walkStartedAt;
     if (deltas.size === 0 && readTo !== null && next.getTime() === readTo.getTime()) continue;
     try {
-      await commitIdentity(identity.id, deltas, null, names, next);
+      // The server was removed during the walk: the rest would be skipped too.
+      if (!(await commitIdentity("plex", slug, identity.id, deltas, null, names, next))) return;
       result.identities++;
     } catch (err) {
       result.failedIdentities++;
@@ -266,9 +347,11 @@ async function importJellyfinServer(slug: string, everyone: boolean, signal: Abo
   const apiKey = cfg.apiKey?.trim();
   if (!url || !apiKey) return;
 
+  // Read either way: the favorites gate below uses them too.
+  const subjects = await accountSubjects("jellyfin");
   const identities: IdentityRow[] = await prisma.mediaServerUser.findMany({
-    where: identityScope("jellyfin", slug, everyone),
-    select: { id: true, sourceUserId: true, isServerAdmin: true, userId: true, watchCursor: { select: { readTo: true } } },
+    where: identityScope("jellyfin", slug, everyone, subjects),
+    select: IDENTITY_SELECT,
   });
   if (identities.length === 0) return;
   result.servers++;
@@ -285,7 +368,7 @@ async function importJellyfinServer(slug: string, everyone: boolean, signal: Abo
       const played = await getJellyfinPlayedSince(url, apiKey, identity.sourceUserId, readTo ? { since: readTo, signal } : { signal });
       // Favorites only matter for a person with an account (they seed THEIR
       // shelf); an unlinked identity's history still feeds co-watching.
-      const favorites = identity.userId ? await getJellyfinFavorites(url, apiKey, identity.sourceUserId, { signal }) : null;
+      const favorites = isLinked(identity, subjects) ? await getJellyfinFavorites(url, apiKey, identity.sourceUserId, { signal }) : null;
       if (signal.aborted) {
         result.aborted = true;
         return;
@@ -312,7 +395,8 @@ async function importJellyfinServer(slug: string, everyone: boolean, signal: Abo
       // A full read that found nothing dated anchors at its own start, so the
       // next read is incremental instead of re-reading the whole list.
       const next = nextReadTo(readTo, played.map((p) => p.lastPlayedAt)) ?? (readTo === null ? readStartedAt : null);
-      await commitIdentity(identity.id, deltas, favoriteKeys, namesOf(titles.values()), next);
+      // The server was removed meanwhile: the rest would be skipped too.
+      if (!(await commitIdentity("jellyfin", slug, identity.id, deltas, favoriteKeys, namesOf(titles.values()), next))) return;
       result.identities++;
     } catch (err) {
       result.failedIdentities++;

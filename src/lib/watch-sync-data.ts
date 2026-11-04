@@ -68,6 +68,7 @@ import {
   oldestFirst,
   WATCH_SYNC_PROGRESS_MAX_UNITS,
   decideProgress,
+  isWatchedWithoutResume,
   latestState,
   progressUnitKey,
   targetIdsFor,
@@ -231,7 +232,10 @@ async function runWatchSyncInner(lockSignal: AbortSignal | undefined, pairIds: r
 
   // A pair whose rows are not (plex, jellyfin) can't come from the admin route,
   // but a hand-edited row must not reach a server. Neither may a Jellyfin user
-  // who has left the server.
+  // who has left the server. A Plex account's `active` is NOT checked: nothing
+  // ever sets a Plex identity active again, so a server removed and re-added
+  // under its slug keeps working pairs flagged inactive. Removing an instance
+  // deletes its pairs instead (media-instances route).
   const valid = pairs.filter((p) => {
     if (p.plexUser.source !== "plex" || p.jellyfinUser.source !== "jellyfin") {
       failPair(p.id, "Pair does not link a Plex account to a Jellyfin user");
@@ -626,18 +630,20 @@ async function syncProgress(
 
     const writes: Array<{ target: "toJellyfin" | "toPlex"; ids: readonly string[]; positionMs: number }> = [];
     for (const p of plays) {
-      const pk = targetIdsFor(p, plexTargets).filter((k) => plexStates.has(k));
-      const ji = targetIdsFor(p, jfTargets).filter((id) => jfStates.has(id));
-      const plexState = latestState(pk.map((k): ProgressState => {
+      const plexCopies = targetIdsFor(p, plexTargets).filter((k) => plexStates.has(k)).map((k): [string, ProgressState] => {
         const s = plexStates.get(k)!;
-        return { positionMs: s.viewOffset, durationMs: s.durationMs, lastActivity: s.lastViewedAt, played: s.viewCount > 0 };
-      }));
-      const jfState = latestState(ji.map((id): ProgressState => {
+        return [k, { positionMs: s.viewOffset, durationMs: s.durationMs, lastActivity: s.lastViewedAt, played: s.viewCount > 0 }];
+      });
+      const jfCopies = targetIdsFor(p, jfTargets).filter((id) => jfStates.has(id)).map((id): [string, ProgressState] => {
         const s = jfStates.get(id)!;
-        return { positionMs: s.positionMs, durationMs: s.durationMs, lastActivity: s.lastPlayedAt, played: s.played };
-      }));
-      const d = decideProgress(plexState, jfState, pair.direction);
-      if (d) writes.push({ target: d.target, ids: d.target === "toPlex" ? pk : ji, positionMs: d.positionMs });
+        return [id, { positionMs: s.positionMs, durationMs: s.durationMs, lastActivity: s.lastPlayedAt, played: s.played }];
+      });
+      const d = decideProgress(latestState(plexCopies.map(([, s]) => s)), latestState(jfCopies.map(([, s]) => s)), pair.direction);
+      if (!d) continue;
+      // The decision reads one copy per side; a sibling copy the user watched
+      // still never takes the position (19e).
+      const ids = (d.target === "toPlex" ? plexCopies : jfCopies).filter(([, s]) => !isWatchedWithoutResume(s)).map(([id]) => id);
+      if (ids.length > 0) writes.push({ target: d.target, ids, positionMs: d.positionMs });
     }
 
     await mapLimit(writes, APPLY_CONCURRENCY, async (w) => {

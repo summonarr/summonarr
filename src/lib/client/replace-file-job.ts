@@ -9,12 +9,14 @@
 // The loop is COUNTED, one poll at a time from each answer (never setInterval,
 // never a clock — guardrail 16's lesson in arr-command-status.ts): at most
 // `maxPolls` polls, and `failLimit` failed polls in a row (network, or a
-// proxy's own 5xx with no JSON body) give up. A 404
+// proxy's own 5xx with no JSON body) give up — both answer status 0 ("no
+// answer, it may still be running"), never the proxy's 5xx: every caller reads
+// a non-2xx as the job's own failure. A 404
 // (the job expired or a restart dropped it) is the route's own answer and is
 // returned like any other — its `error` says to reload, not to retry.
 
 export interface ReplaceJobAnswer {
-  /** The HTTP status of the replace's answer; 0 when no answer came (network, or out of polls). */
+  /** The HTTP status of the replace's answer; 0 when no answer came (network or proxy 5xx polls, or out of polls). */
   status: number;
   data: unknown;
 }
@@ -81,9 +83,10 @@ export async function runReplaceFileJob(
     }
     const answer: unknown = await poll.json().catch(() => null);
     // A proxy's own 5xx (no JSON body) is a blip on the POLL, not the
-    // replace's answer — the route's 502 always carries its counts.
+    // replace's answer — the route's 502 always carries its counts. Running out
+    // of them is "no answer", the same as running out on network failures.
     if (poll.status >= 500 && (answer === null || typeof answer !== "object")) {
-      if (++failures >= (opts.failLimit ?? DEFAULT_FAIL_LIMIT)) return { status: poll.status, data: answer };
+      if (++failures >= (opts.failLimit ?? DEFAULT_FAIL_LIMIT)) return { status: 0, data: null };
       continue;
     }
     return { status: poll.status, data: answer ?? {} };

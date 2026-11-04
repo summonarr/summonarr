@@ -516,78 +516,110 @@ async function pinnedFetch(
     // timeout), so THAT is the error callers see, not the socket reset it causes.
     let ownError: Error | null = null;
     let gotHeaders = false;
-    const fail = (err: unknown) => {
-      reject(signal.aborted ? signal.reason : new TypeError("fetch failed", { cause: ownError ?? err }));
+    // This promise must settle on EVERY path: doFetch awaits it with nothing
+    // else racing it, so a path that never settles hangs the caller forever.
+    let settled = false;
+    const onAbort = () => {
+      settle(() => reject(signal.reason));
+      creq.destroy();
     };
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      fn();
+    };
+    const refuse = (cause: unknown) => settle(() => reject(new TypeError("fetch failed", { cause })));
+    const fail = (err: unknown) => settle(() => {
+      reject(signal.aborted ? signal.reason : new TypeError("fetch failed", { cause: ownError ?? err }));
+    });
     const creq = transport.request(opts, (res) => {
       gotHeaders = true;
-      const status = res.statusCode ?? 0;
-      if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
-        res.destroy();
-        reject(new TypeError("fetch failed", { cause: new Error("unexpected redirect") }));
-        return;
-      }
-      const respHeaders = new Headers();
-      for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) {
-        try { respHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]); } catch { /* skip an unrepresentable header */ }
-      }
-      if (status < 200 || status > 599) {
-        res.destroy();
-        reject(new TypeError("fetch failed", { cause: new Error(`unsupported status ${status}`) }));
-        return;
-      }
-      if (request.method === "HEAD" || status === 204 || status === 205 || status === 304) {
-        res.resume();
-        resolve(new Response(null, { status, statusText: res.statusMessage ?? "", headers: respHeaders }));
-        return;
-      }
-
-      // Codings are listed in the order they were applied, so undo them last to
-      // first. Like fetch: more than MAX_CONTENT_ENCODINGS is refused, and an
-      // unknown coding anywhere means none can be undone, so the body is passed
-      // through raw.
-      const encodings = (res.headers["content-encoding"] ?? "")
-        .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s && s !== "identity").reverse();
-      if (encodings.length > MAX_CONTENT_ENCODINGS) {
-        res.destroy();
-        reject(new TypeError("fetch failed", {
-          cause: new Error(`too many content-encodings in response: ${encodings.length}, maximum allowed is ${MAX_CONTENT_ENCODINGS}`),
-        }));
-        return;
-      }
-      const decoders: Transform[] = [];
-      for (const enc of encodings) {
-        const d = decoderFor(enc);
-        if (!d) {
-          for (const x of decoders) x.destroy();
-          decoders.length = 0;
-          break;
+      // Undoes whatever this handler has built so far if it throws.
+      let teardown = () => { res.destroy(); };
+      try {
+        const status = res.statusCode ?? 0;
+        if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
+          res.destroy();
+          refuse(new Error("unexpected redirect"));
+          return;
         }
-        decoders.push(d);
-      }
-      const stages: NodeJS.ReadableStream[] = [res];
-      const out = new PassThrough();
-      const destroyAll = (err?: unknown) => {
-        const e = err === undefined ? undefined : (signal.aborted ? signal.reason : streamError(ownError ?? err));
-        out.destroy(e as Error | undefined);
-        for (const s of stages) (s as Readable).destroy();
-      };
-      let last: NodeJS.ReadableStream = res;
-      for (const d of decoders) {
-        d.on("error", destroyAll);
-        last = last.pipe(d);
-        stages.push(d);
-      }
-      res.on("error", destroyAll);
-      res.on("close", () => { if (!res.complete) destroyAll(new Error("terminated")); });
-      last.pipe(out);
-      out.on("close", () => { for (const s of stages) (s as Readable).destroy(); });
+        const respHeaders = new Headers();
+        for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) {
+          try { respHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]); } catch { /* skip an unrepresentable header */ }
+        }
+        if (status < 200 || status > 599) {
+          res.destroy();
+          refuse(new Error(`unsupported status ${status}`));
+          return;
+        }
+        if (request.method === "HEAD" || status === 204 || status === 205 || status === 304) {
+          res.resume();
+          // Built BEFORE settle(): a throw inside it would mark the promise settled.
+          const empty = new Response(null, { status, statusText: res.statusMessage ?? "", headers: respHeaders });
+          settle(() => resolve(empty));
+          return;
+        }
 
-      resolve(new Response(Readable.toWeb(out) as ReadableStream<Uint8Array>, {
-        status,
-        statusText: res.statusMessage ?? "",
-        headers: respHeaders,
-      }));
+        // Codings are listed in the order they were applied, so undo them last to
+        // first. Like fetch: more than MAX_CONTENT_ENCODINGS is refused, and an
+        // unknown coding anywhere means none can be undone, so the body is passed
+        // through raw.
+        const encodings = (res.headers["content-encoding"] ?? "")
+          .split(",").map((s) => s.trim().toLowerCase()).filter((s) => s && s !== "identity").reverse();
+        if (encodings.length > MAX_CONTENT_ENCODINGS) {
+          res.destroy();
+          refuse(new Error(`too many content-encodings in response: ${encodings.length}, maximum allowed is ${MAX_CONTENT_ENCODINGS}`));
+          return;
+        }
+        const decoders: Transform[] = [];
+        for (const enc of encodings) {
+          const d = decoderFor(enc);
+          if (!d) {
+            for (const x of decoders) x.destroy();
+            decoders.length = 0;
+            break;
+          }
+          decoders.push(d);
+        }
+        const stages: NodeJS.ReadableStream[] = [res];
+        const out = new PassThrough();
+        const destroyAll = (err?: unknown) => {
+          const e = err === undefined ? undefined : (signal.aborted ? signal.reason : streamError(ownError ?? err));
+          out.destroy(e as Error | undefined);
+          for (const s of stages) (s as Readable).destroy();
+        };
+        teardown = () => destroyAll();
+        let last: NodeJS.ReadableStream = res;
+        for (const d of decoders) {
+          d.on("error", destroyAll);
+          last = last.pipe(d);
+          stages.push(d);
+        }
+        res.on("error", destroyAll);
+        res.on("close", () => { if (!res.complete) destroyAll(new Error("terminated")); });
+        last.pipe(out);
+        out.on("close", () => { for (const s of stages) (s as Readable).destroy(); });
+
+        const response = new Response(Readable.toWeb(out) as ReadableStream<Uint8Array>, {
+          status,
+          statusText: res.statusMessage ?? "",
+          headers: respHeaders,
+        });
+        settle(() => resolve(response));
+      } catch (err) {
+        // A throw here would escape as an uncaughtException and leave the
+        // promise pending. new Response() throws on a reason phrase holding a
+        // control character, which Node's HTTP parser accepts.
+        teardown();
+        refuse(err);
+      }
+    });
+    // A 101. Without this listener Node drops the socket and emits neither
+    // 'response' nor 'error'. fetch refuses an upgrade too.
+    creq.on("upgrade", (res, socket) => {
+      socket.destroy();
+      refuse(new Error(`unexpected upgrade (status ${res.statusCode})`));
     });
     const kill = (err: Error) => {
       ownError ??= err;
@@ -611,6 +643,14 @@ async function pinnedFetch(
         : transportTimeout(`Headers Timeout Error (no response for ${limits.idleTimeoutMs}ms)`, "UND_ERR_HEADERS_TIMEOUT"));
     });
     creq.on("error", fail);
+    // Backstop: a request that closes before anything settled it fails now
+    // instead of hanging.
+    creq.on("close", () => fail(new Error("connection closed before a response")));
+    // Node's own `signal` listener is removed once the request closes, so the
+    // signal is watched here too: timeoutMs and the caller's signal always
+    // bound the wait for headers, as they did under fetch().
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
     creq.end(body);
   });
 }

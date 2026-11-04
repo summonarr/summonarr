@@ -24,6 +24,7 @@ import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { greenlitPeerStatuses } from "@/lib/request-mirror";
+import { dropStaleDeclined, restoreThread } from "@/lib/request-comment-carry";
 
 // The request chokepoint — everything POST /api/requests does once the caller is
 // authenticated, rate-limited and its body validated: instance resolution and
@@ -438,9 +439,10 @@ export async function createMediaRequest(
       // permanent between the read and here, the predicate no-ops the delete — the create
       // below then 409s on the surviving row rather than orphaning an APPROVED row's ARR
       // grab or evading a fresh permanent ban.
-      if (staleDeclinedId) {
-        await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
-      }
+      //
+      // The declined row's comment thread would cascade with it; it is read first and
+      // written back onto whichever row the branch below creates (request-comment-carry.ts).
+      const carried = await dropStaleDeclined(tx, staleDeclinedId);
 
       if (isAutoApprove) {
         // create (NOT upsert update:{}): a concurrent duplicate must hit the unique
@@ -456,6 +458,7 @@ export async function createMediaRequest(
           // approvedAt: auto-approve is an approval (MediaRequest.approvedAt).
           data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) },
         });
+        await restoreThread(tx, createdRequest.id, carried);
         createdBranch = "auto-approve";
         return;
       }
@@ -496,11 +499,13 @@ export async function createMediaRequest(
             ...(mirrorStatus === "AVAILABLE" ? { availableAt: new Date() } : {}),
           },
         });
+        await restoreThread(tx, createdRequest.id, carried);
         createdBranch = "mirror-approved";
         return;
       }
 
       createdRequest = await tx.mediaRequest.create({ data: baseData });
+      await restoreThread(tx, createdRequest.id, carried);
       createdBranch = "pending";
     }, { isolationLevel: "Serializable" }));
   } catch (err) {

@@ -12,6 +12,7 @@ import {
   SNAPSHOT_MAX_ENTRY_BYTES,
   arrSnapshotStats,
   clearArrSnapshots,
+  dropArrTitleSnapshots,
   readSnapshot,
   rememberSnapshot,
   snapshotKey,
@@ -169,6 +170,44 @@ test("config writes drop every snapshot: a cached read never runs its route's ow
   assert.equal((settings.match(/clearArrSnapshots\(\)/g) ?? []).length, 2, "the write path and the rollback path");
   const instances = src("src/app/api/admin/arr-instances/route.ts");
   assert.match(instances, /clearArrSnapshots\(\);\s*void logAudit\(/);
+});
+
+test("dropArrTitleSnapshots drops every title-manager view of that title on that instance, in every language — nothing else", () => {
+  const views = [
+    "http://x/api/admin/arr/title?service=radarr&instance=&id=7",
+    "http://x/api/admin/arr/title?service=radarr&id=007",
+    "http://x/api/admin/arr/title?service=radarr&instance=&tmdbId=603",
+    "http://x/api/admin/arr/title/files?service=radarr&instance=&id=7",
+    "http://x/api/admin/arr/title/history?service=radarr&instance=&id=7",
+    "http://x/base/api/admin/arr/title/history?service=radarr&instance=&id=7",
+  ];
+  const kept = [
+    "http://x/api/admin/arr/title?service=radarr&instance=&id=8",
+    "http://x/api/admin/arr/title?service=radarr&instance=4k&id=7",
+    "http://x/api/admin/arr/title?service=sonarr&instance=&id=7",
+    "http://x/api/admin/arr/title/files?service=radarr&instance=&tmdbId=603",
+    "http://x/api/admin/arr/history?service=radarr&instance=&id=7",
+    "http://x/api/admin/queue",
+  ];
+  for (const u of [...views, ...kept]) for (const lang of ["en", "fr"]) rememberSnapshot(snapshotKey(u, lang)!, "{}");
+  assert.equal(dropArrTitleSnapshots({ service: "radarr", instance: "", arrId: 7, tmdbId: 603 }), views.length * 2);
+  for (const u of views) assert.equal(readSnapshot(snapshotKey(u, "fr")!), null, u);
+  for (const u of kept) assert.ok(readSnapshot(snapshotKey(u, "en")!), u);
+  assert.equal(arrSnapshotStats().entries, kept.length * 2);
+
+  // A Sonarr series' season episodes; a title with no tmdb id matches by its arr id only.
+  rememberSnapshot(snapshotKey("http://x/api/admin/arr/title/episodes?service=sonarr&instance=anime&id=21&season=1", "en")!, "{}");
+  rememberSnapshot(snapshotKey("http://x/api/admin/arr/title?service=sonarr&instance=anime&tmdbId=0", "en")!, "{}");
+  assert.equal(dropArrTitleSnapshots({ service: "sonarr", instance: "anime", arrId: 21, tmdbId: null }), 1);
+});
+
+test("the title manager's Remove drops the removed title's views once the arr took it off", () => {
+  const remove = src("src/app/api/admin/arr/title/remove/route.ts");
+  assert.match(
+    remove,
+    /if \(!result\) return NextResponse\.json\([^\n]+\{ status: 404 \}\);\s*invalidateArrLibraryIndexCache\(\);\s*invalidateNeverWatchedReport\(\);\s*dropArrTitleSnapshots\(\{ service: target\.service, instance: target\.instance, arrId: target\.arrId, tmdbId: result\.title\.tmdbId \}\);/,
+  );
+  assert.equal((remove.match(/dropArrTitleSnapshots\(/g) ?? []).length, 1, "only after a removal the arr accepted");
 });
 
 test("the hook shows the stale note only for a snapshot the page actually drew", () => {

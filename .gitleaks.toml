@@ -71,7 +71,7 @@
 #    The same release added two more: a NEXTAUTH_SECRET fixture,
 #    "purge-pii-2026-10-20-secret-0123456789ab" (the item-5 shape, one
 #    character short of the counting run), in
-#    tests/audit-2026-10-20-purge-pii.test.mts, and a fourth invented
+#    tests/account-purge-audit-pii.test.mts, and a fourth invented
 #    Discord snowflake, "876543210987654321" (a descending digit run, item
 #    5's pattern), in tests/discord-routes.test.mts.
 

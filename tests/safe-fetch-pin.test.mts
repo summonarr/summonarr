@@ -11,6 +11,7 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import zlib from "node:zlib";
 import net from "node:net";
@@ -469,6 +470,172 @@ test("connection refused maps to a network SafeFetchError", async () => {
   await new Promise((r) => setTimeout(r, 20));
   const err = await rejection(safeFetchAdminConfigured(`http://127.0.0.1:${port}/`));
   assert.equal(err.reason, "network");
+});
+
+// ---------------------------------------------------------------------------
+// The pinned request always settles. doFetch awaits it with nothing
+// racing it, so any path that neither resolves nor rejects hung the caller
+// forever, whatever timeoutMs said.
+// ---------------------------------------------------------------------------
+
+// Fails the test instead of hanging the runner when `p` never settles.
+async function settlesWithin<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`still pending after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// A raw TCP server that answers every request with `reply`, then closes the
+// socket or keeps it open. `closed` resolves once every accepted socket closed.
+async function rawServer(reply: string, keepOpen: boolean) {
+  const sockets: net.Socket[] = [];
+  const closed: Promise<void>[] = [];
+  const server = net.createServer((sock) => {
+    sockets.push(sock);
+    closed.push(new Promise<void>((r) => { sock.once("close", () => r()); }));
+    sock.on("error", () => { /* the client may reset it */ });
+    sock.once("data", () => {
+      const bytes = Buffer.from(reply, "latin1");
+      if (keepOpen) sock.write(bytes);
+      else sock.end(bytes);
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return {
+    port: (server.address() as AddressInfo).port,
+    allClosed: () => Promise.all(closed),
+    close: () => { for (const s of sockets) s.destroy(); server.close(); },
+  };
+}
+
+test("a reason phrase new Response() refuses rejects at once as network, and the connection is torn down", async () => {
+  // 0x01 is accepted by Node's parser but makes the Response constructor throw,
+  // which used to escape as an uncaughtException with the promise left pending.
+  const cases: Array<{ name: string; method: string; keepOpen: boolean; length: number }> = [
+    { name: "GET, peer closes", method: "GET", keepOpen: false, length: 2 },
+    { name: "GET, peer keeps the socket open", method: "GET", keepOpen: true, length: 2 },
+    // The body never completes, so only our own teardown closes the socket.
+    { name: "GET, body still owed", method: "GET", keepOpen: true, length: 100 },
+    { name: "HEAD, peer keeps the socket open", method: "HEAD", keepOpen: true, length: 2 },
+  ];
+  for (const c of cases) {
+    const srv = await rawServer(`HTTP/1.1 200 O\x01K\r\nContent-Length: ${c.length}\r\n\r\nok`, c.keepOpen);
+    try {
+      const t0 = Date.now();
+      const err = await settlesWithin(
+        rejection(safeFetchAdminConfigured(`http://127.0.0.1:${srv.port}/`, { method: c.method, timeoutMs: 5000 })),
+        2000,
+      );
+      assert.equal(err.reason, "network", c.name);
+      assert.match(err.message, /Invalid statusText/, c.name);
+      assert.ok(Date.now() - t0 < 2000, `${c.name}: took ${Date.now() - t0}ms`);
+      await settlesWithin(srv.allClosed(), 2000);
+    } finally {
+      srv.close();
+    }
+  }
+});
+
+test("a 101 is refused at once as network, whether the peer closes or keeps the socket open", async () => {
+  for (const keepOpen of [false, true]) {
+    const srv = await rawServer("HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\nConnection: Upgrade\r\n\r\n", keepOpen);
+    try {
+      const t0 = Date.now();
+      const err = await settlesWithin(
+        rejection(safeFetchAdminConfigured(`http://127.0.0.1:${srv.port}/`, { timeoutMs: 5000 })),
+        2000,
+      );
+      assert.equal(err.reason, "network");
+      assert.match(err.message, /unexpected upgrade \(status 101\)/);
+      assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+      await settlesWithin(srv.allClosed(), 2000);
+    } finally {
+      srv.close();
+    }
+  }
+});
+
+test("a caller abort while waiting for headers settles at once with the caller's reason", async () => {
+  let reached!: () => void;
+  const atServer = new Promise<void>((r) => { reached = r; });
+  const { port } = await listen(() => { reached(); /* never respond */ });
+  const ac = new AbortController();
+  const p = safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { signal: ac.signal, timeoutMs: 5000 });
+  await atServer;
+  const t0 = Date.now();
+  ac.abort(new Error("caller gave up"));
+  const err = await settlesWithin(rejection(p), 2000);
+  assert.equal(err.reason, "network");
+  assert.match(err.message, /caller gave up/);
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0}ms`);
+});
+
+// A ClientRequest stand-in that reports nothing, the way Node ends some paths
+// (a 101 with no 'upgrade' listener) with neither 'response' nor 'error'.
+class MuteRequest extends EventEmitter {
+  destroyed = false;
+  closeOnEnd = false;
+  setTimeout(): this { return this; }
+  end(): this {
+    if (this.closeOnEnd) setImmediate(() => this.emit("close"));
+    return this;
+  }
+  destroy(): this { this.destroyed = true; return this; }
+}
+
+async function withMuteTransport<T>(closeOnEnd: boolean, run: (reqs: MuteRequest[]) => Promise<T>): Promise<T> {
+  const mod = http as unknown as { request: unknown };
+  const real = mod.request;
+  const reqs: MuteRequest[] = [];
+  mod.request = () => {
+    const r = new MuteRequest();
+    r.closeOnEnd = closeOnEnd;
+    reqs.push(r);
+    return r;
+  };
+  try {
+    return await run(reqs);
+  } finally {
+    mod.request = real;
+  }
+}
+
+test("a request the transport never reports on is still bounded by timeoutMs", async () => {
+  await withMuteTransport(false, async (reqs) => {
+    const t0 = Date.now();
+    const err = await settlesWithin(rejection(safeFetchAdminConfigured("http://127.0.0.1:9/", { timeoutMs: 200 })), 2000);
+    assert.equal(err.reason, "timeout");
+    assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0}ms`);
+    assert.equal(reqs.length, 1);
+    assert.ok(reqs[0].destroyed, "the request is destroyed on abort");
+  });
+});
+
+test("a request the transport never reports on is still bounded by the caller's signal", async () => {
+  await withMuteTransport(false, async (reqs) => {
+    const ac = new AbortController();
+    const p = safeFetchAdminConfigured("http://127.0.0.1:9/", { signal: ac.signal, timeoutMs: 5000 });
+    setTimeout(() => ac.abort(new Error("caller gave up")), 50);
+    const err = await settlesWithin(rejection(p), 2000);
+    assert.match(err.message, /caller gave up/);
+    assert.ok(reqs[0].destroyed);
+  });
+});
+
+test("a request that closes with neither a response nor an error fails at once, not at the timeout", async () => {
+  await withMuteTransport(true, async () => {
+    const t0 = Date.now();
+    const err = await settlesWithin(rejection(safeFetchAdminConfigured("http://127.0.0.1:9/", { timeoutMs: 5000 })), 2000);
+    assert.equal(err.reason, "network");
+    assert.match(err.message, /connection closed before a response/);
+    assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0}ms`);
+  });
 });
 
 test("env-proxy mode cannot be pinned and falls back to fetch() (documented exception)", async () => {

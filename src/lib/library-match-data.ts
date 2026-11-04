@@ -119,6 +119,9 @@ async function readMediaServers(sources: LibraryMatchSource[], signal?: AbortSig
     : [];
   const selection = new Map(selectionRows.map((r) => [r.key, parseSelection(r.value)]));
 
+  // Every listing is appended one by one, never a spread push: a spread throws
+  // RangeError past ~125k entries, which would mark a readable source down
+  // (guardrail 5i).
   const entries: ServerMatchEntry[] = [];
   for (const instance of plexInstances) {
     if (signal?.aborted) break;
@@ -131,7 +134,7 @@ async function readMediaServers(sources: LibraryMatchSource[], signal?: AbortSig
         ...await listPlexMatchEntries(url, cfg.token, instance.slug, "MOVIE", selected),
         ...await listPlexMatchEntries(url, cfg.token, instance.slug, "TV", selected),
       ];
-      entries.push(...items);
+      for (const item of items) entries.push(item);
       sources.push({ service: "plex", instance: instance.slug, ok: true, items: items.length });
     } catch (err) {
       console.warn(`[library-match] Plex "${instance.slug}" could not be listed:`, err instanceof Error ? err.message : err);
@@ -148,7 +151,7 @@ async function readMediaServers(sources: LibraryMatchSource[], signal?: AbortSig
         ...await listJellyfinMatchEntries(cfg.url, cfg.apiKey, instance.slug, "MOVIE", selected),
         ...await listJellyfinMatchEntries(cfg.url, cfg.apiKey, instance.slug, "TV", selected),
       ];
-      entries.push(...items);
+      for (const item of items) entries.push(item);
       sources.push({ service: "jellyfin", instance: instance.slug, ok: true, items: items.length });
     } catch (err) {
       console.warn(`[library-match] Jellyfin "${instance.slug}" could not be listed:`, err instanceof Error ? err.message : err);
@@ -169,7 +172,7 @@ async function readArrs(sources: LibraryMatchSource[], signal?: AbortSignal): Pr
         const cfg = await getArrCfg(service, instance.slug);
         if (!cfg) continue;
         const rows = projectArrRows(service, instance.slug, await arrFetch<unknown>(cfg, service === "radarr" ? "/api/v3/movie" : "/api/v3/series"));
-        out.push(...rows);
+        for (const row of rows) out.push(row); // one by one, as above (guardrail 5i)
         sources.push({ service, instance: instance.slug, ok: true, items: rows.length });
       } catch (err) {
         sources.push({ service, instance: instance.slug, ok: false, kind: arrErrorKind(err), items: 0 });

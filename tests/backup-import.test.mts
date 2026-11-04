@@ -119,6 +119,8 @@ const { BACKUP_TABLES, computeSchemaFingerprint } = await import("../src/lib/bac
 const { tokenEncryptionKeyFingerprint } = await import("../src/lib/token-crypto.ts");
 const { cachedSessionCheckIsStale, invalidateCachedSessionChecks } =
   await import("../src/lib/session-revocation.ts");
+const { arrSnapshotStats, clearArrSnapshots, rememberSnapshot, snapshotKey } =
+  await import("../src/lib/arr-snapshot.ts");
 
 // ── stream helpers ──────────────────────────────────────────────────────────
 function streamFrom(chunks: Uint8Array[], onCancel?: () => void): ReadableStream<Uint8Array> {
@@ -270,6 +272,7 @@ beforeEach(() => {
   delete process.env.TRUST_PROXY;
   delete process.env.SUMMONARR_ALLOW_SETUP_RESTORE;
   invalidateCachedSessionChecks(0); // a restore's session-check floor is process-wide
+  clearArrSnapshots();
 });
 
 // ── caps ────────────────────────────────────────────────────────────────────
@@ -560,6 +563,28 @@ test("a refused or rolled-back restore leaves the session-check floor alone", as
   expectFailure(await runImport([new Uint8Array(HAPPY_ENC)]));
   assert.equal(txRejections, 1);
   assert.equal(cachedSessionCheckIsStale(before), false, "the floor is set only after the transaction commits");
+});
+
+// The restore replaced the Setting table, Radarr/Sonarr instances included,
+// and a `cached=1` read skips its route's instance checks (guardrail 5h).
+const keepArrSnapshot = () =>
+  rememberSnapshot(snapshotKey("http://x/api/admin/arr/history?service=sonarr&instance=anime", "en")!, "{}");
+
+test("a committed restore drops every kept admin arr answer", async () => {
+  keepArrSnapshot();
+  assert.equal(arrSnapshotStats().entries, 1);
+  expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)]));
+  assert.equal(arrSnapshotStats().entries, 0);
+});
+
+test("a refused or rolled-back restore keeps the arr answers", async () => {
+  keepArrSnapshot();
+  expectFailure(await runImport([new Uint8Array(COMMENTS_ONLY_ENC)]));
+  assert.equal(arrSnapshotStats().entries, 1, "refused before the database was touched");
+  failOnSqlIncludes = "'siteUrl'";
+  expectFailure(await runImport([new Uint8Array(HAPPY_ENC)]));
+  assert.equal(txRejections, 1);
+  assert.equal(arrSnapshotStats().entries, 1, "rolled back: the config they were read under is unchanged");
 });
 
 test("conflict-skipped rows (0 affected) are attributed per table and surface as a warning", async () => {

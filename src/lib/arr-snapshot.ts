@@ -24,7 +24,8 @@
 // 10, Arr System every 15 (SNAPSHOT_REFRESH_TIERS) — by /api/cron/refresh-arr-
 // snapshots, which re-runs the route's own handler, so the kept body is exactly
 // what a live read answers. A refresh is not a view: a page nobody opens stops
-// being refreshed once the window passes.
+// being refreshed once the window passes. A view whose re-reads keep failing
+// backs off and goes after the views that answer (dueSnapshots).
 import { NextRequest, NextResponse } from "next/server";
 import { localeForRequest } from "@/lib/i18n/server-locale";
 import { processSingleton } from "@/lib/process-singleton";
@@ -47,6 +48,11 @@ export const SNAPSHOT_VIEW_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const SNAPSHOT_REFRESH_MAX_PER_RUN = 40;
 /** Re-reads in flight at once — the arrs and the Prisma pool are shared (guardrail 31). */
 export const SNAPSHOT_REFRESH_CONCURRENCY = 2;
+/**
+ * A view whose background re-reads keep failing waits its tier's interval after
+ * the last attempt, doubled for each failure in a row, but never longer than this.
+ */
+export const SNAPSHOT_RETRY_MAX_WAIT_MS = 60 * 60_000;
 // The cron runs every 5 minutes; a view read 4 minutes 30 seconds ago is due
 // now, not 5 minutes from now.
 const REFRESH_SLACK_MS = 60_000;
@@ -96,6 +102,10 @@ interface Entry {
   /** The live read's URL (no `cached`) and language — what a background refresh re-reads. */
   url: string | null;
   locale: string | null;
+  /** Background re-reads that failed in a row since this answer was kept. */
+  failures: number;
+  /** When the last of those failed re-reads ran; null with none. */
+  failedAt: number | null;
 }
 
 type AnyHandler = (req: NextRequest, ctx: unknown, session: unknown) => Response | Promise<Response>;
@@ -144,7 +154,13 @@ export function rememberSnapshot(
   // A background refresh is not a view: it keeps the last time an admin looked.
   const viewedAt = meta.viewed === false && prev ? prev.viewedAt : now;
   // Re-inserting puts the key last: Map order is the LRU order.
-  store.entries.set(key, { body, at: now, bytes, viewedAt, url: meta.url ?? prev?.url ?? null, locale: meta.locale ?? prev?.locale ?? null });
+  store.entries.set(key, {
+    body, at: now, bytes, viewedAt,
+    url: meta.url ?? prev?.url ?? null,
+    locale: meta.locale ?? prev?.locale ?? null,
+    failures: 0,
+    failedAt: null,
+  });
   store.bytes += bytes;
   while (store.bytes > SNAPSHOT_MAX_BYTES) {
     const oldest = store.entries.keys().next().value;
@@ -177,6 +193,44 @@ export function readSnapshot(key: string, now: number = Date.now()): { body: str
 export function clearArrSnapshots(): void {
   store.entries.clear();
   store.bytes = 0;
+}
+
+// The title manager's reads. Each names one title by `service`, `instance` and
+// the arr's `id`; the title read can name it by `tmdbId` instead.
+const TITLE_READ_PATHS: readonly string[] = [
+  "/api/admin/arr/title",
+  "/api/admin/arr/title/episodes",
+  "/api/admin/arr/title/files",
+  "/api/admin/arr/title/history",
+];
+
+// An id query value as the routes parse it (parseArrId: digits, leading zeros allowed).
+function idParam(v: string | null): number | null {
+  return v !== null && /^\d{1,12}$/.test(v) ? Number(v) : null;
+}
+
+/**
+ * Drop every kept title-manager view of one title on one instance. Called once
+ * the title manager's Remove has taken it off the instance: those reads answer
+ * 404 from then on, so the background refresh would retry each of them for a
+ * day. Returns how many views were dropped.
+ */
+export function dropArrTitleSnapshots(title: { service: string; instance: string; arrId: number; tmdbId: number | null }): number {
+  let dropped = 0;
+  for (const key of [...store.entries.keys()]) {
+    // The key is `<locale>|<path>?<query>` (snapshotKey).
+    const u = new URL(key.slice(key.indexOf("|") + 1), "http://snapshot.invalid");
+    const path = routePathOf(u.pathname);
+    if (!TITLE_READ_PATHS.includes(path)) continue;
+    const q = u.searchParams;
+    if (q.get("service") !== title.service || (q.get("instance") ?? "") !== title.instance) continue;
+    const byId = idParam(q.get("id")) === title.arrId;
+    const byTmdb = path === "/api/admin/arr/title" && title.tmdbId !== null && idParam(q.get("tmdbId")) === title.tmdbId;
+    if (!byId && !byTmdb) continue;
+    drop(key);
+    dropped++;
+  }
+  return dropped;
 }
 
 /** Test seam: also forget the registered route handlers. */
@@ -257,13 +311,26 @@ export interface DueSnapshot {
   everyMs: number;
   /** How far past due (ms); the most overdue go first. */
   overdueMs: number;
+  /** Its last background re-read failed. */
+  failing: boolean;
+}
+
+/** How long a view waits after its last answer, or its last failed re-read. */
+function refreshWaitMs(everyMs: number, failures: number): number {
+  if (failures <= 0) return everyMs;
+  return Math.min(everyMs * 2 ** Math.min(failures - 1, 10), Math.max(everyMs, SNAPSHOT_RETRY_MAX_WAIT_MS));
 }
 
 /**
- * The kept views a background run should re-read now, most overdue first: an
- * admin opened it within SNAPSHOT_VIEW_WINDOW_MS, its read has a priority tier,
- * its route's handler is registered in this process, and its answer is at least
- * its tier's interval old (less REFRESH_SLACK_MS).
+ * The kept views a background run should re-read now: an admin opened it within
+ * SNAPSHOT_VIEW_WINDOW_MS, its read has a priority tier, its route's handler is
+ * registered in this process, and its answer is at least its tier's interval
+ * old (less REFRESH_SLACK_MS). A view whose re-reads keep failing waits from its
+ * last attempt instead, the interval doubled per failure in a row up to
+ * SNAPSHOT_RETRY_MAX_WAIT_MS, so a dark instance or a removed title is not
+ * retried on every run. Healthy views first, by priority then most overdue;
+ * failing views last, so their timeouts never take the per-run cap or the run's
+ * time from views that answer.
  */
 export function dueSnapshots(now: number = Date.now()): DueSnapshot[] {
   const due: DueSnapshot[] = [];
@@ -273,10 +340,18 @@ export function dueSnapshots(now: number = Date.now()): DueSnapshot[] {
     const path = routePathOf(new URL(e.url).pathname);
     const everyMs = refreshEveryMs(path);
     if (everyMs === null || !store.handlers.has(path)) continue;
-    const overdueMs = now - e.at - (everyMs - REFRESH_SLACK_MS);
-    if (overdueMs >= 0) due.push({ key, url: e.url, locale: e.locale, everyMs, overdueMs });
+    const since = Math.max(e.at, e.failedAt ?? 0);
+    const overdueMs = now - since - (refreshWaitMs(everyMs, e.failures) - REFRESH_SLACK_MS);
+    if (overdueMs >= 0) due.push({ key, url: e.url, locale: e.locale, everyMs, overdueMs, failing: e.failures > 0 });
   }
-  return due.sort((a, b) => a.everyMs - b.everyMs || b.overdueMs - a.overdueMs);
+  return due.sort((a, b) => Number(a.failing) - Number(b.failing) || a.everyMs - b.everyMs || b.overdueMs - a.overdueMs);
+}
+
+// A background re-read of `entry` failed: it waits longer before the next try.
+// An answer an admin's own read kept meanwhile is a new entry, left as it is.
+function noteFailedRefresh(entry: Entry, at: number): void {
+  entry.failures++;
+  entry.failedAt = at;
 }
 
 export interface RefreshResult {
@@ -316,9 +391,13 @@ export async function refreshArrSnapshots(opts: { signal?: AbortSignal; now?: ()
       // A config write that cleared the store while this read was out must win.
       if (!store.entries.has(d.key)) return;
       if (await keepIfJson(d.key, res, { url: d.url, locale: d.locale, viewed: false }, now())) refreshed++;
-      else failed++;
+      else {
+        failed++;
+        noteFailedRefresh(current, now());
+      }
     } catch (err) {
       failed++;
+      noteFailedRefresh(current, now());
       // A route that throws every pass is a condition, not an event (guardrail 7b).
       const path = routePathOf(new URL(d.url).pathname);
       const message = err instanceof Error ? err.message : String(err);

@@ -16,7 +16,7 @@ import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/li
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { runDownloadCheck } from "@/lib/download-check";
 import { logAudit } from "@/lib/audit";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, replacePlexLibraryForInstances, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type PlexLibraryRow, type JellyfinLibraryRow } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, cronSkippedResponse, patchPlexShowFilePaths, replaceEpisodeCacheForSource, replacePlexLibraryForInstances, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type PlexLibraryRow, type JellyfinLibraryRow } from "@/lib/cron-auth";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
@@ -137,7 +137,9 @@ export async function POST(request: NextRequest) {
   return withCronRunRecording("sync:full", () => withAdvisoryLock(
     SYNC_ORCHESTRATOR_LOCK_ID,
     (signal: AbortSignal) => runSyncOrchestrator(actor, t, signal),
-    () => NextResponse.json({ skipped: true, reason: "sync already running" }, { status: 200 }),
+    // X-Cron-Skipped keeps a busy answer out of the sync:full ledger (no run
+    // happened). Same 200 and body: internal-trigger reads `skipped: true`.
+    () => cronSkippedResponse("sync already running"),
   ));
 }
 

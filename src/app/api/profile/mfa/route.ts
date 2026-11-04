@@ -4,7 +4,8 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { revokeOtherUserSessions } from "@/lib/auth";
+import { revokeOtherUserSessionsInTx } from "@/lib/auth";
+import { markSessionForceRevoked } from "@/lib/session-revocation";
 import { clearMfaLockoutInTx, deleteAllMfaInTx, getMfaState, lockUserMfaInTx } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp, secondFactorRequiredResponse } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
@@ -52,7 +53,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (proof instanceof NextResponse) return proof;
 
   const before = proof.state;
-  const blocked = await prisma.$transaction(async (tx) => {
+  const outcome = await prisma.$transaction(async (tx) => {
     await lockUserMfaInTx(tx, user.id);
     // Password-only (nothing was active when the step-up ran) must not remove
     // a factor that became active after that read.
@@ -60,14 +61,20 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
       // One at a time: a transaction is one connection (guardrail 23c).
       const totp = await tx.userTotp.findUnique({ where: { userId: user.id }, select: { enabledAt: true } });
       const passkeys = await tx.webAuthnCredential.count({ where: { userId: user.id } });
-      if (totp?.enabledAt || passkeys > 0) return true;
+      if (totp?.enabledAt || passkeys > 0) return { blocked: true as const, revokedSessionIds: [] as string[] };
     }
     await deleteAllMfaInTx(tx, user.id);
     await clearMfaLockoutInTx(tx, user.id);
-    return false;
+    // Signing out the OTHER sessions commits with the factor delete: a
+    // separate transaction that failed would 500 a change that already turned
+    // 2FA off and leave those sessions live on a password-only account.
+    const revokedSessionIds = before.enabled ? await revokeOtherUserSessionsInTx(tx, user.id, session.sessionId) : [];
+    return { blocked: false as const, revokedSessionIds };
   });
-  if (blocked) return secondFactorRequiredResponse(t, await getMfaState(user.id));
-  const revoked = before.enabled ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
+  if (outcome.blocked) return secondFactorRequiredResponse(t, await getMfaState(user.id));
+  // Committed: only now mark the revoked sessions in memory (guardrail 27).
+  for (const sessionId of outcome.revokedSessionIds) markSessionForceRevoked(sessionId);
+  const revoked = outcome.revokedSessionIds.length;
   if (before.enabled) void notifyMfaSecurityEvent(user.id, "mfa-disabled");
 
   // Committed — a failed audit write must not 500 it (guardrail 26).

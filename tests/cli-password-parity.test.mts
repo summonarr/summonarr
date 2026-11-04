@@ -3,7 +3,7 @@
 // do what the in-app change does (guardrail 6g), or "reset the password from
 // the CLI after a compromise" leaves the attacker's sessions, devices and feed
 // URL alive. The scripts connect to Postgres on import, so — like
-// tests/review-2026-09-p13.test.mts — these pins read the SOURCE.
+// tests/operator-scripts.test.mts — these pins read the SOURCE.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

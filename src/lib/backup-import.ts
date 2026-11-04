@@ -17,6 +17,7 @@ import {
 import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
 import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
 import { invalidateCachedSessionChecks } from "@/lib/session-revocation";
+import { clearArrSnapshots } from "@/lib/arr-snapshot";
 
 // Verbose INSERT-per-row encoding inflates row data 3–5×; 500 MB plaintext
 // covers a fully-loaded Summonarr instance with audit log + play history.
@@ -696,6 +697,10 @@ export async function processBackupImport(
   // A cookie whose dbCheckedAt is still inside its window would otherwise
   // skip that lookup for up to 60s and act with its pre-restore privileges.
   invalidateCachedSessionChecks();
+  // The Setting table was replaced, Radarr/Sonarr instances included: a
+  // `cached=1` read skips its route's instance checks, so a kept answer could
+  // paint an instance the restored config no longer has (guardrail 5h).
+  clearArrSnapshots();
 
   warnings.push(
     "Every account was signed out by the restore (sessions in the backup are never brought back). Sign in again.",

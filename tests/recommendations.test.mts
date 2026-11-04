@@ -422,6 +422,9 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Pro
 // `omdbKeyConfigured` switches on a key so the OMDB path can actually be
 // reached — needed only by the transport-failure test at the bottom of the file.
 let omdbKeyConfigured = false;
+// The same for MDBList — needed only by the MDBList-storm verdict tests at the
+// very end of the file.
+let mdblistKeyConfigured = false;
 // feature.behavior.forYouCoWatch (guardrail 40c) — OFF unless a test turns it on,
 // exactly like a fresh install. Call setCoWatch, which also drops the flag cache.
 let coWatchOn = false;
@@ -431,7 +434,9 @@ function setCoWatch(on: boolean): void {
 }
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) =>
-    omdbKeyConfigured && args.where.key === "omdbApiKey" ? { key: "omdbApiKey", value: "test-omdb-key" } : null,
+    omdbKeyConfigured && args.where.key === "omdbApiKey" ? { key: "omdbApiKey", value: "test-omdb-key" }
+    : mdblistKeyConfigured && args.where.key === "mdblistApiKey" ? { key: "mdblistApiKey", value: "test-mdblist-key" }
+    : null,
   findMany: async (args?: { where?: { key?: { in?: string[] } } }) =>
     coWatchOn && args?.where?.key?.in?.includes("feature.behavior.forYouCoWatch")
       ? [{ key: "feature.behavior.forYouCoWatch", value: "true" }]
@@ -988,7 +993,12 @@ const fetchCalls: string[] = [];
 // suggestions" one layer up and why the conclusive flag has to exist.
 let tmdbOutage = false;
 let omdbTimesOut = false;
-globalThis.fetch = (async (input: RequestInfo | URL) => {
+// MDBList (only reachable once mdblistKeyConfigured is set): "timeout" throws
+// the shape safe-fetch turns into SafeFetchError("timeout"); "answer" replies
+// to a batch POST with a row per requested id that carries no ratings.
+let mdblistReply: "timeout" | "answer" = "answer";
+let mdblistCalls = 0;
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchCalls.push(url.pathname);
   if (omdbTimesOut && url.hostname === "www.omdbapi.com") {
@@ -996,6 +1006,19 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
     const err = new Error("The operation was aborted due to timeout");
     err.name = "TimeoutError";
     throw err;
+  }
+  if (url.hostname === "api.mdblist.com") {
+    mdblistCalls++;
+    if (mdblistReply === "timeout") {
+      const err = new Error("The operation was aborted due to timeout");
+      err.name = "TimeoutError";
+      throw err;
+    }
+    const ids = init?.body ? (JSON.parse(String(init.body)) as { ids: number[] }).ids : [];
+    return new Response(JSON.stringify(ids.map((id) => ({ tmdb_id: id, ratings: [] }))), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   }
   if (tmdbOutage) throw new TypeError("fetch failed");
   // Not anchored to the start: TMDB's real paths carry a version prefix
@@ -3751,4 +3774,75 @@ test("40c pure: tasteFactor tiers, and a rating outranks a favorite", () => {
   assert.equal(isQuitShow(2, 9, old, now), false, "2/9 is not under the ratio");
   assert.equal(isQuitShow(2, null, old, now), false, "not on the server ⇒ never judged");
   assert.equal(isQuitShow(2, 20, null, now), false, "undated ⇒ not provably settled");
+});
+
+// ═══ an MDBList storm's FIRST verdict batch earns no verdict ═════════════════
+// ORDER-DEPENDENT and deliberately at the very end: the jump below expires the
+// OMDb lockout an earlier test tripped and the 30s API-key memos, and these
+// tests leave MDBList's process-wide failure count where they put it.
+//
+// The MDBList breaker trips on the fifth failure in a row, and one verdict batch
+// sends about three requests (a movie POST, a TV POST, one probe GET). Without a
+// per-batch failure signal the first batch of a storm read MDBList as answering
+// and stamped a week-long null verdict on every title it touched.
+
+const { isMdblistQuotaLocked } = await import("../src/lib/mdblist.ts");
+
+function unratedNode(tmdbId: number, mediaType: MT): NodeRow {
+  return {
+    tmdbId,
+    mediaType,
+    releaseDate: null,
+    suggestionsRefreshedAt: null,
+    suggestionCount: 0,
+    quality: null,
+    evidence: 0,
+    qualityRatedAt: null,
+  };
+}
+
+function useMdblistOnly(reply: "timeout" | "answer"): void {
+  // Past the OMDb lockout (an hour) and every 30s memo, with OMDb off: an
+  // MDBList-only instance, so a null verdict is MDBList's answer alone.
+  mock.timers.tick(2 * 60 * 60 * 1000);
+  omdbKeyConfigured = false;
+  omdbTimesOut = false;
+  mdblistKeyConfigured = true;
+  mdblistReply = reply;
+  mdblistCalls = 0;
+}
+
+test("verdict pass: MDBList answered with no ratings ⇒ the null verdict IS stamped", async () => {
+  useMdblistOnly("answer");
+  nodeRows.push(unratedNode(910, "MOVIE"), unratedNode(911, "TV"));
+  try {
+    const result = await refreshRecommendationGraph();
+    assert.ok(mdblistCalls > 0, "precondition: MDBList was asked");
+    assert.equal(result.verdictsDeferred, 0);
+    assert.equal(result.titlesRated, 2, "MDBList answered — 'asked, nobody had ratings' is a verdict");
+    for (const node of nodeRows) {
+      assert.ok(node.qualityRatedAt, "stamped");
+      assert.equal(node.quality, null);
+    }
+  } finally {
+    mdblistKeyConfigured = false;
+  }
+});
+
+test("verdict pass: MDBList timing out in the FIRST batch of a storm, breaker not yet tripped ⇒ nothing is stamped", async () => {
+  useMdblistOnly("timeout");
+  nodeRows.push(unratedNode(920, "MOVIE"), unratedNode(921, "TV"));
+  try {
+    const result = await refreshRecommendationGraph();
+    assert.equal(mdblistCalls, 3, "a movie POST, a TV POST and one probe — all timed out");
+    assert.equal(isMdblistQuotaLocked({ background: true }), false, "precondition: three failures do not trip the breaker");
+    assert.equal(result.titlesRated, 0);
+    assert.equal(result.verdictsDeferred, 2, "both titles are re-asked next run");
+    for (const node of nodeRows) {
+      assert.equal(node.qualityRatedAt, null, "no week-long verdict earned by a timeout");
+    }
+  } finally {
+    mdblistKeyConfigured = false;
+    mdblistReply = "answer";
+  }
 });

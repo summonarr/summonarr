@@ -124,3 +124,19 @@ test("bulk: an AVAILABLE peer is a greenlight only with the routed instance's *a
   );
   assert.doesNotMatch(CODE, /for \(const g of greenlit\) greenlitKeys\.add/, "an unfiltered add is the old mirror-any-peer shape");
 });
+
+test("bulk: a re-requested DECLINED row's comment thread moves to the row created for the same key", () => {
+  // The stale rows are deleted to free the unique key and RequestComment cascades
+  // with them; without the carry the decline conversation is lost. The drop goes
+  // through the shared helper (read the threads, then ONE CAS deleteMany), BEFORE
+  // the insert, and only a row THIS call created takes a thread.
+  assert.match(CODE, /import \{ dropStaleDeclinedMany, restoreThread \} from "@\/lib\/request-comment-carry"/);
+  assert.doesNotMatch(CODE, /tx\.mediaRequest\.deleteMany\(/, "a bare stale-row delete cascades the threads");
+  const drop = CODE.indexOf("const carriedThreads = await dropStaleDeclinedMany(tx, staleDeclinedIds);");
+  const insert = CODE.indexOf("await tx.mediaRequest.createMany(");
+  assert.ok(drop > 0 && insert > drop, "threads are dropped (and read) before the insert");
+  assert.match(
+    CODE,
+    /const created = after\.filter\(\(r\) => !beforeIds\.has\(r\.id\)\);\s*for \(const r of created\) \{\s*const staleId = staleDeclinedIdByKey\.get\(keyOf\(r\.tmdbId, r\.mediaType\)\);\s*if \(staleId\) await restoreThread\(tx, r\.id, carriedThreads\.get\(staleId\)\);\s*\}\s*return created;/,
+  );
+});

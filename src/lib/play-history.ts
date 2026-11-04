@@ -811,7 +811,14 @@ export async function emitActiveSessionsSnapshot(): Promise<void> {
 // SAME updateMany instead of a boolean letting the second caller proceed
 // against un-re-anchored rows before the write commits. Resets on process
 // restart — which is exactly when we want to re-anchor again.
-let reanchorPromise: Promise<void> | null = null;
+// Process-wide (guardrail 27a): this module is compiled into the boot chunk (via
+// plex-events) AND the poller's route chunk. A per-chunk memo let a chunk's
+// first call — an SSE manager first connecting hours after boot — re-stamp
+// every ActiveSession row mid-day, pushing back real absence finalizes.
+const reanchorMemo = processSingleton<{ promise: Promise<void> | null }>(
+  "play-history:reanchorPromise",
+  () => ({ promise: null }),
+);
 
 // On the FIRST reconcile after this process started, bump lastSeenAt = now for
 // every ActiveSession row so the absence grace (SESSION_ABSENCE_GRACE_MS) and
@@ -851,7 +858,7 @@ let reanchorPromise: Promise<void> | null = null;
  * bootstrap would abort the connect so the stream never opened at all.
  */
 export async function reanchorActiveSessionsOnBoot(): Promise<boolean> {
-  const inFlight = (reanchorPromise ??= prisma.activeSession
+  const inFlight = (reanchorMemo.promise ??= prisma.activeSession
     .updateMany({ data: { lastSeenAt: new Date() } })
     .then(() => undefined));
   try {
@@ -859,7 +866,7 @@ export async function reanchorActiveSessionsOnBoot(): Promise<boolean> {
     return true;
   } catch (err) {
     // Only clear our own promise — a later caller may have already memoized a retry.
-    if (reanchorPromise === inFlight) reanchorPromise = null;
+    if (reanchorMemo.promise === inFlight) reanchorMemo.promise = null;
     console.warn("[play-history] boot re-anchor of ActiveSession.lastSeenAt failed:", err);
     return false;
   }

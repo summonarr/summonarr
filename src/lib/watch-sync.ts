@@ -341,6 +341,13 @@ export function isResumePoint(s: ProgressState | null): boolean {
   return true;
 }
 
+// Watched with no resume point: takes no position (watched beats in-progress).
+// Applied to the title's latest copy AND to every copy written, since copies of
+// one title can differ (one watched, one paused).
+export function isWatchedWithoutResume(s: ProgressState): boolean {
+  return s.played && !isResumePoint(s);
+}
+
 export interface ProgressDecision {
   target: "toJellyfin" | "toPlex";
   positionMs: number;
@@ -373,7 +380,7 @@ export function decideProgress(
   if (!syncsToward(direction, target)) return null;
   if (Math.abs(src.positionMs - dst.positionMs) <= WATCH_SYNC_PROGRESS_TOLERANCE_MS) return null;
   // Watched beats in-progress.
-  if (dst.played && !isResumePoint(dst)) return null;
+  if (isWatchedWithoutResume(dst)) return null;
   // The target saw activity at or after the source's: the user moved on there.
   const ts = t(src);
   const td = t(dst);

@@ -751,8 +751,20 @@ test("upcoming takes advisory lock 2007 and releases it", async () => {
 test("a busy upcoming lock skips instead of running", async () => {
   lockAcquire = () => false;
   const res = await call(upcoming);
+  assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
   assert.deepEqual(deletesOf("upcomingCacheItem"), []);
+  // A skip is not a run (guardrail 7b): X-Cron-Skipped keeps it out of the ledger.
+  assert.equal(res.headers.get("X-Cron-Skipped"), "1", "the busy answer must go through cronSkippedResponse");
+  assert.ok(
+    !opsOf("setting.upsert").some((o) => o.args === "cron:lastRun:upcoming-cache"),
+    "a lock-busy skip must write no cron:lastRun:upcoming-cache row",
+  );
+});
+
+test("a run that happened IS recorded in the upcoming-cache ledger (control for the busy pin)", async () => {
+  await call(upcoming);
+  assert.ok(opsOf("setting.upsert").some((o) => o.args === "cron:lastRun:upcoming-cache"));
 });
 
 test("a TMDB outage keeps BOTH stored upcoming lists and answers 502 — never a green run that emptied the cache", async () => {
@@ -848,7 +860,15 @@ test("a busy ratings lock skips instead of double-burning provider quota", async
   settings.set("omdbApiKey", "a-key");
   lockAcquire = () => false;
   const res = await call(ratings);
+  assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { skipped: true, reason: "already running" });
+  // A skip is not a run (guardrail 7b) — unlike the no-API-key skip above, which
+  // is a completed no-op and IS recorded.
+  assert.equal(res.headers.get("X-Cron-Skipped"), "1", "the busy answer must go through cronSkippedResponse");
+  assert.ok(
+    !opsOf("setting.upsert").some((o) => o.args === "cron:lastRun:ratings-sync"),
+    "a lock-busy skip must write no cron:lastRun:ratings-sync row",
+  );
 });
 
 test("ratings releases its lock on the happy path", async () => {

@@ -28,8 +28,13 @@ export interface ArrHealthCheck {
   wikiUrl: string | null;
 }
 
-const MAX_CHECKS = 50;
+export const MAX_CHECKS = 50;
 const MAX_TEXT = 500;
+// The health list is the arr's, capped by arrFetch only by size, and each entry
+// runs safeMessage's masks; this runs from the background snapshot refresh too.
+// So it is READ at most this many times MAX_CHECKS deep (guardrail 5i).
+// arr-queue.ts's constant, repeated: safeMessage stays this module's only import.
+export const PROJECTION_SCAN_FACTOR = 10;
 
 const str = (v: unknown, max = MAX_TEXT): string => (typeof v === "string" ? v.slice(0, max) : "");
 
@@ -47,7 +52,9 @@ function httpsUrlOrNull(v: unknown): string | null {
 export function normalizeHealthChecks(raw: unknown): ArrHealthCheck[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrHealthCheck[] = [];
-  for (const r of raw as Array<Record<string, unknown> | null>) {
+  const list = raw as Array<Record<string, unknown> | null>;
+  for (let i = 0, n = Math.min(list.length, MAX_CHECKS * PROJECTION_SCAN_FACTOR); i < n; i++) {
+    const r = list[i];
     if (!r || typeof r !== "object") continue;
     const type = typeof r.type === "string" ? r.type.toLowerCase() : "";
     if (type !== "notice" && type !== "warning" && type !== "error") continue;
@@ -115,7 +122,13 @@ function pointsAtSummonarr(url: unknown, service: ArrHealthService): URL | null 
   if (typeof url !== "string") return null;
   try {
     const u = new URL(url);
-    return u.pathname.replace(/\/+$/, "").endsWith(`/api/webhooks/${service}`) ? u : null;
+    // Trailing slashes dropped in one scan, never a /\/+$/ regex: the URL is
+    // the arr's, and that regex backtracks over every run of slashes in it,
+    // which a URL keeps (guardrail 5i).
+    const p = u.pathname;
+    let end = p.length;
+    while (end > 0 && p.charCodeAt(end - 1) === 47) end--;
+    return p.endsWith(`/api/webhooks/${service}`, end) ? u : null;
   } catch {
     return null;
   }

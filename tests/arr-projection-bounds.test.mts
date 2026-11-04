@@ -27,6 +27,13 @@
 //   7. The paged readers (readQueuePages, the calendar's readQueue,
 //      readCutoffPages) keep at most one page's worth per page, appended one by
 //      one, and at most MAX_PAGES × PAGE_SIZE in all, whatever one page holds.
+//   8. The health panel (normalizeHealthChecks reads a bounded prefix;
+//      evaluateWebhook drops a URL's trailing slashes in one scan, never a
+//      backtracking regex), an issue's Replace file (the title's history and
+//      episode list read ONCE per listing, not once per file; nothing read past
+//      MAX_REPLACE_HISTORY), the Why? status's failure fold (a Map, not a scan
+//      of the counted list), and the library match check and fix-match's
+//      candidates, which append whole listings one by one.
 //
 // 6 and 7 run the real readers and loaders over a scripted Radarr/Sonarr on
 // RFC1918 literals (admin SSRF mode, no DNS) and in-memory prisma stubs.
@@ -40,6 +47,9 @@ import * as T from "../src/lib/arr-title.ts";
 import * as Q from "../src/lib/arr-queue.ts";
 import * as C from "../src/lib/arr-calendar.ts";
 import * as M from "../src/lib/arr-missing.ts";
+import * as H from "../src/lib/arr-health.ts";
+import * as R from "../src/lib/issue-replace.ts";
+import { projectHistoryRecords } from "../src/lib/arr-history.ts";
 import { readDisks } from "../src/lib/arr-watch.ts";
 
 // ── harness for 6 and 7 (set up before any test runs) ───────────────────────
@@ -88,6 +98,7 @@ shadowPrismaModel(prisma, "tmdbMediaCore", { findMany: async () => [] });
 const queueData = await import("../src/lib/arr-queue-data.ts");
 const calendarData = await import("../src/lib/arr-calendar-data.ts");
 const missingData = await import("../src/lib/arr-missing-data.ts");
+const { countFailedDownloads } = await import("../src/lib/request-arr-status.ts");
 
 const BIG = 100_000;
 
@@ -460,6 +471,134 @@ test("planSeriesSearch takes a 200k-episode season's missing ids one by one, nev
   assert.deepEqual(plan.seasons, []);
   assert.equal(plan.episodeIds.length, n);
   assert.deepEqual([plan.episodeIds[0], plan.episodeIds.at(-1)], [1, n]);
+});
+
+// ── Radarr/Sonarr health and the webhook check ──────────────────────────────
+
+test("normalizeHealthChecks keeps at most MAX_CHECKS of 100k checks, errors first, and reads a bounded prefix", () => {
+  const scan = H.MAX_CHECKS * H.PROJECTION_SCAN_FACTOR;
+  const { list, reads } = counted(Array.from({ length: BIG }, (_, i) => ({ source: "IndexerStatusCheck", type: i % 2 ? "warning" : "error", message: `check ${i}` })));
+  const checks = H.normalizeHealthChecks(list);
+  assert.equal(checks.length, H.MAX_CHECKS);
+  assert.ok(checks.every((c) => c.level === "error"), "errors first");
+  assert.ok(reads() <= scan, `read ${reads()} checks`);
+  // Entries that are not a check never reach the cap: the scan stops all the same.
+  const junk = counted(Array.from({ length: BIG }, () => ({ type: "ok", message: "fine" })));
+  assert.deepEqual(H.normalizeHealthChecks(junk.list), []);
+  assert.ok(junk.reads() <= scan, `read ${junk.reads()} junk entries`);
+});
+
+/** How many regular expressions ran over a string at least `minLength` long while `fn` ran. */
+function regexRunsOver(minLength: number, fn: () => void): number {
+  const proto = RegExp.prototype as unknown as { exec: (s: string) => RegExpExecArray | null };
+  const original = proto.exec;
+  let runs = 0;
+  proto.exec = function (this: RegExp, s: string) {
+    if (String(s).length >= minLength) runs++;
+    return original.call(this, s);
+  };
+  try {
+    fn();
+  } finally {
+    proto.exec = original;
+  }
+  return runs;
+}
+
+test("evaluateWebhook drops an arr URL's trailing slashes in one scan: no regex runs over the URL", () => {
+  // A /\/+$/ strip backtracks over every run of slashes, and a URL keeps them:
+  // ~160k slashes froze the event loop for seconds on every health read.
+  const slashes = "/".repeat(10_000);
+  const hook = (url: string) => [{ id: 3, implementation: "Webhook", fields: [{ name: "url", value: url }], onDownload: true }];
+  let states: string[] = [];
+  const runs = regexRunsOver(slashes.length, () => {
+    states = [
+      H.evaluateWebhook(hook(`http://h/${slashes}x`), "radarr", "s").state,
+      H.evaluateWebhook(hook(`http://h/api/webhooks/radarr${slashes}?token=s`), "radarr", "s").state,
+      H.evaluateWebhook(hook(`http://h/base/api/webhooks/sonarr/?token=t`), "sonarr", "s").state,
+    ];
+  });
+  assert.equal(runs, 0, `${runs} regex runs over the arr's URL`);
+  assert.deepEqual(states, ["missing", "ok", "tokenMismatch"], "Summonarr's path is still found through any trailing slashes");
+});
+
+// ── an issue's Replace file ──────────────────────────────────────────────────
+
+// A season of `n` single-episode files, each with its grab and import on record.
+function replaceSeason(n: number) {
+  const raw: unknown[] = [];
+  const files: Parameters<typeof R.replaceableFiles>[2][number][] = [];
+  for (let i = 1; i <= n; i++) {
+    const path = `/tv/Show/Season 01/e${i}.mkv`;
+    const episode = { seasonNumber: 1, episodeNumber: i };
+    raw.push({ id: 2 * i - 1, seriesId: 9, eventType: "grabbed", date: "2026-10-01T00:00:00Z", downloadId: `D${i}`, episode });
+    raw.push({ id: 2 * i, seriesId: 9, eventType: "downloadFolderImported", date: "2026-10-01T00:00:00Z", downloadId: `D${i}`, episode, data: { importedPath: path } });
+    files.push({
+      id: i, relativePath: `Season 01/e${i}.mkv`, path, size: 1, dateAdded: null, quality: null, qualityTags: [], languages: [], customFormats: [],
+      customFormatScore: null, qualityCutoffNotMet: false, releaseGroup: null, sceneName: null, edition: null, seasonNumber: 1, episodes: [episode], media: null,
+    });
+  }
+  const episodes = Array.from({ length: n }, (_, i) => ({ seasonNumber: 1, episodeNumber: i + 1, title: `Episode ${i + 1}` }));
+  return { history: projectHistoryRecords("sonarr", "", raw), files, episodes };
+}
+
+test("replaceableFiles reads the title's history and episode list ONCE per listing, not once per file", () => {
+  const n = 500;
+  const season = replaceSeason(n);
+  const history = counted(season.history);
+  const episodes = counted(season.episodes);
+  const files = R.replaceableFiles("sonarr", { kind: "series" }, season.files, history.list, episodes.list);
+  assert.equal(files.length, n);
+  assert.ok(files.every((f) => f.grab?.event.downloadId === `D${f.id}` && f.grab.event.id === 2 * f.id - 1 && !f.grab.failed), "every file still traced to its own grab");
+  assert.ok(files.every((f) => f.episodes[0].title === `Episode ${f.id}`), "every episode still named by Sonarr's title");
+  assert.ok(history.reads() <= season.history.length, `read ${history.reads()} history records for ${season.history.length}`);
+  assert.ok(episodes.reads() <= season.episodes.length, `read ${episodes.reads()} episodes for ${season.episodes.length}`);
+});
+
+test("a history past MAX_REPLACE_HISTORY is not read at all: every file is searched for, none attributed", () => {
+  const season = replaceSeason(1);
+  const [grab, imported] = season.history;
+  const filler = projectHistoryRecords("sonarr", "", [{ id: 1_000_000, seriesId: 9, eventType: "downloadIgnored" }])[0];
+  const raw: typeof season.history = new Array(R.MAX_REPLACE_HISTORY + 1).fill(filler);
+  raw[0] = imported;
+  raw[1] = grab;
+  const { list, reads } = counted(raw);
+  assert.equal(R.replaceableFiles("sonarr", { kind: "series" }, season.files, list)[0].grab, null);
+  assert.equal(reads(), 0, `read ${reads()} records`);
+  // The same two records in a history within the bound are attributed.
+  assert.equal(R.replaceableFiles("sonarr", { kind: "series" }, season.files, [imported, grab])[0].grab?.event.id, 1);
+});
+
+// ── the Why? status's failure fold ───────────────────────────────────────────
+
+test("countFailedDownloads folds a download's records through a Map: no scan of the counted list", () => {
+  const n = 2_000;
+  const failed = projectHistoryRecords("radarr", "", Array.from({ length: n }, (_, i) => ({
+    id: i + 1, movieId: 1, eventType: "downloadFailed", date: new Date(Date.UTC(2026, 9, 1) + i * 1_000).toISOString(), downloadId: `D${i}`,
+  })));
+  let count = 0;
+  const visits = searchVisits(() => {
+    count = countFailedDownloads(failed);
+  });
+  assert.equal(count, n, "every distinct download counted once");
+  assert.equal(visits, 0, `searched ${visits} elements`);
+});
+
+// ── whole listings appended one by one ───────────────────────────────────────
+
+test("the library match check, fix-match's candidates, Replace file and the Why? status append one by one: no spread push", () => {
+  // A spread of an arr's list throws RangeError past ~125k entries; these lists
+  // are whole listings, so only the source can show a spread came back.
+  for (const file of [
+    "src/lib/library-match-data.ts",
+    "src/app/api/admin/fix-match/candidates/route.ts",
+    "src/lib/issue-replace.ts",
+    "src/lib/request-arr-status.ts",
+    "src/lib/arr-health.ts",
+  ]) {
+    const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, "");
+    assert.doesNotMatch(src, /\.push\(\s*\.\.\./, `${file} spread-pushes a list`);
+  }
 });
 
 // ── the per-instance merges, end to end ──────────────────────────────────────

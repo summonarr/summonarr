@@ -407,8 +407,11 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
               // the create-time id stuck until finalize copied it into PlayHistory —
               // a watch the subject resolver (guardrail 34) could never link to the
               // owner's account. Only written on a mismatch so the CAS data stays
-              // minimal for the common case.
-              ...(existing.mediaServerUserId !== msUserId ? { mediaServerUserId: msUserId } : {}),
+              // minimal for the common case. Never while plexAdminId is null: then
+              // this tick resolved the owner to that same phantom "1" row, and
+              // re-binding would move a correctly bound session onto it for the
+              // whole plex.tv outage (and out of the owner's history at finalize).
+              ...(plexAdminId !== null && existing.mediaServerUserId !== msUserId ? { mediaServerUserId: msUserId } : {}),
               progressPercent: nextProgressPercent,
               progressMs: BigInt(nextProgressMs),
               ...(playheadMoved || resumedToPlaying ? { progressUpdatedAt: now } : {}),
@@ -996,6 +999,11 @@ async function syncPlayHistory(request: NextRequest) {
     // either source loop. On failure the sweeps below are skipped instead, since
     // their grace would be measured off pre-restart anchors (guardrail 21).
     const reanchored = await reanchorActiveSessionsOnBoot();
+    // Every row a server reports this tick is stamped at or after this, so the
+    // stream-limit alert counts exactly the sessions seen this tick (not an ended
+    // one lingering in its absence grace). Taken AFTER the re-anchor, whose boot
+    // stamp must not make every leftover row look live.
+    const tickStartedAt = new Date();
 
     const [plexEnabled, jellyfinEnabled] = await Promise.all([
       isSourceEnabled("plex"),
@@ -1100,7 +1108,7 @@ async function syncPlayHistory(request: NextRequest) {
 
     await emitActiveSessionsSnapshot();
     // Never throws: an alert failure must not fail the poll.
-    await evaluateConcurrentStreams();
+    await evaluateConcurrentStreams(tickStartedAt);
 
     // Guardrail 21: cleanupStaleSessions measures off lastSeenAt exactly like
     // the two per-source absence sweeps, which skip when the boot re-anchor

@@ -411,6 +411,37 @@ function localizeTestResults(results: Record<string, unknown>, t: Translator): R
   return out;
 }
 
+// AuditLog.details is VarChar(8000) and the SETTINGS_CHANGE row is written
+// INSIDE the save transaction, so an oversized details string failed the insert
+// and rolled the whole save back (a ~4k-char MOTD body, before + after, did).
+// Long values are cut with a length marker; if many long values still don't
+// fit, the values are dropped and the changed keys kept. JS length counts
+// UTF-16 units, never fewer than the characters Postgres counts.
+const AUDIT_DETAILS_MAX = 8000;
+const AUDIT_VALUE_CAPS = [1000, 100] as const;
+
+function capAuditValue(value: string, cap: number): string {
+  if (value.length <= cap) return value;
+  let head = value.slice(0, cap);
+  if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1); // don't split a surrogate pair
+  return `${head}… [${value.length} chars]`;
+}
+
+function settingsAuditDetails(
+  keys: string[],
+  before: Record<string, string>,
+  after: Record<string, string>,
+): string {
+  const capAll = (values: Record<string, string>, cap: number) =>
+    Object.fromEntries(Object.entries(values).map(([k, v]) => [k, capAuditValue(v, cap)]));
+  for (const cap of AUDIT_VALUE_CAPS) {
+    const details = JSON.stringify({ keys, before: capAll(before, cap), after: capAll(after, cap) });
+    if (details.length <= AUDIT_DETAILS_MAX) return details;
+  }
+  const keysOnly = JSON.stringify({ keys, valuesOmitted: true });
+  return keysOnly.length <= AUDIT_DETAILS_MAX ? keysOnly : JSON.stringify({ keyCount: keys.length, valuesOmitted: true });
+}
+
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...ALLOWED_KEYS] } },
@@ -800,8 +831,10 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "ipinfoToken",
     "omdbApiKey",
     "mdblistApiKey",
-    // Removing it switches per-user Trakt connections off (the cron and the
-    // profile card both need it); readers treat "" as unset.
+    // Removing either switches per-user Trakt connections off (the cron and
+    // the profile card need both); the id alone also drives the public Trakt
+    // lists. Readers treat "" as unset.
+    "traktClientId",
     "traktClientSecret",
     // Webhook secrets must be clearable or the admin form silently lies: it
     // offers a blank field to remove the secret, the write is skipped as an
@@ -956,7 +989,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           userName: sanitizeText(session.user.name ?? session.user.email ?? "unknown"),
           action: changedKeys.includes("maintenanceEnabled") ? "MAINTENANCE_TOGGLE" : "SETTINGS_CHANGE",
           target: "settings",
-          details: JSON.stringify({ keys: changedKeys, before: oldValues, after: newValues }),
+          details: settingsAuditDetails(changedKeys, oldValues, newValues),
           ipAddress: auditIp,
           userAgent: auditUa,
           provider: session.user.provider ?? null,

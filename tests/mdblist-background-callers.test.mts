@@ -2,8 +2,8 @@
 // background job. A bare call is a "page" and may spend the day down to zero,
 // and For You's "are the providers answering?" check then reads MDBList as up
 // after it stopped asking — stamping week-long null verdicts (the 2026-10-28
-// failure). This scans the three cron callers and requires the flag on every
-// call that reaches MDBList, so a dropped option fails here instead of in prod.
+// failure). This scans the cron callers and requires the flag on every call
+// that reaches MDBList, so a dropped option fails here instead of in prod.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -45,6 +45,11 @@ const CALLERS: Array<{ file: string; fns: string[] }> = [
   {
     file: "src/app/api/sync/ratings/route.ts",
     fns: ["fetchMdblistBatch", "revalidateMdblistForTmdb", "fetchUnifiedRatings", "getMdblistRatingsForTmdb", "isMdblistQuotaLocked", "mdblistPause", "checkMdblistPause"],
+  },
+  // The list cache warm: its top-rated list reads used to count as page traffic.
+  {
+    file: "src/app/api/cron/warm-list-cache/route.ts",
+    fns: ["getMdblistTopRated", "getMdblistTopLists", "getMdblistListItems", "isMdblistQuotaLocked", "mdblistPause", "checkMdblistPause"],
   },
 ];
 

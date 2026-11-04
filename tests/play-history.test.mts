@@ -1315,6 +1315,19 @@ test("reanchorActiveSessionsOnBoot: concurrent boot callers share ONE updateMany
   assert.equal(warns.length, 0);
 });
 
+// Guardrail 27a: play-history.ts is compiled into the boot chunk (via
+// plex-events) and the poller's route chunk. A per-chunk memo let the other
+// chunk's first call — an SSE manager first connecting hours after boot —
+// re-stamp every row mid-day. A cache-busted second import is the unit-test
+// analogue of that second chunk (the session-revocation.test pattern).
+test("reanchorActiveSessionsOnBoot: the once-guard is process-wide — another chunk's first call after the re-anchor writes nothing", async () => {
+  const specifier = "../src/lib/play-history.ts?chunk=boot";
+  const otherChunk: typeof import("../src/lib/play-history.ts") = await import(specifier);
+  assert.notEqual(otherChunk.reanchorActiveSessionsOnBoot, reanchorActiveSessionsOnBoot, "a distinct module instance");
+  assert.equal(await otherChunk.reanchorActiveSessionsOnBoot(), true);
+  assert.equal(activeSessionUpdateManyCalls.length, 0, "the process already re-anchored (previous test): no second write from another chunk");
+});
+
 // ═══ purgeOldHistory ════════════════════════════════════════════════════════
 
 test("purgeOldHistory: unset, zero, and negative retention are a no-op that never issues a delete", async () => {

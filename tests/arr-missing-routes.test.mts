@@ -37,7 +37,9 @@ const fakeLookup = async () => [{ address: "10.0.0.250", family: 4 }];
 (dns as { lookup: unknown }).lookup = fakeLookup;
 if ((dns as { lookup: unknown }).lookup !== fakeLookup) throw new Error("could not stub dns.lookup");
 
-console.warn = () => {};
+// Captured, not printed: the episode route's outage warning is pinned below.
+const warnLines: string[] = [];
+console.warn = (...a: unknown[]) => { warnLines.push(a.map(String).join(" ")); };
 console.error = () => {};
 
 // ── scripted Radarr/Sonarr ───────────────────────────────────────────────────
@@ -50,12 +52,15 @@ let radarrMovies: Record<string, unknown[]> = {};
 let sonarrSeries: unknown[] = [];
 let sonarrEpisodes: Record<string, unknown[]> = {};
 let status: (origin: string, path: string) => number = () => 200;
+// A transport failure (connection refused, timeout) rather than an HTTP answer.
+let transportFail = false;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   const method = init?.method ?? "GET";
   const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
   calls.push({ origin: url.origin, method, path: url.pathname, query: url.search, body });
+  if (transportFail) throw new TypeError("fetch failed");
   const s = status(url.origin, url.pathname);
   if (s !== 200) return new Response("nope", { status: s });
   if (method === "POST" && url.pathname === "/api/v3/command") return Response.json({ id: calls.length, status: "queued", ...body }, { status: 201 });
@@ -86,6 +91,7 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 
 // ── auth fixture ─────────────────────────────────────────────────────────────
 const usersById = new Map<string, Record<string, unknown>>();
@@ -184,6 +190,9 @@ beforeEach(() => {
   calls = [];
   coreReads = [];
   status = () => 200;
+  transportFail = false;
+  warnLines.length = 0;
+  resetLogDedup();
   settings.clear();
   for (const [k, v] of Object.entries({
     radarrUrl: RADARR, radarrApiKey: "radarr-key",
@@ -369,6 +378,40 @@ test("episodes: Sonarr off is 404 with no fetch; Sonarr's own 404 is 404; an out
   const res = await get(episodesRoute.GET, token, "/episodes?seriesId=31");
   assert.equal(res.status, 502);
   assert.ok(!(await res.text()).includes("10.0.0.7"), "the instance URL is not echoed");
+});
+
+test("episodes: an outage the snapshot refresh re-reads on every pass is logged ONCE per series, and again after a recovery (guardrail 7b)", async () => {
+  const token = await mintSession();
+  sonarrEpisodes["35"] = [];
+  const outage = () => warnLines.filter((l) => l.includes("episode listing failed"));
+  // No transient-read retry delays here (a transport failure is retried twice otherwise).
+  const { arrReadRetry } = await import("../src/lib/arr.ts");
+  const delays = arrReadRetry.delaysMs;
+  arrReadRetry.delaysMs = [];
+  try {
+    status = () => 500;
+    for (let i = 0; i < 3; i++) assert.equal((await get(episodesRoute.GET, token, "/episodes?seriesId=31")).status, 502);
+    assert.equal(outage().length, 1, "an unchanged outage is one line, not one per pass");
+
+    // A transport failure's message names the series' own URL: two expanded
+    // series alternating on a dark instance still log once each.
+    status = () => 200;
+    transportFail = true;
+    for (let i = 0; i < 3; i++) {
+      for (const id of [31, 35]) assert.equal((await get(episodesRoute.GET, token, `/episodes?seriesId=${id}`)).status, 502);
+    }
+    assert.equal(outage().length, 3, "the changed failure for 31, then 35's own");
+    assert.ok(outage().every((l) => !l.includes("sonarr-key")));
+
+    // Back, then down again: news again.
+    transportFail = false;
+    assert.equal((await get(episodesRoute.GET, token, "/episodes?seriesId=31")).status, 200);
+    transportFail = true;
+    assert.equal((await get(episodesRoute.GET, token, "/episodes?seriesId=31")).status, 502);
+    assert.equal(outage().length, 4);
+  } finally {
+    arrReadRetry.delaysMs = delays;
+  }
 });
 
 // ── 6: search ────────────────────────────────────────────────────────────────

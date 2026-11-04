@@ -456,6 +456,30 @@ test("device flow: a Trakt account connected to ANOTHER user is a conflict — n
   assert.equal(conns.some((c) => c.userId === "u1"), false);
 });
 
+test("device flow: reconnecting a DIFFERENT Trakt account drops the old account's history AND ratings (40c), not another user's", async () => {
+  mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-08T12:00:00Z") });
+  addUser("u1");
+  addUser("u2");
+  connect("u1", { providerAccountId: "uuid-OLD" });
+  connect("u2");
+  watched.push({ userId: "u1", tmdbId: 1, mediaType: "MOVIE", title: "old-watched", plays: 1, lastWatchedAt: new Date() });
+  ratings.push({ userId: "u1", tmdbId: 2, mediaType: "MOVIE", title: "old-rated", rating: 2, ratedAt: new Date() });
+  ratings.push({ userId: "u2", tmdbId: 3, mediaType: "MOVIE", title: "u2-rated", rating: 9, ratedAt: new Date() });
+  respond = (c) => {
+    if (c.path === "/oauth/device/code") return json({ device_code: "D", user_code: "U", expires_in: 600, interval: 1 });
+    if (c.path === "/oauth/device/token") return json({ access_token: "acc-new", refresh_token: "ref-new", expires_in: 86_400 });
+    if (c.path === "/users/settings") return json({ user: { username: "newacct", ids: { uuid: "uuid-NEW" } } });
+    throw new Error(`unexpected ${c.path}`);
+  };
+  await trakt.startTraktDeviceAuth("u1", CFG);
+  mock.timers.tick(1_000);
+  assert.deepEqual(await trakt.pollTraktDeviceAuth("u1", CFG), { state: "connected", username: "newacct" });
+  assert.deepEqual(accounts.filter((a) => a.userId === "u1").map((a) => a.providerAccountId), ["uuid-NEW"]);
+  assert.equal(watched.filter((w) => w.userId === "u1").length, 0);
+  assert.deepEqual(ratings.filter((r) => r.userId === "u1"), [], "the old account's ratings would keep vetoing For You seeds");
+  assert.deepEqual(ratings.map((r) => r.title), ["u2-rated"], "another user's ratings are untouched");
+});
+
 test("device flow: a refusal on trakt.tv (418) reads denied and ends the pending grant", async () => {
   mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-08T12:00:00Z") });
   respond = (c) => {

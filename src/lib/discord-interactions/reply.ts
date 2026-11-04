@@ -41,12 +41,14 @@ export async function interactionTranslator(interaction: { locale?: unknown }, d
 }
 
 // The quota window label ("week", "7 days", …) comes from quota.ts in English;
-// map the known shapes onto catalog keys, anything else passes through.
+// map the known shapes onto catalog keys, anything else passes through. "<N> days"
+// takes a numeric count so the plural form is picked (1 día, 2 días), as the web
+// path's translateQuotaWindow does.
 export function quotaWindowLabel(t: Translator, label: string | undefined): string {
   if (label === undefined) return t("notify.bot.quotaWindow.period");
   if (label === "day" || label === "week" || label === "month") return t(`notify.bot.quotaWindow.${label}`);
   const days = /^(\d+) days$/.exec(label);
-  if (days) return t("notify.bot.quotaWindow.days", { days: days[1] });
+  if (days) return t("notify.bot.quotaWindow.days", { count: Number(days[1]) });
   return label;
 }
 

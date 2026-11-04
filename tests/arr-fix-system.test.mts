@@ -26,7 +26,7 @@
 //   9. Warnings-only test results read as "working, with warnings"; Test All
 //      and single tests are rate-limited separately. A System.Text.Json arr's
 //      Test All flags no failure either way (C089 — the source facts are in
-//      tests/audit-fix4-test-all.test.mts): those rows reach the page as
+//      tests/arr-system-test-all-warnings.test.mts): those rows reach the page as
 //      `uncertain`, never failed.
 //  10. A "********" secret the arr sent is sent back to it unchanged in both
 //      the save and the test body (the secret-preservation contract).

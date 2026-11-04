@@ -23,15 +23,20 @@ export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
     }
   }
 
-  if (requireLinked && !isExemptByRole) {
-    const linkedUser = await prisma.user.findFirst({
-      where: { discordId: discordUserId, NOT: { email: { endsWith: "@discord.local" } } },
-      select: { id: true },
-    });
-    if (!linkedUser) {
-      await editOriginal(appId, token, { content: t("notify.bot.linkRequiredToRequest") });
-      return;
-    }
+  // A deactivated account is refused outright, as /recent does: its
+  // restricted-server grants are still on the row (guardrail 33), and the result
+  // badges below would read through them.
+  const caller = await prisma.user.findUnique({
+    where: { discordId: discordUserId },
+    select: { email: true, deactivatedAt: true },
+  });
+  if (caller?.deactivatedAt) {
+    await editOriginal(appId, token, { content: t("notify.bot.pick.deactivated") });
+    return;
+  }
+  if (requireLinked && !isExemptByRole && (!caller || caller.email.endsWith("@discord.local"))) {
+    await editOriginal(appId, token, { content: t("notify.bot.linkRequiredToRequest") });
+    return;
   }
 
   // `options` is always present on a real /request; a payload without it throws

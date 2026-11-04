@@ -8,6 +8,7 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { matchCheckView, matchFlagKey as flagKey, noMatchFixes, recordMatchFix, type MatchFixes } from "@/lib/client/match-check-fixes";
 import { fixMatchErrorMessage, fixMatchWarningMessage, runFixMatch, type FixMatchProgressView } from "@/lib/client/fix-match";
 import { folderYear, fixableFlag, type MatchCounts, type MatchFlag, type MatchFlagKind } from "@/lib/library-match";
 import type { LibraryMatchSource } from "@/lib/library-match-data";
@@ -44,8 +45,6 @@ function serviceLabel(service: "plex" | "jellyfin" | "radarr" | "sonarr", instan
   return instance ? `${base} (${instance})` : base;
 }
 
-const flagKey = (f: ClientMatchFlag) => `${f.server}:${f.serverInstance}:${f.itemKey}`;
-
 // m:ss from a duration the poll already measured — no clock read in render (guardrail 16).
 function formatElapsed(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -58,10 +57,10 @@ function titleWithYear(title: string | null, year: number | null, fallback: stri
   return year && !name.endsWith(`(${year})`) ? `${name} (${year})` : name;
 }
 
-// `onFixed(key, warning)`: a fix that went through but carries a warning (a
+// `onFixed(flag, warning)`: a fix that went through but carries a warning (a
 // partial remap, a Plex metadata merge) keeps its row on screen with that
 // warning — dropping the row at once threw the note away unread.
-type OnFixed = (key: string, warning?: string) => void;
+type OnFixed = (flag: ClientMatchFlag, warning?: string) => void;
 
 function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdbId: number } }; onFixed: OnFixed }) {
   const t = useT();
@@ -84,7 +83,7 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
         { onProgress: setProgress },
       );
       const warning = fixMatchWarningMessage(outcome, t);
-      onFixed(flagKey(flag), warning ?? undefined);
+      onFixed(flag, warning ?? undefined);
     } catch (err) {
       setState("error");
       setMessage(fixMatchErrorMessage(err, t));
@@ -162,7 +161,7 @@ function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr
         });
         // The row keeps the warning (FlagRow); a bulk run that dropped it read
         // "N/N fixed" over a remap that was only partial.
-        onFixed(flagKey(flag), fixMatchWarningMessage(outcome, t) ?? undefined);
+        onFixed(flag, fixMatchWarningMessage(outcome, t) ?? undefined);
       } catch (err) {
         failed++;
         collected.push({ key: flagKey(flag), title: titleWithYear(flag.title, flag.year, flag.folder ?? flag.itemKey), error: fixMatchErrorMessage(err, t) });
@@ -308,14 +307,21 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const [kind, setKind] = useState<MatchFlagKind | "all">("all");
-  // Fixed this session: hidden at once; the stored report already dropped them.
-  // key -> warning ("" = none). A fix with a warning keeps its row, showing it.
-  const [fixed, setFixed] = useState<ReadonlyMap<string, string>>(new Map());
-  const onFixed = useCallback<OnFixed>((key, warning) => setFixed((prev) => new Map(prev).set(key, warning ?? "")), []);
+  // Fixed this session (match-check-fixes.ts): hidden at once, or kept with
+  // its warning — also once a refresh brings the stored report, which already
+  // dropped the flag and lowered counts.flagged. `fixed`: key -> warning ("" = none).
+  const [fixes, setFixes] = useState<MatchFixes<ClientMatchFlag>>(noMatchFixes);
+  const checkedAt = report?.checkedAt ?? "";
+  const onFixed = useCallback<OnFixed>(
+    (flag, warning) => setFixes((prev) => recordMatchFix(prev, checkedAt, flag, warning)),
+    [checkedAt],
+  );
+  const view = useMemo(() => matchCheckView(report, fixes), [report, fixes]);
+  const fixed = view.fixed;
 
   const flags = useMemo(
-    () => (report?.flags ?? []).filter((f) => (!mediaType || f.mediaType === mediaType) && fixed.get(flagKey(f)) !== ""),
-    [report, mediaType, fixed],
+    () => view.flags.filter((f) => !mediaType || f.mediaType === mediaType),
+    [view, mediaType],
   );
   const byKind = useMemo(() => {
     const out: Record<MatchFlagKind, number> = { wrongMatch: 0, noTmdbId: 0, yearMismatch: 0 };
@@ -347,7 +353,7 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
         setError(typeof msg === "string" && msg ? msg : t("adminManage.library.match.checkFailed"));
         return;
       }
-      setFixed(new Map());
+      setFixes(noMatchFixes());
       router.refresh();
     } catch {
       setError(t("adminManage.library.match.checkFailed"));
@@ -391,8 +397,8 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
                 checked: report.counts.checked.toLocaleString(locale),
                 agreed: report.counts.agreed.toLocaleString(locale),
                 notManaged: report.counts.notManaged.toLocaleString(locale),
-                // Items fixed on this page already left the stored report.
-                flagged: Math.max(0, report.counts.flagged - fixed.size).toLocaleString(locale),
+                // A fix counts here only until the stored report reflects it.
+                flagged: view.flagged.toLocaleString(locale),
               })
               : t("adminManage.library.match.never")}
           </p>

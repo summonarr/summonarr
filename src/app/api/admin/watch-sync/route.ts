@@ -122,7 +122,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     prisma.mediaServerUser.findUnique({ where: { id: plexUserId }, select: { id: true, source: true, active: true } }),
     prisma.mediaServerUser.findUnique({ where: { id: jellyfinUserId }, select: { id: true, source: true, active: true } }),
   ]);
-  if (!plex || plex.source !== "plex" || !jellyfin || jellyfin.source !== "jellyfin" || !jellyfin.active) {
+  // A NEW pair needs both identities active, matching the GET list (which hides
+  // inactive ones). runWatchSync checks only the Jellyfin side: nothing ever
+  // re-activates a Plex identity, so an EXISTING pair must not be stopped by a
+  // stale Plex flag (a server removed and re-added under its slug).
+  if (!plex || plex.source !== "plex" || !plex.active || !jellyfin || jellyfin.source !== "jellyfin" || !jellyfin.active) {
     return NextResponse.json({ error: t("apiAdmin.watchSync.pairInvalid") }, { status: 400 });
   }
   try {

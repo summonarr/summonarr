@@ -684,19 +684,25 @@ export async function revokeAllUserSessions(
 // cutoff is per-USER (`iat <= cutoff`) and would kill the kept session too.
 // It doesn't need it — a deleted AuthSession row fails the slow-path presence
 // check, and markSessionForceRevoked forces the very next request of each
-// revoked session onto that slow path (single process, guardrail 17). Ledger
-// marks go after the delete commits (guardrail 27).
-export async function revokeOtherUserSessions(userId: string, keepSessionId: string | undefined): Promise<number> {
-  const sessionIds = await prisma.$transaction(async (tx) => {
-    const where = keepSessionId
-      ? { userId, sessionId: { not: keepSessionId } }
-      : { userId };
-    const sessions = await tx.authSession.findMany({ where, select: { sessionId: true } });
-    await tx.authSession.deleteMany({ where });
-    return sessions.map((s) => s.sessionId);
-  });
-  for (const sessionId of sessionIds) markSessionForceRevoked(sessionId);
-  return sessionIds.length;
+// revoked session onto that slow path (single process, guardrail 17).
+//
+// It runs inside the CALLER's transaction, so the 2FA change and the sign-out
+// it requires commit together: a separate second transaction that failed would
+// 500 a change that already landed and leave the other sessions live. There is
+// deliberately no standalone wrapper. Returns the revoked session ids; the
+// caller marks each with markSessionForceRevoked only AFTER its transaction
+// commits (guardrail 27). One query at a time on the tx connection (23c).
+export async function revokeOtherUserSessionsInTx(
+  tx: Pick<typeof prisma, "authSession">,
+  userId: string,
+  keepSessionId: string | undefined,
+): Promise<string[]> {
+  const where = keepSessionId
+    ? { userId, sessionId: { not: keepSessionId } }
+    : { userId };
+  const sessions = await tx.authSession.findMany({ where, select: { sessionId: true } });
+  await tx.authSession.deleteMany({ where });
+  return sessions.map((s) => s.sessionId);
 }
 
 export interface DeviceMeta {

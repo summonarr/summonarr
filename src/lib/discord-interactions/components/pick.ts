@@ -17,6 +17,7 @@ import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { greenlitPeerStatuses } from "@/lib/request-mirror";
+import { dropStaleDeclined, restoreThread } from "@/lib/request-comment-carry";
 import { TMDB_POSTER_BASE, editOriginal, quotaWindowLabel, releaseYearOf } from "../reply";
 import type { ComponentContext, PendingSearch } from "../types";
 
@@ -434,12 +435,14 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
           // (not delete) no-ops on a concurrent double re-request; the CAS on
           // status + permanentlyDeclined leaves the row intact if an admin
           // re-approved it or made the decline permanent since the read, and the
-          // create below then surfaces P2002 instead of evading that.
-          if (staleDeclinedId) {
-            await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
-          }
+          // create below then surfaces P2002 instead of evading that. The declined
+          // row's comment thread (it would cascade) moves to the new row
+          // (request-comment-carry.ts).
+          const carried = await dropStaleDeclined(tx, staleDeclinedId);
           // approvedAt: auto-approve is an approval (MediaRequest.approvedAt).
-          return tx.mediaRequest.create({ data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) } });
+          const row = await tx.mediaRequest.create({ data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) } });
+          await restoreThread(tx, row.id, carried);
+          return row;
         }, { isolationLevel: "Serializable" })
       );
       // Keep the admin request list live (every other creation path emits).
@@ -520,10 +523,8 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
           // Same rollback-safety as the auto-approve tx above: deleted only in
           // the tx that creates the replacement, so a QUOTA_EXCEEDED throw or a
           // P2034 retry-exhaustion cannot leave the decline erased with nothing
-          // in its place.
-          if (staleDeclinedId) {
-            await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
-          }
+          // in its place. Its comment thread moves to the new row, as above.
+          const carried = await dropStaleDeclined(tx, staleDeclinedId);
           // No approvedAt on the copy, as in the web route: the watch grade
           // counts it through the approval of the request it copied. A row
           // stamped `cleanedUpAt` records a deliberate removal, not a
@@ -545,15 +546,19 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
             // Mirror availableAt when the copied status is AVAILABLE, matching the
             // alreadyAvailable branch — otherwise an AVAILABLE mirror row has a null
             // availableAt and looks freshly approved.
-            return tx.mediaRequest.create({
+            const copy = await tx.mediaRequest.create({
               data: {
                 ...baseData,
                 status: mirrorStatus,
                 ...(mirrorStatus === "AVAILABLE" ? { availableAt: new Date() } : {}),
               },
             });
+            await restoreThread(tx, copy.id, carried);
+            return copy;
           }
-          return tx.mediaRequest.create({ data: baseData });
+          const row = await tx.mediaRequest.create({ data: baseData });
+          await restoreThread(tx, row.id, carried);
+          return row;
         }, { isolationLevel: "Serializable" })
       );
       // Keep the admin request list live (every other creation path emits).

@@ -321,6 +321,30 @@ test("a retry re-resolves the agent: one disabled or deleted in the meantime is 
   }
 });
 
+test("a retry pending when the integration flag is switched off is withdrawn: no fetch, no outcome", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    respond = () => new Response("down", { status: 503 });
+    agents = [{ id: "a", kind: "webhook", name: "hook", enabled: true, events: ["request.available"], config: { url: "https://a.example/" }, secret: null }];
+    emitNotificationEvent(AVAILABLE);
+    await settle();
+    assert.equal(calls.length, 1);
+    // The admin flips the kill switch while the 30s retry is pending (the
+    // settings route invalidates the flag cache on write — the test does too).
+    settings.set("feature.integration.webhooks", "false");
+    invalidateFeatureFlagCache();
+    mock.timers.tick(30_000);
+    await settle();
+    mock.timers.tick(15 * 60_000);
+    await settle();
+    assert.equal(calls.length, 1, "a pending retry posted after the integration was switched off");
+    assert.equal(updates.length, 0, "a withdrawn retry wrote an outcome");
+    assert.equal(warns.filter((w) => w.includes("[notify-agents]")).length, 0);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test("a retry delivers with the agent's CURRENT url and secret, not the snapshot from attempt 0", async () => {
   mock.timers.enable({ apis: ["setTimeout"] });
   try {

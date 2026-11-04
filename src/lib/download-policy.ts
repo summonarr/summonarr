@@ -4,7 +4,7 @@ import { getJellyfinConfig } from "./jellyfin-config";
 import { normalizeEmail } from "./email-normalize";
 import { type MediaInstanceKey, mediaInstanceLabel } from "./media-instances";
 import { getSyncableMediaInstances } from "./media-instance-registry";
-import { offboardJellyfinIdentities } from "./jellyfin-offboarding";
+import { noteJellyfinDepartures, offboardJellyfinIdentities } from "./jellyfin-offboarding";
 
 interface PolicySyncResult {
   source: string;
@@ -14,11 +14,12 @@ interface PolicySyncResult {
 }
 
 // One instance's sync, plus what the offboarding pass (jellyfin-offboarding.ts)
-// needs from it: the identities this run turned inactive, and whether the
-// server gave an opinion at all (a failed or empty /Users fetch gives none).
+// needs from it: whether the server gave an opinion at all (a failed or empty
+// /Users fetch gives none). The identities it turned inactive go straight onto
+// the offboarding ledger as each write commits (noteJellyfinDepartures), so a
+// throw later in the run can't lose one.
 interface InstanceSyncOutcome {
   result: PolicySyncResult;
-  departed: string[];
   noOpinion: boolean;
 }
 
@@ -81,7 +82,6 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   // (never library-scaled), so guardrail 31's bounded-concurrency concern
   // doesn't apply — a straightforward loop keeps this simple and avoids two
   // instances' full user-syncs interleaving their own internal work.
-  const departed: string[] = [];
   const noOpinion: MediaInstanceKey[] = [];
   for (const instance of instances) {
     const cfg = await getJellyfinConfig(instance.slug);
@@ -89,7 +89,6 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
     try {
       const outcome = await syncJellyfinPolicies(instance.slug, cfg.url, cfg.apiKey, autoDisableNew);
       results.push(outcome.result);
-      departed.push(...outcome.departed);
       if (outcome.noOpinion) noOpinion.push(instance.slug);
     } catch (err) {
       console.warn(`[download-policy] Jellyfin sync task failed for instance "${instance.slug}":`, err instanceof Error ? err.message : String(err));
@@ -105,7 +104,7 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   // After EVERY instance has synced, so "gone from every configured server" is
   // judged on this run's rows (guardrail 35). Never throws out of the sync.
   try {
-    const offboard = await offboardJellyfinIdentities({ departed, noOpinion });
+    const offboard = await offboardJellyfinIdentities({ noOpinion });
     if (offboard.errors > 0) {
       results.push({ source: "jellyfin-offboarding", upserted: 0, enforced: 0, errors: offboard.errors });
     }
@@ -119,8 +118,6 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
 
 async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<InstanceSyncOutcome> {
   const result: PolicySyncResult = { source: mediaInstanceLabel("jellyfin", instance), upserted: 0, enforced: 0, errors: 0 };
-  // Identities this run turned inactive, for the offboarding pass.
-  const departed: string[] = [];
 
   let users;
   try {
@@ -130,7 +127,7 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
     // Count the fetch failure so the cron run is recorded as not-ok rather than
     // reporting zero errors on a sync that never actually ran.
     result.errors++;
-    return { result, departed, noOpinion: true };
+    return { result, noOpinion: true };
   }
 
   // Batch-load all existing records and all potentially-linked Summonarr accounts
@@ -221,7 +218,9 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
         },
       });
       result.upserted++;
-      if (newlyInactive) departed.push(u.id);
+      // On the ledger now, not at the end of the run: the next run reads this row
+      // as already inactive and would never report the departure again.
+      if (newlyInactive) noteJellyfinDepartures([u.id]);
 
       // Push only on DRIFT — u.downloadsEnabled is the server's CURRENT value
       // from the same /Users fetch this run already made (absent Policy coerces
@@ -296,10 +295,10 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
     // instead of restarting the 3-run countdown behind a log line that already
     // claimed "reconciling".
     refusedReconciles.delete(instance);
-    departed.push(...absent);
+    noteJellyfinDepartures(absent);
   }
 
-  return { result, departed, noOpinion: users.length === 0 };
+  return { result, noOpinion: users.length === 0 };
 }
 
 /**

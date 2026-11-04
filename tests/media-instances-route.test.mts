@@ -99,6 +99,12 @@ let activeSessions: SessionRow[] = [];
 let serverUsers: ServerUserRow[] = [];
 type EvidenceRow = { source: string; serverInstance: string; itemKey: string };
 let upstreamEvidence: EvidenceRow[] = [];
+// Watch-sync pairs (guardrail 19e), each with its two server identities. Their
+// ledgers (WatchSyncMark / WatchSyncPlexMark) go with the pair by the schema's
+// onDelete: Cascade, which a fake can't model — the pair delete is what's pinned.
+type PairIdentity = { source: string; serverInstance: string };
+type WatchSyncPairRow = { id: string; plexUser: PairIdentity; jellyfinUser: PairIdentity };
+let watchSyncPairs: WatchSyncPairRow[] = [];
 const auditRows: Array<Record<string, unknown>> = [];
 
 // Deliberately permissive: a `where` with no keys matches EVERY row, so a
@@ -190,12 +196,25 @@ function makeClient(txId: number | null) {
     activeSession: rowDelegate("activeSession", () => activeSessions, (r) => { activeSessions = r; }),
     mediaServerUser: rowDelegate("mediaServerUser", () => serverUsers, (r) => { serverUsers = r; }),
     // The removed server's upstream watch-record snapshot (guardrail 14d) —
-    // pinned in tests/audit-fix-nw-upstream.test.mts.
+    // pinned in tests/upstream-watch-instance-removal.test.mts.
     upstreamWatchEvidence: rowDelegate("upstreamWatchEvidence", () => upstreamEvidence, (r) => { upstreamEvidence = r; }),
     // For You's copy of the removed server's own history and its read points
     // (guardrail 40c) — journaled so the scoping and the transaction are pinned.
     serverWatchedTitle: rowDelegate("serverWatchedTitle", () => [] as Record<string, unknown>[], () => {}),
     serverWatchCursor: rowDelegate("serverWatchCursor", () => [] as Record<string, unknown>[], () => {}),
+    // Filtered through a relation (`{ plexUser: {...} }`); like whereMatches, an
+    // empty where matches every pair, so an unscoped delete fails loudly.
+    watchSyncPair: {
+      deleteMany: async (args?: { where?: Record<string, Where> }) => {
+        record("watchSyncPair", "deleteMany", args?.where);
+        const hit = (p: WatchSyncPairRow) =>
+          Object.entries(args?.where ?? {}).every(([rel, cond]) => whereMatches(p[rel as "plexUser" | "jellyfinUser"] ?? {}, cond));
+        const kept = watchSyncPairs.filter((p) => !hit(p));
+        const count = watchSyncPairs.length - kept.length;
+        watchSyncPairs = kept;
+        return { count };
+      },
+    },
     // PlayHistory has NO legitimate caller in this route — every op is journaled
     // so the guardrail-19 test can assert the model was never addressed at all.
     playHistory: rowDelegate("playHistory", () => [] as Record<string, unknown>[], () => {}),
@@ -335,6 +354,7 @@ beforeEach(() => {
   activeSessions = [];
   serverUsers = [];
   upstreamEvidence = [];
+  watchSyncPairs = [];
   failUpsertKey = null;
   respond = (url) => { throw new Error(`unexpected fetch ${url}`); };
 });
@@ -469,6 +489,45 @@ test("ActiveSession rows for the removed slug are deleted, scoped by source+serv
   );
 });
 
+test("WATCH SYNC (19e): removing a Plex instance deletes the pairs whose Plex account is on it, scoped — read points and ratingKey ledger go with them", async () => {
+  // Plex ratingKeys are per-server integers: a pair left behind would resume on
+  // a server later registered under the same slug with the old read point and
+  // a ledger that suppresses (or echo-skips) colliding keys.
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  watchSyncPairs = [
+    { id: "wp-remote", plexUser: { source: "plex", serverInstance: "remote" }, jellyfinUser: { source: "jellyfin", serverInstance: "" } },
+    { id: "wp-default", plexUser: { source: "plex", serverInstance: "" }, jellyfinUser: { source: "jellyfin", serverInstance: "" } },
+    // The same slug on the OTHER service: a Plex removal must not touch it.
+    { id: "wp-jf-remote", plexUser: { source: "plex", serverInstance: "keep" }, jellyfinUser: { source: "jellyfin", serverInstance: "remote" } },
+  ];
+  assert.equal((await POST(postReq(removeAll, admin.header), undefined)).status, 200);
+  await flush();
+
+  const del = opsFor("watchSyncPair", "deleteMany");
+  assert.equal(del.length, 1);
+  assert.deepEqual(del[0].where, { plexUser: { source: "plex", serverInstance: "remote" } });
+  assert.deepEqual(watchSyncPairs.map((p) => p.id).sort(), ["wp-default", "wp-jf-remote"]);
+  assert.equal(opsFor("mediaServerUser", "deleteMany").length, 0, "the identities themselves are only soft-deleted (guardrail 28)");
+  const details = JSON.parse(String(auditRows[0].details)) as { removedCounts: Record<string, { watchSyncPairs: number }> };
+  assert.equal(details.removedCounts.remote.watchSyncPairs, 1, "the audit names what was destroyed");
+});
+
+test("WATCH SYNC (19e): removing a Jellyfin instance deletes the pairs whose Jellyfin user is on it, scoped", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("jellyfinRemoteUrl", "http://10.0.0.9:8096");
+  settings.set("jellyfinRemoteApiKey", "jf-key");
+  watchSyncPairs = [
+    { id: "wp-jf-remote", plexUser: { source: "plex", serverInstance: "" }, jellyfinUser: { source: "jellyfin", serverInstance: "remote" } },
+    { id: "wp-jf-default", plexUser: { source: "plex", serverInstance: "" }, jellyfinUser: { source: "jellyfin", serverInstance: "" } },
+    { id: "wp-plex-remote", plexUser: { source: "plex", serverInstance: "remote" }, jellyfinUser: { source: "jellyfin", serverInstance: "" } },
+  ];
+  assert.equal((await POST(postReq({ service: "jellyfin", instances: [] }, admin.header), undefined)).status, 200);
+  assert.deepEqual(opsFor("watchSyncPair", "deleteMany")[0].where, { jellyfinUser: { source: "jellyfin", serverInstance: "remote" } });
+  assert.deepEqual(watchSyncPairs.map((p) => p.id).sort(), ["wp-jf-default", "wp-plex-remote"]);
+});
+
 test("Setting cleanup covers the WHOLE per-instance field union, not just the connection pair", async () => {
   const admin = await mintSession("ADMIN");
   seedPlexRemote();
@@ -560,8 +619,9 @@ test("ONE transaction: the registry write AND every cleanup op share a single tx
     ...opsFor("upstreamWatchEvidence", "deleteMany"),
     ...opsFor("serverWatchedTitle", "deleteMany"),
     ...opsFor("serverWatchCursor", "deleteMany"),
+    ...opsFor("watchSyncPair", "deleteMany"),
   ];
-  assert.equal(cleanup.length, 7, "all seven cleanup ops ran");
+  assert.equal(cleanup.length, 8, "all eight cleanup ops ran");
   // The For You history rows are scoped through their server identity to the
   // removed (service, slug) — never a bare deleteMany (guardrail 40c / 35).
   for (const op of [...opsFor("serverWatchedTitle", "deleteMany"), ...opsFor("serverWatchCursor", "deleteMany")]) {
@@ -602,10 +662,10 @@ test("removal is audited post-commit with the slugs and row counts destroyed (gu
   assert.equal(auditRows[0].target, "media-instances:plex");
   const details = JSON.parse(String(auditRows[0].details)) as {
     removed: string[];
-    removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number }>;
+    removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number; watchSyncPairs: number }>;
   };
   assert.deepEqual(details.removed, ["remote"]);
-  assert.deepEqual(details.removedCounts.remote, { libraryItems: 2, activeSessions: 1, serverUsersDisabled: 1 });
+  assert.deepEqual(details.removedCounts.remote, { libraryItems: 2, activeSessions: 1, serverUsersDisabled: 1, watchSyncPairs: 0 });
 });
 
 test("a save that removes NOTHING performs no cleanup at all (the default instance is never a removal candidate)", async () => {
@@ -620,6 +680,7 @@ test("a save that removes NOTHING performs no cleanup at all (the default instan
   assert.equal(opsFor("activeSession", "deleteMany").length, 0);
   assert.equal(opsFor("mediaServerUser", "updateMany").length, 0);
   assert.equal(opsFor("setting", "deleteMany").length, 0);
+  assert.equal(opsFor("watchSyncPair", "deleteMany").length, 0);
   assert.deepEqual(libSlugs(plexLibrary), ["", "keep", "remote", "remote"]);
 });
 

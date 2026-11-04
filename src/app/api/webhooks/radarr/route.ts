@@ -16,7 +16,7 @@ import { pollAndNotifyAvailable } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
-import { isMovieDownloadedInRadarr } from "@/lib/arr";
+import { arrErrorMessage, arrFetch, getArrCfg, isMovieDownloadedInRadarr } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { sanitizeForLog } from "@/lib/sanitize";
@@ -37,6 +37,39 @@ interface RadarrWebhookPayload {
   // MovieFileDelete only — Radarr's DeleteMediaFileReason, camelCased by its
   // serializer ("upgrade" when the file is being replaced by a better one).
   deleteReason?: string;
+}
+
+// What Radarr itself says about a movie a delete event names, read before the
+// cache follows the event. The secret alone doesn't prove the delete happened
+// (the Download path's reasoning), so the payload's tmdbId only says WHICH
+// movie to ask about. `fileOnly` (MovieFileDelete) also asks whether a file is
+// still there. null = can't tell: instance not configured, Radarr unreachable,
+// or an answer of the wrong shape.
+async function radarrDeleteState(
+  tmdbId: number,
+  arrInstance: string,
+  fileOnly: boolean,
+): Promise<"absent" | "noFile" | "present" | null> {
+  const cfg = await getArrCfg("radarr", arrInstance);
+  if (!cfg) return null;
+  try {
+    const movies = await arrFetch<unknown>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`);
+    if (!Array.isArray(movies)) return null;
+    const movie = (movies as ({ id?: unknown; tmdbId?: unknown } | null)[]).find((m) => m?.tmdbId === tmdbId);
+    if (!movie) return "absent";
+    if (!fileOnly) return "present";
+    const arrId = movie.id;
+    if (typeof arrId !== "number" || !Number.isInteger(arrId) || arrId <= 0) return null;
+    // The file rows, not the movie's hasFile: Radarr deletes the file row
+    // BEFORE it sends the event, but clears the movie's file id (what hasFile
+    // reads) in another handler that can run after the webhook went out.
+    const files = await arrFetch<unknown>(cfg, `/api/v3/moviefile?movieId=${arrId}`);
+    if (!Array.isArray(files)) return null;
+    return (files as ({ movieId?: unknown } | null)[]).some((f) => f?.movieId === arrId) ? "present" : "noFile";
+  } catch (err) {
+    console.warn("[webhook/radarr] delete check failed:", arrErrorMessage(err));
+    return null;
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -233,26 +266,43 @@ export async function POST(req: NextRequest) {
   // doesn't hold the movie, and the detail page offers "Add to" and the Issues
   // row loses its Manage icon until the next sync — right after an issue's
   // Replace file, when the admin is following the replacement.
+  //
+  // Radarr is asked first, as on the Download path: the cache records what
+  // Radarr reports (gone → neither row; still there without a file → wanted),
+  // never what the payload claims. Anything else — the movie or its file still
+  // there, or no answer — leaves the cache to the next sync.
   if (payload.eventType === "MovieDelete" || payload.eventType === "MovieFileDelete") {
     const delTmdbId = payload.movie?.tmdbId;
+    const fileDelete = payload.eventType === "MovieFileDelete";
     // A file deleted FOR AN UPGRADE is transient — the replacement import is
     // already underway; evicting availability would just flicker the badge.
-    const isUpgrade = payload.eventType === "MovieFileDelete" && payload.deleteReason === "upgrade";
-    if (isTmdbIdInRange(delTmdbId as number) && !isUpgrade) {
-      await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
-        if (payload.eventType === "MovieDelete") {
-          await tx.radarrWantedItem.deleteMany({ where: { tmdbId: delTmdbId as number, arrInstance } });
-        }
-        await tx.radarrAvailableItem.deleteMany({ where: { tmdbId: delTmdbId as number, arrInstance } });
-        if (payload.eventType === "MovieFileDelete") {
-          // skipDuplicates: a row already there is no error, so nothing aborts this tx (guardrail 23).
-          await tx.radarrWantedItem.createMany({ data: [{ tmdbId: delTmdbId as number, arrInstance }], skipDuplicates: true });
-        }
-      }, { timeout: 30_000 });
+    const isUpgrade = fileDelete && payload.deleteReason === "upgrade";
+    if (!isTmdbIdInRange(delTmdbId as number) || isUpgrade) {
+      syncCompleted = true;
+      return NextResponse.json({ ok: true, evicted: false });
     }
+    const delId = delTmdbId as number;
+    const state = await radarrDeleteState(delId, arrInstance, fileDelete);
+    if (state !== "absent" && !(fileDelete && state === "noFile")) {
+      if (state !== null) {
+        console.warn("[webhook/radarr] %s for tmdbId=%s not confirmed by Radarr; cache left to the next sync.", fileDelete ? "MovieFileDelete" : "MovieDelete", sanitizeForLog(delId));
+      }
+      syncCompleted = true;
+      return NextResponse.json({ ok: true, evicted: false, reason: state === null ? "unverified" : "not_deleted" });
+    }
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
+      if (state === "absent") {
+        await tx.radarrWantedItem.deleteMany({ where: { tmdbId: delId, arrInstance } });
+      }
+      await tx.radarrAvailableItem.deleteMany({ where: { tmdbId: delId, arrInstance } });
+      if (state === "noFile") {
+        // skipDuplicates: a row already there is no error, so nothing aborts this tx (guardrail 23).
+        await tx.radarrWantedItem.createMany({ data: [{ tmdbId: delId, arrInstance }], skipDuplicates: true });
+      }
+    }, { timeout: 30_000 });
     syncCompleted = true;
-    return NextResponse.json({ ok: true, evicted: !isUpgrade });
+    return NextResponse.json({ ok: true, evicted: true });
   }
 
   if (payload.eventType !== "Download" || !payload.movie?.tmdbId) {

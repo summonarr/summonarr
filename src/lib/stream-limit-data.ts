@@ -3,6 +3,7 @@ import { prisma } from "./prisma";
 import { processSingleton } from "./process-singleton";
 import { emitNotificationEvent } from "./notify-agents";
 import { createInAppNotification } from "./in-app-notify";
+import { SESSION_ABSENCE_GRACE_MS } from "./play-history";
 import {
   countStreamsByOwner,
   evaluateStreams,
@@ -22,11 +23,14 @@ const state = processSingleton<{ current: StreamAlertState }>("stream-limit:stat
 
 /**
  * One evaluation, called by the 5s play-history poller after it has refreshed
- * ActiveSession. Never throws (the poll must not fail over an alert); returns the
- * number of owners alerted. Reads the limit with setting.findUnique ONLY, like
- * the rest of the poller's config reads.
+ * ActiveSession. `tickStartedAt` is when that poll tick began (before any server
+ * fetch): only rows stamped since — sessions a server reported this tick — can
+ * put an owner over the limit, and rows stamped within the absence grace before
+ * it keep an owner over (a one-tick gap is not a drop). Never throws (the poll
+ * must not fail over an alert); returns the number of owners alerted. Reads the
+ * limit with setting.findUnique ONLY, like the rest of the poller's config reads.
  */
-export async function evaluateConcurrentStreams(now: Date = new Date()): Promise<number> {
+export async function evaluateConcurrentStreams(tickStartedAt: Date, now: Date = new Date()): Promise<number> {
   try {
     const row = await prisma.setting.findUnique({ where: { key: CONCURRENT_STREAM_LIMIT_KEY } });
     const limit = parseStreamLimit(row?.value);
@@ -59,7 +63,8 @@ export async function evaluateConcurrentStreams(now: Date = new Date()): Promise
         seasonNumber: s.seasonNumber,
         episodeNumber: s.episodeNumber,
       })),
-      now,
+      tickStartedAt,
+      new Date(tickStartedAt.getTime() - SESSION_ABSENCE_GRACE_MS),
     );
 
     const result = evaluateStreams(counts, limit, state.current, now.getTime());

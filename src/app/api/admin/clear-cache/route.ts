@@ -14,7 +14,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // metadata lives — including the country/language/keyword/watch-provider fields — and previously had
 // no clear button (only a warm one). MDBList and OMDB are the external ratings caches.
 // The tmdb list must name EVERY key namespace src/lib/tmdb.ts writes (a drift pin in
-// tests/review-2026-09-p44.test.mts scans that file): `movies:` is a separate entry because
+// tests/clear-cache-tmdb-prefixes.test.mts scans that file): `movies:` is a separate entry because
 // `movie:` does not prefix-match `movies:popular` / `movies:upcoming` / `movies:top_rated` /
 // `movies:popular:page:<p>` (the "s" precedes the colon), and `search:` / `collection:` were
 // simply missing — search results and collection pages kept serving stale rows after a

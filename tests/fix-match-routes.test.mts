@@ -147,6 +147,12 @@ function libraryDelegate(name: "plexLibraryItem" | "jellyfinLibraryItem", rows: 
         .sort((a, b) => a.serverInstance.localeCompare(b.serverInstance))
         .map((r) => ({ serverInstance: r.serverInstance, filePath: r.filePath }));
     },
+    // Outside the tx: the Jellyfin confirmation fallback's read of the TARGET
+    // title's stored copies.
+    findUnique: async (args: { where: { tmdbId_mediaType_serverInstance: { tmdbId: number; mediaType: string; serverInstance: string } } }) => {
+      rec(`${name}.findUnique`, args);
+      return matchRows(rows, args.where.tmdbId_mediaType_serverInstance)[0] ?? null;
+    },
   };
 }
 
@@ -890,6 +896,77 @@ test("POST (jellyfin, two copies): a failed read of copy B is never confirmed by
   const upsert = opsOf("jellyfinLibraryItem.upsert")[0]?.args as { create: { jellyfinItemId: string; jellyfinItemIds: string[] } };
   assert.equal(upsert.create.jellyfinItemId, "aaaaaaaa");
   assert.deepEqual(upsert.create.jellyfinItemIds, ["aaaaaaaa"]);
+});
+
+// The siblings' twin on the TARGET side. A correctly matched copy
+// of the corrected title (the 4K twin) carries the target id by construction,
+// and the item being fixed — still named after the wrong title — isn't in the
+// name search at all. Accepting that copy "confirmed" a fix nobody read back,
+// moved the row onto the other copy's id and dropped the fixed item from it.
+const Y_HD = "/movies/Y (2019)/Y.mkv";
+const Y_4K = { Id: "cccccccc", Path: "/movies-4k/Y (2019)/Y.2160p.mkv", ProviderIds: { Tmdb: "222" } };
+function unreadableItemResponder(itemId: string, searchItems: () => unknown[], searches: string[] = []) {
+  return (url: URL): Response => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Y" }]);
+    if (p === `/Items/${itemId}/Refresh`) return new Response("", { status: 200 });
+    if (p === `/Items/${itemId}`) return new Response("", { status: 500 }); // busy: never reads back
+    if (p === "/Items") { searches.push(url.search); return okJson({ Items: searchItems() }); }
+    throw new Error(`unexpected Jellyfin path ${p} (only the item itself may be read or refreshed)`);
+  };
+}
+
+test("jellyfin, tmdbId mode: a failed read is never confirmed by a stored, correctly matched copy of the TARGET title", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: Y_HD, jellyfinItemId: "aaaaaaaa", jellyfinItemIds: ["aaaaaaaa"] });
+  jellyfinRows.push({ tmdbId: 222, mediaType: "MOVIE", serverInstance: "", filePath: Y_4K.Path, jellyfinItemId: "cccccccc", jellyfinItemIds: ["cccccccc"] });
+  const searches: string[] = [];
+  respond = unreadableItemResponder("aaaaaaaa", () => [Y_4K], searches);
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 }, a.header), undefined);
+
+  assert.ok(searches.length > 0, "the fallback search ran");
+  assert.equal(res.status, 502, "nothing confirmed the item being fixed");
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0, "the row must not move onto the 4K copy's id");
+  assert.equal(opsOf("jellyfinLibraryItem.deleteMany").length, 0);
+  assert.ok(errors.some((e) => e.includes("Could not read the item back")), errors.join(" | "));
+});
+
+test("jellyfin: when the target title's copies can't be read, only the item's own path may confirm (fail closed)", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: Y_HD, jellyfinItemId: "aaaaaaaa", jellyfinItemIds: ["aaaaaaaa"] });
+  const delegate = fakePrisma.jellyfinLibraryItem as { findUnique: unknown };
+  const real = delegate.findUnique;
+  delegate.findUnique = async () => { throw new Error("pool timeout"); };
+  try {
+    respond = unreadableItemResponder("aaaaaaaa", () => [Y_4K]);
+    const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 }, a.header), undefined);
+    assert.equal(res.status, 502);
+    assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
+    assert.equal(warns.filter((w) => w.includes("could not read the target title's copies")).length, 1, "read (and warned) once per call");
+  } finally {
+    delegate.findUnique = real;
+  }
+});
+
+test("jellyfin: the fallback still confirms on the item's OWN path, beside a stored target copy, under the item's own id", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: Y_HD, jellyfinItemId: "aaaaaaaa", jellyfinItemIds: ["aaaaaaaa"] });
+  jellyfinRows.push({ tmdbId: 222, mediaType: "MOVIE", serverInstance: "", filePath: Y_4K.Path, jellyfinItemId: "cccccccc", jellyfinItemIds: ["cccccccc"] });
+  existingTargetRow = { jellyfinItemId: "cccccccc", jellyfinItemIds: ["cccccccc"] };
+  // The remap landed: the item is renamed, so the name search finds it at its own path.
+  respond = unreadableItemResponder("aaaaaaaa", () => [Y_4K, { Id: "aaaaaaaa", Path: Y_HD, ProviderIds: { Tmdb: "222" } }]);
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 }, a.header), undefined);
+
+  assert.equal(res.status, 200);
+  const up = opsOf("jellyfinLibraryItem.upsert")[0]?.args as { update: { jellyfinItemId: string; jellyfinItemIds: string[] } };
+  assert.equal(up.update.jellyfinItemId, "aaaaaaaa");
+  assert.deepEqual(up.update.jellyfinItemIds, ["cccccccc", "aaaaaaaa"]);
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1812,6 +1889,23 @@ test("item-mode jobs are keyed by the ITEM: two unmatched items fixed to one tit
   const base = { server: "jellyfin", serverInstance: "", mediaType: "MOVIE", tmdbId: 0, correctTmdbId: 5 };
   assert.notEqual(fixMatchJobKey({ ...base, itemKey: "x" }), fixMatchJobKey({ ...base, itemKey: "y" }));
   assert.equal(fixMatchJobKey({ ...base, tmdbId: 3 }), "jellyfin::MOVIE:3->5", "the tmdbId mode's key is unchanged");
+});
+
+test("jellyfin, item mode: the flagged item is never 'confirmed' by the target title's stored copy, and its flag stays", async () => {
+  const a = await admin();
+  configureServers();
+  const ITEM = "b".repeat(32);
+  const TARGET_COPY = "d".repeat(32);
+  storeMatchReport([wrongCopyFlag({ itemKey: ITEM, path: Y_HD, folder: "Y (2019)", serverTmdbId: 111 })]);
+  jellyfinRows.push({ tmdbId: 222, mediaType: "MOVIE", serverInstance: "", filePath: Y_4K.Path, jellyfinItemId: TARGET_COPY, jellyfinItemIds: [TARGET_COPY] });
+  respond = unreadableItemResponder(ITEM, () => [{ ...Y_4K, Id: TARGET_COPY }]);
+
+  const res = await fixMatch(postBody({ server: "jellyfin", mediaType: "MOVIE", correctTmdbId: 222, itemKey: ITEM }, a.header), undefined);
+
+  assert.equal(res.status, 502);
+  assert.equal(ops.filter((o) => /\.(update|create|delete|upsert)/.test(o.op)).length, 0, "nothing moved");
+  const stored = JSON.parse(settings.get("libraryMatchCheck:report")!) as { flags: Array<{ itemKey: string }> };
+  assert.deepEqual(stored.flags.map((f) => f.itemKey), [ITEM], "the still-wrong item stays on the report");
 });
 
 // ════════════════════════════════════════════════════════════════════════════

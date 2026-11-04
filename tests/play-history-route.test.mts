@@ -372,6 +372,15 @@ const fakePrisma = {
       const u = usersById.get(args.where.id);
       return u ? { ...u } : null;
     },
+    // The concurrent-stream alert's admin read (stream-limit-data.ts).
+    findMany: async (args: unknown) => { rec("user", "findMany", args); return [{ id: "stream-admin" }]; },
+  },
+  // The concurrent-stream alert's inbox row and agent fan-out (no agents).
+  notification: {
+    create: async (args: { data: Record<string, unknown> }) => { rec("notification", "create", args); return args.data; },
+  },
+  notificationAgent: {
+    findMany: async () => [],
   },
   authSession: {
     findUnique: async (args: { where: { sessionId: string } }) =>
@@ -438,14 +447,20 @@ let plexLibRows: Array<Record<string, unknown>> = [];
 let plexSessionsStatus = 200;
 let plexRemoteSessionsStatus = 200;
 let jfSessionsStatus = 200;
+// A slow sibling server: the Jellyfin /Sessions answer is held this long.
+let jfSessionsDelayMs = 0;
 
 const okJson = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+// A plex.tv outage: the owner lookup fails (and, uncached, keeps failing).
+let plexTvDown = false;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchLog.push({ url: String(input), method: init?.method ?? "GET" });
   if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") {
+    if (plexTvDown) return new Response("unavailable", { status: 503 });
     return okJson({ id: 9, email: "owner@plex.tv", username: "owner", thumb: "" });
   }
   if (url.pathname === "/status/sessions") {
@@ -458,6 +473,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return okJson({ MediaContainer: { Metadata: [{}] } }); // no markers → no marker updateMany
   }
   if (url.pathname === "/Sessions") {
+    if (jfSessionsDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, jfSessionsDelayMs));
     if (url.origin === JF_REMOTE_URL) return okJson(jfRemoteSnapshot, jfSessionsStatus);
     return okJson(jfSnapshot, jfSessionsStatus);
   }
@@ -670,6 +686,7 @@ beforeEach(() => {
   plexSessionsStatus = 200;
   plexRemoteSessionsStatus = 200;
   jfSessionsStatus = 200;
+  jfSessionsDelayMs = 0;
   playHistoryCreateError = null;
   // Clear the process-global recently-finalized ledger so a mark from a prior
   // test can't filter this test's session out of the poll (plex-events pattern).
@@ -1465,6 +1482,43 @@ test("GUARDRAIL 34: a continuing session whose owner RE-RESOLVED to a different 
   );
 });
 
+test("GUARDRAIL 34: during a plex.tv outage (no owner id this tick) a correctly bound owner session is NOT re-bound onto the phantom \"1\" row", async () => {
+  // The re-bind heals a phantom; it must never point the other way. With
+  // plexAdminId null the "1" rewrite can't fire, so this tick resolves the owner
+  // to the phantom (plex, "", "1") row — re-binding there would file the watch
+  // under an identity guardrail 34 can never link, and drop the owner's
+  // isServerAdmin exemption for the whole outage.
+  // A fresh admin token misses the route's owner-id cache (failures are not
+  // cached), so the lookup really runs and fails.
+  syncSettings.set("plexAdminToken", "plex-admin-token-outage");
+  plexTvDown = true;
+  try {
+    seed(makeRow("own-out", {
+      mediaServerUserId: "msu:plex:9", // bound to the owner's global-id row while plex.tv was up
+      state: "playing", progressMs: 60_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000),
+    }));
+    const snap = plexSnap("own-out", { viewOffset: 70_000 });
+    (snap.User as { id: string }).id = "1";
+    plexSnapshot = [snap];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 1, ended: 0 });
+    await settle();
+
+    assert.ok(
+      dbCalls.some((c) => c.model === "mediaServerUser" && c.op === "upsert" &&
+        (c.args as { create: { sourceUserId: string } }).create.sourceUserId === "1"),
+      "precondition: with plex.tv down this tick resolved the owner to the phantom \"1\" row",
+    );
+    const upd = activeUpdatesFor("plex:own-out");
+    assert.equal(upd.length, 1);
+    assert.equal("mediaServerUserId" in upd[0].data, false, "no re-bind while the owner id is unknown");
+  } finally {
+    plexTvDown = false;
+    syncSettings.set("plexAdminToken", "plex-admin-token-1");
+  }
+});
+
 test("a continuing session whose owner resolved to the SAME MediaServerUser does not carry mediaServerUserId in the CAS data", async () => {
   // The re-bind is written only on a mismatch, so the common case keeps the
   // update payload minimal.
@@ -1523,6 +1577,61 @@ test("a failed Plex ABSENCE-sweep finalize warns with the [play-history] scope, 
     warns.some((w) => w.includes("[play-history] Failed to finalize plex session plex:abs-fail")),
     `a silently swallowed sweep failure leaves the operator nothing to correlate a late finalize with; warns=${JSON.stringify(warns)}`,
   );
+});
+
+// ═══ Concurrent-stream alert (guardrail 19f): the tick's start is the cut ═══
+// The poller passes the time its tick began; only sessions a server reported
+// THIS tick (stamped at or after it) count. An ended session lingering in its
+// 60s absence grace is not re-stamped, so a fast device switch is one stream.
+
+function streamAlerts(): Array<Record<string, unknown>> {
+  return dbCalls
+    .filter((c) => c.model === "notification" && c.op === "create")
+    .map((c) => (c.args as { data: Record<string, unknown> }).data)
+    .filter((d) => d.type === "STREAM_LIMIT");
+}
+
+test("GUARDRAIL 19f: a device switch is one stream — the old row, absent this tick and inside its grace, is not counted", async () => {
+  settings.set("concurrentStreamLimit", "1");
+  try {
+    // Stopped on the TV 10s ago (still inside the 60s absence grace, so not
+    // finalized), now playing on the phone. Same identity: the phone session
+    // resolves to msu:plex:acct-phone.
+    seed(makeRow("tv", { mediaServerUserId: "msu:plex:acct-phone", lastSeenAt: agoReal(10_000) }));
+    plexSnapshot = [plexSnap("phone", { viewOffset: 60_000 })];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    assert.deepEqual((await bodyOf(res)).plex, { started: 1, updated: 0, ended: 0 });
+    await settle();
+    assert.ok(activeStore.has("plex:tv"), "precondition: the old row is still in its grace");
+    assert.equal(streamAlerts().length, 0, "no false accusation on a device switch");
+  } finally {
+    settings.delete("concurrentStreamLimit");
+  }
+});
+
+test("GUARDRAIL 19f: two sessions of one identity both reported this tick ARE two streams — even while a slow sibling server holds the evaluation back", async () => {
+  settings.set("concurrentStreamLimit", "1");
+  // The Jellyfin server answers late, so the evaluation runs well after the Plex
+  // rows were stamped. They were still seen THIS tick and must count.
+  jfSessionsDelayMs = 60;
+  try {
+    // Two players started on one account: both rows are written this tick.
+    const a = plexSnap("two-a", { viewOffset: 60_000 });
+    const b = plexSnap("two-b", { viewOffset: 60_000 });
+    (a.User as { id: string }).id = "acct-two";
+    (b.User as { id: string }).id = "acct-two";
+    plexSnapshot = [a, b];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    assert.deepEqual((await bodyOf(res)).plex, { started: 2, updated: 0, ended: 0 });
+    await settle();
+    const alerts = streamAlerts();
+    assert.equal(alerts.length, 1, "both rows were stamped during this tick, so both count");
+    assert.equal(alerts[0].userId, "stream-admin");
+  } finally {
+    settings.delete("concurrentStreamLimit");
+  }
 });
 
 test("the route never console.errors across every path exercised in this file (guardrail 7)", () => {

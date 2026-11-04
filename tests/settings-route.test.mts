@@ -84,6 +84,7 @@ const deleteManyCalls: Array<{ where: { key: string } }> = [];
 const auditAttempts: Array<Record<string, unknown>> = [];
 const auditRows: Array<Record<string, unknown>> = [];
 let auditThrows = false;
+const AUDIT_DETAILS_COLUMN = 8000;
 // Every top-level setting.findMany key filter, in order. The Discord slash-command
 // re-registration task's FIRST step is a findMany over exactly the three
 // registration keys, so its presence/absence here pins whether the (fire-and-
@@ -122,6 +123,14 @@ function makeTx() {
       create: async (args: { data: Record<string, unknown> }) => {
         auditAttempts.push(args.data);
         if (auditThrows) throw new Error("audit insert exploded (unit test)");
+        // AuditLog.details is VarChar(8000): Postgres refuses a longer value
+        // (counted in characters), and the insert fails the save's transaction.
+        const details = args.data.details;
+        if (typeof details === "string" && [...details].length > AUDIT_DETAILS_COLUMN) {
+          throw Object.assign(new Error("value too long for type character varying(8000)"), {
+            name: "PrismaClientKnownRequestError", code: "P2000",
+          });
+        }
         auditRows.push(args.data);
         return args.data;
       },
@@ -1070,4 +1079,88 @@ test("PATCH: mdblistPlan accepts only auto or a known plan, and a save applies a
     "plus",
     "the route drops the plan memo, so the budget follows the save immediately",
   );
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — the Trakt Client ID Remove, and audit details that always fit
+// ════════════════════════════════════════════════════════════════════════════
+
+// Steps past the route's 10s per-key cooldown left by any earlier test,
+// including an earlier patchLater (each call lands further ahead).
+let laterOffsetMs = 0;
+async function patchLater(body: Record<string, string>, header: Record<string, string>): Promise<Response> {
+  const realNow = Date.now;
+  laterOffsetMs += 10 * 60_000;
+  const offset = laterOffsetMs;
+  Date.now = () => realNow() + offset;
+  try {
+    return await PATCH(patchReq(JSON.stringify(body), header), undefined);
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+test("PATCH: an empty traktClientId is WRITTEN — the Trakt form's Remove must clear the id, like the secret", async () => {
+  // ApiKeySettingForm's Remove sends "" and shows "Removed" on any 2xx. The id
+  // was missing from CLEARABLE_KEYS, so the blank was dropped, the route said
+  // ok with no write, and the old app id kept driving Trakt.
+  settings.set("traktClientId", "live-client-id");
+  settings.set("traktClientSecret", "live-client-secret");
+  const admin = await mintSession("ADMIN");
+  const res = await patchLater({ traktClientId: "", traktClientSecret: "" }, admin.header);
+  assert.equal(res.status, 200);
+  for (const key of ["traktClientId", "traktClientSecret"]) {
+    assert.equal(upsertFor(key)[0]?.create.value, "", `clearing ${key} must reach the database`);
+    assert.equal(settings.get(key), "");
+  }
+  const details = JSON.parse(auditRows[0].details as string);
+  assert.deepEqual(details.keys, ["traktClientId", "traktClientSecret"]);
+  assert.equal(details.before.traktClientId, "[redacted]", "a secret never reaches the audit row");
+});
+
+test("PATCH: a long MOTD body saves — each audited value is cut with a length marker so details fits VarChar(8000)", async () => {
+  // A stored 4,200-char body plus the new one made details ~8.8k characters:
+  // the in-transaction audit insert failed and every MOTD save answered 500.
+  const oldBody = "b".repeat(4200);
+  const newBody = "c".repeat(4300);
+  settings.set("motdBody", oldBody);
+  settings.set("motdTitle", "Notice");
+  const admin = await mintSession("ADMIN");
+  const res = await patchLater({ motdEnabled: "true", motdTitle: "Notice!", motdBody: newBody }, admin.header);
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal(upsertFor("motdBody")[0]?.create.value, newBody, "the setting itself is saved whole");
+  assert.equal(auditRows.length, 1);
+  const raw = auditRows[0].details as string;
+  assert.ok(raw.length <= AUDIT_DETAILS_COLUMN);
+  const details = JSON.parse(raw);
+  assert.deepEqual(details.keys, ["motdEnabled", "motdTitle", "motdBody"]);
+  assert.equal(details.before.motdBody, `${"b".repeat(1000)}… [4200 chars]`);
+  assert.equal(details.after.motdBody, `${"c".repeat(1000)}… [4300 chars]`);
+  assert.equal(details.before.motdTitle, "Notice", "a short value is kept as it is");
+  assert.equal(details.after.motdTitle, "Notice!");
+});
+
+test("PATCH: many long values at once still fit — values are cut harder, and secrets stay [redacted]", async () => {
+  const long: Record<string, string> = {
+    motdBody: "d".repeat(4800),
+    motdTitle: "e".repeat(1900),
+    maintenanceMessage: "f".repeat(1900),
+    plexMoviePathStripPrefix: `/${"g".repeat(1899)}`,
+  };
+  for (const [k, v] of Object.entries(long)) settings.set(k, v.toUpperCase());
+  settings.set("omdbApiKey", "old-omdb-key");
+  const admin = await mintSession("ADMIN");
+  const res = await patchLater({ ...long, omdbApiKey: "new-omdb-key" }, admin.header);
+  assert.equal(res.status, 200, await res.clone().text());
+  const raw = auditRows[0].details as string;
+  assert.ok(raw.length <= AUDIT_DETAILS_COLUMN);
+  const details = JSON.parse(raw);
+  assert.deepEqual(details.keys, [...Object.keys(long), "omdbApiKey"]);
+  for (const [k, v] of Object.entries(long)) {
+    assert.equal(details.after[k], `${v.slice(0, 100)}… [${v.length} chars]`, k);
+    assert.equal(details.before[k], `${v.toUpperCase().slice(0, 100)}… [${v.length} chars]`, k);
+  }
+  assert.equal(details.before.omdbApiKey, "[redacted]");
+  assert.equal(details.after.omdbApiKey, "[redacted]");
+  assert.ok(!raw.includes("omdb-key"), "no secret value in the audit row");
 });

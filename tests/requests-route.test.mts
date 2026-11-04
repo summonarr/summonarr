@@ -315,7 +315,7 @@ const mediaRequestModel = {
   },
   deleteMany: async (args: unknown) => {
     rec("mediaRequest.deleteMany", args);
-    return { count: 1 };
+    return { count: staleDeleteCount };
   },
   updateMany: async (args: unknown) => {
     rec("mediaRequest.updateMany", args);
@@ -335,6 +335,24 @@ const mediaRequestModel = {
   },
 };
 shadowPrismaModel(prisma, "mediaRequest", mediaRequestModel);
+
+// The comment thread of the stale DECLINED row a re-request replaces (oldest
+// first). findMany answers it the way the real query is written: newest first,
+// capped by `take`.
+type ThreadRow = { id: string; createdAt: Date; authorId: string; body: string; fromAdmin: boolean };
+let staleThread: ThreadRow[] = [];
+let staleDeleteCount = 1; // what the stale row's CAS deleteMany reports
+const requestCommentModel = {
+  findMany: async (args: { take?: number }) => {
+    rec("requestComment.findMany", args);
+    const newestFirst = [...staleThread].reverse();
+    return args.take === undefined ? newestFirst : newestFirst.slice(0, args.take);
+  },
+  createMany: async (args: { data: unknown[] }) => {
+    rec("requestComment.createMany", args);
+    return { count: args.data.length };
+  },
+};
 
 // resolveMediaMeta prefers the pre-warmed TmdbMediaCore row — serving it from
 // the stub keeps TMDB entirely off the wire (its live shape is owned by
@@ -443,7 +461,7 @@ shadowPrismaModel(prisma, "pushSubscription", {
 // $transaction stub: callback form (the request insert) tags ops inTx and
 // PROPAGATES the callback's rejection — the abort semantics the route's outer
 // catch depends on. Array form covers any batched shape.
-const txObj = { mediaRequest: mediaRequestModel };
+const txObj = { mediaRequest: mediaRequestModel, requestComment: requestCommentModel };
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   txCalls++;
   if (Array.isArray(arg)) return Promise.all(arg);
@@ -533,6 +551,8 @@ beforeEach(() => {
   createImpls = [];
   requestCounts = [];
   existingRow = null;
+  staleThread = [];
+  staleDeleteCount = 1;
   greenlitRow = null;
   earlierPendingRow = null;
   listRows = [];
@@ -926,6 +946,53 @@ test("duplicates: PENDING → 409; permanently declined → 403; a plain DECLINE
     permanentlyDeclined: false,
   });
   assert.equal(opsOf("mediaRequest.create").length, 1);
+});
+
+test("a re-request keeps the declined row's comment thread: read before the delete, written onto the new row, announced to nobody", async () => {
+  const { userId, token } = await mintSession();
+  existingRow = { id: "req-declined", status: "DECLINED", permanentlyDeclined: false };
+  const t0 = new Date("2026-10-31T10:00:00.000Z");
+  const t1 = new Date("2026-10-31T11:00:00.000Z");
+  staleThread = [
+    { id: "c-1", createdAt: t0, authorId: "u-admin", body: "Declined for now, request the 4K once it releases", fromAdmin: true },
+    { id: "c-2", createdAt: t1, authorId: userId, body: "Will do", fromAdmin: false },
+  ];
+  const res = await post(token, requestBody(userId));
+  assert.equal(res.status, 201);
+  const newId = ((await res.json()) as { id: string }).id;
+
+  // Order inside the one tx: thread read → CAS delete (cascade) → create → restore.
+  const order = ops.filter((o) => o.inTx).map((o) => o.op);
+  assert.deepEqual(
+    order.filter((op) => /^(requestComment\.|mediaRequest\.(deleteMany|create)$)/.test(op)),
+    ["requestComment.findMany", "mediaRequest.deleteMany", "mediaRequest.create", "requestComment.createMany"],
+  );
+  const read = opsOf("requestComment.findMany")[0].args as { where: unknown; take: number };
+  assert.deepEqual(read.where, { requestId: "req-declined", request: { status: "DECLINED", permanentlyDeclined: false } });
+  // The SAME comments, moved: ids, authors, bodies, fromAdmin and createdAt kept, oldest first.
+  assert.deepEqual((opsOf("requestComment.createMany")[0].args as { data: unknown[] }).data, [
+    { ...staleThread[0], requestId: newId },
+    { ...staleThread[1], requestId: newId },
+  ]);
+  // Not new comments: no comment SSE (and the route has no comment audit/notify path).
+  assert.deepEqual(sseEvents.map((e) => e.type), ["request:new"]);
+});
+
+test("a re-request whose CAS delete removed nothing carries no thread (the surviving row keeps it)", async () => {
+  const { userId, token } = await mintSession();
+  existingRow = { id: "req-declined", status: "DECLINED", permanentlyDeclined: false };
+  staleThread = [{ id: "c-1", createdAt: new Date(), authorId: "u-admin", body: "no", fromAdmin: true }];
+  staleDeleteCount = 0;
+  const res = await post(token, requestBody(userId));
+  assert.equal(res.status, 201, "the stub's create succeeds; on a real DB the surviving row makes it 409");
+  assert.equal(opsOf("requestComment.createMany").length, 0);
+});
+
+test("a fresh request with no stale DECLINED row reads and writes no comments", async () => {
+  const { userId, token } = await mintSession();
+  const res = await post(token, requestBody(userId));
+  assert.equal(res.status, 201);
+  assert.equal(opsOf("requestComment.findMany").length + opsOf("requestComment.createMany").length, 0);
 });
 
 // ── branch behavior ─────────────────────────────────────────────────────────

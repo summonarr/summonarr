@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
+import { readWarnKey } from "@/lib/arr-admin-http";
 import { isFeatureEnabled } from "@/lib/features";
 import { loadMissingEpisodes, MissingInstanceError } from "@/lib/arr-missing-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
 import { sanitizeForLog } from "@/lib/sanitize";
 
 // Admin → Missing, one series expanded (ADMIN): its aired, monitored,
@@ -25,8 +27,14 @@ export const GET = withAdmin(snapshotted(async (req) => {
   if (!(await isFeatureEnabled("feature.integration.sonarr"))) {
     return NextResponse.json({ error: t("apiAdmin.missing.integrationDisabled", { service: "Sonarr" }) }, { status: 404 });
   }
+  // The snapshot refresh re-reads every series an admin expanded: a dark
+  // instance is an unchanged condition, logged once (guardrail 7b). Keyed per
+  // series too, because a transport failure's message names the series' URL.
+  const target = { service: "sonarr", instance } as const;
+  const warnKey = `${readWarnKey("missing-episodes", target)}:${seriesId}`;
   try {
     const episodes = await loadMissingEpisodes(instance, seriesId, new Date());
+    forgetWarnOnChange(warnKey);
     return NextResponse.json({ episodes });
   } catch (err) {
     if (err instanceof MissingInstanceError) {
@@ -36,7 +44,8 @@ export const GET = withAdmin(snapshotted(async (req) => {
       return NextResponse.json({ error: t("apiAdmin.missing.seriesNotFound") }, { status: 404 });
     }
     // The slug is the browser's: never written raw into a log line (CR/LF, ANSI).
-    console.warn(`[missing] sonarr instance "${sanitizeForLog(instance)}" episode listing failed:`, arrErrorMessage(err));
+    const detail = arrErrorMessage(err);
+    warnOnChange(warnKey, detail, `[missing] sonarr instance "${sanitizeForLog(instance)}" episode listing failed: ${detail}`);
     return NextResponse.json({ error: t("apiAdmin.missing.sonarrUnreachable") }, { status: 502 });
   }
 }));

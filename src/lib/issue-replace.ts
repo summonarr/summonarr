@@ -98,6 +98,104 @@ export interface ReplaceableFile extends TitleFile {
   grab: FileGrab | null;
 }
 
+// ── the title's history, indexed once ────────────────────────────────────────
+
+/**
+ * A history longer than this is not read at all: no file's grab is attributed,
+ * so each is searched for, never blocklisted. Far past a real title's (a full
+ * Sonarr record is hundreds of bytes to a few KB, so arrFetch's 50 MB cap holds
+ * tens of thousands), and it bounds the read whatever the arr sends (guardrail
+ * 5i). Reading only the newest records would not be safe: a dropped older
+ * import naming the file's own path changes which import the rules pick.
+ */
+export const MAX_REPLACE_HISTORY = 100_000;
+
+interface UnitHistory {
+  /** The unit's newest import (the first seen wins a tie), and its newest per imported path. */
+  newestImport: ArrHistoryEvent | null;
+  newestImportByPath: Map<string, ArrHistoryEvent>;
+  /** The newest rename record's id, per path it names. */
+  renamedTo: Map<string, number>;
+  /** The newest deletion's id, an upgrade's deletion excepted. */
+  lastDeletion: number;
+}
+
+/**
+ * The title's history as importForFile and grabForImport ask about it, built
+ * ONCE per listing: per unit (the movie, or an S/E) and per download. The
+ * history is the title's whole, unpaged list, and re-scanning it for every file
+ * was O(files × history) on the one event loop — seconds on a long daily show.
+ */
+export interface ReplaceHistoryIndex {
+  /** False when the history is past MAX_REPLACE_HISTORY: nothing is attributed. */
+  complete: boolean;
+  /** Radarr's one unit: every record. */
+  movie: UnitHistory;
+  /** Sonarr's units, keyed `season:episode`. */
+  episodes: Map<string, UnitHistory>;
+  /** Each download's grabs, one per id (the first seen), ascending by id. */
+  grabs: Map<string, ArrHistoryEvent[]>;
+  /** Each download's newest failure id. */
+  lastFailure: Map<string, number>;
+}
+
+type HistorySource = readonly ArrHistoryEvent[] | ReplaceHistoryIndex;
+
+const episodeKey = (e: EpisodeRef) => `${e.seasonNumber}:${e.episodeNumber}`;
+const emptyUnit = (): UnitHistory => ({ newestImport: null, newestImportByPath: new Map(), renamedTo: new Map(), lastDeletion: -Infinity });
+
+function addToUnit(u: UnitHistory, e: ArrHistoryEvent): void {
+  if (e.kind === "imported") {
+    if (u.newestImport === null || e.id > u.newestImport.id) u.newestImport = e;
+    if (e.importedPath !== null) {
+      const prev = u.newestImportByPath.get(e.importedPath);
+      if (prev === undefined || e.id > prev.id) u.newestImportByPath.set(e.importedPath, e);
+    }
+  } else if (e.kind === "renamed") {
+    if (e.path !== null && e.id > (u.renamedTo.get(e.path) ?? -Infinity)) u.renamedTo.set(e.path, e.id);
+  } else if (e.kind === "deleted") {
+    if ((e.reason ?? "").toLowerCase() !== "upgrade" && e.id > u.lastDeletion) u.lastDeletion = e.id;
+  }
+}
+
+/** One pass over the title's history (none past MAX_REPLACE_HISTORY). */
+export function indexReplaceHistory(history: readonly ArrHistoryEvent[]): ReplaceHistoryIndex {
+  const index: ReplaceHistoryIndex = {
+    complete: history.length <= MAX_REPLACE_HISTORY,
+    movie: emptyUnit(),
+    episodes: new Map(),
+    grabs: new Map(),
+    lastFailure: new Map(),
+  };
+  if (!index.complete) return index;
+  const grabsById = new Map<string, Map<number, ArrHistoryEvent>>();
+  for (let i = 0; i < history.length; i++) {
+    const e = history[i];
+    addToUnit(index.movie, e);
+    if (e.episode !== null) {
+      const key = episodeKey(e.episode);
+      let unit = index.episodes.get(key);
+      if (unit === undefined) index.episodes.set(key, (unit = emptyUnit()));
+      addToUnit(unit, e);
+    }
+    if (e.downloadId === null) continue;
+    if (e.kind === "grabbed") {
+      let byId = grabsById.get(e.downloadId);
+      if (byId === undefined) grabsById.set(e.downloadId, (byId = new Map()));
+      if (!byId.has(e.id)) byId.set(e.id, e);
+    } else if (e.kind === "failed" && e.id > (index.lastFailure.get(e.downloadId) ?? -Infinity)) {
+      index.lastFailure.set(e.downloadId, e.id);
+    }
+  }
+  for (const [downloadId, byId] of grabsById) index.grabs.set(downloadId, [...byId.values()].sort((a, b) => a.id - b.id));
+  return index;
+}
+
+const indexOf = (h: HistorySource): ReplaceHistoryIndex => (isHistoryIndex(h) ? h : indexReplaceHistory(h));
+function isHistoryIndex(h: HistorySource): h is ReplaceHistoryIndex {
+  return !Array.isArray(h);
+}
+
 /**
  * Whether an import's absolute path ends with the file's path relative to its
  * title folder, on a separator boundary (`/old/Show/Season 01/S01E01.mkv` vs
@@ -129,41 +227,40 @@ function sameRelativeFile(importedPath: string, relativePath: string): boolean {
  * an import whose path ends with the file's relative path still stands. An
  * import with no path on record still stands for the unit. Every unit of a
  * multi-episode file must point at the same download.
+ *
+ * `history` is the title's list, or its index (replaceableFiles builds it once
+ * for every file).
  */
 export function importForFile(
   service: ArrService,
   file: TitleFile,
   titleFiles: readonly TitleFile[],
-  history: readonly ArrHistoryEvent[],
+  history: HistorySource,
 ): ArrHistoryEvent | null {
-  const units: Array<EpisodeRef | null> = service === "radarr" ? [null] : file.episodes;
+  const index = indexOf(history);
+  if (!index.complete) return null;
+  // A unit with no record at all has no import: the file's grab is unknown.
+  const units: Array<UnitHistory | undefined> = service === "radarr" ? [index.movie] : file.episodes.map((e) => index.episodes.get(episodeKey(e)));
   if (units.length === 0) return null;
   const ambiguousMovie = service === "radarr" && titleFiles.length > 1;
-  const onUnit = (e: ArrHistoryEvent, unit: EpisodeRef | null) =>
-    unit === null || (e.episode !== null && sameEpisode(e.episode, unit));
   const found: ArrHistoryEvent[] = [];
   for (const unit of units) {
-    const imports = history.filter((e) => e.kind === "imported" && onUnit(e, unit));
-    const byPath = file.path !== null ? imports.filter((e) => e.importedPath === file.path) : [];
-    if (ambiguousMovie && byPath.length === 0) return null;
-    const pool = byPath.length > 0 ? byPath : imports;
-    if (pool.length === 0) return null;
-    const newest = pool.reduce((a, b) => (b.id > a.id ? b : a));
-    if (byPath.length === 0 && newest.importedPath !== null && file.path !== null && newest.importedPath !== file.path) {
+    if (unit === undefined) return null;
+    const byPath = file.path !== null ? (unit.newestImportByPath.get(file.path) ?? null) : null;
+    if (ambiguousMovie && byPath === null) return null;
+    const newest = byPath ?? unit.newestImport;
+    if (newest === null) return null;
+    if (byPath === null && newest.importedPath !== null && file.path !== null && newest.importedPath !== file.path) {
       // The same file whose title folder moved since (a series/movie path change, or the title
       // manager's root-folder move): the arrs record no history for a move, so the import still
       // names the old folder — but the same relative path inside it.
       const folderMoved = sameRelativeFile(newest.importedPath, file.relativePath);
       // The rename's `path` is the file's relative path (an older arr sends the full one).
-      const renamedTo = history.some(
-        (e) => e.kind === "renamed" && onUnit(e, unit) && e.id > newest.id && e.path !== null && (e.path === file.relativePath || e.path === file.path),
-      );
+      const renamedTo = Math.max(unit.renamedTo.get(file.relativePath) ?? -Infinity, unit.renamedTo.get(file.path) ?? -Infinity) > newest.id;
       if (!folderMoved && !renamedTo) return null;
     }
-    const replacedSince = history.some(
-      (e) => e.kind === "deleted" && onUnit(e, unit) && e.id > newest.id && (e.reason ?? "").toLowerCase() !== "upgrade",
-    );
-    if (replacedSince) return null;
+    // Replaced since: a deletion after the import, other than an upgrade's.
+    if (unit.lastDeletion > newest.id) return null;
     found.push(newest);
   }
   const downloads = new Set(found.map((e) => e.downloadId));
@@ -179,16 +276,24 @@ export function importForFile(
  * shares the old grab's id: only grabs BEFORE the import count, and only a
  * failure AFTER the grab means it is already failed.
  */
-export function grabForImport(imported: ArrHistoryEvent, history: readonly ArrHistoryEvent[]): FileGrab | null {
+export function grabForImport(imported: ArrHistoryEvent, history: HistorySource): FileGrab | null {
   const downloadId = imported.downloadId;
   if (downloadId === null) return null;
-  let grab: ArrHistoryEvent | null = null;
-  for (const e of history) {
-    if (e.kind === "grabbed" && e.downloadId === downloadId && e.id < imported.id && (grab === null || e.id > grab.id)) grab = e;
+  const index = indexOf(history);
+  if (!index.complete) return null;
+  const grabs = index.grabs.get(downloadId);
+  if (grabs === undefined) return null;
+  // The last grab below the import's id: a binary search of the ascending list.
+  let lo = 0;
+  let hi = grabs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (grabs[mid].id < imported.id) lo = mid + 1;
+    else hi = mid;
   }
-  if (grab === null) return null;
-  const grabId = grab.id;
-  return { event: grab, failed: history.some((e) => e.kind === "failed" && e.downloadId === downloadId && e.id > grabId) };
+  if (lo === 0) return null;
+  const grab = grabs[lo - 1];
+  return { event: grab, failed: (index.lastFailure.get(downloadId) ?? -Infinity) > grab.id };
 }
 
 /**
@@ -203,18 +308,26 @@ export function replaceableFiles(
   history: readonly ArrHistoryEvent[],
   episodeList: readonly Pick<TitleEpisode, "seasonNumber" | "episodeNumber" | "title">[] = [],
 ): ReplaceableFile[] {
+  // History and episode list each read once, then looked up per file (guardrail 5i).
+  const index = indexReplaceHistory(history);
+  // The first listed entry for an S/E names it, as a search of the list would.
+  const titles = new Map<string, string>();
+  for (const x of episodeList) {
+    const key = episodeKey(x);
+    if (!titles.has(key)) titles.set(key, x.title);
+  }
   const titleOf = (e: EpisodeRef): string | null => {
-    const hit = episodeList.find((x) => sameEpisode(x, e));
-    return hit && hit.title.trim() !== "" ? hit.title : null;
+    const title = titles.get(episodeKey(e));
+    return title !== undefined && title.trim() !== "" ? title : null;
   };
   return titleFiles
     .filter((f) => fileInScope(f, scope))
     .map((f) => {
-      const imported = importForFile(service, f, titleFiles, history);
+      const imported = importForFile(service, f, titleFiles, index);
       return {
         ...f,
         episodes: f.episodes.map((e) => ({ seasonNumber: e.seasonNumber, episodeNumber: e.episodeNumber, title: titleOf(e) })),
-        grab: imported ? grabForImport(imported, history) : null,
+        grab: imported ? grabForImport(imported, index) : null,
       };
     });
 }
@@ -383,7 +496,8 @@ export function followUpSearch(
     const inSeason = episodes.filter((e) => e.seasonNumber === seasonNumber);
     const seasonLeft = remaining.some((f) => fileInScope(f, { kind: "season", seasonNumber }));
     if (seasonNumber > 0 && inSeason.length >= 2 && !seasonLeft) seasons.push(seasonNumber);
-    else rest.push(...inSeason);
+    // One by one, never a spread push (guardrail 5i).
+    else for (const e of inSeason) rest.push(e);
   }
   return { kind: "plan", seasons, episodes: rest };
 }

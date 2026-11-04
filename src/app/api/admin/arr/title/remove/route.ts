@@ -3,6 +3,7 @@ import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrTitleGate } from "@/lib/arr-admin-http";
+import { dropArrTitleSnapshots } from "@/lib/arr-snapshot";
 import { RequestsActiveError, planTitleRemoval, removeTitle } from "@/lib/arr-title-lifecycle";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
@@ -63,6 +64,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (!result) return NextResponse.json({ error: t("apiAdmin.arr.titleNotFound", { service }) }, { status: 404 });
   invalidateArrLibraryIndexCache();
   invalidateNeverWatchedReport();
+  // Its title-manager views 404 from now on; the background refresh would retry them for a day (5h).
+  dropArrTitleSnapshots({ service: target.service, instance: target.instance, arrId: target.arrId, tmdbId: result.title.tmdbId });
   // Deleted files leave the media servers only once they rescan.
   if (opts.deleteFiles && !result.alreadyGone) after(() => scheduleLibraryScan(target.service === "radarr" ? "movie" : "tv"));
   void logAudit({

@@ -20,6 +20,8 @@ import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
 import { RequestThread } from "@/components/requests/request-thread";
 import { getTranslator } from "@/lib/i18n/server";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { redirect } from "next/navigation";
+import { commentLinkToLocate, ownRequestCommentPage, ownRequestsOrderBy } from "@/lib/request-comment-deep-link";
 
 export const dynamic = "force-dynamic";
 
@@ -69,6 +71,18 @@ export default async function RequestsPage({
     ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
   };
 
+  const commentsEnabled = await isFeatureEnabled("feature.behavior.requestComments");
+
+  // A comment link names a request, not a page. On arrival from one (see
+  // commentLinkToLocate), go to the page that holds the viewer's own request
+  // under the current filter, with an explicit page so a later live refresh of
+  // that URL never relocates them. The param rides along to open the thread.
+  const locateId = commentsEnabled ? commentLinkToLocate(pageParam, commentsRaw) : null;
+  if (locateId) {
+    const target = await ownRequestCommentPage(where, locateId, sort === "oldest" ? "asc" : "desc", PAGE_SIZE);
+    if (target !== null) redirect(pageHref(target, locateId));
+  }
+
   const [requests, total, statusCountsRaw] = await Promise.all([
     prisma.mediaRequest.findMany({
       where,
@@ -80,7 +94,7 @@ export default async function RequestsPage({
         createdAt: true, updatedAt: true,
         _count: { select: { comments: true } },
       },
-      orderBy: { createdAt: sort === "oldest" ? "asc" : "desc" },
+      orderBy: ownRequestsOrderBy(sort === "oldest" ? "asc" : "desc"),
       skip,
       take: PAGE_SIZE,
     }),
@@ -101,8 +115,6 @@ export default async function RequestsPage({
   const totalAllStatuses = statusCountsRaw.reduce((s, r) => s + r._count.status, 0);
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
-
-  const commentsEnabled = await isFeatureEnabled("feature.behavior.requestComments");
 
   const [plexEnabled, jellyfinEnabled] = await Promise.all([
     isFeatureEnabled("feature.integration.plex"),
@@ -135,12 +147,15 @@ export default async function RequestsPage({
     enriched.map((e) => [`${e.id}:${e.mediaType}`, e]),
   );
 
-  function pageHref(p: number): string {
+  function pageHref(p: number, comments?: string): string {
     const params = new URLSearchParams();
-    if (p > 1) params.set("page", String(p));
+    // A comment link's target always names its page, even page 1: a URL with
+    // `page` is never located again (commentLinkToLocate).
+    if (p > 1 || comments) params.set("page", String(p));
     if (status) params.set("status", status);
     if (sort !== "newest") params.set("sort", sort);
     if (q) params.set("q", q);
+    if (comments) params.set("comments", comments);
     return `/requests${params.toString() ? `?${params.toString()}` : ""}`;
   }
 

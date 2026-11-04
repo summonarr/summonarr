@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const { fixAdvice, defaultFileSelection, rejectedOnlyForFileOnDisk, defaultRelease } = await import("../src/lib/issue-fix.ts");
-const { functionBody, stripComments } = await import("./audit-fix2-R8b-tests-vacuous-source.mts");
+const { functionBody, stripComments } = await import("./structural-pin-source-scan.mts");
 
 const here = dirname(fileURLToPath(import.meta.url));
 const read = (p: string) => readFileSync(join(here, "..", p), "utf8");

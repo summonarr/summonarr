@@ -238,23 +238,55 @@ export async function POST(req: NextRequest) {
   // to the periodic sync — per-episode granularity doesn't map onto the
   // series-level cache rows. MediaRequest.status and notifiedAvailable stay
   // untouched (the orchestrator's CAS is the sole authority — guardrail 14).
+  //
+  // Sonarr is asked first, as on the Download path: the rows go only when
+  // Sonarr reports the series ABSENT from its library. Still there, or no
+  // answer, leaves the cache to the next sync. The check must cover the
+  // tmdbId being evicted. The payload tvdbId (Sonarr's own key, a cheap
+  // filtered read) covers it only when SONARR-sourced data ties the two: a
+  // request on this instance storing both ids (its tvdbId is written only
+  // from Sonarr's own answers). Never the tvdb→tmdb cache or TMDB's
+  // cross-reference — user-edited data, so a forged pair (an absent tvdbId
+  // beside a held tmdbId) could be made to look tied (guardrail 14a).
+  // Otherwise the tmdbId is checked through Sonarr's tmdb lookup, which lags
+  // new shows and can land on another series, so a "still there" from it is
+  // no evidence of forgery and is not logged.
   if (payload.eventType === "SeriesDelete" && payload.series) {
     const rawTvdb = payload.series.tvdbId;
     const rawTmdb = payload.series.tmdbId;
     const delTvdbId = Number.isInteger(rawTvdb) && rawTvdb > 0 ? rawTvdb : null;
-    let delTmdbId = typeof rawTmdb === "number" && isTmdbIdInRange(rawTmdb) ? rawTmdb : null;
-    if (delTmdbId === null && delTvdbId !== null) {
-      delTmdbId = await resolveSingleTvdbToTmdb(delTvdbId);
+    const payloadTmdbId = typeof rawTmdb === "number" && isTmdbIdInRange(rawTmdb) ? rawTmdb : null;
+    // With no payload tmdbId the mapping only NAMES the candidate; it is
+    // confirmed like any other below.
+    const delTmdbId = payloadTmdbId ?? (delTvdbId !== null ? await resolveSingleTvdbToTmdb(delTvdbId) : null);
+    if (delTmdbId === null) {
+      syncCompleted = true;
+      return NextResponse.json({ ok: true, evicted: false });
     }
-    if (delTmdbId !== null) {
-      await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-        await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: delTmdbId!, arrInstance } });
-        await tx.sonarrAvailableItem.deleteMany({ where: { tmdbId: delTmdbId!, arrInstance } });
-      }, { timeout: 30_000 });
+    const byTvdb = delTvdbId !== null && (await prisma.mediaRequest.findFirst({
+      where: { tmdbId: delTmdbId, mediaType: "TV", arrInstance, tvdbId: delTvdbId },
+      select: { id: true },
+    })) !== null;
+    const verdict = await isSeriesDownloadedInSonarr(
+      byTvdb ? { tvdbId: delTvdbId } : { tmdbId: delTmdbId },
+      arrInstance,
+    );
+    if (verdict === null || verdict.downloaded || verdict.reason !== "absent") {
+      if (verdict !== null && byTvdb) {
+        console.warn("[webhook/sonarr] SeriesDelete for tmdbId=%s not confirmed by Sonarr; cache left to the next sync.", sanitizeForLog(delTmdbId));
+      }
+      syncCompleted = true;
+      const reason = verdict === null ? "unverified" : byTvdb ? "not_deleted" : "unconfirmed";
+      return NextResponse.json({ ok: true, evicted: false, reason });
     }
+    const evictTmdbId = delTmdbId;
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
+      await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: evictTmdbId, arrInstance } });
+      await tx.sonarrAvailableItem.deleteMany({ where: { tmdbId: evictTmdbId, arrInstance } });
+    }, { timeout: 30_000 });
     syncCompleted = true;
-    return NextResponse.json({ ok: true, evicted: delTmdbId !== null });
+    return NextResponse.json({ ok: true, evicted: true });
   }
 
   if (payload.eventType !== "Download" || !payload.series) {
@@ -297,7 +329,12 @@ export async function POST(req: NextRequest) {
   //                         reconciles. Nothing here ever needs the optimistic
   //                         path: an attacker still cannot induce null without
   //                         breaking the operator's own Sonarr connectivity, and
-  //                         a null now produces NO transition at all.
+  //                         a null now produces no REQUEST transition here.
+  //                         The issue-grab claim below still runs on null
+  //                         (only the refused shapes return first), so it can
+  //                         auto-resolve an issue: that asks whether the
+  //                         grabbed release was imported, not whether the
+  //                         series is complete.
   const verdict = await isSeriesDownloadedInSonarr(
     { tvdbId: safeVdbId, tmdbId: safeMdbId },
     arrInstance,

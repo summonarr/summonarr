@@ -291,7 +291,7 @@ export function failedArrInstances(index: Pick<ArrLibraryIndex, "errors">, media
 export type CrossRefMode = "fetch" | "cached";
 
 // MUST equal the key resolveTmdbToTvdb (arr.ts) reads and writes — pinned by
-// tests/audit-fix2-R3-cleanup.test.mts.
+// tests/cleanup-read-paths.test.mts.
 export function tmdbToTvdbCacheKey(tmdbId: number): string {
   return `tmdb-to-tvdb:${tmdbId}`;
 }
@@ -364,32 +364,43 @@ export async function lookupTmdbToTvdb(tmdbIds: readonly number[], mode: CrossRe
 }
 
 // The delete targets for each title: every instance entry carrying its tmdbId,
-// plus — for a show no Sonarr entry names by tmdbId — the tvdbId-only entries
-// TMDB's own cross-reference points at. Bounded: the TVDB lookup runs only for
-// the selected titles that missed, and only when tvdb-only entries exist at all.
-// `crossRef` is required on purpose: every caller decides whether a miss may
-// cost a TMDB call (the delete route) or must not (a read path).
+// plus — on every Sonarr instance that did not name the show by tmdbId — the
+// tvdbId-only entries TMDB's own cross-reference points at. A v4 Sonarr naming
+// the show doesn't make a v3 instance's tvdb-only copy any less a copy (14b:
+// every holder is a target). Bounded: the TVDB lookup runs only for the
+// selected titles that some tvdb-only instance could still hold, and only when
+// tvdb-only entries exist at all. `crossRef` is required on purpose: every
+// caller decides whether a miss may cost a TMDB call (the delete route) or must
+// not (a read path).
 export async function resolveArrTargets(
   items: ReadonlyArray<{ tmdbId: number; mediaType: CleanupMediaType }>,
   index: ArrLibraryIndex,
   crossRef: CrossRefMode,
 ): Promise<Map<string, ArrLibraryEntry[]>> {
   const out = new Map<string, ArrLibraryEntry[]>();
-  const misses: Array<{ tmdbId: number; key: string }> = [];
+  // The Sonarr instances that list any series tvdb-only — once per call.
+  const tvdbOnlyInstances = new Set<string>();
+  for (const list of index.tvdbOnly.values()) {
+    for (const e of list) if (e.service === "sonarr") tvdbOnlyInstances.add(e.instance);
+  }
+  const misses: Array<{ tmdbId: number; key: string; matched: ReadonlySet<string> }> = [];
   for (const it of items) {
     const key = cleanupKey(it.tmdbId, it.mediaType);
     const hit = index.byKey.get(key) ?? [];
     out.set(key, [...hit]);
-    if (it.mediaType === "TV" && index.tvdbOnly.size > 0 && !hit.some((e) => e.service === "sonarr")) {
-      misses.push({ tmdbId: it.tmdbId, key });
-    }
+    if (it.mediaType !== "TV" || tvdbOnlyInstances.size === 0) continue;
+    const matched = new Set(hit.filter((e) => e.service === "sonarr").map((e) => e.instance));
+    if ([...tvdbOnlyInstances].some((i) => !matched.has(i))) misses.push({ tmdbId: it.tmdbId, key, matched });
   }
   if (misses.length > 0) {
     const tvdbOf = await lookupTmdbToTvdb(misses.map((m) => m.tmdbId), crossRef);
     for (const m of misses) {
       const tvdbId = tvdbOf.get(m.tmdbId);
       if (tvdbId == null) continue;
-      out.get(m.key)!.push(...(index.tvdbOnly.get(tvdbId) ?? []));
+      const list = out.get(m.key)!;
+      for (const e of index.tvdbOnly.get(tvdbId) ?? []) {
+        if (e.service === "sonarr" && !m.matched.has(e.instance)) list.push(e);
+      }
     }
   }
   return out;

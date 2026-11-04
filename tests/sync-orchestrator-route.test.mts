@@ -2388,6 +2388,8 @@ test("advisory lock 2000 is acquired and released around a normal run", async ()
 
   assert.ok(pgLockCalls.some((c) => c.op === "try" && c.lockId === 2000), "the orchestrator must take advisory lock 2000");
   assert.ok(pgLockCalls.some((c) => c.op === "unlock" && c.lockId === 2000), "advisory lock 2000 must be released in the finally");
+  // A real run IS recorded — the control for the busy test's "no ledger row" pin.
+  assert.ok(settingUpserts.some((u) => u.key === "cron:lastRun:sync:full"), "a run that happened writes its ledger row");
 });
 
 test("a second concurrent run (lock 2000 busy) is gated: skipped:true, no fetch, no library write", async () => {
@@ -2398,6 +2400,14 @@ test("a second concurrent run (lock 2000 busy) is gated: skipped:true, no fetch,
   const res = await POST(syncReq({ headers: AS_CRON }));
   assert.equal(res.status, 200);
   assert.deepEqual(await bodyOf(res), { skipped: true, reason: "sync already running" });
+  // A skip is not a run (guardrail 7b): the X-Cron-Skipped marker keeps it out of
+  // the sync:full ledger, which otherwise logged a ~0 ms ok run per busy answer —
+  // over-counting runs/h and turning a failed run's last-run green.
+  assert.equal(res.headers.get("X-Cron-Skipped"), "1", "the busy answer must go through cronSkippedResponse");
+  assert.ok(
+    !settingUpserts.some((u) => u.key === "cron:lastRun:sync:full"),
+    "a lock-busy skip must write no cron:lastRun:sync:full ledger row",
+  );
   await settle();
 
   // The busy fast-path runs onBusy() only: work never starts.

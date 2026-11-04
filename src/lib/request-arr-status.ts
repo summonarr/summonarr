@@ -162,12 +162,18 @@ export function countFailedDownloads(events: readonly ArrHistoryEvent[]): number
     .map((e) => ({ id: e.downloadId, ms: arrDateMs(e.date) }))
     .filter((x): x is { id: string | null; ms: number } => x.ms !== null)
     .sort((a, b) => a.ms - b.ms);
-  const firsts: Array<{ id: string; ms: number }> = [];
+  // Each download's latest counted failure, by id: in time order it is the
+  // closest one, so it alone decides the fold. A Map lookup, never a scan of
+  // the counted list (guardrail 5i).
+  const lastCounted = new Map<string, number>();
   let count = 0;
   for (const x of dated) {
-    if (x.id !== null && firsts.some((f) => f.id === x.id && x.ms - f.ms <= FAILURE_FOLD_WINDOW_MS)) continue;
+    if (x.id !== null) {
+      const last = lastCounted.get(x.id);
+      if (last !== undefined && x.ms - last <= FAILURE_FOLD_WINDOW_MS) continue;
+      lastCounted.set(x.id, x.ms);
+    }
     count++;
-    if (x.id !== null) firsts.push({ id: x.id, ms: x.ms });
   }
   return count;
 }
@@ -435,11 +441,14 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
     };
     // The newest failure is the reason only when no import came at or after it.
     if (!input.imports?.ok) return done("unreachable", { errorKind: kindOf(input.imports) });
-    const importMs = input.imports.value
-      .filter((e) => e.kind === "imported")
-      .map((e) => arrDateMs(e.date))
-      .filter((ms): ms is number => ms !== null);
-    const lastImportMs = importMs.length > 0 ? Math.max(...importMs) : null;
+    // A loop, never Math.max(...list): spreading the arr's list into arguments
+    // throws RangeError past ~125k records (guardrail 5i).
+    let lastImportMs: number | null = null;
+    for (const e of input.imports.value) {
+      if (e.kind !== "imported") continue;
+      const ms = arrDateMs(e.date);
+      if (ms !== null && (lastImportMs === null || ms > lastImportMs)) lastImportMs = ms;
+    }
     const lastFailureMs = arrDateMs(last.date);
     if (lastImportMs === null || (lastFailureMs !== null && lastFailureMs > lastImportMs)) return done("downloadFailed");
   }

@@ -705,6 +705,9 @@ async function storeTraktConnection(
     // so it can only ever describe the account now connected.
     await tx.account.deleteMany({ where: { userId, provider: "trakt", NOT: { providerAccountId: profile.uuid } } });
     await tx.traktWatchedItem.deleteMany({ where: { userId } });
+    // Ratings go wherever the history goes (guardrail 40c): left behind, the old
+    // account's low ratings would keep vetoing For You seeds.
+    await tx.traktRating.deleteMany({ where: { userId } });
     // Raw tokens — the Prisma extension encrypts them on write (guardrail 7a).
     await tx.account.upsert({
       where: { provider_providerAccountId: { provider: "trakt", providerAccountId: profile.uuid } },

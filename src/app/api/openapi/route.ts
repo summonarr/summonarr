@@ -1705,6 +1705,9 @@ const spec = {
                 properties: {
                   currentPassword: { type: "string" },
                   newPassword: { type: "string", minLength: 12, maxLength: 1024 },
+                  // Guardrail 6i: an account with two-factor also proves a fresh
+                  // second factor; checked only after the password verified.
+                  secondFactor: MFA_SECOND_FACTOR_SCHEMA,
                 },
               },
             },
@@ -1712,10 +1715,10 @@ const spec = {
         },
         responses: {
           "200": { description: "Password updated ({ ok, requiresRelogin }) — every session is revoked" },
-          "400": { description: "Validation error (newPassword missing, under 12 or over 1024 characters), or wrong current password" },
+          "400": { description: `${MFA_STEP_UP_400}, or a validation error (newPassword missing, under 12 or over 1024 characters). An account with two-factor gets secondFactorRequired until it sends secondFactor` },
           "401": { description: "User row not found" },
           "403": { description: "SSO account — local passwords are not available" },
-          "429": { description: "Too many attempts (5 per 15 minutes per user)" },
+          "429": { description: "Too many attempts (5 per 15 minutes per user), or code entry is locked" },
           "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
@@ -3383,7 +3386,7 @@ const spec = {
                 } } },
                 blacklisted: { type: "boolean" },
                 uncertain: { type: "boolean", enum: [true], description: "Present only when a target's delete had an unknown outcome (timeout, network, 502/504)" },
-                bookkeepingError: { type: "string", description: "Present only when the files went but a request stamp, vote clear or blacklist write failed — or, on a `status: \"failed\"` result with `uncertain: true`, when re-asserting the title's cleanup stamps failed" },
+                bookkeepingError: { type: "string", description: "Present only when the files went but a request stamp, vote clear or blacklist write failed — or, on a `status: \"failed\"` result with `uncertain: true`, when re-asserting the title's cleanup stamps failed — or, on a `status: \"failed\"` result with nothing deleted, when the pre-delete cleanup stamp could not be written (that title was not deleted) or the un-stamp after every delete was refused failed" },
               } } },
             } } } },
           },
@@ -5047,11 +5050,11 @@ const spec = {
         responses: {
           "200": {
             description:
-              "Sync summary. Also the response for a DEGRADED run (a configured source failed) " +
-              "and for a run skipped because one was already in flight — the status is " +
-              "deliberately never 5xx, because the container's cron reschedules a non-2xx after " +
-              "CRON_RETRY_INTERVAL and a full library replace every 5 minutes during an outage " +
-              "is worse than a missed hour.",
+              "Sync summary, or { skipped: true, reason: \"sync already running\" } when another " +
+              "run holds the lock (X-Cron-Skipped). Also the response for a DEGRADED run (a " +
+              "configured source failed). Neither is ever 5xx, because the container's cron " +
+              "reschedules a non-2xx after CRON_RETRY_INTERVAL and a full library replace every " +
+              "5 minutes during an outage is worse than a missed hour.",
             headers: {
               "X-Cron-Degraded": {
                 description: "Comma-separated failed sources. Present only on a degraded run.",
@@ -5165,7 +5168,7 @@ const spec = {
         summary: "Sync upcoming releases from TMDB",
         security: [{ session: [] }, { cronSecret: [] }],
         responses: {
-          "200": { description: "{ movies, tv, total, errors, durationMs, calendar, error? } — a partial failure still answers 200 with `X-Cron-Degraded: movies|tv`; or { skipped: true, reason: \"already running\" }" },
+          "200": { description: "{ movies, tv, total, errors, durationMs, calendar, error? } — a partial failure still answers 200 with `X-Cron-Degraded: movies|tv`; or { skipped: true, reason: \"already running\" } (X-Cron-Skipped)" },
           "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
           "502": { description: "Every TMDB fetch failed and nothing was written" },
         },
@@ -5177,7 +5180,7 @@ const spec = {
         summary: "Sync external ratings cache",
         security: [{ session: [] }, { cronSecret: [] }],
         responses: {
-          "200": { description: "{ total, warmed, skipped, quotaExhausted, durationMs }, or { skipped: true, reason } (no MDBList/OMDB key configured, or already running)" },
+          "200": { description: "{ total, warmed, skipped, quotaExhausted, durationMs }, or { skipped: true, reason } (no MDBList/OMDB key configured, or already running — X-Cron-Skipped)" },
           "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
         },
       },
@@ -5726,7 +5729,15 @@ const spec = {
         summary: "Confirm Discord account merge",
         requestBody: {
           required: true,
-          content: { "application/json": { schema: { type: "object", required: ["token"], properties: { token: { type: "string" } } } } },
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["code"],
+                properties: { code: { type: "string", description: "The 12-character code the bot sent by DM (case and surrounding whitespace are ignored)" } },
+              },
+            },
+          },
         },
         responses: {
           "200": { description: "{ ok: true, migrated, discordId }" },

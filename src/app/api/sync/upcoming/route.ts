@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUpcomingMoviesForRefresh, getUpcomingTVForRefresh } from "@/lib/tmdb";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
+import { cronSkippedResponse, isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { warmCalendarCache, type CalendarWarmResult } from "@/lib/calendar-feed";
@@ -126,6 +126,7 @@ export async function POST(request: NextRequest) {
           ? { headers: { "X-Cron-Degraded": failedSources.join(",") } }
           : {});
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    // A busy lock is not a run: X-Cron-Skipped keeps it out of the ledger.
+    () => cronSkippedResponse(),
   ));
 }

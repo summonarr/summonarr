@@ -12,6 +12,9 @@ import {
 import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
 import { getMdblistTopRated } from "@/lib/mdblist";
 
+// A cron's MDBList calls stop at the reserve kept for pages (guardrail 31b).
+const BACKGROUND_MDBLIST = { background: true } as const;
+
 // Runs one list fetch and returns how many items came back. There is no
 // try/catch on purpose: a failed fetch must reject, so the Promise.allSettled
 // below counts it as an error and the run is recorded as not ok.
@@ -59,8 +62,8 @@ export async function POST(request: NextRequest) {
       warm(getTraktPopularMovies),
       warm(getTraktPopularTV),
 
-      warm(() => getMdblistTopRated("movie")),
-      warm(() => getMdblistTopRated("tv")),
+      warm(() => getMdblistTopRated("movie", undefined, BACKGROUND_MDBLIST)),
+      warm(() => getMdblistTopRated("tv", undefined, BACKGROUND_MDBLIST)),
     ]);
 
     const extract = (r: PromiseSettledResult<number>) => r.status === "fulfilled" ? r.value : 0;

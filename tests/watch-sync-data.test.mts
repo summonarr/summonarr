@@ -22,7 +22,9 @@
 //  10. The pair's direction gates each side.
 //
 // Both: nothing ever unmarks (no DELETE / unscrobble), PlayHistory is never
-// written, and an abort RETURNS (guardrail 41).
+// written, and an abort RETURNS (guardrail 41). A resume point never lands on a
+// target copy that is itself watched. An existing pair whose Plex account is
+// flagged inactive still runs (nothing re-activates a Plex identity).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
@@ -67,10 +69,12 @@ shadowPrismaModel(prisma, "setting", {
 
 type PairRow = { id: string; enabled: boolean; direction: string; syncProgress?: boolean; historyReadTo: Date | null; jellyfinReadTo: Date | null; lastResult?: unknown; createdAt: Date };
 let pairs: PairRow[] = [];
-let plexUser = { source: "plex", serverInstance: "", sourceUserId: "555", isServerAdmin: true };
+// `active` defaults to true; a test sets it false (a re-added server's account).
+let plexUser: { source: string; serverInstance: string; sourceUserId: string; isServerAdmin: boolean; active?: boolean } =
+  { source: "plex", serverInstance: "", sourceUserId: "555", isServerAdmin: true };
 const JF_USER = { source: "jellyfin", serverInstance: "", sourceUserId: "jfuser", active: true };
 shadowPrismaModel(prisma, "watchSyncPair", {
-  findMany: async () => pairs.filter((p) => p.enabled).map((p) => ({ ...p, plexUser, jellyfinUser: JF_USER })),
+  findMany: async () => pairs.filter((p) => p.enabled).map((p) => ({ ...p, plexUser: { active: true, ...plexUser }, jellyfinUser: JF_USER })),
   update: async (a: { where: { id: string }; data: Partial<PairRow> }) => {
     const p = pairs.find((x) => x.id === a.where.id)!;
     Object.assign(p, a.data);
@@ -236,7 +240,7 @@ function defaultRespond(url: URL, method: string, token: string | null): Respons
     return json({ Items: jfResumable.map(jfItem), TotalRecordCount: jfResumable.length });
   }
   if (url.origin === JF && url.pathname === "/Items" && url.searchParams.get("Ids")) {
-    const known = new Set(["jm1", "jm2", "je11", "je12"]);
+    const known = new Set(["jm1", "jm2", "jm2b", "je11", "je12"]);
     return json({ Items: url.searchParams.get("Ids")!.split(",").filter((id) => known.has(id)).map(jfItem) });
   }
   const ud = /^\/UserItems\/([^/]+)\/UserData$/.exec(url.pathname);
@@ -566,6 +570,39 @@ test("Jellyfin → Plex resume point: 30 min on Jellyfin lands on EVERY Plex cop
   assert.ok(progressWrites.every((w) => w.token === FRIEND_TOKEN), "never the admin token");
 });
 
+test("resume points: a Plex copy the user WATCHED never takes the position, though a paused sibling copy decided the write (19e)", async () => {
+  pairs = [progressPair("both")];
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "777", isServerAdmin: false };
+  jfResumable = ["jm2"];
+  jfState.set("jm2", { pos: 1_800_000, last: isoAgo(60) });
+  // Copy 12: paused at 10 min two days ago — the latest Plex copy, so it decides.
+  plexState.set("12", { viewOffset: 600_000, lastViewedAt: NOW_S - 2 * 86_400 });
+  // Copy 13: watched to the end a month ago, no resume point.
+  plexState.set("13", { viewCount: 1, lastViewedAt: NOW_S - 30 * 86_400 });
+  const r = await runWatchSync();
+  assert.equal(r.pairs[0].progress?.toPlex, 1);
+  assert.deepEqual(progressWrites.map((w) => [w.side, w.id, w.ms]), [["plex", "12", 1_800_000]], "copy 13 is watched: left alone");
+});
+
+test("resume points: a Jellyfin copy the user WATCHED never takes the position either (multi-library copies, guardrail 37)", async () => {
+  pairs = [progressPair("both")];
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "777", isServerAdmin: false };
+  plexDeck = ["12"];
+  plexState.set("12", { viewOffset: 720_000, lastViewedAt: NOW_S - 60 });
+  jfState.set("jm2", { pos: 0, last: isoAgo(86_400) });
+  jfState.set("jm2b", { pos: 0, played: true, last: isoAgo(30 * 86_400) });
+  const row = jfLibRows[1];
+  const before = row.jellyfinItemIds;
+  row.jellyfinItemIds = ["jm2", "jm2b"];
+  try {
+    const r = await runWatchSync();
+    assert.equal(r.pairs[0].progress?.toJellyfin, 1);
+    assert.deepEqual(progressWrites, [{ side: "jellyfin", id: "jm2", ms: 720_000 }], "jm2b is watched: left alone");
+  } finally {
+    row.jellyfinItemIds = before;
+  }
+});
+
 test("resume points don't bounce: the run after a copy writes nothing (within tolerance, either side newer)", async () => {
   pairs = [progressPair("both")];
   plexUser = { source: "plex", serverInstance: "", sourceUserId: "777", isServerAdmin: false };
@@ -612,6 +649,24 @@ test("resume points with no Plex token for the account: an error, and nothing wr
   const r = await runWatchSync();
   assert.match(r.pairs[0].progress?.error ?? "", /No Plex access/);
   assert.deepEqual(progressWrites, []);
+});
+
+test("an EXISTING pair whose Plex account is flagged inactive still RUNS: nothing ever re-activates a Plex identity, so a server removed and re-added under its slug keeps working pairs", async () => {
+  pairs = [progressPair("both")];
+  plexUser = { source: "plex", serverInstance: "", sourceUserId: "777", isServerAdmin: false, active: false };
+  jfPlayed = JF_PLAYED;
+  history = [...history, { type: "movie", ratingKey: "11", viewedAt: S("2025-02-02T10:00:00Z"), accountID: 777 }];
+  jfResumable = ["je12"];
+  jfState.set("je12", { pos: 1_500_000, last: isoAgo(60) });
+  const r = await runWatchSync();
+  const p = r.pairs[0];
+  assert.equal(p.error, undefined, "no pair-level refusal");
+  assert.equal(p.toJellyfin?.error, undefined);
+  assert.equal(p.toPlex?.error, undefined);
+  assert.equal(p.progress?.error, undefined);
+  assert.deepEqual(marked, ["jm1@2025-02-02T10:00:00.000Z"], "Plex → Jellyfin ran");
+  assert.deepEqual(scrobbled.map((x) => x.key).sort(), ["12", "13", "191"], "Jellyfin → Plex ran");
+  assert.deepEqual(progressWrites.map((w) => [w.side, w.id]), [["plex", "192"]], "resume points ran");
 });
 
 // ── account filter, checkpoints, budget, run state ───────────────────────────

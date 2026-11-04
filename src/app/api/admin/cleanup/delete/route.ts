@@ -15,6 +15,7 @@ import { CLEANUP_MAX_ITEMS, cleanupKey, parseCleanupItems, type CleanupMediaType
 import { CLEANUP_FEATURE_KEY, cleanupRequestIdentity, computeCleanupReport, type CleanupRow, type TitleKey } from "@/lib/library-cleanup-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
+import { dropArrTitleSnapshots } from "@/lib/arr-snapshot";
 
 // Library cleanup delete (ADMIN) — the ONLY way anything in this feature is
 // removed, and only ever by an admin's explicit, two-step confirmation:
@@ -179,17 +180,29 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // Stamp FIRST: if the stamp can't be written the delete must not happen, or
     // the next sync would put the title straight back. Only rows not already
     // stamped are touched, so an unstamp below never clears an older stamp.
-    const toStamp = await prisma.mediaRequest.findMany({
-      where: {
-        ...cleanupRequestIdentity(tmdbId, mediaType, targets.map((e) => e.tvdbId)),
-        mediaType, status: "AVAILABLE", cleanedUpAt: null,
-      },
-      select: { id: true, arrInstance: true },
-    });
-    const stampedIds = toStamp.map((r) => r.id);
-    if (stampedIds.length > 0) {
-      await prisma.mediaRequest.updateMany({ where: { id: { in: stampedIds }, cleanedUpAt: null }, data: { cleanedUpAt: now } });
+    let toStamp: Array<{ id: string; arrInstance: string }>;
+    try {
+      toStamp = await prisma.mediaRequest.findMany({
+        where: {
+          ...cleanupRequestIdentity(tmdbId, mediaType, targets.map((e) => e.tvdbId)),
+          mediaType, status: "AVAILABLE", cleanedUpAt: null,
+        },
+        select: { id: true, arrInstance: true },
+      });
+      if (toStamp.length > 0) {
+        await prisma.mediaRequest.updateMany({ where: { id: { in: toStamp.map((r) => r.id) }, cleanedUpAt: null }, data: { cleanedUpAt: now } });
+      }
+    } catch (err) {
+      // This title's failure, not the batch's: a throw here rejected mapLimit
+      // (a 500) while the other worker went on deleting, and skipped the cache
+      // invalidations and rescans below. Nothing was deleted for this title.
+      console.error(`[cleanup] stamping ${mediaType}:${tmdbId}'s requests failed — not deleting it:`, err);
+      return {
+        tmdbId, mediaType, title, status: "failed" as const, deleted: [] as string[], failed: [], blacklisted: false,
+        bookkeepingError: err instanceof Error ? err.message : String(err),
+      };
     }
+    const stampedIds = toStamp.map((r) => r.id);
 
     const deleted: string[] = [];
     // `error` is the English detail (older pages print it); the page translates
@@ -205,10 +218,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       try {
         await deleteArrEntry(t);
         deleted.push(targetLabel(t));
+        // The title manager's kept views of a title that is gone would 404 on
+        // every background re-read (guardrail 5h) — drop them, as Remove does.
+        dropArrTitleSnapshots({ service: t.service, instance: t.instance, arrId: t.arrId, tmdbId });
       } catch (err) {
         // Gone already (removed by hand since the listing): the goal is met.
         if (err instanceof ArrResponseError && err.status === 404) {
           deleted.push(targetLabel(t));
+          dropArrTitleSnapshots({ service: t.service, instance: t.instance, arrId: t.arrId, tmdbId });
           continue;
         }
         console.error(`[cleanup] delete of ${mediaType}:${tmdbId} from ${targetLabel(t)} failed:`, err instanceof Error ? err.message : err);
@@ -255,14 +272,22 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       // stamped first) and that execute's definite refusal must not leave a
       // maybe-deleted title unstamped.
       const unstamp = uncertain ? toStamp.filter((r) => stillHeldOn.has(r.arrInstance)).map((r) => r.id) : stampedIds;
+      // Reported on the title, never thrown (the stamp's reasoning above).
+      let unstampError: string | undefined;
       if (unstamp.length > 0) {
-        await prisma.mediaRequest.updateMany({ where: { id: { in: unstamp }, cleanedUpAt: now }, data: { cleanedUpAt: null } });
+        try {
+          await prisma.mediaRequest.updateMany({ where: { id: { in: unstamp }, cleanedUpAt: now }, data: { cleanedUpAt: null } });
+        } catch (err) {
+          console.error(`[cleanup] un-stamping ${mediaType}:${tmdbId}'s requests after every delete was refused failed:`, err);
+          unstampError = err instanceof Error ? err.message : String(err);
+        }
       }
       const reassertError = uncertain ? await reassertStamps() : undefined;
+      const bookkeepingError = unstampError ?? reassertError;
       return {
         tmdbId, mediaType, title, status: "failed" as const, deleted, failed, blacklisted: false,
         ...(uncertain ? { uncertain: true } : {}),
-        ...(reassertError ? { bookkeepingError: reassertError } : {}),
+        ...(bookkeepingError ? { bookkeepingError } : {}),
       };
     }
 

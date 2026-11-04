@@ -248,7 +248,20 @@ function pauseForLimit(headers: Headers, errorText: string | null, context: stri
 // a 4xx or 5xx included — proves the host is up and clears the count.
 const TRANSPORT_FAILURE_LIMIT = 5;
 
+// Every request that got no answer since the process started. Unlike the
+// breaker's count it never resets, so a job can read it before and after a
+// batch and learn that MDBList failed DURING the batch even when the breaker
+// has not tripped: one For You verdict batch sends about three requests, fewer
+// than the five the breaker needs. Its own singleton, so a runtime object an
+// older build left behind (dev hot reload) can't lack the field.
+const transportFailureTotal = processSingleton("mdblist:transport-failure-total", () => ({ count: 0 }));
+
+export function mdblistTransportFailureCount(): number {
+  return transportFailureTotal.count;
+}
+
 function noteTransportFailure(reason: string): void {
+  transportFailureTotal.count++;
   runtime.transportFailures++;
   if (runtime.transportFailures < TRANSPORT_FAILURE_LIMIT) return;
   runtime.transportFailures = 0;
@@ -821,7 +834,10 @@ interface MdblistListItem {
   score: number | null;
 }
 
-export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]> {
+// `opts.background` marks a cron caller (the warm-list-cache job): it stops at
+// the reserve kept for pages (guardrail 31b). Coalesced callers share whichever
+// call started first.
+export async function getMdblistTopLists(limit = 10, opts: MdblistCallOptions = {}): Promise<MdblistListMeta[]> {
   const key = "mdblist:top-lists";
   return coalesce(key, async () => {
   const cached = await getCache<MdblistListMeta[]>(key);
@@ -829,7 +845,7 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
 
   const apiKey = await getApiKey();
   if (!apiKey) return [];
-  if (await checkMdblistPause()) return [];
+  if (await checkMdblistPause(opts)) return [];
 
   try {
     const url = new URL(`${MDBLIST_REST_BASE}lists/top`);
@@ -871,6 +887,7 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
 // success, so a failure never poisons this list's own cache either.
 async function fetchMdblistListItemsWithStatus(
   listId: number,
+  opts: MdblistCallOptions = {},
 ): Promise<{ items: TmdbMedia[]; ok: boolean }> {
   // ONE cache row per list, holding every item (movies and TV together).
   // Callers filter by type in memory, so one upstream fetch serves both, and
@@ -882,7 +899,7 @@ async function fetchMdblistListItemsWithStatus(
 
   const apiKey = await getApiKey();
   if (!apiKey) return { items: [], ok: false };
-  if (await checkMdblistPause()) return { items: [], ok: false };
+  if (await checkMdblistPause(opts)) return { items: [], ok: false };
 
   try {
     const url = new URL(`${MDBLIST_REST_BASE}lists/${listId}/items`);
@@ -938,9 +955,11 @@ export async function getMdblistListItems(
   return mediaType ? items.filter((m) => m.mediaType === mediaType) : items;
 }
 
+// `opts.background`: see getMdblistTopLists. Pages pass nothing.
 export async function getMdblistTopRated(
   mediaType: "movie" | "tv",
   maxLists = 5,
+  opts: MdblistCallOptions = {},
 ): Promise<TmdbMedia[]> {
   const key = `mdblist:top-rated:${mediaType}`;
   // coalesce: the /top page and /api/top-rated both call this per request, so
@@ -950,11 +969,11 @@ export async function getMdblistTopRated(
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
-  const lists = await getMdblistTopLists(maxLists);
+  const lists = await getMdblistTopLists(maxLists, opts);
   if (lists.length === 0) return [];
 
   const settled = await Promise.all(
-    lists.map((l) => fetchMdblistListItemsWithStatus(l.id)),
+    lists.map((l) => fetchMdblistListItemsWithStatus(l.id, opts)),
   );
   // If ANY list failed (quota lockout, 429, transient error), the union is a
   // partial picture — cache it and the 12h hard TTL would pin the truncated

@@ -687,6 +687,29 @@ async function fixJellyfinMatch(
 
   let resolvedItemId = safeItemId;
   let confirmed = false;
+  // The copies of the TARGET title this server already holds (the corrected
+  // row's ids) — the siblings' twin. A correctly matched copy (the 4K/HD twin
+  // guardrail 37 allows) carries the target id by construction, while the item
+  // being fixed is still named after the wrong title and may be missing from
+  // the name search entirely; accepting that copy "confirmed" this item without
+  // ever reading it. Both modes (tmdbId and item) go through here. Read once,
+  // when the fallback first needs it; unreadable ⇒ only the item's own path may
+  // confirm.
+  let targetCopiesRead: Promise<ReadonlySet<string> | null> | null = null;
+  const targetCopies = (): Promise<ReadonlySet<string> | null> => (targetCopiesRead ??= (async () => {
+    try {
+      const row = await prisma.jellyfinLibraryItem.findUnique({
+        where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance: instance } },
+        select: { jellyfinItemId: true, jellyfinItemIds: true },
+      });
+      const ids = [...(row?.jellyfinItemId ? [row.jellyfinItemId] : []), ...(row?.jellyfinItemIds ?? [])]
+        .map((id) => id.replace(/[^0-9a-f-]/gi, ""));
+      return new Set(ids.filter((id) => id !== safeItemId));
+    } catch (err) {
+      console.warn("[fix-match]", tag, "could not read the target title's copies; the fallback confirms by path only:", err instanceof Error ? err.message : err);
+      return null;
+    }
+  })());
   // Post-mortem inputs: the last TMDB id the item reported, and whether it is
   // metadata-locked — both read off the confirmation polls we already make.
   let lastSeenTmdbId: string | null = null;
@@ -741,10 +764,14 @@ async function fixJellyfinMatch(
             (i) => !(i.Id && siblingItemIds.has(i.Id.replace(/[^0-9a-f-]/gi, ""))),
           );
           const byPath = items.find((i) => i.Path === filePath);
-          const byTmdb = items.find((i) => {
+          // The item's own path wins; a hit elsewhere must not be a known copy
+          // of the target title (targetCopies above).
+          const others = byPath ? null : await targetCopies();
+          const byTmdb = others ? items.find((i) => {
+            if (i.Id && others.has(i.Id.replace(/[^0-9a-f-]/gi, ""))) return false;
             const pid = i.ProviderIds?.Tmdb ?? i.ProviderIds?.tmdb;
             return pid === String(correctTmdbId);
-          });
+          }) : undefined;
           const found = byPath ?? byTmdb;
           if (found?.Id) {
             // Sanitize the upstream-supplied Id before it lands in a URL and the DB.

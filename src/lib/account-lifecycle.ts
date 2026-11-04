@@ -252,6 +252,12 @@ export async function purgeUserDataInTx(
   await tx.traktWatchedItem.deleteMany({ where: { userId: id } });
   await tx.traktRating.deleteMany({ where: { userId: id } });
   await tx.traktConnection.deleteMany({ where: { userId: id } });
+  // The watchlist auto-request ledger (guardrail 34b) keeps one row per title
+  // that was ever on this person's Summonarr, Plex or Trakt watchlist, with
+  // where it came from: the same private data as the watchlist rows above. It
+  // only exists to stop re-requesting in a loop, and a purged account is never
+  // polled again and can't be re-enabled.
+  await tx.autoRequestLedger.deleteMany({ where: { userId: id } });
   // A pending notification-email verification carries the candidate address in its
   // identifier, and the confirm link stays redeemable for its TTL — left behind, a
   // click after the purge would write that address back onto the scrubbed row.

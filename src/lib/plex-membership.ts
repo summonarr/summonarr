@@ -35,6 +35,13 @@ import { plexSettingKey, mediaInstanceLabel, type MediaInstanceKey } from "@/lib
 // contributes nothing without poisoning — the old single-server "unconfigured →
 // null" survives as "zero configured instances → null".
 //
+// Per-instance read: getCachedPlexMembersByInstance hands back each
+// instance's OWN set from the same caches (same refresh, backoff and
+// serve-stale rules, no extra plex.tv traffic), for the per-server question
+// "is this person still shared on THIS server" (Admin → Activity → Users),
+// which the union answers wrongly on a multi-server install. Display only —
+// enforcement stays on the union and its poison rule.
+//
 // Shape constraint: every DB read in this module's path must be a
 // setting.findUnique — getMediaInstances (one findUnique), getPlexConfig (two),
 // and the per-instance AdminEmail read below. Do NOT switch to
@@ -131,22 +138,10 @@ function startSlugRefresh(slug: MediaInstanceKey, state: SlugState, now: number)
     });
 }
 
-/**
- * Returns the union of the members (plex.tv account ids + emails) currently
- * shared on every configured Plex instance, or null when membership cannot be
- * determined — nothing configured, the registry unreadable, or ANY configured
- * instance cold with a failing/empty fetch — a partial union would mass-revoke
- * that server's users. A null return means callers MUST fail open — do not lock
- * anyone out.
- *
- * Each instance caches per-replica for ALLOWLIST_TTL_MS. On a cold instance the
- * first caller blocks on its plex.tv fetch so enforcement starts immediately;
- * once a set is cached, an expired entry is served stale into the union while a
- * single background refresh runs, so the hot path never blocks on plex.tv again.
- */
-export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null> {
-  const now = Date.now();
-
+// The registered instances with their cache state, every due refresh started
+// (not awaited), and slugs that left the registry evicted. Null when the
+// registry can't be read — no opinion.
+async function consultInstances(now: number): Promise<Array<{ slug: MediaInstanceKey; state: SlugState }> | null> {
   // Which instances exist is re-read per call (one findUnique) — an instance
   // added or removed in the admin settings takes effect on the next check
   // rather than after a TTL. A registry read failure is the same class as a
@@ -191,6 +186,25 @@ export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null
   for (const slug of slugStates.keys()) {
     if (!registered.has(slug)) slugStates.delete(slug);
   }
+  return consulted;
+}
+
+/**
+ * Returns the union of the members (plex.tv account ids + emails) currently
+ * shared on every configured Plex instance, or null when membership cannot be
+ * determined — nothing configured, the registry unreadable, or ANY configured
+ * instance cold with a failing/empty fetch — a partial union would mass-revoke
+ * that server's users. A null return means callers MUST fail open — do not lock
+ * anyone out.
+ *
+ * Each instance caches per-replica for ALLOWLIST_TTL_MS. On a cold instance the
+ * first caller blocks on its plex.tv fetch so enforcement starts immediately;
+ * once a set is cached, an expired entry is served stale into the union while a
+ * single background refresh runs, so the hot path never blocks on plex.tv again.
+ */
+export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null> {
+  const consulted = await consultInstances(Date.now());
+  if (!consulted) return null;
 
   const parts: Array<{ slug: MediaInstanceKey; ids: Set<string>; emails: Set<string>; fetchedAt: number }> = [];
   for (const { slug, state } of consulted) {
@@ -229,4 +243,24 @@ export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null
         };
   composed = { key, members };
   return members;
+}
+
+/**
+ * Each registered Plex instance's OWN members (plex.tv account ids + emails),
+ * by slug — the per-instance sets getCachedPlexAllowlist unions, read through
+ * the same caches (a cold instance's first fetch is awaited, a stale one is
+ * served while it refreshes). An instance whose members are unknown
+ * (unconfigured, or cold with a failing/empty fetch) is ABSENT: the caller has
+ * no answer for that server alone. Null when the registry can't be read. The
+ * Sets are the cache's own — read them, never mutate them.
+ */
+export async function getCachedPlexMembersByInstance(): Promise<Map<MediaInstanceKey, PlexServerMembers> | null> {
+  const consulted = await consultInstances(Date.now());
+  if (!consulted) return null;
+  const out = new Map<MediaInstanceKey, PlexServerMembers>();
+  for (const { slug, state } of consulted) {
+    if (!state.cache && state.inflight) await state.inflight;
+    if (state.cache) out.set(slug, { ids: state.cache.ids, emails: state.cache.emails });
+  }
+  return out;
 }

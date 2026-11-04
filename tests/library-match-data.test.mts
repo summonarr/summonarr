@@ -36,6 +36,8 @@ let locks = 0;
 const JF = "http://10.77.0.1:8096";
 const RADARR = "http://10.77.0.2:7878";
 let radarrStatus = 200;
+// Extra titles Radarr lists after the two below (no folder match, no flag).
+let radarrExtra = 0;
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -55,6 +57,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
     return json([
       { tmdbId: 9323, imdbId: "tt0113568", title: "Ghost in the Shell", year: 1995, path: "/data/movies/Ghost in the Shell (1995)" },
       { tmdbId: 315837, imdbId: "tt1219827", title: "Ghost in the Shell", year: 2017, path: "/data/movies/Ghost in the Shell (2017)" },
+      ...Array.from({ length: radarrExtra }, (_, i) => ({ tmdbId: 1_000_000 + i, path: `/data/movies/x${i}` })),
     ]);
   }
   throw new Error(`unexpected fetch ${url}`);
@@ -69,6 +72,7 @@ beforeEach(() => {
   settings.set("radarrUrl", RADARR);
   settings.set("radarrApiKey", "radarr-key");
   radarrStatus = 200;
+  radarrExtra = 0;
   locks = 0;
   warns.length = 0;
 });
@@ -104,4 +108,12 @@ test("an aborted run stores nothing and the previous report stays", async () => 
   controller.abort();
   assert.equal(await runLibraryMatchCheck({ signal: controller.signal }), null);
   assert.equal(settings.get(LIBRARY_MATCH_REPORT_KEY), "previous");
+});
+
+test("a Radarr listing past where a spread push throws is read whole, not marked unreadable (guardrail 5i)", async () => {
+  radarrExtra = 130_000;
+  const report = await runLibraryMatchCheck();
+  assert.ok(report);
+  assert.deepEqual(report.sources.find((s) => s.service === "radarr"), { service: "radarr", instance: "", ok: true, items: 130_002 });
+  assert.deepEqual(report.flags.map((f) => [f.kind, f.itemKey, f.arr?.tmdbId]), [["wrongMatch", "b2", 315837]], "it still referees");
 });

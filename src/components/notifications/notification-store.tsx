@@ -12,6 +12,7 @@ import {
 } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useLiveEvents } from "@/hooks/use-live-events";
+import { reloadsInbox } from "./inbox-live-events";
 
 // ONE notifications poll for the whole app.
 //
@@ -120,13 +121,9 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
   // events (scoped to this user server-side), so re-fetch on them for a
   // near-instant badge instead of waiting up to POLL_MS. The poll above stays
   // as the missed-event safety net. Bursts (a sync flipping several requests at
-  // once) coalesce into one refetch.
+  // once) coalesce into one refetch. The event list lives in inbox-live-events.ts.
   useLiveEvents((event) => {
-    if (
-      event.type === "request:updated" ||
-      event.type === "issue:updated" ||
-      event.type === "issuemessage:created"
-    ) {
+    if (reloadsInbox(event)) {
       if (reloadTimer.current) clearTimeout(reloadTimer.current);
       reloadTimer.current = setTimeout(() => void reload(), 400);
     }

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
 import { fetchUnifiedRatings, hasAnyMdblistRating, type UnifiedRatingsResult } from "@/lib/omdb-availability";
 import { fetchMdblistBatch, isMdblistQuotaLocked, revalidateMdblistForTmdb, type MdblistRatings } from "@/lib/mdblist";
@@ -175,6 +175,7 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json({ total: all.length, warmed, skipped, quotaExhausted, durationMs });
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    // A busy lock is not a run: X-Cron-Skipped keeps it out of the ledger.
+    () => cronSkippedResponse(),
   ));
 }

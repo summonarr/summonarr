@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { NextRequest } from "next/server";
 import {
   SNAPSHOT_REFRESH_TIERS,
+  SNAPSHOT_RETRY_MAX_WAIT_MS,
   SNAPSHOT_VIEW_WINDOW_MS,
   dueSnapshots,
   readSnapshot,
@@ -146,6 +147,67 @@ test("a failed re-read keeps the last good answer; a throw is counted, not raise
   assert.equal((await refreshArrSnapshots({ now: () => t0 + 22 * MIN })).failed, 1);
   const key = snapshotKey("http://x/api/admin/missing?service=sonarr", "en")!;
   assert.deepEqual(JSON.parse(readSnapshot(key, t0 + 23 * MIN)!.body), { good: true });
+});
+
+test("a view whose re-reads keep failing backs off — a removed title is not retried (and the run not failed) on every 5-minute run for a day", async () => {
+  const t0 = 1_000_000_000_000;
+  let gone = false;
+  const route = fakeRoute(() => (gone ? Response.json({ error: "not found" }, { status: 404 }) : Response.json({ title: "x" })));
+  await openAt(route.GET, "http://x/api/admin/arr/title?service=radarr&instance=&id=7", t0);
+  gone = true;
+  const failedAt: number[] = [];
+  for (let now = t0 + 5 * MIN; now <= t0 + SNAPSHOT_VIEW_WINDOW_MS + 10 * MIN; now += 5 * MIN) {
+    if ((await refreshArrSnapshots({ now: () => now })).failed > 0) failedAt.push((now - t0) / MIN);
+  }
+  // Its own tier's interval after the first failure, then doubled, up to an hour.
+  assert.deepEqual(failedAt.slice(0, 5), [10, 20, 40, 80, 140]);
+  assert.equal(failedAt[5] - failedAt[4], SNAPSHOT_RETRY_MAX_WAIT_MS / MIN, "never longer than the cap");
+  assert.ok(failedAt.length < 30, `${failedAt.length} failed runs in a day, not one every 5 minutes`);
+  const key = snapshotKey("http://x/api/admin/arr/title?service=radarr&instance=&id=7", "en")!;
+  assert.deepEqual(JSON.parse(readSnapshot(key, t0 + 60 * MIN)!.body), { title: "x" }, "the last good answer is still kept");
+});
+
+test("a re-read that answers again resets the back-off: the view is back on its tier's interval", async () => {
+  const t0 = 1_000_000_000_000;
+  let fail = false;
+  const route = fakeRoute(() => (fail ? Response.json({ error: "down" }, { status: 502 }) : Response.json({ ok: 1 })));
+  await openAt(route.GET, "http://x/api/admin/arr/blocklist?service=sonarr", t0);
+  fail = true;
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 10 * MIN })).failed, 1);
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 20 * MIN })).failed, 1);
+  assert.equal(dueSnapshots(t0 + 35 * MIN).length, 0, "two failures in a row: twenty minutes, not ten");
+  fail = false;
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 40 * MIN })).refreshed, 1);
+  assert.equal(dueSnapshots(t0 + 49 * MIN).length, 1, "answered again: due ten minutes (less the slack) later");
+});
+
+test("failing views go after every view that answers — a dark instance never takes the per-run cap", async () => {
+  const t0 = 1_000_000_000_000;
+  let darkDown = false;
+  const history = fakeRoute((req) => (darkDown && new URL(req.url).searchParams.get("instance") === "dark"
+    ? Response.json({ error: "timeout" }, { status: 504 })
+    : Response.json({ ok: true })));
+  await openAt(history.GET, "http://x/api/admin/arr/history?service=sonarr&instance=dark", t0);
+  darkDown = true;
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 10 * MIN })).failed, 1);
+  await openAt(history.GET, "http://x/api/admin/arr/history?service=sonarr&instance=ok", t0 + 12 * MIN);
+  // The dark view is due again and further past due than the healthy one…
+  const due = dueSnapshots(t0 + 22 * MIN);
+  assert.deepEqual(due.map((d) => new URL(d.url).searchParams.get("instance")), ["ok", "dark"], "…but goes last");
+  assert.ok(due[1].overdueMs > due[0].overdueMs);
+  const result = await refreshArrSnapshots({ now: () => t0 + 22 * MIN, maxPerRun: 1 });
+  assert.deepEqual(result, { due: 2, refreshed: 1, failed: 0, deferred: 1, aborted: false });
+
+  // Across priorities too: a failing 5-minute view goes after a healthy 15-minute one.
+  resetArrSnapshotsForTests();
+  let queueUp = true;
+  const queue = fakeRoute(() => (queueUp ? Response.json({ items: [] }) : Response.json({ error: "down" }, { status: 502 })));
+  const tasks = fakeRoute(() => Response.json({ tasks: [] }));
+  await openAt(queue.GET, "http://x/api/admin/queue", t0);
+  await openAt(tasks.GET, "http://x/api/admin/arr/tasks", t0);
+  queueUp = false;
+  assert.equal((await refreshArrSnapshots({ now: () => t0 + 5 * MIN })).failed, 1);
+  assert.deepEqual(dueSnapshots(t0 + 15 * MIN).map((d) => new URL(d.url).pathname), ["/api/admin/arr/tasks", "/api/admin/queue"]);
 });
 
 test("bounded: at most maxPerRun re-reads, 2 at a time; a stopped run starts nothing new (guardrail 41)", async () => {

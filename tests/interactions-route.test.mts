@@ -1649,3 +1649,51 @@ test("/status for a DEACTIVATED linked account answers 'no requests' and reads n
   assert.equal(reads, 0, "a disabled account's requests are never read");
   assert.doesNotMatch(String(lastEdit().content), /Dune/);
 });
+
+// ═══ /request and a deactivated account (guardrail 33) ══════════════════════
+// Deactivation leaves role, permissions and mediaServerGrants on the row. /recent,
+// /watchlist, /issue and /status already refuse such an account; /request searched
+// anyway and badged the results through those grants, so a banned user could keep
+// probing what a restricted server holds. It is refused like /recent now, and the
+// visibility resolver gives a deactivated row least privilege on its own too.
+const { discordVisibleInstances } = await import("../src/lib/discord-interactions/search.ts");
+const requestCmd = () => slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]);
+
+test("/request: a DEACTIVATED linked account is refused before the search — no TMDB call, no result set", async () => {
+  linkMember({ deactivatedAt: new Date("2026-01-01T00:00:00.000Z") });
+  tmdbSearchResults = [MATRIX];
+  await run(requestCmd());
+  assert.match(String(lastEdit().content), /deactivated/i);
+  assert.equal(lastEdit().embeds, undefined, "no result embeds");
+  assert.equal(fetchCalls.filter((u) => u.pathname.startsWith("/3/search/")).length, 0, "no TMDB search");
+  assert.deepEqual(opsOf("discordSearchCache.upsert"), [], "no result set is saved for a pick");
+
+  // The same account, active again, gets its results: the refusal is the gate.
+  appUsers[0].deactivatedAt = null;
+  await run(requestCmd());
+  assert.equal(lastEdit().embeds?.length, 1);
+  assert.match(String(lastEdit().embeds?.[0]?.title), /The Matrix/);
+});
+
+test("/request: an unlinked caller is still told to link while the bot requires a linked account", async () => {
+  appUsers.push({ id: "shadow", email: `discord_${MEMBER}@discord.local`, name: "s", discordId: MEMBER, role: "USER", permissions: 0n, deactivatedAt: null, locale: null });
+  settings.set("discordRequireLinkedAccount", "true");
+  tmdbSearchResults = [MATRIX];
+  await run(requestCmd());
+  assert.match(String(lastEdit().content), /link/i);
+  assert.equal(fetchCalls.filter((u) => u.pathname.startsWith("/3/search/")).length, 0);
+});
+
+test("discordVisibleInstances: a DEACTIVATED account's grants and ADMIN role open no restricted server", async () => {
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote", restricted: true }]));
+  linkMember({ mediaServerGrants: { plex: { remote: { view: true } } } });
+  assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, ["", "remote"], "an active grant holder sees the restricted server");
+  appUsers[0].deactivatedAt = new Date("2026-01-01T00:00:00.000Z");
+  assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, [""], "a deactivated one does not");
+
+  appUsers = [];
+  linkMember({ role: "ADMIN", deactivatedAt: new Date("2026-01-01T00:00:00.000Z") });
+  assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, [""], "nor does a deactivated former ADMIN");
+  appUsers[0].deactivatedAt = null;
+  assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, ["", "remote"]);
+});

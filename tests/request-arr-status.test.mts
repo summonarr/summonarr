@@ -685,6 +685,17 @@ test("a failure an import FOLLOWED is answered: the title reads incomplete, not 
   assert.equal(run(null).verdict, "unreachable");
 });
 
+test("a 200k-record import history is read one by one: the newest import still answers the failure, no RangeError from a spread (guardrail 5i)", () => {
+  const sonarrFail = projectHistoryRecords("sonarr", "", [{ id: 40, seriesId: 30, eventType: "downloadFailed", date: "2026-09-02T00:00:00Z", sourceTitle: "Show.S02", data: { message: "Download failed" } }]);
+  const [older] = projectHistoryRecords("sonarr", "", [{ id: 41, seriesId: 30, eventType: "downloadFolderImported", date: "2026-09-01T00:00:00Z", sourceTitle: "Show.S02E01" }]);
+  // Past where spreading a list into Math.max's arguments throws.
+  const imports = Array.from({ length: 200_000 }, (_, i) => ({ ...older, id: 41 + i }));
+  const run = () => judgeStatus({ service: "sonarr", resource: ok(seriesRow([8, 8], [2, 10])), failures: ok(sonarrFail), imports: ok(imports) }).verdict;
+  assert.equal(run(), "downloadFailed", "every import came before the failure");
+  imports[123_456] = { ...older, id: 500_000, date: "2026-09-05T00:00:00Z" };
+  assert.equal(run(), "incomplete", "the newest import, wherever it sits, answers it");
+});
+
 test("route: the import read is the title's own (seriesId), beside the DownloadFailed read; a later import answers a failure (C156)", async () => {
   requests = [{ id: "t1", mediaType: "TV", tmdbId: 300, status: "APPROVED", arrInstance: "", requestedBy: REQUESTER, approvedAt: APPROVED_AT, createdAt: APPROVED_AT }];
   let importDate = "2026-09-05T00:00:00Z";

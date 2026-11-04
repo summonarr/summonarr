@@ -4,7 +4,8 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { revokeOtherUserSessions } from "@/lib/auth";
+import { revokeOtherUserSessionsInTx } from "@/lib/auth";
+import { markSessionForceRevoked } from "@/lib/session-revocation";
 import {
   ensureRecoveryCodesInTx,
   getMfaState,
@@ -90,7 +91,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const name = sanitizePasskeyName(parsed.name);
 
   let outcome:
-    | { kind: "added"; recoveryCodes: string[] | null; firstFactor: boolean }
+    | { kind: "added"; recoveryCodes: string[] | null; firstFactor: boolean; revokedSessionIds: string[] }
     | { kind: "gained-factor" }
     | { kind: "max" };
   try {
@@ -122,7 +123,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
       // alone must not be confirmable once the account has 2FA (totp/enable
       // takes no password), so it goes.
       if (!state.enabled) await tx.userTotp.deleteMany({ where: { userId: user.id, enabledAt: null } });
-      return { kind: "added" as const, recoveryCodes: await ensureRecoveryCodesInTx(tx, user.id), firstFactor: !state.enabled };
+      const recoveryCodes = await ensureRecoveryCodesInTx(tx, user.id);
+      const firstFactor = !state.enabled;
+      // The first factor signs out the OTHER sessions in this same transaction:
+      // a separate one that failed would 500 a registration that already
+      // committed (codes never shown) and leave those sessions live (6d).
+      const revokedSessionIds = firstFactor ? await revokeOtherUserSessionsInTx(tx, user.id, session.sessionId) : [];
+      return { kind: "added" as const, recoveryCodes, firstFactor, revokedSessionIds };
     });
   } catch (err) {
     if (isPrismaErrorCode(err, "P2002")) {
@@ -138,7 +145,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   const { recoveryCodes, firstFactor } = outcome;
 
-  const revoked = firstFactor ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
+  // Committed: only now mark the revoked sessions in memory (guardrail 27).
+  for (const sessionId of outcome.revokedSessionIds) markSessionForceRevoked(sessionId);
+  const revoked = outcome.revokedSessionIds.length;
   void notifyMfaSecurityEvent(user.id, "passkey-added");
   void logAudit({
     userId: user.id,

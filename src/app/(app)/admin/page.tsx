@@ -15,6 +15,7 @@ import { EmptyState, PageHeader, StatCard } from "@/components/ui/design";
 import { ClipboardList } from "@/components/icons";
 import { getWatchGradeSummaries } from "@/lib/watch-grade-data";
 import { getTranslator } from "@/lib/i18n/server";
+import { commentLinkToLocate, queueCommentPage } from "@/lib/request-comment-deep-link";
 
 export const dynamic = "force-dynamic";
 
@@ -70,6 +71,24 @@ export default async function AdminPage({
     { tmdbId: "asc" },
     { mediaType: "asc" },
   ];
+
+  // A comment link names a request, not a page. On arrival from one (see
+  // commentLinkToLocate), go to the page that holds its title under the current
+  // filter, with an explicit page (even 1) so a live refresh of that URL never
+  // relocates the admin. The param rides along to open the thread.
+  const locateId = commentLinkToLocate(pageParam, commentsRaw);
+  if (locateId) {
+    const target = await queueCommentPage(where, groupOrderBy, locateId, PAGE_SIZE);
+    if (target !== null) {
+      const params = new URLSearchParams();
+      params.set("page", String(target));
+      if (statusFilter) params.set("status", statusFilter);
+      if (typeFilter) params.set("type", typeFilter);
+      if (sort !== "newest") params.set("sort", sort);
+      params.set("comments", locateId);
+      redirect(`/admin?${params.toString()}`);
+    }
+  }
 
   // Count the distinct (tmdbId, mediaType) groups in SQL. Doing it with a
   // groupBy would download every group row just to read how many there are.
@@ -280,7 +299,9 @@ export default async function AdminPage({
       <PageHeader
         title={t("adminQueue.page.title")}
         subtitle={t("adminQueue.page.subtitle")}
-        right={<SyncButton />}
+        // /api/sync admits the ADMIN role only (getCronActor), so a
+        // MANAGE_REQUESTS delegate would get a 403 on every click.
+        right={session.user.role === "ADMIN" ? <SyncButton /> : undefined}
       />
 
       <div className="ds-stat-row" style={{ marginBottom: 24 }}>

@@ -12,7 +12,7 @@ import {
   SUGGESTIONS_CACHE_MAX,
 } from "./tmdb";
 import { attachRatingsUnified } from "./omdb-availability";
-import { isMdblistQuotaLocked } from "./mdblist";
+import { isMdblistQuotaLocked, mdblistTransportFailureCount } from "./mdblist";
 import { isOmdbQuotaLocked } from "./omdb";
 import { qualityScoreOf } from "./recommendation-quality";
 import { collectAllLibraryItems } from "./library-iterator";
@@ -960,6 +960,8 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
       break;
     }
     const slice = stale.slice(i, i + QUALITY_BATCH);
+    // Read before the batch, compared after it (see providersAnswering below).
+    const mdblistFailuresBefore = mdblistTransportFailureCount();
     let rated: TmdbMedia[];
     try {
       // blocking:true fetches the misses inline; this runs inside a cron request
@@ -1013,9 +1015,15 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
     // them a run of timeouts would never set this flag. MDBList had none until
     // 2026-10-28, so a night of MDBList timeouts stamped null verdicts here.
     //
+    // The breaker alone still let the FIRST batch of a storm through: it trips
+    // on the fifth failure in a row, and one batch sends about three MDBList
+    // requests. So any MDBList request that got no answer during this batch
+    // also counts as not answering.
+    //
     // MDBList also reads as not answering once this cron is down to the reserve
     // the plan setting keeps for pages: it stopped asking, so a null is not a verdict.
-    const providersAnswering = !isMdblistQuotaLocked(BACKGROUND_RATINGS) && !isOmdbQuotaLocked();
+    const mdblistFailedInBatch = mdblistTransportFailureCount() !== mdblistFailuresBefore;
+    const providersAnswering = !isMdblistQuotaLocked(BACKGROUND_RATINGS) && !isOmdbQuotaLocked() && !mdblistFailedInBatch;
 
     const now = new Date();
     for (const media of rated) {

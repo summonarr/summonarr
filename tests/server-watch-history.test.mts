@@ -17,6 +17,10 @@
 //   7. Favorites are read only for an identity linked to an account, and set
 //      the flag on exactly the favorited titles.
 //   8. Nothing here ever writes PlayHistory (guardrail 19).
+//   9. "Linked" is the For You read side's rule (linkedIdentityBranches): the FK
+//      OR an account's provider subject on an unpinned row — so a Plex friend
+//      whose row's FK is still null is imported, and a pinned row is not.
+//  10. A NAMED server removed mid-run writes no rows and no read point.
 //
 // Harness: in-memory prisma stubs, a staged-commit $transaction, a scripted
 // globalThis.fetch (RFC1918 IP literals for the servers; plex.tv behind a DNS
@@ -73,27 +77,47 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 // ── identities ───────────────────────────────────────────────────────────────
-type Identity = { id: string; source: string; serverInstance: string; sourceUserId: string; isServerAdmin: boolean; userId: string | null; active: boolean };
+type Identity = { id: string; source: string; serverInstance: string; sourceUserId: string; isServerAdmin: boolean; userId: string | null; active: boolean; manualUserLink?: boolean };
 let identities: Identity[] = [];
 type Cursor = { mediaServerUserId: string; readTo: Date | null; importedAt: Date | null };
 let cursors: Cursor[] = [];
+// The linked-only scope's branches: the FK, or a subject on an unpinned row.
+type ScopeBranch = { userId?: { not: null }; manualUserLink?: boolean; sourceUserId?: { in: string[] } };
+function matchesBranch(i: Identity, b: ScopeBranch): boolean {
+  if (b.userId !== undefined && i.userId === null) return false;
+  if (b.manualUserLink !== undefined && (i.manualUserLink ?? false) !== b.manualUserLink) return false;
+  if (b.sourceUserId !== undefined && !b.sourceUserId.in.includes(i.sourceUserId)) return false;
+  return true;
+}
 shadowPrismaModel(prisma, "mediaServerUser", {
-  findMany: async (args: { where: { source: string; serverInstance: string; active: boolean; userId?: { not: null } } }) =>
+  findMany: async (args: { where: { source: string; serverInstance: string; active: boolean; userId?: { not: null }; OR?: ScopeBranch[] } }) =>
     identities
       .filter((i) => i.source === args.where.source && i.serverInstance === args.where.serverInstance && i.active === args.where.active)
       // HONOUR the linked-only scope: a stub that ignored it would hand the run
       // unlinked identities and the co-watch-off pin below would test nothing.
       .filter((i) => args.where.userId === undefined || i.userId !== null)
+      .filter((i) => args.where.OR === undefined || args.where.OR.some((b) => matchesBranch(i, b)))
       .map((i) => ({
         id: i.id,
         sourceUserId: i.sourceUserId,
         isServerAdmin: i.isServerAdmin,
         userId: i.userId,
+        manualUserLink: i.manualUserLink ?? false,
         watchCursor: (() => {
           const c = cursors.find((x) => x.mediaServerUserId === i.id);
           return c ? { readTo: c.readTo } : null;
         })(),
       })),
+});
+
+// ── accounts (their provider subjects: the linkage rule's second branch) ─────
+type Account = { id: string; plexUserId: string | null; jellyfinUserId: string | null };
+let accounts: Account[] = [];
+shadowPrismaModel(prisma, "user", {
+  findMany: async (args: { where: { plexUserId?: { not: null }; jellyfinUserId?: { not: null } } }) =>
+    accounts.filter((a) =>
+      (args.where.plexUserId === undefined || a.plexUserId !== null) &&
+      (args.where.jellyfinUserId === undefined || a.jellyfinUserId !== null)),
 });
 
 // ── library ──────────────────────────────────────────────────────────────────
@@ -136,6 +160,13 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: unknown) => {
   let stagedRows = rows.map((r) => ({ ...r }));
   const stagedCursors = cursors.map((c) => ({ ...c }));
   const tx = {
+    // stillRegisteredInTx's registry read (a named server only). Both call
+    // shapes (guardrail 23a): a Prisma.sql object, or a template + values.
+    $queryRaw: async (q: { values?: unknown[] } | TemplateStringsArray, ...rest: unknown[]) => {
+      const key = String(("raw" in q ? rest : q.values ?? [])[0]);
+      const value = settings.get(key);
+      return value === undefined ? [] : [{ value }];
+    },
     serverWatchedTitle: {
       findMany: async (args: { where: { mediaServerUserId: string } }) =>
         stagedRows.filter((r) => r.mediaServerUserId === args.where.mediaServerUserId).map(({ mediaServerUserId: _m, ...r }) => r),
@@ -220,6 +251,7 @@ beforeEach(() => {
   warns.length = 0;
   forbidden.length = 0;
   identities = [];
+  accounts = [];
   cursors = [];
   rows = [];
   failWriteFor = null;
@@ -483,4 +515,66 @@ test("plex: with co-watch OFF an unlinked account's plays are not stored, and it
   await importServerWatchHistory();
   const historyCall = calls.find((c) => c.path === "/status/sessions/history/all")!;
   assert.ok([...historyCall.params.keys()].some((k) => k.startsWith("viewedAt")), "the never-read stranger does not drag every run back to a full walk");
+});
+
+// ═══ linked by the read side's rule, not the FK alone ════════════════════════
+
+test("plex, co-watch OFF: a friend linked only by their plex.tv subject (FK still null) is imported; a pinned row is not", async () => {
+  plexSetup();
+  // The friend signed up after their last play, so the poller has not set the FK.
+  identities[1].userId = null;
+  accounts = [{ id: "u-friend", plexUserId: "2", jellyfinUserId: null }];
+  // Account 3 matches a row an admin pinned (unlinked by hand): the pin wins.
+  identities.push({ id: "msu-pinned", source: "plex", serverInstance: "", sourceUserId: "3", isServerAdmin: false, userId: null, active: true, manualUserLink: true });
+  accounts.push({ id: "u-three", plexUserId: "3", jellyfinUserId: null });
+  await importServerWatchHistory();
+  assert.deepEqual(rowsOf("msu-friend"), [[450, "TV", 1, false]], "the read side counts this identity as the friend's, so it is imported");
+  assert.ok(cursorOf("msu-friend"));
+  assert.deepEqual(rowsOf("msu-pinned"), []);
+  assert.equal(cursorOf("msu-pinned"), null);
+});
+
+test("jellyfin: an identity linked only by its account's jellyfin subject gets its favorites read", async () => {
+  configureJellyfin();
+  identities = [{ id: "msu-jf", source: "jellyfin", serverInstance: "", sourceUserId: "jf-user", isServerAdmin: false, userId: null, active: true }];
+  accounts = [{ id: "u1", plexUserId: null, jellyfinUserId: "jf-user" }];
+  jfPlayed.set("jf-user", [jfItem({ type: "Movie", id: "jf-movie-700", played: ago(2), count: 1 })]);
+  jfFavorites.set("jf-user", [{ Type: "Movie", Id: "jf-movie-900", UserData: { IsFavorite: true } }]);
+  await importServerWatchHistory();
+  assert.deepEqual(rowsOf("msu-jf"), [[700, "MOVIE", 1, false], [900, "MOVIE", 0, true]]);
+});
+
+// ═══ a named server removed mid-run ══════════════════════════════════════════
+
+function namedPlexSetup(): void {
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("plexRemoteServerUrl", PLEX);
+  settings.set("plexRemoteAdminToken", "plex-remote-token");
+  plexLib = plexLib.map((r) => ({ ...r, serverInstance: "remote" }));
+  identities = [
+    { id: "msu-remote", source: "plex", serverInstance: "remote", sourceUserId: OWNER_PLEX_TV_ID, isServerAdmin: true, userId: "u-owner", active: true },
+  ];
+  plexHistory = [plexRec({ type: "movie", ratingKey: "100", viewedAt: secs(ago(5)), accountID: 1 })];
+}
+
+test("a named server still registered is imported (the registry check passes)", async () => {
+  namedPlexSetup();
+  await importServerWatchHistory();
+  assert.deepEqual(rowsOf("msu-remote"), [[100, "MOVIE", 1, false]]);
+  assert.ok(cursorOf("msu-remote"));
+});
+
+test("a named server removed while its history is read writes no rows and no read point", async () => {
+  namedPlexSetup();
+  // The admin's removal commits while the walk is in flight: it rewrites the
+  // registry without the slug (and deletes these rows, which are still empty).
+  respond = (url) => {
+    if (url.pathname === "/status/sessions/history/all") settings.set("plexInstances", "[]");
+    return serve(url);
+  };
+  const result = await importServerWatchHistory();
+  assert.deepEqual(rowsOf("msu-remote"), [], "nothing re-created for a server that is gone");
+  assert.equal(cursorOf("msu-remote"), null, "no read point a later server under this slug would inherit");
+  assert.equal(result.identities, 0);
+  assert.equal(result.failedIdentities, 0, "a removal is not a failure");
 });

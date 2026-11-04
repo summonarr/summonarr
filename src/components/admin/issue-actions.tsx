@@ -53,6 +53,20 @@ interface IssueActionsProps {
   fixMatch?: ReactNode;
 }
 
+// ManageTitleButton's onActiveChange for the issue page: one hold on the page's
+// live refresh (refresh-hold.ts) per open title manager, released when it closes
+// or unmounts. Why: a refresh can drop this issue's row — a duplicate report
+// makes another issue the group's representative (the row's key), a status
+// change moves it off the tab — and the manager with it, unsaved edits and all.
+function managerRefreshHolds(): (slug: string, open: boolean) => void {
+  const holds = new Map<string, () => void>();
+  return (slug, open) => {
+    holds.get(slug)?.();
+    holds.delete(slug);
+    if (open) holds.set(slug, holdLiveRefresh());
+  };
+}
+
 // Two rows: fixing the file (Fix match, Fix file, Manage) and working the
 // issue (claim, In progress, Resolve/Reopen, Delete). Fix file is ONE window
 // in place of the old Refetch / Replace / Replace file buttons — see
@@ -80,6 +94,7 @@ export function IssueActions({
   const [error, setError] = useState<string | null>(null);
   const [panel, setPanel] = useState<"resolve" | "delete" | "fix" | null>(null);
   const [resolution, setResolution] = useState("");
+  const [onManagerActive] = useState<(slug: string, open: boolean) => void>(managerRefreshHolds);
 
   // `instances` lists only the CONFIGURED Radarr/Sonarr servers, default first.
   // If the default server isn't configured, the "" slug is missing from the list,
@@ -169,6 +184,7 @@ export function IssueActions({
           instanceLabel={arrInstanceLabel(service, h.name, h.slug)}
           variant="icon"
           initialTab={manageTabFor("issue", service)}
+          onActiveChange={(open) => onManagerActive(h.slug, open)}
         />
       ))
     : [];

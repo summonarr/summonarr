@@ -704,6 +704,67 @@ test("C014: a failed re-assert after a durable delete is reported on the title, 
   }
 });
 
+// A DB error on one title's stamp used to reject mapLimit — a 500
+// while the other worker went on deleting, with the cache invalidations and the
+// rescans skipped. Now it is that title's failure: not deleted (14b: no stamp,
+// no delete), reported, and the rest of the batch completes normally.
+for (const failing of ["findMany", "updateMany"] as const) {
+  test(`a stamp ${failing} error fails only its own title — no delete for it, the batch completes, invalidations and rescans run`, async () => {
+    const token = await mintSession();
+    // Warm the shared listing so its invalidation is observable afterwards.
+    await getCachedArrLibraryIndex();
+    const model = prisma.mediaRequest as unknown as Record<string, (a: { where?: ReqWhere; data?: unknown }) => Promise<unknown>>;
+    const real = model[failing];
+    // The up-front stamp: the read keyed `cleanedUpAt: null` + AVAILABLE, the
+    // write keyed `cleanedUpAt: null` by id — for movie 100 only.
+    model[failing] = async (a) => {
+      const w = a.where ?? {};
+      const isStamp = w.cleanedUpAt === null && (failing === "findMany" ? w.status === "AVAILABLE" : w.id?.in.includes("r100a") === true);
+      if (isStamp && JSON.stringify(w).includes("100")) throw new Error("simulated pool timeout");
+      return real(a);
+    };
+    try {
+      const res = await execute(token, { items: [MOVIE_100, SHOW_300], confirmTargets: 3 });
+      assert.equal(res.status, 200, "one title's DB error is never the whole batch's 500");
+      const body = await res.json() as { deletedCount: number; failedCount: number; results: Array<{ tmdbId: number; status: string; deleted: string[]; bookkeepingError?: string }> };
+      const movie = body.results.find((r) => r.tmdbId === 100)!;
+      assert.equal(movie.status, "failed");
+      assert.deepEqual(movie.deleted, []);
+      assert.equal(movie.bookkeepingError, "simulated pool timeout");
+      assert.equal(deletes().filter((c) => c.path.startsWith("/api/v3/movie/")).length, 0, "no stamp ⇒ no delete (guardrail 14b)");
+      assert.equal(body.results.find((r) => r.tmdbId === 300)!.status, "deleted");
+      assert.equal(body.deletedCount, 1);
+      assert.equal(body.failedCount, 1);
+      assert.equal(afterTasks.length, 1, "the show's library rescan is still scheduled");
+      const listingsBefore = calls.filter((c) => c.method === "GET").length;
+      await getCachedArrLibraryIndex();
+      assert.ok(calls.filter((c) => c.method === "GET").length > listingsBefore, "the shared listing was invalidated");
+    } finally {
+      model[failing] = real;
+    }
+  });
+}
+
+test("when every delete is refused, a failed un-stamp is reported on the title, never a 500", async () => {
+  const model = prisma.mediaRequest as unknown as Record<string, (a: { where?: ReqWhere; data?: { cleanedUpAt?: unknown } }) => Promise<unknown>>;
+  const real = model.updateMany;
+  model.updateMany = async (a) => {
+    // The un-stamp: keyed on this call's own time, writing null.
+    if (a.data?.cleanedUpAt === null && a.where?.cleanedUpAt instanceof Date) throw new Error("simulated write failure");
+    return real(a);
+  };
+  try {
+    deleteStatus = () => 503;
+    const res = await execute(await mintSession(), { items: [MOVIE_100], confirmTargets: 2 });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.results[0].status, "failed");
+    assert.equal(body.results[0].bookkeepingError, "simulated write failure");
+  } finally {
+    model.updateMany = real;
+  }
+});
+
 // Audit C057: a failure the page shows carries a translatable kind and names
 // its instance, instead of only the English arrErrorMessage text.
 test("C057: a refused delete reports the instance and a translatable kind beside the English detail", async () => {

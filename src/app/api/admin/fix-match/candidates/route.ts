@@ -291,6 +291,17 @@ async function cachedSeriesList<T>(instance: string, load: () => Promise<T[]>): 
   return rows;
 }
 
+// An arr answer's rows, appended one by one: a spread push throws RangeError
+// past ~125k rows (a Radarr that ignored ?tmdbId= sends its whole table), and a
+// non-array answer or a non-object row adds nothing instead of a TypeError
+// (guardrail 5i). The cross-check is a hint; a broken answer must not 500.
+function appendRows<T extends object>(out: T[], rows: unknown): void {
+  if (!Array.isArray(rows)) return;
+  for (const row of rows as unknown[]) {
+    if (row !== null && typeof row === "object") out.push(row as T);
+  }
+}
+
 // Live Radarr/Sonarr cross-check for the folder being re-matched — an additive
 // trust signal for both the Plex picker and the Jellyfin confirmation card.
 // Null everywhere when no arr is configured or nothing matched.
@@ -363,13 +374,13 @@ async function resolveArrConfirmation(
             console.error("[fix-match/candidates] Arr fetch rejected:", result.reason instanceof Error ? result.reason.message : result.reason);
           }
         }
-        if (correctRes.status === "fulfilled") correctRows.push(...correctRes.value);
-        if (wrongRes.status === "fulfilled") wrongRows.push(...wrongRes.value);
+        if (correctRes.status === "fulfilled") appendRows(correctRows, correctRes.value);
+        if (wrongRes.status === "fulfilled") appendRows(wrongRows, wrongRes.value);
       } else {
         try {
           const all = await cachedSeriesList(inst.slug, () => arrFetch<ArrMovie[]>(cfg, `/api/v3/${endpoint}`));
-          correctRows.push(...all);
-          wrongRows.push(...all);
+          appendRows(correctRows, all);
+          appendRows(wrongRows, all);
         } catch (err) {
           console.error("[fix-match/candidates] Arr fetch rejected:", err instanceof Error ? err.message : err);
         }

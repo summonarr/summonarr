@@ -64,6 +64,7 @@ const { webAuthnUserHandle, passwordVersion, ensureRecoveryCodesInTx, MFA_USER_L
 const { resetMfaTokenLedgerForTests, MAX_TOKEN_FAILURES } = await import("../src/lib/mfa/mfa-token.ts");
 const { MFA_LOCKOUT_THRESHOLD, MFA_LOCKED_MESSAGE, lockoutDurationMs } = await import("../src/lib/mfa/lockout.ts");
 const { refundHit } = await import("../src/lib/rate-limit.ts");
+const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { assertionResponse, makeAuthenticator, registrationResponse } = await import("./_webauthn-fixtures.mts");
 
 // ── in-memory store ─────────────────────────────────────────────────────────
@@ -113,6 +114,10 @@ let sessionWrites = 0;
 let seq = 0;
 let callbackTxCount = 0;
 let sessionDeleteBoom = false;
+// AuthSession deletes so far, and a switch that fails the COMMIT of whichever
+// transaction deleted sessions (the $transaction stub below).
+let sessionDeletes = 0;
+let failCommitOfRevokeTx = false;
 
 // Applies Prisma update data, including atomic { increment } operations.
 function applyData(row: Row, data: Row): void {
@@ -226,6 +231,7 @@ shadowPrismaModel(prisma, "authSession", {
   update: async () => ({}),
   deleteMany: async ({ where }: { where: Where }) => {
     if (sessionDeleteBoom) throw new Error("AuthSession deleteMany exploded (unit test)");
+    sessionDeletes++;
     const before = sessions.length;
     sessions = sessions.filter((s) => !matches(s, where));
     return { count: before - sessions.length };
@@ -256,8 +262,9 @@ shadowPrismaModel(prisma, "discordMergeCode", { deleteMany: recFoothold("discord
 shadowPrismaModel(prisma, "verificationToken", { deleteMany: recFoothold("verificationToken") });
 // Interactive $transaction: snapshot the MFA/session/user rows and restore them
 // on throw so a failed revoke cannot leave factors deleted (the residual this
-// file pins). Array-form transactions are Promise.all of already-issued writes
-// and are left as they are.
+// file pins). Rows are copied, because updateMany writes them in place (the
+// TOTP confirm). Array-form transactions are Promise.all of already-issued
+// writes and are left as they are.
 function restoreUserRows(current: Row[], snap: Row[]): void {
   const byId = new Map(snap.map((r) => [r.id, r]));
   for (const u of current) {
@@ -271,14 +278,17 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   if (Array.isArray(arg)) return Promise.all(arg);
   callbackTxCount++;
   const snap = {
-    totps: totps.slice(),
-    codes: codes.slice(),
-    passkeys: passkeys.slice(),
-    sessions: sessions.slice(),
+    totps: totps.map((r) => ({ ...r })),
+    codes: codes.map((r) => ({ ...r })),
+    passkeys: passkeys.map((r) => ({ ...r })),
+    sessions: sessions.map((r) => ({ ...r })),
     users: users.map((u) => ({ ...u })),
   };
+  const deletesBefore = sessionDeletes;
   try {
-    return await (arg as (tx: unknown) => Promise<unknown>)(prisma);
+    const result = await (arg as (tx: unknown) => Promise<unknown>)(prisma);
+    if (failCommitOfRevokeTx && sessionDeletes !== deletesBefore) throw new Error("COMMIT failed (unit test)");
+    return result;
   } catch (err) {
     totps = snap.totps.slice();
     codes = snap.codes.slice();
@@ -413,6 +423,7 @@ beforeEach(() => {
   footholdOps = [];
   callbackTxCount = 0;
   sessionDeleteBoom = false;
+  failCommitOfRevokeTx = false;
   settings = new Map([["setup_completed_at", "2026-01-01T00:00:00.000Z"]]);
   sessionWrites = 0;
   errors.length = 0;
@@ -1483,6 +1494,132 @@ test("GET /api/profile/mfa reports status and never a secret", async () => {
   assert.equal(body.totpEnabled, true);
   assert.ok(!JSON.stringify(body).includes(totps[0].secret as string));
 });
+
+// ── the sign-out of OTHER sessions commits with the factor change ───────────
+//
+// The five self-service changes that sign out the account's other sessions
+// (6d) do it inside the factor transaction, and mark the in-memory revocation
+// ledger only after it commits (27). A separate second transaction that failed
+// used to 500 a change that had already landed (first-factor codes never shown,
+// 2FA off with the other sessions still live).
+
+type SignOutCase = {
+  name: string;
+  // Seeds the account's factors and returns the call that makes the change,
+  // plus a probe that says whether the change is in the store.
+  arrange: (u: Row, jwt: string) => Promise<{ run: () => Promise<Response>; changed: () => boolean }>;
+};
+
+const SIGN_OUT_CASES: SignOutCase[] = [
+  {
+    name: "POST /totp/enable (first factor)",
+    arrange: async (u, jwt) => {
+      const setup = await (await call(totpSetup.POST as never, "/api/profile/mfa/totp/setup", { body: { password: PASSWORD }, headers: bearer(jwt) })).json();
+      const key = base32Decode(setup.secret)!;
+      return {
+        run: () => call(totpEnable.POST as never, "/api/profile/mfa/totp/enable", { body: { code: hotp(key, totpStep(Date.now())) }, headers: bearer(jwt) }),
+        changed: () => totps.some((t) => t.userId === u.id && t.enabledAt instanceof Date) || codes.some((c) => c.userId === u.id),
+      };
+    },
+  },
+  {
+    name: "POST /passkeys (first factor)",
+    arrange: async (u, jwt) => {
+      const opts = await (await call(passkeyOptions.POST as never, "/api/profile/mfa/passkeys/options", { body: { password: PASSWORD }, headers: bearer(jwt) })).json();
+      const credential = registrationResponse({ auth: makeAuthenticator("EdDSA"), rpId: "localhost", origin: "http://localhost:3000", challenge: opts.publicKey.challenge });
+      return {
+        run: () => call(passkeyRegister.POST as never, "/api/profile/mfa/passkeys", { body: { registrationToken: opts.registrationToken, name: "Key", credential }, headers: bearer(jwt) }),
+        changed: () => passkeys.some((p) => p.userId === u.id) || codes.some((c) => c.userId === u.id),
+      };
+    },
+  },
+  {
+    name: "DELETE /api/profile/mfa (turn off)",
+    arrange: async (u, jwt) => {
+      const key = seedTotp(u.id as string);
+      seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+      return {
+        run: () => call(profileMfa.DELETE as never, "/api/profile/mfa", { method: "DELETE", body: { password: PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } }, headers: bearer(jwt) }),
+        changed: () => !totps.some((t) => t.userId === u.id),
+      };
+    },
+  },
+  {
+    name: "DELETE /totp (last factor)",
+    arrange: async (u, jwt) => {
+      const key = seedTotp(u.id as string);
+      seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+      return {
+        run: () => call(totpRoute.DELETE as never, "/api/profile/mfa/totp", { method: "DELETE", body: { password: PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } }, headers: bearer(jwt) }),
+        changed: () => !totps.some((t) => t.userId === u.id),
+      };
+    },
+  },
+  {
+    name: "DELETE /passkeys/[id] (last factor)",
+    arrange: async (u, jwt) => {
+      const id = `pk-last-${u.id}`;
+      seedPasskey(u.id, undefined, id);
+      seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+      return {
+        run: () => call(passkeyItem.DELETE as never, `/api/profile/mfa/passkeys/${id}`, { method: "DELETE", body: { password: PASSWORD, secondFactor: { method: "recovery", code: "AAAA-BBBB-CCCC-DDDD" } }, headers: bearer(jwt), ctx: { params: Promise.resolve({ id }) } }),
+        changed: () => !passkeys.some((p) => p.id === id),
+      };
+    },
+  },
+];
+
+// A user signed in on this device and one other; returns both session ids.
+async function twoDevices(u: Row): Promise<{ jwt: string; keepSid: string; otherSid: string }> {
+  const jwt = await sessionFor(u);
+  const keepSid = sessions[sessions.length - 1].sessionId as string;
+  await sessionFor(u);
+  const otherSid = sessions[sessions.length - 1].sessionId as string;
+  return { jwt, keepSid, otherSid };
+}
+// Session marks only (no user is ever marked under this id).
+const marked = (sessionId: string) => shouldForceDbCheck("no-such-user", sessionId);
+
+for (const c of SIGN_OUT_CASES) {
+  test(`${c.name}: a failed sign-out of the other sessions rolls the change back — one transaction`, async () => {
+    const u = await seedUser();
+    const { jwt, otherSid } = await twoDevices(u);
+    const { run, changed } = await c.arrange(u, jwt);
+    sessionDeleteBoom = true;
+    await assert.rejects(run, /AuthSession deleteMany exploded/);
+    assert.equal(changed(), false, "the factor change did not commit without the sign-out");
+    assert.equal(sessions.filter((s) => s.userId === u.id).length, 2, "both sessions remain");
+    assert.equal(marked(otherSid), false);
+  });
+
+  test(`${c.name}: the ledger is marked only after the commit, and only for the OTHER session`, async () => {
+    // A COMMIT that fails: nothing landed, so nothing may be marked (27).
+    const a = await seedUser();
+    const devA = await twoDevices(a);
+    const failing = await c.arrange(a, devA.jwt);
+    failCommitOfRevokeTx = true;
+    await assert.rejects(failing.run, /COMMIT failed/);
+    assert.equal(failing.changed(), false, "the change and the sign-out roll back together");
+    assert.equal(sessions.filter((s) => s.userId === a.id).length, 2);
+    assert.equal(marked(devA.otherSid), false, "no mark for a revoke that never committed");
+    failCommitOfRevokeTx = false;
+
+    // The same change committing: the other session is gone and marked, this
+    // one survives unmarked, and the answer is the usual 200.
+    const b = await seedUser();
+    const devB = await twoDevices(b);
+    const ok = await c.arrange(b, devB.jwt);
+    const res = await ok.run();
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.ok(ok.changed());
+    assert.deepEqual(sessions.filter((s) => s.userId === b.id).map((s) => s.sessionId), [devB.keepSid]);
+    assert.equal(marked(devB.otherSid), true, "the revoked session is forced onto the slow path");
+    assert.equal(marked(devB.keepSid), false, "the device making the change is not");
+    await new Promise((r) => setImmediate(r));
+    const row = audit.find((x) => x.action === "MFA_CHANGE" && x.userId === b.id);
+    assert.equal(JSON.parse(row!.details as string).otherSessionsRevoked, 1);
+  });
+}
 
 // ── admin reset ─────────────────────────────────────────────────────────────
 

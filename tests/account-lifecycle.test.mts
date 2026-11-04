@@ -30,7 +30,8 @@
 //   - deleted outright: Account rows (OAuth tokens), AuthSessions, push subs,
 //     Discord link tokens + merge codes, watchlist / hidden / notifications /
 //     recommendations (the derived taste profile — same class of private per-user
-//     data, and NOT among the "requests/votes/issues" the User model keeps);
+//     data, and NOT among the "requests/votes/issues" the User model keeps),
+//     Trakt data and the watchlist auto-request ledger;
 //   - UNLINKED, never deleted: MediaServerUser rows get userId → null
 //     (guardrail 28 — hard-deleting would restrict on play history);
 //   - NEVER a hard-delete of the User row itself (requests/votes/issues stay
@@ -102,6 +103,7 @@ const baseTx = {
   traktWatchedItem: { deleteMany: record("traktWatchedItem", "deleteMany") },
   traktRating: { deleteMany: record("traktRating", "deleteMany") },
   traktConnection: { deleteMany: record("traktConnection", "deleteMany") },
+  autoRequestLedger: { deleteMany: record("autoRequestLedger", "deleteMany") },
   verificationToken: { deleteMany: record("verificationToken", "deleteMany") },
   userTotp: { deleteMany: record("userTotp", "deleteMany") },
   webAuthnCredential: { deleteMany: record("webAuthnCredential", "deleteMany") },
@@ -209,6 +211,9 @@ const PURGE_OPS = [
   "traktWatchedItem.deleteMany",
   "traktRating.deleteMany",
   "traktConnection.deleteMany",
+  // The watchlist auto-request ledger (guardrail 34b): every title from this
+  // person's Summonarr/Plex/Trakt watchlists, with its source.
+  "autoRequestLedger.deleteMany",
   "verificationToken.deleteMany",
   // The audit trail's copies of who this was (audit-scrub.ts): rows ABOUT the
   // account lose the target name/email, rows BY it lose the actor name.
@@ -362,6 +367,8 @@ test("purge of a disabled account issues the full scrub set, in order", async ()
   for (const op of PURGE_OPS.slice(1, 9)) {
     assert.deepEqual(opArgs(op), { where: { userId: ID } }, op);
   }
+  // Scoped to THIS account: the ledger rows of everyone else stay.
+  assert.deepEqual(opArgs("autoRequestLedger.deleteMany"), { where: { userId: ID } });
 });
 
 test("purge scrubs the audit trail's copies of who this was — target name/email on rows ABOUT the account, the actor name on rows BY it", async () => {

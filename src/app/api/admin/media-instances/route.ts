@@ -275,7 +275,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // Guardrail 23: nothing in here catches a write error. A failure propagates,
   // the whole transaction rolls back, and the route 500s — the admin retries
   // against unchanged state.
-  const removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number }> = {};
+  const removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number; watchSyncPairs: number }> = {};
   await prisma.$transaction(async (tx) => {
     // The registry row FIRST: its row lock is what orders this removal against
     // an upstream watch refresh in flight (stillRegisteredInTx in
@@ -349,6 +349,16 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       // instead of adding its whole history on top of the old rows.
       await tx.serverWatchedTitle.deleteMany({ where: { mediaServerUser: { source: service, serverInstance: slug } } });
       await tx.serverWatchCursor.deleteMany({ where: { mediaServerUser: { source: service, serverInstance: slug } } });
+      // Watch-sync pairs with an account on this server (guardrail 19e). Their
+      // read points and ledgers (Plex ratingKeys are per server) describe a
+      // server that is gone, and a server later registered under this slug
+      // would inherit them. The ledgers go with the pair (onDelete: Cascade).
+      // Nothing is unmarked on either server.
+      const watchSyncPairs = await tx.watchSyncPair.deleteMany({
+        where: service === "plex"
+          ? { plexUser: { source: "plex", serverInstance: slug } }
+          : { jellyfinUser: { source: "jellyfin", serverInstance: slug } },
+      });
 
       // Library rows: a pure derived cache, rebuilt from scratch if the server is
       // ever re-added. Leaving them is the headline bug this cleanup exists for.
@@ -376,7 +386,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         data: { active: false },
       });
 
-      removedCounts[slug] = { libraryItems: library.count, activeSessions: sessions.count, serverUsersDisabled: serverUsers.count };
+      removedCounts[slug] = { libraryItems: library.count, activeSessions: sessions.count, serverUsersDisabled: serverUsers.count, watchSyncPairs: watchSyncPairs.count };
     }
   }, { timeout: BATCH_TX_TIMEOUT });
   // A removal changed the never-watched report's inputs (library rows, evidence,

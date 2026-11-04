@@ -285,6 +285,10 @@ async function deliverWithRetry(agent: LoadedAgent, p: WebhookPayload, attempt =
 }
 
 async function retryDelivery(agentId: string, p: WebhookPayload, attempt: number): Promise<void> {
+  // The integration switch is the admin's kill switch for every channel, so a
+  // retry re-checks it too: switched off since attempt 0 ⇒ withdrawn, exactly
+  // like a disabled channel (no fetch, no outcome).
+  if (!(await isFeatureEnabled(AGENTS_FEATURE_KEY))) return;
   // loadEnabledAgents already filters enabled: true and re-validates the stored
   // config; the admin routes invalidate its cache on every write. Absent, or no
   // longer subscribed ⇒ the admin withdrew this delivery: no fetch, no outcome.

@@ -16,10 +16,12 @@ export async function discordVisibleInstances(discordUserId: string): Promise<Vi
   if (!anyRestricted) return visibleInstancesFor(0n, {}, plex, jellyfin);
   const user = await prisma.user.findUnique({
     where: { discordId: discordUserId },
-    select: { role: true, permissions: true, mediaServerGrants: true },
+    select: { role: true, permissions: true, mediaServerGrants: true, deactivatedAt: true },
   });
   // No linked/shadow account yet ⇒ least privilege, same as an anonymous web reader.
-  if (!user) return visibleInstancesFor(0n, {}, plex, jellyfin);
+  // So is a deactivated one: deactivation leaves role, permissions and grants on
+  // the row (guardrail 33), and none of them may still open a restricted server.
+  if (!user || user.deactivatedAt) return visibleInstancesFor(0n, {}, plex, jellyfin);
   return visibleInstancesFor(
     effectivePermissions(user.role, user.permissions),
     parseMediaServerGrants(user.mediaServerGrants),
