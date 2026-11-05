@@ -139,6 +139,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | --------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BACKUP_DB_PASSWORD`  | **≥ 12 chars**      | **Required** to enable the Backup & Restore admin page — export and import return `503` without it. Losing it makes every prior encrypted backup unrecoverable. |
 | `BACKUP_MAX_RESTORE_MB` | integer MB, default `4096` | Largest decrypted backup a restore will accept. Restores stream to a temp file, so this bounds disk (`/tmp`) and time, not memory; the restore transaction timeout scales with size. Raise it for very large servers. |
+| `RESTORE_TMP_DIR` | path, optional | Where a restore stages the uploaded dump and its statements. Unset, the app picks `/data/temp` (created on demand, on the container disk) or `/tmp`, whichever has more free space (the compose `/tmp` is a 128 MB RAM tmpfs). Needs about twice the dump size free. |
 | `AUTH_TRUSTED_ORIGIN` | Comma-separated URLs | Extra origins allowed to make authenticated API calls (staging URL, internal hostname, LAN IP, …).                                                       |
 
 ### Sign-in / identity (optional)

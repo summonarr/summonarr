@@ -8,8 +8,8 @@
 // live here so they can't drift between the two callers.
 
 import { promises as fsp, createReadStream } from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { restoreScratchDir } from "@/lib/restore-scratch";
 import { prisma } from "@/lib/prisma";
 import {
   hasEncryptedMagic,
@@ -70,7 +70,7 @@ class StatementSpool {
   async flush(): Promise<void> {
     if (this.parts.length === 0) return;
     if (!this.fh) {
-      this.dir = await fsp.mkdtemp(path.join(os.tmpdir(), "summonarr-restore-"));
+      this.dir = await fsp.mkdtemp(path.join(await restoreScratchDir(), "summonarr-restore-"));
       this.file = path.join(this.dir, "statements.bin");
       this.fh = await fsp.open(this.file, "w", 0o600);
     }

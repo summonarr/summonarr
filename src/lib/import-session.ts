@@ -10,8 +10,8 @@
 import { promises as fs, createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 import path from "node:path";
-import os from "node:os";
 import { MAX_CIPHERTEXT_BYTES } from "@/lib/backup-import";
+import { restoreScratchDir } from "@/lib/restore-scratch";
 
 // IDLE window: bumped to now+TTL on every chunk (appendChunkUnsafe), so this is the
 // allowed gap BETWEEN chunks, not the total upload time. Kept tight so an attacker
@@ -19,7 +19,7 @@ import { MAX_CIPHERTEXT_BYTES } from "@/lib/backup-import";
 // (the slot frees ~10 min after the last chunk instead of 30); still ample for a slow
 // chunk upload. The chunk-0 rate limit bounds how often a new session can be opened.
 const SESSION_TTL_MS = 10 * 60 * 1000;
-const TEMP_PREFIX = path.join(os.tmpdir(), "summonarr-upload-");
+const tempPrefix = async () => path.join(await restoreScratchDir(), "summonarr-upload-");
 
 type Session = {
   uploadId: string;
@@ -120,7 +120,7 @@ export async function startSession(
       return { ok: true, session: active };
     }
 
-    const tempDir = await fs.mkdtemp(TEMP_PREFIX);
+    const tempDir = await fs.mkdtemp(await tempPrefix());
     const filePath = path.join(tempDir, "upload.bin");
 
     const session: Session = {
