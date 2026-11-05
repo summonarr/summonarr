@@ -138,6 +138,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | Variable              | Constraints         | Purpose                                                                                                                                                  |
 | --------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BACKUP_DB_PASSWORD`  | **≥ 12 chars**      | **Required** to enable the Backup & Restore admin page — export and import return `503` without it. Losing it makes every prior encrypted backup unrecoverable. |
+| `BACKUP_MAX_RESTORE_MB` | integer MB, default `4096` | Largest decrypted backup a restore will accept. Restores stream to a temp file, so this bounds disk (`/tmp`) and time, not memory; the restore transaction timeout scales with size. Raise it for very large servers. |
 | `AUTH_TRUSTED_ORIGIN` | Comma-separated URLs | Extra origins allowed to make authenticated API calls (staging URL, internal hostname, LAN IP, …).                                                       |
 
 ### Sign-in / identity (optional)

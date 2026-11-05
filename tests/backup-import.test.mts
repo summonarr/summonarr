@@ -41,6 +41,10 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
+// The cap is env-configurable (default 4 GB); the boundary test below allocates
+// the cap in memory, so pin the suite to the historical 500 MB.
+process.env.BACKUP_MAX_RESTORE_MB = "500";
+
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
 delete process.env.TRUST_PROXY;
 delete process.env.SUMMONARR_ALLOW_SETUP_RESTORE;
@@ -283,6 +287,22 @@ test("size-cap constants: 500 MB plaintext, ciphertext cap = plaintext + 4096", 
   // header — so this pin is what catches an accidental cap change.
   assert.equal(MAX_PLAINTEXT_BYTES, 500 * 1024 * 1024);
   assert.equal(MAX_CIPHERTEXT_BYTES, MAX_PLAINTEXT_BYTES + 4096);
+});
+
+test("BACKUP_MAX_RESTORE_MB sets the cap; default is 4 GB; junk falls back to the default", async () => {
+  const load = async (v: string | undefined, tag: string) => {
+    if (v === undefined) delete process.env.BACKUP_MAX_RESTORE_MB;
+    else process.env.BACKUP_MAX_RESTORE_MB = v;
+    return (await import(`../src/lib/backup-import.ts?cap=${tag}`)).MAX_PLAINTEXT_BYTES as number;
+  };
+  try {
+    assert.equal(await load("2048", "a"), 2048 * 1024 * 1024);
+    assert.equal(await load(undefined, "b"), 4096 * 1024 * 1024);
+    assert.equal(await load("0", "c"), 4096 * 1024 * 1024);
+    assert.equal(await load("abc", "d"), 4096 * 1024 * 1024);
+  } finally {
+    process.env.BACKUP_MAX_RESTORE_MB = "500";
+  }
 });
 
 test("ciphertext cap boundary: one byte over → 413 before any KDF; exactly at cap passes the gate", async () => {

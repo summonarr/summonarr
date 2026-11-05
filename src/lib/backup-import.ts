@@ -7,6 +7,9 @@
 // schema-fingerprint guard, atomic TRUNCATE+INSERT transaction —
 // live here so they can't drift between the two callers.
 
+import { promises as fsp, createReadStream } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import {
   hasEncryptedMagic,
@@ -19,11 +22,98 @@ import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
 import { invalidateCachedSessionChecks } from "@/lib/session-revocation";
 import { clearArrSnapshots } from "@/lib/arr-snapshot";
 
-// Verbose INSERT-per-row encoding inflates row data 3–5×; 500 MB plaintext
-// covers a fully-loaded Summonarr instance with audit log + play history.
-export const MAX_PLAINTEXT_BYTES = 500 * 1024 * 1024;
+// Verbose INSERT-per-row encoding inflates row data 3–5×. The validated
+// statements are spooled to a temp file (never held in memory), so this cap
+// bounds only disk space and restore time. Default 4 GB; a very large server
+// can raise it with BACKUP_MAX_RESTORE_MB (the dump is also staged on disk by
+// the chunked upload, so the temp directory needs roughly this much free
+// space twice over).
+const DEFAULT_MAX_RESTORE_MB = 4096;
+function configuredMaxRestoreBytes(): number {
+  const raw = Number(process.env.BACKUP_MAX_RESTORE_MB);
+  const mb = Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : DEFAULT_MAX_RESTORE_MB;
+  return mb * 1024 * 1024;
+}
+export const MAX_PLAINTEXT_BYTES = configuredMaxRestoreBytes();
 export const MAX_CIPHERTEXT_BYTES = MAX_PLAINTEXT_BYTES + 4096;
-const RESTORE_TX_TIMEOUT_MS = 10 * 60 * 1000;
+// 10 minutes minimum, then one second per MB of plaintext, so a multi-GB
+// restore isn't rolled back by a timeout sized for 500 MB.
+const MIN_RESTORE_TX_TIMEOUT_MS = 10 * 60 * 1000;
+function restoreTxTimeoutMs(plaintextBytes: number): number {
+  return Math.max(MIN_RESTORE_TX_TIMEOUT_MS, Math.ceil(plaintextBytes / (1024 * 1024)) * 1000);
+}
+
+// Validated statements, length-prefixed (uint32 BE + UTF-8) in a temp file so a
+// restore's memory use does not grow with the dump. The directory is removed by
+// dispose() on every exit path of processBackupImport.
+class StatementSpool {
+  count = 0;
+  private dir: string | null = null;
+  private file: string | null = null;
+  private fh: fsp.FileHandle | null = null;
+  private parts: Buffer[] = [];
+  private pendingBytes = 0;
+
+  add(stmt: string): void {
+    const body = Buffer.from(stmt, "utf8");
+    const head = Buffer.alloc(4);
+    head.writeUInt32BE(body.length, 0);
+    this.parts.push(head, body);
+    this.pendingBytes += 4 + body.length;
+    this.count++;
+  }
+
+  needsFlush(): boolean {
+    return this.pendingBytes >= 1024 * 1024;
+  }
+
+  async flush(): Promise<void> {
+    if (this.parts.length === 0) return;
+    if (!this.fh) {
+      this.dir = await fsp.mkdtemp(path.join(os.tmpdir(), "summonarr-restore-"));
+      this.file = path.join(this.dir, "statements.bin");
+      this.fh = await fsp.open(this.file, "w", 0o600);
+    }
+    const buf = Buffer.concat(this.parts);
+    this.parts = [];
+    this.pendingBytes = 0;
+    await this.fh.write(buf);
+  }
+
+  async *read(): AsyncGenerator<string> {
+    await this.flush();
+    if (this.fh) {
+      await this.fh.close();
+      this.fh = null;
+    }
+    if (!this.file) return;
+    let carry: Buffer = Buffer.alloc(0);
+    for await (const chunk of createReadStream(this.file)) {
+      carry = carry.length === 0 ? (chunk as Buffer) : Buffer.concat([carry, chunk as Buffer]);
+      let off = 0;
+      while (carry.length - off >= 4) {
+        const len = carry.readUInt32BE(off);
+        if (carry.length - off - 4 < len) break;
+        yield carry.toString("utf8", off + 4, off + 4 + len);
+        off += 4 + len;
+      }
+      carry = off === 0 ? carry : carry.subarray(off);
+    }
+  }
+
+  async dispose(): Promise<void> {
+    try {
+      await this.fh?.close();
+    } catch {
+      // already closed
+    }
+    this.fh = null;
+    if (this.dir) {
+      await fsp.rm(this.dir, { recursive: true, force: true }).catch(() => {});
+      this.dir = null;
+    }
+  }
+}
 
 // Build the allowlist from the single source of truth (BACKUP_TABLES / BACKUP_ENUMS).
 // This prevents a future table/enum addition in the exporter from accidentally
@@ -352,6 +442,20 @@ export async function processBackupImport(
   password: string,
   mode: BackupImportMode = "admin",
 ): Promise<BackupImportResult> {
+  const spool = new StatementSpool();
+  try {
+    return await runBackupImport(body, password, mode, spool);
+  } finally {
+    await spool.dispose();
+  }
+}
+
+async function runBackupImport(
+  body: ReadableStream<Uint8Array>,
+  password: string,
+  mode: BackupImportMode,
+  spool: StatementSpool,
+): Promise<BackupImportResult> {
   // Pre-auth ("setup") restore runs before any admin account exists and
   // authenticates solely with BACKUP_DB_PASSWORD, so on an internet-facing
   // instance a leaked/weak password lets an attacker replace the database
@@ -452,7 +556,6 @@ export async function processBackupImport(
   let totalPlaintextBytes = 0;
   let aborted = false;
   let abortReason: { error: string; status: number } | null = null;
-  const validatedStatements: string[] = [];
   let receivedFingerprint: string | null = null;
   let receivedTekFingerprint: string | null = null;
 
@@ -469,7 +572,7 @@ export async function processBackupImport(
       if (errors.length >= 20) aborted = true;
       return;
     }
-    validatedStatements.push(stmt);
+    spool.add(stmt);
   }
 
   // On early abort (validation errors hit the cap, or the size cap fires) we
@@ -511,11 +614,13 @@ export async function processBackupImport(
         collectStatement(stmt);
         if (aborted) break;
       }
+      if (spool.needsFlush()) await spool.flush();
     }
     if (!aborted) {
       const pending: string[] = [];
       flushSqlChunk(splitter, (s) => pending.push(s), collectComment);
       for (const stmt of pending) collectStatement(stmt);
+      await spool.flush();
     } else {
       try {
         await drainPlaintext(ptReader);
@@ -600,7 +705,7 @@ export async function processBackupImport(
   // parsed to ZERO insertable statements would still TRUNCATE every table and
   // report ok — a "restore" of nothing is a silent wipe. No legitimate export
   // is empty (every instance has at least Setting rows), so refuse outright.
-  if (validatedStatements.length === 0) {
+  if (spool.count === 0) {
     return {
       ok: false,
       status: 400,
@@ -641,7 +746,7 @@ export async function processBackupImport(
         }
       }
       await tx.$executeRawUnsafe(truncateStmt);
-      for (const stmt of validatedStatements) {
+      for await (const stmt of spool.read()) {
         // Older exports (pre-snapshot fix) could emit duplicate rows when a
         // sync wrote between paginated SELECTs. Force-append ON CONFLICT DO
         // NOTHING so the restore tolerates those dumps instead of aborting
@@ -674,7 +779,7 @@ export async function processBackupImport(
       // same transaction, so a rolled-back restore leaves sessions untouched.
       await tx.authSession.deleteMany({});
       await tx.user.updateMany({ data: { sessionsRevokedAt: new Date() } });
-    }, { timeout: RESTORE_TX_TIMEOUT_MS, maxWait: 10_000 });
+    }, { timeout: restoreTxTimeoutMs(totalPlaintextBytes), maxWait: 10_000 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Log the underlying DB error server-side; do not echo it to the client.
