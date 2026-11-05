@@ -597,16 +597,16 @@ test("GUARDRAIL 21: the boot re-anchor updateMany runs before any ActiveSession 
   );
 });
 
-test("SSE subscribe wire shape: filters=playing,timeline, URL-encoded token, Plex client headers", () => {
+test("SSE subscribe wire shape: filters=playing,timeline, token in the X-Plex-Token header, Plex client headers", () => {
   const call = sseFetches()[0];
   const url = new URL(call.url);
   assert.equal(url.origin, "http://192.168.77.10:32400");
   assert.equal(url.pathname, "/:/eventsource/notifications");
   assert.equal(url.searchParams.get("filters"), "playing,timeline");
-  assert.equal(url.searchParams.get("X-Plex-Token"), TOKEN1);
-  // The raw URL must carry the encodeURIComponent form — an unencoded token
-  // with spaces/+/slashes corrupts the query string.
-  assert.ok(call.url.includes("X-Plex-Token=sse%20token%2F1%2B2"), `token must be URL-encoded in the wire URL, got: ${call.url}`);
+  // The token is a header, never in the URL (proxy/access logs).
+  assert.equal(url.searchParams.get("X-Plex-Token"), null);
+  assert.ok(!call.url.includes(TOKEN1) && !call.url.includes("sse%20token"), `token must not be in the wire URL, got: ${call.url}`);
+  assert.equal(call.headers.get("x-plex-token"), TOKEN1);
   assert.equal(call.headers.get("accept"), "text/event-stream");
   assert.equal(call.headers.get("x-plex-product"), "Summonarr");
   assert.equal(call.headers.get("x-plex-version"), "1.0");
@@ -1266,8 +1266,7 @@ test("a token change restarts the stream with the new token and never reconnects
   plexAdminToken = TOKEN2;
   await reconcilePlexEventStream();
   await waitFor(() => sseFetches().length === sseBefore + 1, "the restarted SSE subscribe");
-  const fresh = new URL(sseFetches()[sseBefore].url);
-  assert.equal(fresh.searchParams.get("X-Plex-Token"), TOKEN2, "the new connection must carry the rotated token");
+  assert.equal(sseFetches()[sseBefore].headers.get("x-plex-token"), TOKEN2, "the new connection must carry the rotated token");
 
   // Wind down the aborted old connection: its read resolves on stream end, its
   // finally clears the recycle timer, and after one (real) 1s backoff sleep
@@ -1366,7 +1365,7 @@ test("named-instance activation: a second manager connects to ITS origin/token a
   // default manager's live connection is untouched (no restart).
   const remoteSse = new URL(sseFetchesFor(PLEX2_URL)[0].url);
   assert.equal(remoteSse.origin, "http://192.168.77.11:32400");
-  assert.equal(remoteSse.searchParams.get("X-Plex-Token"), TOKEN_R);
+  assert.equal(sseFetchesFor(PLEX2_URL)[0].headers.get("x-plex-token"), TOKEN_R);
   assert.equal(remoteSse.searchParams.get("filters"), "playing,timeline");
 
   // A playing event on the REMOTE stream lands on the 3-segment id.

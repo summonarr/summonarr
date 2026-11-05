@@ -381,10 +381,12 @@ class PlexEventStreamManager {
       // reachability is derived from getPlexSessions succeeding instead (see
       // persistReachability). Other notification types (transcode.*,
       // preferences, account) are dropped server-side by the filter.
-      const sseUrl = `${url}/:/eventsource/notifications?filters=playing,timeline&X-Plex-Token=${encodeURIComponent(token)}`;
+      const sseUrl = `${url}/:/eventsource/notifications?filters=playing,timeline`;
       const res = await safeFetchAdminConfigured(sseUrl, {
         headers: {
           Accept: "text/event-stream",
+          // The token rides a header, never the URL, so it can't land in a proxy or access log.
+          "X-Plex-Token": token,
           // Required by Plex for any client-style request.
           "X-Plex-Product": "Summonarr",
           "X-Plex-Version": "1.0",
