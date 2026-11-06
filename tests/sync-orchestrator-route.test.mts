@@ -375,8 +375,11 @@ const fakePrisma = {
   // issues exactly one UPDATE … RETURNING; we replay its semantics against the
   // shared request store so a row already flipped by the Plex pass yields NO
   // winner in the Jellyfin pass — the real exactly-once mechanism.
+  // replaceEpisodeCacheForSource's unchanged-set check is raw SQL too; it is not
+  // a claim. No answer reads as "changed", so the episode swaps still run.
   $queryRaw: async (query: { sql: string; values: unknown[] }) => {
     const sql = query.sql;
+    if (sql.includes(`FROM "TVEpisodeCache"`)) return [];
     const ids = (query.values ?? []).map(String);
     const mode: CasCall["mode"] = sql.includes("IN ('PENDING', 'APPROVED')")
       ? "markAvailable"

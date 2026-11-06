@@ -283,7 +283,10 @@ const fakePrisma = {
   // fixture that does not opt in. The visibility tests below DO seed pending
   // requests, so there the call is counted instead — reaching the CAS at all is the
   // failure those tests are looking for.
-  $queryRaw: async () => {
+  // replaceEpisodeCacheForSource's unchanged-set check is raw SQL too. No answer
+  // reads as "changed", so the episode swaps these suites pin still run.
+  $queryRaw: async (query?: { sql?: string }) => {
+    if (String(query?.sql ?? "").includes(`FROM "TVEpisodeCache"`)) return [];
     if (pendingRequests.length === 0) {
       throw new Error("unexpected prisma.$queryRaw — the notify path must not run in these tests");
     }
