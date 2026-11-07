@@ -1,9 +1,9 @@
 // The one counted `?job=` poll loop behind every background job the browser
 // waits on (the guardrail-37a pattern): an issue's Replace file and the other
-// runReplaceFileJob callers, the release searches (release-search-job.ts) and
-// the title manager's file delete. Each caller keeps its own interval and
-// poll budget; the loop and the rule for a failed poll are shared, so a fix to
-// one reaches all of them.
+// runReplaceFileJob callers, the release searches (release-search-job.ts), the
+// title manager's file delete and Arr System's provider tests and saves. Each
+// caller keeps its own interval and poll budget; the loop and the rule for a
+// failed poll are shared, so a fix to one reaches all of them.
 //
 // COUNTED, one poll at a time from each answer — never setInterval, never a
 // clock (guardrail 16's lesson in arr-command-status.ts). A 202 is "still

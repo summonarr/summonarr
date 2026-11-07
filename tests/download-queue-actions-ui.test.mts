@@ -12,14 +12,20 @@
 //     queue read after the admin had left the page;
 //   - both error lists render through one component that shows the translated
 //     kind only, never the upstream text (guardrail 5e).
+// The page is download-queue.tsx; its reads (the load, the poll, the re-read
+// timer) live in use-queue-data.ts and its rows in queue-table.tsx.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 /** Source with comments removed, so a commented-out call can't satisfy a pin. */
-const src = readFileSync(new URL("../src/components/admin/download-queue.tsx", import.meta.url), "utf8")
-  .replace(/\/\*[\s\S]*?\*\//g, "")
-  .replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+const code = (file: string) =>
+  readFileSync(new URL(`../src/components/admin/${file}`, import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+const src = code("download-queue.tsx");
+const data = code("use-queue-data.ts");
+const table = code("queue-table.tsx");
 
 /** The body of `async function <name>(…) {…}` inside the page component. */
 function fnBody(name: string): string {
@@ -34,15 +40,15 @@ function fnBody(name: string): string {
   throw new Error("unbalanced");
 }
 
-/** The `useCallback(async (…) => { … }` body that defines `const load`. */
+/** The `useCallback(async (…) => { … }` body that defines `const load` (in the data hook). */
 function loadBody(): string {
-  const at = src.indexOf("const load = useCallback(");
+  const at = data.indexOf("const load = useCallback(");
   assert.ok(at >= 0);
-  const open = src.indexOf("{", src.indexOf("=>", at));
+  const open = data.indexOf("{", data.indexOf("=>", at));
   let depth = 0;
-  for (let i = open; i < src.length; i++) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}" && --depth === 0) return src.slice(open, i + 1);
+  for (let i = open; i < data.length; i++) {
+    if (data[i] === "{") depth++;
+    else if (data[i] === "}" && --depth === 0) return data.slice(open, i + 1);
   }
   throw new Error("unbalanced");
 }
@@ -61,7 +67,7 @@ test("Grab now and Re-check report a failure on their own line, which a successf
 test("the in-flight actions are a Set, and each action removes only its own key", () => {
   assert.match(src, /const \[acting, setActing\] = useState<ReadonlySet<string>>\(/);
   assert.doesNotMatch(src, /setActing\(null\)/);
-  assert.doesNotMatch(src, /acting === /, "disabled and spinner states read the Set");
+  for (const file of [src, table]) assert.doesNotMatch(file, /acting === /, "disabled and spinner states read the Set");
   const grab = fnBody("grabNow");
   assert.match(grab, /startActing\(key\)/);
   assert.match(grab, /finally \{\s*stopActing\(key\);\s*\}/);
@@ -69,19 +75,21 @@ test("the in-flight actions are a Set, and each action removes only its own key"
   assert.match(recheck, /startActing\("recheck"\)/);
   assert.match(recheck, /finally \{\s*stopActing\("recheck"\);\s*\}/);
   assert.match(src, /const stopActing = \(key: string\) => setActing\(\(s\) => \{\s*const next = new Set\(s\);\s*next\.delete\(key\);/, "removing a key removes that key alone");
-  assert.match(src, /disabled=\{acting\.has\(key\)\}/);
+  assert.match(table, /disabled=\{acting\.has\(key\)\}/, "a row's Grab now reads the page's Set under its own key");
+  assert.match(src, /acting=\{acting\}/, "which the page hands the table whole");
   assert.match(src, /disabled=\{acting\.has\("recheck"\)\}/);
 });
 
 test("the re-read after an action is ONE tracked timer: a newer action replaces it, unmount clears it, and it is still a manual load", () => {
-  assert.doesNotMatch(src, /window\.setTimeout\(\(\) => void load\(\)/, "no untracked deferred load");
-  assert.equal((src.match(/window\.setTimeout\(/g) ?? []).length, 1, "the one scheduler sets the only timer");
-  const at = src.indexOf("const reloadSoon = useCallback(");
+  for (const file of [src, data, table]) assert.doesNotMatch(file, /window\.setTimeout\(\(\) => void load\(\)/, "no untracked deferred load");
+  assert.equal([src, data, table].reduce((n, file) => n + (file.match(/window\.setTimeout\(/g) ?? []).length, 0), 1, "the one scheduler sets the only timer");
+  const at = data.indexOf("const reloadSoon = useCallback(");
   assert.ok(at >= 0, "the deferred-reload scheduler");
-  const scheduler = src.slice(at, src.indexOf("}, [load]);", at));
+  const scheduler = data.slice(at, data.indexOf("}, [load]);", at));
   assert.match(scheduler, /if \(reloadTimer\.current !== null\) window\.clearTimeout\(reloadTimer\.current\);\s*reloadTimer\.current = window\.setTimeout\(/, "a pending re-read is cleared before a new one is set");
   assert.match(scheduler, /void load\(\);/, "a manual load: it supersedes one in flight (createLoadGate)");
-  assert.match(src, /useEffect\(\(\) => \(\) => \{\s*if \(reloadTimer\.current !== null\) window\.clearTimeout\(reloadTimer\.current\);\s*\}, \[\]\);/, "cleared on unmount");
+  assert.match(data, /useEffect\(\(\) => \(\) => \{\s*if \(reloadTimer\.current !== null\) window\.clearTimeout\(reloadTimer\.current\);\s*\}, \[\]\);/, "cleared on unmount");
+  assert.match(src, /const \{[^}]*\breloadSoon\b[^}]*\} = useQueueData\(/, "the page re-reads through the hook's scheduler");
   for (const [name, ms] of [["grabNow", "2_000"], ["recheck", "5_000"]] as const) {
     assert.match(fnBody(name), new RegExp(`reloadSoon\\(${ms}\\)`), `${name} re-reads through the scheduler`);
   }

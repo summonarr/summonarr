@@ -545,22 +545,11 @@ export function validationMessagesFromBody(body: string): string[] {
 // ── background jobs, as the page polls them ──────────────────────────────────
 
 /**
- * How many `?job=` polls in a row may fail in TRANSPORT before the page stops
- * waiting — and then it shows the change as still running, never as failed.
+ * How many `?job=` polls in a row may fail on the way (the shared rule in
+ * lib/client/job-poll.ts) before the page stops waiting — and then it shows
+ * the change as still running, never as failed.
  */
 export const JOB_MAX_FAILED_POLLS = 5;
-
-/**
- * A `?job=` poll that failed on the way, not the job's own answer: the fetch
- * threw (status 0), or a proxy answered 502–504 with no JSON body. The job
- * keeps running on the server, and may land and be audited, so this is never
- * the change's failure. Every answer of the job itself is JSON — arrFailure's
- * 502/504, a save's 504 { timedOut }, a 409 — and stays terminal; so does the
- * 500 a thrown job answers with.
- */
-export function isTransientJobPollFailure(status: number, body: unknown): boolean {
-  return status === 0 || (status >= 502 && status <= 504 && (body === null || body === undefined));
-}
 
 // ── tags ─────────────────────────────────────────────────────────────────────
 

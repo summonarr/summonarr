@@ -2,7 +2,7 @@
 
 // Admin → Download Queue. Every configured Radarr and Sonarr instance's queue
 // in one table (GET /api/admin/queue), one row per download, rows Radarr/Sonarr
-// flag first. Refreshes itself every POLL_MS while the tab is visible and no
+// flag first. Refreshes itself every 20 s while the tab is visible and no
 // dialog is open. Per row:
 //   Import            — a download the arr would not import on its own: its
 //                       Manual Import, with every correction, in QueueImportDialog.
@@ -25,18 +25,18 @@
 // tag), languages, custom formats and score, size, progress, time left and ETA,
 // added, protocol, download client, indexer, output path and download id —
 // as columns the admin picks (remembered in this browser) and, per row, in an
-// expandable details panel that always shows all of it.
+// expandable details panel that always shows all of it (queue-table.tsx).
 //
 // Every time and size is server-supplied and formatted for the viewer's
 // locale; nothing reads the clock while rendering (guardrail 16).
 //
-// Instant, then live (use-arr-snapshot.ts): on open the last queue the server
-// kept paints at once, marked with when it was read, while the live read is
-// out; the live answer replaces it and polling carries on as before. A row
-// painted from it acts through the same routes, which re-check live.
+// Instant, then live (use-queue-data.ts, use-arr-snapshot.ts): on open the
+// last queue the server kept paints at once, marked with when it was read,
+// while the live read is out; the live answer replaces it and polling carries
+// on as before. A row painted from it acts through the same routes, which
+// re-check live.
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -52,136 +52,32 @@ import { Input } from "@/components/ui/input";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
-import { Chip, EmptyState, FilterBar, StatCard, type ChipTone } from "@/components/ui/design";
+import { EmptyState, FilterBar, StatCard } from "@/components/ui/design";
 import {
-  AlertTriangle, Ban, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Download, FileCheck, List, Loader2, Magnet, Radio,
-  RefreshCcw, RefreshCw, RotateCcw, Trash2, Wrench, X,
+  AlertTriangle, Ban, CheckCircle2, CircleDashed, List, Loader2, RefreshCcw, RefreshCw, RotateCcw, Trash2, X,
 } from "@/components/icons";
-import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
+import { arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
 import { QueueImportDialog } from "@/components/admin/queue-import-dialog";
 import { ArrTitleManager } from "@/components/admin/arr-title/title-manager";
-import { episodeCode, episodeSummary, queueFormatters, seasonPackSeasons } from "@/components/admin/queue-format";
+import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
+import { COLUMNS, DEFAULT_HIDDEN, QueueTable, rowKey, useHiddenColumns, useQueueTableView, type QueueRowActions } from "@/components/admin/queue-table";
+import { readError, useQueueData, type Service } from "@/components/admin/use-queue-data";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import {
   blocklistRedownload, recheckOutcome, removalIds,
-  type QualityTag, type QueueItem, type QueuePhase, type QueueRemoveAction, type QueueRemoveMethod, type RecheckError,
+  type QueueItem, type QueueRemoveAction, type QueueRemoveMethod, type RecheckError,
 } from "@/lib/arr-queue";
-import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
-import { createLoadGate, type LoadKind } from "@/lib/arr-system";
-import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
+import { ARR_ERROR_KIND_KEYS, isArrErrorKind } from "@/lib/arr-error-kind";
 import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
 import { manageTabFor, matchesQueueTitle, queueLinkKey, type QueueLinkFilters, type QueueTitleFilter } from "@/lib/arr-manage-links";
 
-type Service = "radarr" | "sonarr";
 type Filter = "all" | "attention" | Service;
 
-interface QueueReport {
-  instances: Array<{ service: Service; slug: string; name: string }>;
-  errors: Array<{ service: Service; instance: string; error: string; kind?: ArrErrorKind }>;
-  items: QueueItem[];
-  // Instances whose queue ran past the server's page ceiling.
-  truncated?: Array<{ service: Service; instance: string; read: number; total: number }>;
-}
-
-const POLL_MS = 20_000;
-// The page's one read. The live load and its snapshot must name the SAME url,
-// or the server's snapshot key misses.
-const queueUrl = () => withBasePath("/api/admin/queue");
 const SERVICE_LABEL: Record<Service, string> = { radarr: "Radarr", sonarr: "Sonarr" };
 
-const PHASE_TONE: Record<QueuePhase, ChipTone> = {
-  downloading: "accent",
-  queued: "neutral",
-  paused: "neutral",
-  delay: "neutral",
-  importPending: "approved",
-  importing: "approved",
-  importBlocked: "declined",
-  failed: "declined",
-  clientUnavailable: "declined",
-  unknown: "neutral",
-};
-
-const rowKey = (r: QueueItem) => `${r.service}:${r.instance}:${r.ids[0]}`;
-
-// The table's optional columns, in the arr's own order. Title and the row
-// actions are always shown; everything is also in each row's details panel.
-type ColumnId =
-  | "instance" | "status" | "quality" | "languages" | "customFormats" | "size" | "progress"
-  | "timeLeft" | "eta" | "added" | "downloadClient" | "indexer" | "requestedBy";
-const COLUMNS: ReadonlyArray<{ id: ColumnId; label: string }> = [
-  { id: "instance", label: "adminManage.queue.col.instance" },
-  { id: "status", label: "adminManage.queue.col.status" },
-  { id: "quality", label: "adminManage.queue.col.quality" },
-  { id: "languages", label: "adminManage.queue.col.languages" },
-  { id: "customFormats", label: "adminManage.queue.col.customFormats" },
-  { id: "size", label: "adminManage.queue.col.size" },
-  { id: "progress", label: "adminManage.queue.col.progress" },
-  { id: "timeLeft", label: "adminManage.queue.col.timeLeft" },
-  { id: "eta", label: "adminManage.queue.col.eta" },
-  { id: "added", label: "adminManage.queue.col.added" },
-  { id: "downloadClient", label: "adminManage.queue.col.downloadClient" },
-  { id: "indexer", label: "adminManage.queue.col.indexer" },
-  { id: "requestedBy", label: "adminManage.queue.col.requestedBy" },
-];
-const DEFAULT_HIDDEN: ReadonlySet<ColumnId> = new Set<ColumnId>(["instance", "quality", "languages", "customFormats", "eta", "added", "size", "downloadClient", "indexer"]);
-const COLUMN_IDS = new Set<string>(COLUMNS.map((c) => c.id));
-const isColumnId = (v: unknown): v is ColumnId => typeof v === "string" && COLUMN_IDS.has(v);
-// Per-viewer convenience only: a blocked or empty store just means the defaults.
-const HIDDEN_COLUMNS_KEY = "admin-queue-hidden-columns";
-
-const QUALITY_TAG_LABEL: Record<QualityTag, string> = {
-  proper: "adminManage.queue.qualityTag.proper",
-  repack: "adminManage.queue.qualityTag.repack",
-  real: "adminManage.queue.qualityTag.real",
-};
-const PROTOCOL_LABEL: Record<QueueItem["protocol"], string> = {
-  torrent: "adminManage.queue.protocol.torrent",
-  usenet: "adminManage.queue.protocol.usenet",
-  unknown: "adminManage.queue.protocol.unknown",
-};
-
-// Only a finished download the arr is holding back can be imported: blocked,
-// or waiting on an import that needs a hand. A tracked download id is required.
-const canImport = (r: QueueItem) => r.downloadId !== null && (r.phase === "importBlocked" || r.phase === "importPending");
-async function readError(res: Response, fallback: string): Promise<string> {
-  const d = (await res.json().catch(() => null)) as { error?: string } | null;
-  return d?.error ?? fallback;
-}
-
-const th: React.CSSProperties = { padding: "8px 10px" };
-const td: React.CSSProperties = { padding: "8px 10px", verticalAlign: "top" };
-
 const NO_LINK_FILTERS: QueueLinkFilters = { q: "", title: null };
-
-// The optional columns this viewer hid, remembered in this browser. Read after
-// mount so the first render matches the server's (defaults); storage can throw
-// (blocked site data, some private windows) — then the defaults simply stay.
-function useHiddenColumns() {
-  const [hidden, setHidden] = useState<ReadonlySet<ColumnId>>(DEFAULT_HIDDEN);
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HIDDEN_COLUMNS_KEY);
-      const ids: unknown = raw ? JSON.parse(raw) : null;
-      if (Array.isArray(ids)) setHidden(new Set(ids.filter(isColumnId)));
-    } catch {}
-  }, []);
-  function saveHidden(next: ReadonlySet<ColumnId>) {
-    setHidden(next);
-    try {
-      localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...next]));
-    } catch {}
-  }
-  function toggleColumn(id: ColumnId, on: boolean) {
-    const next = new Set(hidden);
-    if (on) next.delete(id);
-    else next.add(id);
-    saveHidden(next);
-  }
-  return { hidden, saveHidden, toggleColumn };
-}
 
 // Why each instance failed, in the viewer's language — never the raw upstream
 // text, which stays in the server log (guardrail 5e).
@@ -215,9 +111,6 @@ export function DownloadQueue({
   const t = useT();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
-  const [report, setReport] = useState<QueueReport | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
   const [filter, setFilter] = useState<Filter>(initialFilters.filter ?? "all");
   const [instance, setInstance] = useState("all");
   const [query, setQuery] = useState(initialFilters.q);
@@ -275,90 +168,14 @@ export function DownloadQueue({
   // failure, which leaves the cautious wording for the session.
   const versionsRequested = useRef(false);
   const { hidden, saveHidden, toggleColumn } = useHiddenColumns();
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  // The table scrolls sideways inside its frame; an expanded row's details are
-  // sized to the frame's VISIBLE width and stick to its left edge, so a phone
-  // (or a table with every column on) never cuts them off.
-  const [frameWidth, setFrameWidth] = useState<number | null>(null);
-  const frameObserver = useRef<ResizeObserver | null>(null);
-  const frameRef = useCallback((el: HTMLDivElement | null) => {
-    frameObserver.current?.disconnect();
-    frameObserver.current = null;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => setFrameWidth(el.clientWidth));
-    ro.observe(el);
-    frameObserver.current = ro;
-  }, []);
-  // Only the newest load may write state — a slow poll must not overwrite the
-  // result of a refresh the admin clicked after it started. And a poll tick is
-  // skipped while a load is out: a dark instance holds its page read for the
-  // whole 30 s request timeout, past POLL_MS, and a tick that superseded it
-  // would discard every answer (createLoadGate).
-  const [gate] = useState(createLoadGate);
-  // The snapshot only paints an EMPTY page: it never replaces rows already on
-  // screen (a live answer, or a removal's optimistic drop), and leaves the
-  // error, filters, selections and dialogs alone.
-  const { staleAt: snapshotAt, markLive } = useArrSnapshot<QueueReport>(configured ? queueUrl() : null, (data) =>
-    setReport((cur) => cur ?? data),
-  );
-
-  const load = useCallback(async (kind: LoadKind = "manual") => {
-    const id = gate.begin(kind);
-    if (id === null) return;
-    setLoading(true);
-    let next: { report: QueueReport } | { error: string };
-    try {
-      const res = await fetch(queueUrl());
-      next = res.ok ? { report: (await res.json()) as QueueReport } : { error: await readError(res, t("adminManage.queue.error.load")) };
-    } catch {
-      next = { error: t("adminManage.queue.error.loadNetwork") };
-    }
-    if (!gate.settle(id)) return;
-    setLoading(false);
-    if ("report" in next) {
-      setReport(next.report);
-      setError("");
-      markLive();
-    } else setError(next.error);
-  }, [gate, t, markLive]);
-
-  useEffect(() => {
-    if (configured) void load();
-  }, [configured, load]);
-
-  // The re-read after an action (the arr acts in the background, so it waits a
-  // moment): ONE pending timer — a newer action's replaces it — cleared when
-  // the page goes away. Still a manual load (it supersedes one in flight).
-  const reloadTimer = useRef<number | null>(null);
-  const reloadSoon = useCallback((ms: number) => {
-    if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
-    reloadTimer.current = window.setTimeout(() => {
-      reloadTimer.current = null;
-      void load();
-    }, ms);
-  }, [load]);
-  useEffect(() => () => {
-    if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
-  }, []);
-
-  function toggleExpanded(key: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
-
-  // Poll while live, visible, and no dialog is open (a refresh would
-  // reshuffle the row being confirmed).
-  useEffect(() => {
-    if (!configured || !live || removing || importing || managing) return;
-    const id = window.setInterval(() => {
-      if (document.visibilityState === "visible") void load("poll");
-    }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [configured, live, removing, importing, managing, load]);
+  const { expanded, toggleExpanded, frameWidth, frameRef } = useQueueTableView();
+  // Any open dialog pauses the poll (a refresh would reshuffle the row being
+  // confirmed); it resumes when the dialog closes.
+  const { report, setReport, loading, error, snapshotAt, load, reloadSoon } = useQueueData({
+    configured,
+    live,
+    paused: removing !== null || importing !== null || managing !== null,
+  });
 
   // Drop the exact-title filter, and its parameters from the URL so a reload
   // shows the whole queue too (any `q` stays). `linked` follows the URL, so a
@@ -463,6 +280,13 @@ export function DownloadQueue({
     setRemoving(null);
   }
 
+  const rowActions: QueueRowActions = {
+    onManage: setManaging,
+    onImport: setImporting,
+    onGrab: (row) => void grabNow(row),
+    onRemove: openRemove,
+  };
+
   const items = report?.items;
   const instanceName = useCallback(
     (service: Service, slug: string) => report?.instances.find((i) => i.service === service && i.slug === slug)?.name ?? slug,
@@ -475,150 +299,6 @@ export function DownloadQueue({
   const multiInstance = (report?.instances.length ?? 0) > 1;
   const shownColumns = COLUMNS.filter((c) => !hidden.has(c.id) && (c.id !== "instance" || multiInstance));
 
-  const protocolIcon = (r: QueueItem) =>
-    r.protocol === "torrent" ? (
-      <Magnet style={{ width: 12, height: 12, flexShrink: 0 }} aria-label={t("adminManage.queue.protocol.torrent")} />
-    ) : r.protocol === "usenet" ? (
-      <Radio style={{ width: 12, height: 12, flexShrink: 0 }} aria-label={t("adminManage.queue.protocol.usenet")} />
-    ) : null;
-  const qualityOf = (r: QueueItem) => (
-    <span className="inline-flex flex-wrap items-center gap-1">
-      <span className="ds-mono" style={{ whiteSpace: "nowrap" }}>{r.quality ?? "—"}</span>
-      {r.qualityTags.map((q) => <Chip key={q}>{t(QUALITY_TAG_LABEL[q])}</Chip>)}
-    </span>
-  );
-  // No custom format matched means a score of 0 — nothing worth a cell; the details panel still shows it.
-  const customFormatsOf = (r: QueueItem) =>
-    r.customFormats.length === 0 ? (
-      "—"
-    ) : (
-      <span className="inline-flex flex-wrap items-center gap-1" style={{ minWidth: 140 }}>
-        {r.customFormats.map((f) => <Chip key={f}>{f}</Chip>)}
-        {r.customFormatScore !== null && (
-          <span className="ds-mono" style={{ color: "var(--ds-fg-muted)" }}>{fmt.score(r.customFormatScore)}</span>
-        )}
-      </span>
-    );
-  const timeLeftOf = (r: QueueItem) => (r.phase === "downloading" ? fmt.duration(r.timeLeftSeconds) : "—");
-  const etaOf = (r: QueueItem) => (r.phase === "downloading" ? fmt.dateTime(r.estimatedCompletion) : "—");
-
-  function cell(c: ColumnId, r: QueueItem, arrLabel: string): React.ReactNode {
-    const small: React.CSSProperties = { ...td, fontSize: 12 };
-    switch (c) {
-      case "instance":
-        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{arrLabel}</td>;
-      case "status":
-        return (
-          <td style={{ ...td, maxWidth: 220 }}>
-            <div className="flex flex-wrap items-center gap-1" style={{ minWidth: 110 }}>
-              <Chip tone={PHASE_TONE[r.phase]}>{t(`adminManage.queue.phase.${r.phase}`)}</Chip>
-              {r.attention && (
-                <Chip tone="pending">
-                  <AlertTriangle style={{ width: 11, height: 11 }} aria-hidden /> {t("adminManage.queue.attention")}
-                </Chip>
-              )}
-            </div>
-            {r.messages.length > 0 && (
-              <ul className="m-0 p-0" style={{ listStyle: "none", marginTop: 4, fontSize: 11, color: r.attention ? "var(--ds-warning)" : "var(--ds-fg-subtle)" }}>
-                {r.messages.map((m, i) => <li key={i} style={{ overflowWrap: "anywhere" }}>{m}</li>)}
-              </ul>
-            )}
-          </td>
-        );
-      case "quality":
-        return <td style={small}>{qualityOf(r)}</td>;
-      case "languages":
-        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.languages.length > 0 ? r.languages.join(", ") : "—"}</td>;
-      case "customFormats":
-        return <td style={{ ...small, maxWidth: 260 }}>{customFormatsOf(r)}</td>;
-      case "size":
-        return (
-          <td className="ds-mono" style={{ ...small, whiteSpace: "nowrap" }}>
-            {r.size > 0 ? fmt.size(r.size) : "—"}
-            {r.sizeLeft > 0 && (
-              <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{t("adminManage.queue.sizeLeft", { size: fmt.size(r.sizeLeft) })}</div>
-            )}
-          </td>
-        );
-      case "progress":
-        return (
-          <td style={td}>
-            <div
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(r.progress * 100)}
-              aria-label={t("adminManage.queue.progressLabel", { title: r.mediaTitle || r.title })}
-              style={{ height: 6, borderRadius: 3, background: "var(--ds-bg-3)", overflow: "hidden" }}
-            >
-              <div style={{ width: `${Math.round(r.progress * 100)}%`, height: "100%", background: r.attention ? "var(--ds-warning)" : "var(--ds-accent)" }} />
-            </div>
-            <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)", marginTop: 3, whiteSpace: "nowrap" }}>
-              {fmt.percent(r.progress)} · {fmt.size(r.size - r.sizeLeft)} / {fmt.size(r.size)}
-            </div>
-          </td>
-        );
-      case "timeLeft":
-        return <td className="ds-mono" style={{ ...small, whiteSpace: "nowrap" }}>{timeLeftOf(r)}</td>;
-      case "eta":
-        return <td style={{ ...small, color: "var(--ds-fg-muted)", whiteSpace: "nowrap" }}>{etaOf(r)}</td>;
-      case "added":
-        return <td style={{ ...small, color: "var(--ds-fg-muted)", whiteSpace: "nowrap" }}>{fmt.dateTime(r.added)}</td>;
-      case "downloadClient":
-        return (
-          <td style={small}>
-            <span className="inline-flex items-center gap-1">
-              {protocolIcon(r)}
-              {r.downloadClient ?? "—"}
-            </span>
-          </td>
-        );
-      case "indexer":
-        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.indexer ?? "—"}</td>;
-      case "requestedBy":
-        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.requesters.length > 0 ? r.requesters.join(", ") : "—"}</td>;
-    }
-  }
-
-  // Everything Radarr/Sonarr report for the download, whatever columns are shown.
-  function details(r: QueueItem, arrLabel: string): React.ReactNode {
-    const item = (label: string, value: React.ReactNode, opts: { wide?: boolean; mono?: boolean } = {}) => (
-      <div key={label} style={opts.wide ? { gridColumn: "1 / -1" } : undefined}>
-        <dt style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{label}</dt>
-        <dd className={opts.mono ? "ds-mono" : undefined} style={{ margin: 0, overflowWrap: "anywhere" }}>{value}</dd>
-      </div>
-    );
-    // Capped so it stays in view while a wide table is scrolled to its left edge.
-    return (
-      <dl className="grid gap-x-6 gap-y-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", fontSize: 12, margin: 0, maxWidth: 1100 }}>
-        {item(t("adminManage.queue.details.release"), r.title || "—", { wide: true, mono: true })}
-        {r.episodes.length > 0 && item(t("adminManage.queue.details.episodes"), r.episodes.map(episodeCode).join(", "), { wide: true, mono: true })}
-        {item(t("adminManage.queue.col.status"), t(`adminManage.queue.phase.${r.phase}`))}
-        {item(t("adminManage.queue.col.quality"), qualityOf(r))}
-        {item(t("adminManage.queue.col.languages"), r.languages.length > 0 ? r.languages.join(", ") : "—")}
-        {item(t("adminManage.queue.col.customFormats"), r.customFormats.length > 0 ? r.customFormats.join(", ") : "—")}
-        {item(t("adminManage.queue.details.score"), r.customFormatScore !== null ? fmt.score(r.customFormatScore) : "—", { mono: true })}
-        {item(t("adminManage.queue.col.size"), r.size > 0 ? fmt.size(r.size) : "—", { mono: true })}
-        {item(t("adminManage.queue.details.downloaded"), `${fmt.size(r.size - r.sizeLeft)} (${fmt.percent(r.progress)})`, { mono: true })}
-        {item(t("adminManage.queue.details.left"), fmt.size(r.sizeLeft), { mono: true })}
-        {item(t("adminManage.queue.col.timeLeft"), timeLeftOf(r), { mono: true })}
-        {item(t("adminManage.queue.col.eta"), etaOf(r))}
-        {item(t("adminManage.queue.col.added"), fmt.dateTime(r.added))}
-        {item(t("adminManage.queue.details.protocol"), t(PROTOCOL_LABEL[r.protocol]))}
-        {item(t("adminManage.queue.col.downloadClient"), r.downloadClient ?? "—")}
-        {item(t("adminManage.queue.col.indexer"), r.indexer ?? "—")}
-        {item(t("adminManage.queue.col.instance"), arrLabel)}
-        {item(t("adminManage.queue.col.requestedBy"), r.requesters.length > 0 ? r.requesters.join(", ") : "—")}
-        {item(t("adminManage.queue.details.downloadId"), r.downloadId ?? "—", { mono: true })}
-        {item(t("adminManage.queue.details.outputPath"), r.outputPath ?? "—", { wide: true, mono: true })}
-        {r.messages.length > 0 && item(t("adminManage.queue.details.messages"), (
-          <ul className="m-0 p-0" style={{ listStyle: "none" }}>
-            {r.messages.map((m, i) => <li key={i}>{m}</li>)}
-          </ul>
-        ), { wide: true })}
-      </dl>
-    );
-  }
   // The exact-title filter applies before the others: it is what the link was for.
   const titleRows = useMemo(
     () => (titleFilter ? (items ?? []).filter((r) => matchesQueueTitle(r, titleFilter)) : (items ?? [])),
@@ -795,183 +475,20 @@ export function DownloadQueue({
             <EmptyState icon={CheckCircle2} title={t("adminManage.queue.empty.title")} description={t("adminManage.queue.empty.description")} />
           )
         ) : (
-          <div ref={frameRef} className="resp-table-scroll" style={{ border: "1px solid var(--ds-border)", borderRadius: 10 }}>
-            <table className="w-full" style={{ fontSize: 13, borderCollapse: "collapse", color: "var(--ds-fg)" }}>
-              <thead>
-                <tr style={{ background: "var(--ds-bg-2)", textAlign: "left", color: "var(--ds-fg-subtle)", fontSize: 11 }}>
-                  <th style={th}>{t("adminManage.queue.col.title")}</th>
-                  {shownColumns.map((c) => (
-                    <th key={c.id} style={{ ...th, whiteSpace: "nowrap", ...(c.id === "progress" ? { minWidth: 130 } : {}) }}>{t(c.label)}</th>
-                  ))}
-                  <th style={th} />
-                </tr>
-              </thead>
-              <tbody>
-                {visible.map((r) => {
-                  const detailHref = r.tmdbId !== null ? `/${r.service === "radarr" ? "movie" : "tv"}/${r.tmdbId}` : null;
-                  const name = instanceName(r.service, r.instance);
-                  const arrLabel = arrInstanceLabel(r.service, name, r.instance);
-                  const key = rowKey(r);
-                  const open = expanded.has(key);
-                  const title = r.mediaTitle || r.title;
-                  const arrId = r.arrMediaId;
-                  return (
-                    <Fragment key={key}>
-                      <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-                        <td style={{ ...td, maxWidth: 380 }}>
-                          <div className="flex items-start gap-1.5" style={{ minWidth: 220 }}>
-                            <button
-                              type="button"
-                              onClick={() => toggleExpanded(key)}
-                              aria-expanded={open}
-                              aria-controls={`queue-details-${key}`}
-                              aria-label={t(open ? "adminManage.queue.details.hide" : "adminManage.queue.details.show", { title })}
-                              className="ds-hover-tint inline-flex shrink-0 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
-                              style={{ width: 22, height: 22, marginTop: -1 }}
-                            >
-                              {open ? <ChevronDown style={{ width: 14, height: 14 }} aria-hidden /> : <ChevronRight style={{ width: 14, height: 14 }} aria-hidden />}
-                            </button>
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-1" style={{ fontWeight: 500 }}>
-                                <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>
-                                  {detailHref ? <Link href={detailHref} className="hover:underline">{title}</Link> : title}
-                                  {r.year ? <span style={{ color: "var(--ds-fg-subtle)", fontWeight: 400 }}> ({r.year})</span> : null}
-                                </span>
-                                {r.arrMediaId !== null && (
-                                  <OpenInArrLink
-                                    service={r.service}
-                                    instance={r.instance}
-                                    target={{ arrId: r.arrMediaId }}
-                                    label={t("adminManage.openIn", { name: arrLabel })}
-                                    iconOnly
-                                  />
-                                )}
-                              </div>
-                              {r.episodes.length > 0 && (
-                                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>
-                                  {(() => {
-                                    const seasons = seasonPackSeasons(r.title, r.episodes);
-                                    return seasons
-                                      ? `${seasons.map((n) => t("adminManage.queue.seasonNumber", { n })).join(", ")} · ${t("adminManage.queue.import.releaseTypes.seasonPack")}`
-                                      : episodeSummary(r.episodes);
-                                  })()}
-                                  {r.episodes.length > 1 && <span> · {t("adminManage.queue.episodeCount", { count: r.episodes.length })}</span>}
-                                </div>
-                              )}
-                              {/* Chiplets stand in for every detail column the viewer has hidden, so the table stays narrow. */}
-                              <div className="flex flex-wrap items-center gap-1" style={{ marginTop: 3 }}>
-                                {multiInstance && hidden.has("instance") && <Chip>{arrLabel}</Chip>}
-                                {hidden.has("quality") && r.quality && <Chip>{r.quality}</Chip>}
-                                {hidden.has("quality") && r.qualityTags.map((q) => <Chip key={q}>{t(QUALITY_TAG_LABEL[q])}</Chip>)}
-                                {hidden.has("size") && r.size > 0 && <Chip>{fmt.size(r.size)}</Chip>}
-                                {hidden.has("downloadClient") && r.downloadClient && (
-                                  <Chip>{protocolIcon(r)} {r.downloadClient}</Chip>
-                                )}
-                                {hidden.has("indexer") && r.indexer && <Chip>{r.indexer}</Chip>}
-                                {hidden.has("languages") && r.languages.length > 0 && <Chip>{r.languages.join(", ")}</Chip>}
-                              </div>
-                              {r.title !== title && (
-                                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
-                                  {r.title}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        {shownColumns.map((c) => <Fragment key={c.id}>{cell(c.id, r, arrLabel)}</Fragment>)}
-                        <td style={{ ...td, textAlign: "right" }}>
-                          <div className="flex flex-wrap justify-end gap-1" style={{ maxWidth: 170, marginLeft: "auto" }}>
-                            {/* Unknown/unmatched downloads name no title on the instance — nothing to manage. */}
-                            {arrId !== null && (
-                              <Button
-                                size="icon-xs"
-                                variant="ghost"
-                                onClick={() => setManaging({ service: r.service, instance: r.instance, arrId, label: arrLabel })}
-                                title={t("adminArr.manage.button", { name: arrLabel })}
-                                aria-label={t("adminManage.queue.action.manageAria", { title, name: arrLabel })}
-                              >
-                                <Wrench />
-                              </Button>
-                            )}
-                            {canImport(r) && (
-                              <Button
-                                size="xs"
-                                variant="outline"
-                                onClick={() => setImporting(r)}
-                                aria-label={t("adminManage.queue.action.importAria", { title: r.mediaTitle || r.title })}
-                              >
-                                <FileCheck />
-                                {t("adminManage.queue.action.import")}
-                              </Button>
-                            )}
-                            {r.pending && (
-                              <Button
-                                size="xs"
-                                variant="outline"
-                                onClick={() => void grabNow(r)}
-                                disabled={acting.has(key)}
-                                aria-label={t("adminManage.queue.action.grabAria", { title: r.mediaTitle || r.title })}
-                              >
-                                {acting.has(key) ? <Loader2 className="animate-spin" /> : <Download />}
-                                {t("adminManage.queue.action.grab")}
-                              </Button>
-                            )}
-                            {/* A held release was never downloaded — there is nothing to search a replacement FOR yet. */}
-                            {!r.pending && (
-                              <Button
-                                size="icon-xs"
-                                variant="outline"
-                                title={t("adminManage.queue.action.blocklistSearch")}
-                                onClick={() => openRemove(r, "blocklistSearch")}
-                                aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
-                              >
-                                <RotateCcw />
-                              </Button>
-                            )}
-                            <Button
-                              size="icon-xs"
-                              variant="outline"
-                              title={t("adminManage.queue.action.blocklist")}
-                              onClick={() => openRemove(r, "blocklist")}
-                              aria-label={t("adminManage.queue.action.blocklistAria", { title: r.mediaTitle || r.title })}
-                            >
-                              <Ban />
-                            </Button>
-                            <Button
-                              size="icon-xs"
-                              variant="ghost"
-                              title={t("adminManage.queue.remove.button")}
-                              onClick={() => openRemove(r, "remove")}
-                              aria-label={t("adminManage.queue.remove.aria", { title: r.mediaTitle || r.title })}
-                            >
-                              <Trash2 />
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
-                      {open && (
-                        <tr id={`queue-details-${key}`} style={{ background: "var(--ds-bg-1)" }}>
-                          <td colSpan={shownColumns.length + 2} style={{ padding: 0 }}>
-                            <div
-                              style={{
-                                position: "sticky",
-                                left: 0,
-                                boxSizing: "border-box",
-                                width: frameWidth ?? undefined,
-                                padding: `6px 10px 14px ${frameWidth !== null && frameWidth < 640 ? 10 : 40}px`,
-                              }}
-                            >
-                              {details(r, arrLabel)}
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <QueueTable
+            rows={visible}
+            columns={shownColumns}
+            hidden={hidden}
+            multiInstance={multiInstance}
+            instanceName={instanceName}
+            fmt={fmt}
+            acting={acting}
+            expanded={expanded}
+            onToggleExpanded={toggleExpanded}
+            frameWidth={frameWidth}
+            frameRef={frameRef}
+            actions={rowActions}
+          />
         )}
       </div>
     );

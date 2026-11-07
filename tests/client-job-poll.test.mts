@@ -121,8 +121,8 @@ test("a network failure on the release search's FIRST request still rejects, as 
 
 const src = (p: string) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf8");
 
-test("the release search, Replace file and the title manager's file delete poll through job-poll.ts, with no private loop", () => {
-  for (const file of ["lib/client/release-search-job.ts", "lib/client/replace-file-job.ts", "components/admin/arr-title/files-tab.tsx"]) {
+test("the release search, Replace file, the title manager's file delete and Arr System's provider jobs poll through job-poll.ts, with no private loop", () => {
+  for (const file of ["lib/client/release-search-job.ts", "lib/client/replace-file-job.ts", "components/admin/arr-title/files-tab.tsx", "components/admin/arr-system.tsx"]) {
     const text = src(file);
     assert.match(text, /await pollJob\(|return pollJob\(/, `${file} polls through pollJob`);
     assert.doesNotMatch(text, /for \(let i = 0; i < [A-Z_a-z.?()]+; i\+\+\)|while \(res\.status === 202\)/, `${file} keeps no loop of its own`);
@@ -131,4 +131,8 @@ test("the release search, Replace file and the title manager's file delete poll 
   assert.match(files, /pollJob\(fetch, withBasePath\(`\$\{path\}&job=\$\{encodeURIComponent\(start\.data\.job\)\}`\), \{\s*isAlive: alive,\s*intervalMs: DELETE_POLL_MS,\s*maxPolls: DELETE_MAX_POLLS,\s*failLimit: DELETE_FAILED_POLLS,/);
   // A delete with no answer is "still running", never "failed".
   assert.match(files, /if \(answer\.status === 0 \|\| data === null \|\| typeof data !== "object"\) return \{ ok: false, running: true \};/);
+  // Arr System: no counter of its own; no answer is "still running", never the change's failure.
+  const system = src("components/admin/arr-system.tsx");
+  assert.doesNotMatch(system, /polls\+\+|failedPolls|isTransientJobPollFailure/);
+  assert.match(system, /if \(answer\.status === 0\) return \{ error: stillRunning, status: 0, body: \{ stillRunning: true \} \};/);
 });

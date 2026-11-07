@@ -843,8 +843,8 @@ test("the same async save while one runs is joined (one PUT); a lost job is 404 
 test("Arr System runs its provider tests and saves as polled jobs, counting polls — never holding the request, never reading the clock", () => {
   const src = readFileSync(new URL("../src/components/admin/arr-system.tsx", import.meta.url), "utf8");
   assert.match(src, /body: \{ \.\.\.init\.body, async: true \}/, "sent with async");
-  assert.match(src, /\$\{path\}\?job=\$\{encodeURIComponent\(job\)\}/, "polled at ?job=");
-  assert.match(src, /if \(polls >= JOB_MAX_POLLS\)/, "a counted cap");
+  assert.match(src, /await pollJob\(fetch, withBasePath\(`\$\{path\}\?job=\$\{encodeURIComponent\(job\)\}`\), \{/, "polled at ?job= through the shared loop");
+  assert.match(src, /maxPolls: JOB_MAX_POLLS,/, "a counted cap");
   assert.equal((src.match(/callJob<[^>]*>\(\s*"\/api\/admin\/arr\/providers(\/test)?"/g) ?? []).length, 2, "both the test and the save");
   assert.doesNotMatch(src, /Date\.now\(\)|new Date\(\)/);
 });
@@ -854,13 +854,19 @@ test("Arr System runs its provider tests and saves as polled jobs, counting poll
 test("the queue and Arr System poll through the load gate as a POLL; the queue's poll pauses while its title manager is open", () => {
   const src = (f: string) => readFileSync(new URL(`../src/components/admin/${f}`, import.meta.url), "utf8");
   const interval = /window\.setInterval\(\(\) => \{([^}]*)\}/;
-  for (const file of ["download-queue.tsx", "arr-system.tsx"]) {
+  // The queue polls from its data hook (use-queue-data.ts).
+  for (const file of ["use-queue-data.ts", "arr-system.tsx"]) {
     const body = interval.exec(src(file))?.[1] ?? "";
     assert.match(body, /void load\("poll"\)/, `${file}: a tick is a poll — skipped while a read is out, never superseding it`);
   }
-  const queue = src("download-queue.tsx");
-  const effect = /useEffect\(\(\) => \{\s*if \(([^)]*)\) return;\s*const \w+ = window\.setInterval\([\s\S]*?\}, \[([^\]]*)\]\);/.exec(queue);
+  const effect = /useEffect\(\(\) => \{\s*if \(([^)]*)\) return;\s*const \w+ = window\.setInterval\([\s\S]*?\}, \[([^\]]*)\]\);/.exec(src("use-queue-data.ts"));
   assert.ok(effect, "the queue's poll effect");
-  assert.match(effect[1], /\bmanaging\b/, "no poll while the title manager is open");
-  assert.match(effect[2], /\bmanaging\b/, "and it resumes when it closes");
+  assert.match(effect[1], /\bpaused\b/, "no poll while the page has it paused");
+  assert.match(effect[2], /\bpaused\b/, "and it resumes when the pause lifts");
+  // The page pauses it while any of its dialogs is open, the title manager included.
+  const paused = /useQueueData\(\{[\s\S]*?\bpaused: ([^\n]*),\n/.exec(src("download-queue.tsx"));
+  assert.ok(paused, "the page hands the hook its pause");
+  for (const dialog of ["removing", "importing", "managing"]) {
+    assert.match(paused[1], new RegExp(`\\b${dialog} !== null`), `no poll while ${dialog} is open, and it resumes when it closes`);
+  }
 });

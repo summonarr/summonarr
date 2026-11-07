@@ -12,6 +12,8 @@
 //   - the snapshot only paints an empty view (`cur ?? data`): it never replaces
 //     rows already on screen, and never clears an error;
 //   - the stale note is rendered, wired to the page's live-loading flag;
+//   - the queue's reads all live in its data hook (use-queue-data.ts): the
+//     page renders what the hook returns and reads the queue nowhere else;
 //   - the health panel keeps its `{ variant }` props (three pages render it).
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -64,18 +66,22 @@ function snapshotCall(src: string): string {
 }
 
 const QUEUE = "src/components/admin/download-queue.tsx";
+const QUEUE_DATA = "src/components/admin/use-queue-data.ts";
 const HEALTH = "src/components/admin/arr-health-panel.tsx";
 
 test("queue: the live fetch and the snapshot read name the same url, built in one place", () => {
-  const src = code(QUEUE);
+  const src = code(QUEUE_DATA);
   assert.equal(count(src, 'const queueUrl = () => withBasePath("/api/admin/queue");'), 1, "one builder");
   assert.equal(count(src, '"/api/admin/queue"'), 1, "the path appears only in the builder");
   assert.match(loadBody(src), /await fetch\(queueUrl\(\)\)/, "the live load fetches the builder's url");
   assert.match(snapshotCall(src), /^useArrSnapshot<QueueReport>\(configured \? queueUrl\(\) : null,/, "the snapshot reads the builder's url, none while not configured");
+  const page = code(QUEUE);
+  assert.doesNotMatch(page, /"\/api\/admin\/queue"/, "the page never reads the queue itself");
+  assert.doesNotMatch(page, /useArrSnapshot/, "nor keeps a second snapshot");
 });
 
 test("queue: markLive runs only for an ACCEPTED live answer — after the load gate, in the success branch", () => {
-  const body = loadBody(code(QUEUE));
+  const body = loadBody(code(QUEUE_DATA));
   assert.equal(count(body, "markLive()"), 1);
   const gate = body.indexOf("if (!gate.settle(id)) return;");
   assert.ok(gate >= 0, "the load gate");
@@ -85,11 +91,11 @@ test("queue: markLive runs only for an ACCEPTED live answer — after the load g
   assert.match(branch, /setReport\(next\.report\);[\s\S]*markLive\(\);/, "markLive is in the accepted-live branch, after the report is set");
   assert.ok(body.indexOf("markLive()") > gate, "never before the gate (a superseded load is not live for this view)");
   assert.doesNotMatch(body.slice(body.indexOf("{", success) + branch.length), /markLive/, "never on the error branch");
-  assert.match(code(QUEUE), /\}, \[gate, t, markLive\]\);/, "load's deps carry markLive");
+  assert.match(code(QUEUE_DATA), /\}, \[gate, t, markLive\]\);/, "load's deps carry markLive");
 });
 
 test("queue: the snapshot only paints an empty page and touches nothing but the report", () => {
-  const call = snapshotCall(code(QUEUE));
+  const call = snapshotCall(code(QUEUE_DATA));
   assert.match(call, /setReport\(\(cur\) => cur \?\? data\)/, "never replaces rows on screen (live, or a removal's optimistic drop)");
   for (const setter of ["setError", "setNotice", "setRemoving", "setImporting", "setManaging", "setActing", "setRemoveBusy", "setExpanded", "setFilter", "setQuery", "setTitleFilter"]) {
     assert.doesNotMatch(call, new RegExp(`\\b${setter}\\(`), `the snapshot leaves ${setter} alone`);
@@ -99,9 +105,12 @@ test("queue: the snapshot only paints an empty page and touches nothing but the 
 test("queue: the stale note is shown beside the refresh controls, wired to the live-loading flag", () => {
   const src = code(QUEUE);
   assert.equal(count(src, "<ArrSnapshotNote at={snapshotAt} refreshing={loading} />"), 1);
-  assert.match(src, /const \{ staleAt: snapshotAt, markLive \} = useArrSnapshot</);
+  assert.match(src, /const \{[^}]*\bloading\b[^}]*\bsnapshotAt\b[^}]*\} = useQueueData\(/, "both from the data hook");
+  const data = code(QUEUE_DATA);
+  assert.match(data, /const \{ staleAt: snapshotAt, markLive \} = useArrSnapshot</);
+  assert.match(data, /return \{[^}]*\bloading\b[^}]*\bsnapshotAt\b[^}]*\};/, "the hook hands both to the page");
   // Polling is unchanged: the interval still loads as a poll.
-  assert.match(src, /void load\("poll"\)/);
+  assert.match(data, /void load\("poll"\)/);
 });
 
 test("health panel: the live fetch and the snapshot read name the same url, built in one place", () => {

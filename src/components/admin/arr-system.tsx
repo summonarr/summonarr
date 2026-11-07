@@ -39,24 +39,22 @@ import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/ar
 import {
   bulkActionCommand,
   createLoadGate,
-  isTransientJobPollFailure,
-  JOB_MAX_FAILED_POLLS,
   taskRisk,
   type ArrCommandRow, type ArrDisk, type ArrDownloadClient, type ArrIndexer, type ArrRootFolder, type ArrTag, type ArrTask,
   type CommandStatus, type LoadKind, type ProviderTestResult,
 } from "@/lib/arr-system";
+import { jobIdOf, pollJob } from "@/lib/client/job-poll";
+import { SERVICE_LABEL, type ArrServiceName } from "@/components/admin/arr-title/shared";
 
-type Service = "radarr" | "sonarr";
 type Tab = "tasks" | "providers" | "storage";
-interface InstanceRef { service: Service; slug: string; name: string }
+interface InstanceRef { service: ArrServiceName; slug: string; name: string }
 interface Report<T> {
   instances: InstanceRef[];
-  errors: Array<{ service: Service; instance: string; error: string; kind?: ArrErrorKind }>;
-  results: Array<{ service: Service; instance: string } & T>;
+  errors: Array<{ service: ArrServiceName; instance: string; error: string; kind?: ArrErrorKind }>;
+  results: Array<{ service: ArrServiceName; instance: string } & T>;
 }
 
 const TASKS_POLL_MS = 15_000;
-const SERVICE_LABEL: Record<Service, string> = { radarr: "Radarr", sonarr: "Sonarr" };
 
 type CallResult<T> = { data: T; status: number } | { error: string; status: number; body: Record<string, unknown> | null };
 
@@ -78,14 +76,19 @@ async function callUrl<T>(url: string, init: { method: string; body?: unknown } 
       ...(init?.body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(init.body) } : {}),
     });
     const data = (await res.json().catch(() => null)) as unknown;
-    const body = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : null;
-    if (!res.ok || !body) {
-      return { error: typeof body?.error === "string" ? body.error : fallback, status: res.status, body };
-    }
-    return { data: body as T, status: res.status };
+    return resultOf<T>(res.status, data, fallback);
   } catch {
     return { error: fallback, status: 0, body: null };
   }
+}
+
+/** A route's answer: its data when a 2xx carries a JSON object, else its `error` (or `fallback`). */
+function resultOf<T>(status: number, data: unknown, fallback: string): CallResult<T> {
+  const body = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : null;
+  if (status < 200 || status > 299 || !body) {
+    return { error: typeof body?.error === "string" ? body.error : fallback, status, body };
+  }
+  return { data: body as T, status };
 }
 
 // A provider test or a testing save waits on the arr for up to two minutes —
@@ -99,13 +102,14 @@ const JOB_POLL_MS = 2_000;
 const JOB_MAX_POLLS = 150;
 
 /**
- * `call` as a background job. Null when `alive()` turned false (the tab went
- * away) — the caller drops it. Out of polls, the answer is `stillRunning`
- * (body `{ stillRunning: true }`): the job may yet finish, so the caller shows
- * it as pending, never as a failure of the change. A poll that failed on the
- * way (isTransientJobPollFailure — a network blip, a proxy 502 with no JSON)
- * is not the job's answer: it is retried, and JOB_MAX_FAILED_POLLS of them in
- * a row are `stillRunning` too, because the job keeps running on the server.
+ * `call` as a background job, its `?job=` polled through the shared counted
+ * loop (job-poll.ts). Null when `alive()` turned false (the tab went away) —
+ * the caller drops it. No answer — out of polls, or JOB_MAX_FAILED_POLLS polls
+ * in a row that failed on the way (a network blip, a proxy's own 5xx page with
+ * no JSON) — is `stillRunning` (body `{ stillRunning: true }`): the job keeps
+ * running on the server and may yet finish, so the caller shows it as
+ * pending, never as a failure of the change. Every JSON answer of the job
+ * route, its own 502/504 included, is the job's answer.
  */
 async function callJob<T>(
   path: string,
@@ -114,24 +118,18 @@ async function callJob<T>(
   stillRunning: string,
   alive: () => boolean,
 ): Promise<CallResult<T> | null> {
-  let res = await call<T>(path, { method: init.method, body: { ...init.body, async: true } }, fallback);
-  let failedPolls = 0;
-  for (let polls = 0; "data" in res && res.status === 202; polls++) {
-    const job = (res.data as { job?: unknown }).job;
-    if (typeof job !== "string") return { error: fallback, status: 0, body: null };
-    if (polls >= JOB_MAX_POLLS) return { error: stillRunning, status: 0, body: { stillRunning: true } };
-    await new Promise((resolve) => window.setTimeout(resolve, JOB_POLL_MS));
-    if (!alive()) return null;
-    const next = await call<T>(`${path}?job=${encodeURIComponent(job)}`, undefined, fallback);
-    if (!("data" in next) && isTransientJobPollFailure(next.status, next.body)) {
-      // `res` stays the last 202: poll again (the polls cap still counts).
-      if (++failedPolls >= JOB_MAX_FAILED_POLLS) return { error: stillRunning, status: 0, body: { stillRunning: true } };
-      continue;
-    }
-    failedPolls = 0;
-    res = next;
-  }
-  return alive() ? res : null;
+  const res = await call<T>(path, { method: init.method, body: { ...init.body, async: true } }, fallback);
+  if (!("data" in res) || res.status !== 202) return alive() ? res : null;
+  const job = jobIdOf(res.data);
+  if (job === null) return { error: fallback, status: 0, body: null };
+  const answer = await pollJob(fetch, withBasePath(`${path}?job=${encodeURIComponent(job)}`), {
+    isAlive: alive,
+    intervalMs: JOB_POLL_MS,
+    maxPolls: JOB_MAX_POLLS,
+  });
+  if (answer === null) return null;
+  if (answer.status === 0) return { error: stillRunning, status: 0, body: { stillRunning: true } };
+  return resultOf<T>(answer.status, answer.data, fallback);
 }
 
 /**
@@ -229,7 +227,7 @@ function Card({ title, actions, children }: { title: string; actions?: React.Rea
   );
 }
 
-const labelOf = (report: Report<unknown>, service: Service, slug: string) =>
+const labelOf = (report: Report<unknown>, service: ArrServiceName, slug: string) =>
   arrInstanceLabel(service, report.instances.find((i) => i.service === service && i.slug === slug)?.name, slug);
 
 // ── tasks ────────────────────────────────────────────────────────────────────
@@ -280,7 +278,7 @@ function TasksTab() {
   // ends (its task's last run, the Recent commands list).
   const { watch, watches } = useArrCommandWatch();
 
-  async function run(key: string, service: Service, instance: string, body: Record<string, unknown>, done: string) {
+  async function run(key: string, service: ArrServiceName, instance: string, body: Record<string, unknown>, done: string) {
     const card = `${service}:${instance}`;
     startBusy(card, key);
     setConfirming(null);
@@ -301,7 +299,7 @@ function TasksTab() {
     void load();
   }
 
-  async function cancel(service: Service, instance: string, id: number) {
+  async function cancel(service: ArrServiceName, instance: string, id: number) {
     const card = `${service}:${instance}`;
     startBusy(card, `cancel:${card}:${id}`);
     const q = new URLSearchParams({ service, instance, commandId: String(id) });
@@ -508,12 +506,12 @@ function ProvidersTab() {
   }, []);
   const isAlive = useCallback(() => alive.current, []);
 
-  const keyOf = (service: Service, instance: string, kind: ProviderKind, id: number) => `${service}:${instance}:${kind}:${id}`;
+  const keyOf = (service: ArrServiceName, instance: string, kind: ProviderKind, id: number) => `${service}:${instance}:${kind}:${id}`;
   const without = <V,>(m: Record<string, V>, drop: (k: string) => boolean) => Object.fromEntries(Object.entries(m).filter(([k]) => !drop(k)));
   const startBusy = (card: string, action: string) => setBusy((m) => ({ ...m, [card]: action }));
   const endBusy = (card: string) => setBusy((m) => without(m, (key) => key === card));
 
-  async function test(service: Service, instance: string, kind: ProviderKind, id: number | null) {
+  async function test(service: ArrServiceName, instance: string, kind: ProviderKind, id: number | null) {
     const prefix = `${service}:${instance}:${kind}:`;
     const k = id === null ? `${prefix}all` : keyOf(service, instance, kind, id);
     const card = `${service}:${instance}`;
@@ -554,7 +552,7 @@ function ProvidersTab() {
     }
   }
 
-  async function toggle(service: Service, instance: string, kind: ProviderKind, provider: ArrIndexer | ArrDownloadClient, change: Change, opts: ToggleOpts = {}) {
+  async function toggle(service: ArrServiceName, instance: string, kind: ProviderKind, provider: ArrIndexer | ArrDownloadClient, change: Change, opts: ToggleOpts = {}) {
     const k = keyOf(service, instance, kind, provider.id);
     // Prowlarr's next full sync turns a change made here back — say so first.
     if ("managedByProwlarr" in provider && provider.managedByProwlarr && !opts.confirmed) {
@@ -592,7 +590,7 @@ function ProvidersTab() {
     setResults((m) => ({ ...m, [k]: pendingView(res) }));
   }
 
-  function result(k: string, service: Service) {
+  function result(k: string, service: ArrServiceName) {
     const r = results[k];
     if (!r) return null;
     if (r.pending) {
@@ -647,7 +645,7 @@ function ProvidersTab() {
 
   // The head of a card's indexer or download-client section: its last Test All
   // (summary, or the refusal for the whole kind) and the Test All button.
-  function sectionHeader(service: Service, instance: string, kind: ProviderKind, heading: string, rows: number) {
+  function sectionHeader(service: ArrServiceName, instance: string, kind: ProviderKind, heading: string, rows: number) {
     const card = `${service}:${instance}`;
     const cardBusy = busy[card];
     return (
@@ -664,7 +662,7 @@ function ProvidersTab() {
   }
 
   // What stands between a switch and the arr: a Prowlarr confirm, or warnings to accept.
-  function pending(service: Service, instance: string, kind: ProviderKind, provider: ArrIndexer | ArrDownloadClient) {
+  function pending(service: ArrServiceName, instance: string, kind: ProviderKind, provider: ArrIndexer | ArrDownloadClient) {
     const k = keyOf(service, instance, kind, provider.id);
     const h = held[k];
     const cardBusy = busy[`${service}:${instance}`];

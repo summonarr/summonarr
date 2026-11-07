@@ -28,7 +28,7 @@ test("a four-episode pack folds to one row carrying all four episodes", () => {
 });
 
 test("a multi-episode pack row shows its episode COUNT (plural key present in every locale)", () => {
-  const src = readFileSync(new URL("../src/components/admin/download-queue.tsx", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/components/admin/queue-table.tsx", import.meta.url), "utf8");
   assert.match(src, /r\.episodes\.length > 1 &&[^\n]*t\("adminManage\.queue\.episodeCount", \{ count: r\.episodes\.length \}\)/);
   for (const loc of ["en", "es", "fr", "de", "pt", "it", "zh"]) {
     const json = JSON.parse(readFileSync(new URL(`../src/lib/i18n/messages/${loc}/adminManage.json`, import.meta.url), "utf8"));
