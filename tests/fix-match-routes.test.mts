@@ -2494,6 +2494,13 @@ test("a synchronous POST for a title whose remap is already running JOINS that j
   const { jobId } = await started.json() as { jobId: string };
 
   const sync = fixMatch(postBody(body, a.header), undefined);
+  // Open the gate only once the synchronous POST has read its title, the last
+  // await before it joins the registry. Opened earlier, the background job can
+  // finish first and there is nothing left to join.
+  const titleReads = () =>
+    opsOf("jellyfinLibraryItem.findFirst").filter((o) => (o.args as { select?: { title?: boolean } }).select?.title === true).length;
+  for (let i = 0; i < 200 && titleReads() < 2; i++) await flush();
+  assert.equal(titleReads(), 2, "fixture sanity: both POSTs reached the join");
   await flush();
   release();
   const res = await sync;
