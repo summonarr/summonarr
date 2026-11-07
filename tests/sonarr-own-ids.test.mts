@@ -133,7 +133,7 @@ test("verify: the library row's own tmdbId settles a genuine event — zero look
   library = onlyTvdb(777, seriesRow(777, 888));
 
   const verdict = await isSeriesDownloadedInSonarr({ tvdbId: 777, tmdbId: 888 });
-  assert.deepEqual(verdict, { downloaded: true, episodeFileCount: 10, episodeCount: 10 });
+  assert.deepEqual(verdict, { downloaded: true, tmdbId: 888, episodeFileCount: 10, episodeCount: 10 });
   assert.equal(lookupCalls(), 0);
   assert.ok(!warns.some((w) => w.includes("isSeriesDownloadedInSonarr failed")), warns.join(" | "));
 });
@@ -172,7 +172,8 @@ test("verify: a row with no USABLE tmdbId falls back to the lookup — absent, 0
     lookupAnswer = [{ tmdbId: 888, tvdbId: 777 }];
     assert.deepEqual(
       await isSeriesDownloadedInSonarr({ tvdbId: 777, tmdbId: 888 }),
-      { downloaded: true, episodeFileCount: 10, episodeCount: 10 },
+      // The verdict reports only a USABLE library tmdbId — never the junk value.
+      { downloaded: true, tmdbId: null, episodeFileCount: 10, episodeCount: 10 },
       `tmdbId=${JSON.stringify(tmdbId)}: an agreeing lookup lets the genuine event through`,
     );
   }
@@ -195,14 +196,15 @@ test("verify: a tvdbId Sonarr doesn't have is absent — no lookup", async () =>
 test("verify: a tvdbId-only payload reads the library and nothing else", async () => {
   lookupAnswer = "down";
   library = onlyTvdb(777, seriesRow(777, 888));
-  assert.deepEqual(await isSeriesDownloadedInSonarr({ tvdbId: 777 }), { downloaded: true, episodeFileCount: 10, episodeCount: 10 });
+  // Sonarr's own tmdbId rides along: the webhook keys a tvdb-only event's cache rows on it.
+  assert.deepEqual(await isSeriesDownloadedInSonarr({ tvdbId: 777 }), { downloaded: true, tmdbId: 888, episodeFileCount: 10, episodeCount: 10 });
   assert.equal(lookupCalls(), 0);
 });
 
 test("verify: a tmdbId-only payload still needs ONE lookup to find the row", async () => {
   lookupAnswer = [{ tmdbId: 888, tvdbId: 777 }];
   library = onlyTvdb(777, seriesRow(777, 888));
-  assert.deepEqual(await isSeriesDownloadedInSonarr({ tmdbId: 888 }), { downloaded: true, episodeFileCount: 10, episodeCount: 10 });
+  assert.deepEqual(await isSeriesDownloadedInSonarr({ tmdbId: 888 }), { downloaded: true, tmdbId: 888, episodeFileCount: 10, episodeCount: 10 });
   assert.equal(lookupCalls(), 1);
 
   calls.length = 0;

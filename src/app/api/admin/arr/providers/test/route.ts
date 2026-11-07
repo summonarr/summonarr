@@ -40,9 +40,8 @@ export const GET = withAdmin(async (req, _ctx, session) => {
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrGate(body.service, body.instance, t);
   if (target instanceof NextResponse) return target;
   const kind = parseProviderKind(body.kind);
@@ -64,7 +63,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     ? checkRateLimit(`arr-provider-test-all:${owner}`, TEST_ALL_PER_MIN, 60_000)
     : checkRateLimit(`arr-provider-test:${owner}`, TEST_ONE_PER_MIN, 60_000);
   if (!allowed) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   const runTest = async (): Promise<NextResponse> => {
     try {

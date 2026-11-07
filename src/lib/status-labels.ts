@@ -18,35 +18,15 @@ export const REQUEST_STATUS_TONE: Record<string, ChipTone> = {
   AVAILABLE: "accent",
 };
 
-export const REQUEST_STATUS_LABEL: Record<string, string> = {
-  PENDING: "Pending",
-  APPROVED: "Approved",
-  DECLINED: "Declined",
-  AVAILABLE: "Available",
-};
-
 export const ISSUE_STATUS_TONE: Record<string, ChipTone> = {
   OPEN: "declined",
   IN_PROGRESS: "pending",
   RESOLVED: "approved",
 };
 
-export const ISSUE_STATUS_LABEL: Record<string, string> = {
-  OPEN: "Open",
-  IN_PROGRESS: "In Progress",
-  RESOLVED: "Resolved",
-};
-
-export const ISSUE_TYPE_LABELS: Record<string, string> = {
-  BAD_VIDEO: "Bad video quality",
-  WRONG_AUDIO: "Wrong / missing audio",
-  MISSING_SUBTITLES: "Missing subtitles",
-  WRONG_MATCH: "Wrong match",
-  OTHER: "Other",
-};
-
-// i18n keys for the same labels, for translated surfaces (the user's own
-// /issues page). The English maps above stay for the untranslated callers.
+// Message keys for the issue status and type labels. Every surface that shows
+// them is translated (both issues pages, the mobile drawer, admin stats), so the
+// English text lives only in the catalog — there are no English maps here.
 export const ISSUE_STATUS_LABEL_KEY: Record<string, string> = {
   OPEN: "personal.issues.status.open",
   IN_PROGRESS: "personal.issues.status.inProgress",
@@ -61,17 +41,8 @@ export const ISSUE_TYPE_LABEL_KEY: Record<string, string> = {
   OTHER: "personal.issues.type.other",
 };
 
-// Locale-aware twin of ISSUE_DATE_FORMAT below — same fields and UTC pin, so the
-// server-rendered list and the client drawer still agree for a given locale.
+// Issue dates: fixed fields and a UTC pin, so the server-rendered issues list
+// and the client mobile drawer print the same date for a given locale.
 export function issueDateFormat(locale: string): Intl.DateTimeFormat {
   return new Intl.DateTimeFormat(locale, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
-
-// Fixed locale + timezone so the desktop issues list/pane (server-rendered) and
-// the mobile issue drawer (client) print the same date for the same issue.
-export const ISSUE_DATE_FORMAT = new Intl.DateTimeFormat("en-US", {
-  year: "numeric",
-  month: "short",
-  day: "numeric",
-  timeZone: "UTC",
-});

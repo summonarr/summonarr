@@ -68,10 +68,15 @@ export function ResyncLibraryButton({
               body: JSON.stringify({ full: true }),
             });
             const data = (await res.json().catch(() => null)) as
-              | { scanned?: { movies: number; tv: number }; error?: string }
+              | { scanned?: { movies: number; tv: number }; error?: string; skipped?: boolean }
               | null;
             if (!res.ok || data?.error) {
               return { name, ok: false, text: `${name} ${data?.error ?? t("adminManage.library.btn.failedStatus", { status: res.status })}` };
+            }
+            // 200 { skipped: true }: a resync of this server is already running.
+            // Not a fault, and it carries no counts.
+            if (data?.skipped) {
+              return { name, ok: true, text: `${name} ${t("adminManage.library.btn.alreadyRunning")}` };
             }
             const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
             return { name, ok: true, text: `${name} ${t("adminManage.library.btn.items", { count, formatted: count.toLocaleString(locale) })}` };

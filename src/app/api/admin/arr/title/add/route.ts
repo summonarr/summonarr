@@ -42,15 +42,14 @@ export const GET = withAdmin(async (req) => {
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrGate(body.service, body.instance, t);
   if (target instanceof NextResponse) return target;
   const add = parseTitleAdd(target.service, body);
   if (!add) return NextResponse.json({ error: t("apiAdmin.arr.addInvalid") }, { status: 400 });
   if (!checkRateLimit(`arr-title-add:${session.user.id}`, ADDS_PER_MIN, 60_000)) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   const service = ARR_SERVICE_LABEL[target.service];
   let result;

@@ -1,57 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
 import { checkBodySize } from "@/lib/body-size";
-import { sanitizeText } from "@/lib/sanitize";
-import { checkRateLimit, getClientIp, getClientIpKey } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
 } from "@/lib/backup-import";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { localizeBackupMessage } from "@/lib/backup-messages";
+import { auditSetupImport, importResultResponse, setupRestoreGate } from "@/lib/backup-routes";
 
 export const dynamic = "force-dynamic";
 
-const MIN_BACKUP_PASSWORD_LEN = 12;
-
 // First-run-only restore. Refuses once any User row exists, so an attacker
 // can't post a crafted dump to a live server. The admin route at
-// /api/admin/backup/db-import handles every other case.
+// /api/admin/backup/db-import handles every other case. The UI uploads through
+// the chunked sibling; both share one gate (backup-routes.ts).
 export async function POST(req: NextRequest) {
   const t = translatorForRequest(req);
   if (!checkRateLimit(`setup-import:${getClientIpKey(req.headers)}`, 5, 5 * 60 * 1000)) {
     return NextResponse.json({ error: t("apiAuth.setup.tooManyAttempts") }, { status: 429 });
   }
 
-  // Advisory lock 43 is shared with /api/auth/register — initial registration and setup-import
-  // are mutually exclusive. Re-check both user count and setup_completed_at inside the txn so a
-  // racing register can't sneak in between the SELECT and the import.
-  const gate = await prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
-    const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
-    const userCount = await tx.user.count();
-    return { closed: setupCompleted !== null || userCount > 0 };
-  });
-  if (gate.closed) {
+  // The internet-facing opt-in (403), freshness under advisory lock 43 (409),
+  // then the password (503).
+  const gate = await setupRestoreGate(t);
+  if (gate instanceof NextResponse) return gate;
+  if ("closed" in gate) {
     return NextResponse.json(
       { error: t("apiAuth.setup.notFresh") },
       { status: 409 },
     );
   }
-
-  const password = process.env.BACKUP_DB_PASSWORD ?? "";
-  if (password.length === 0) {
-    return NextResponse.json(
-      { error: t("apiAuth.setup.backupNotConfigured") },
-      { status: 503 },
-    );
-  }
-  if (password.length < MIN_BACKUP_PASSWORD_LEN) {
-    return NextResponse.json(
-      { error: t("apiAuth.setup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
-      { status: 503 },
-    );
-  }
+  const { password } = gate;
 
   const sizeCheck = checkBodySize(req, MAX_CIPHERTEXT_BYTES);
   if (sizeCheck) return sizeCheck;
@@ -61,52 +40,6 @@ export async function POST(req: NextRequest) {
   }
 
   const result = await processBackupImport(req.body, password, "setup");
-
-  if (!result.ok) {
-    if (result.errors) {
-      return NextResponse.json({
-        ok: false,
-        summary: result.summary,
-        errors: result.errors,
-      });
-    }
-    // Same translation the admin twin (db-import) applies — the first-run panel
-    // renders this string verbatim beside otherwise-localized copy.
-    return NextResponse.json({ error: localizeBackupMessage(result.error, t) }, { status: result.status });
-  }
-
-  // Audit row is written outside the import transaction, so it survives the
-  // TRUNCATE inside processBackupImport. userId is null because no admin
-  // session exists yet — the imported users haven't logged in.
-  try {
-    await prisma.auditLog.create({
-      data: {
-        userId: null,
-        userName: "system (setup)",
-        action: "BACKUP_IMPORT",
-        target: "backup:full-db",
-        details: JSON.stringify({
-          format: "sql",
-          encrypted: true,
-          mode: "setup",
-          after: {
-            totalStatements: result.summary.total,
-            executed: result.summary.executed,
-            skipped: result.summary.skipped,
-            errors: result.summary.errors,
-          },
-        }),
-        ipAddress: getClientIp(req.headers),
-        userAgent: sanitizeText(req.headers.get("user-agent")?.slice(0, 512) ?? ""),
-      },
-    });
-  } catch (err) {
-    console.error("[audit] Setup-import audit log failed:", err);
-  }
-
-  return NextResponse.json({
-    ok: true,
-    summary: result.summary,
-    ...(result.warning ? { warning: result.warning } : {}),
-  });
+  if (result.ok) await auditSetupImport(req, result, "setup");
+  return importResultResponse(result, t, { chunked: false });
 }

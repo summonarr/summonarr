@@ -142,7 +142,7 @@ export async function verifyAndRefreshSession(
     typeof dbCheckedAt === "number" &&
     now - dbCheckedAt <= checkInterval &&
     verified.signedWithCurrentKey &&
-    !shouldForceDbCheck(claims.id, claims.sessionId) &&
+    !shouldForceDbCheck(claims.id, claims.sessionId, dbCheckedAt) &&
     !cachedSessionCheckIsStale(dbCheckedAt);
 
   if (skipDbCheck) {

@@ -127,7 +127,7 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
   );
 }
 
-type SyncStatus = "idle" | "running" | "done" | "error";
+type SyncStatus = "idle" | "running" | "done" | "busy" | "error";
 
 interface JellyfinSyncFormProps {
   initialUrl: string;
@@ -253,11 +253,16 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       });
       const body = (await res.json().catch(() => ({}))) as
         | { marked: number; scanned: { movies: number; tv: number } }
-        | { error?: string };
+        | { error?: string; skipped?: boolean };
+      // 200 { skipped: true }: a sync of this server is already running.
+      if (res.ok && "skipped" in body && body.skipped === true) {
+        setSyncStatus("busy");
+        return;
+      }
       if (!res.ok || !("marked" in body)) {
-        // Show the server's own reason (409 "sync already running", 429, the
-        // not-configured message) instead of one fixed sentence that blames
-        // the credentials for every failure.
+        // Show the server's own reason (429, the not-configured message)
+        // instead of one fixed sentence that blames the credentials for every
+        // failure.
         setSyncError("error" in body && typeof body.error === "string" ? body.error : "");
         setSyncStatus("error");
         return;
@@ -289,6 +294,9 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
             <Input
               id="jellyfin-api-key"
               type="password"
+              autoComplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setSaveStatus("idle"); }}
               placeholder={t("settings.form.jellyfin.apiKeyPlaceholder")}
@@ -352,6 +360,11 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
             <span className="text-zinc-500">
               {t("settings.form.library.scanned", { movies: syncResult.scanned.movies, tv: syncResult.scanned.tv })}
             </span>
+          </span>
+        )}
+        {syncStatus === "busy" && (
+          <span role="status" aria-live="polite" className="text-sm text-zinc-400">
+            {t("settings.form.library.alreadyRunning")}
           </span>
         )}
         {syncStatus === "error" && (

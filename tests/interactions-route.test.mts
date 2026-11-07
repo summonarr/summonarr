@@ -88,6 +88,8 @@ const agentPosts: AgentPost[] = [];
 // A Radarr the admin_approve button can push to (the requests-mutation harness's
 // responder, trimmed): lookup → root folder → quality profile → add.
 const RADARR_HOST = "10.0.0.2";
+// Answers the add with this status instead of accepting it (e.g. a gateway 504).
+let radarrAddStatus: number | null = null;
 // What TMDB's /search answers (the /watchlist add and /issue searches); empty by default.
 let tmdbSearchResults: Array<Record<string, unknown>> = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -108,7 +110,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const tmdbId = Number((url.searchParams.get("term") ?? "").replace(/^tmdb:/, "")) || 0;
       return json([{ tmdbId, title: "The Matrix", year: 1999, titleSlug: "the-matrix", images: [], seasons: [] }]);
     }
-    if (url.pathname.includes("/api/v3/movie")) return json({ id: 1, tvdbId: 4242 });
+    if (url.pathname.includes("/api/v3/movie")) {
+      if (radarrAddStatus !== null) return new Response("upstream timed out", { status: radarrAddStatus });
+      return json({ id: 1, tvdbId: 4242 });
+    }
     throw new Error(`unexpected Radarr fetch ${url.href}`);
   }
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
@@ -237,7 +242,15 @@ shadowPrismaModel(prisma, "discordLinkToken", {
     }
     return hit;
   },
-  delete: async (args: unknown) => { rec("discordLinkToken.delete", args); return {}; },
+  // Like Prisma: a delete of a row that is gone throws P2025.
+  delete: async (args: { where: { token: string } }) => {
+    rec("discordLinkToken.delete", args);
+    if (!linkTokens.some((t) => t.token === args.where.token)) {
+      throw new Prisma.PrismaClientKnownRequestError("record not found", { code: "P2025", clientVersion: "0.0.0-test" });
+    }
+    linkTokens = linkTokens.filter((t) => t.token !== args.where.token);
+    return {};
+  },
   deleteMany: async (args: { where: { token?: string } }) => {
     rec("discordLinkToken.deleteMany", { ...args.where, inTx });
     const before = linkTokens.length;
@@ -307,7 +320,8 @@ for (const m of [
     groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
     create: async (args: unknown) => { rec(`${m}.create`, args); return { id: "x" }; },
     createMany: async () => ({ count: 0 }), update: async (args: unknown) => { rec(`${m}.update`, args); return {}; },
-    updateMany: async () => ({ count: 0 }), upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
+    updateMany: async () => ({ count: 0 }), upsert: async () => ({}),
+    deleteMany: async (args: unknown) => { rec(`${m}.deleteMany`, args); return { count: 0 }; },
   });
 }
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
@@ -333,6 +347,12 @@ let requestRows: RequestRow[] = [];
 // "already greenlit" mirror lookup, `status: { in: [...] }`). Every other findFirst
 // (the clicker's own `existing` row, `earlierPending`) answers null.
 let greenlitPeer: { status: string } | null = null;
+// Another user's PENDING request for the picked title (the pending branch's
+// first-pending read, `status: "PENDING"`); recorded with whether it ran in a tx.
+let pendingPeer: { id: string } | null = null;
+const pendingPeerReads: Array<{ inTx: boolean }> = [];
+// When set, mediaRequest.create throws it (a duplicate-request race, P2002).
+let requestCreateThrows: Error | null = null;
 shadowPrismaModel(prisma, "mediaRequest", {
   findUnique: async (args: { where: { id: string } }) => {
     const r = requestRows.find((x) => x.id === args.where.id);
@@ -350,15 +370,24 @@ shadowPrismaModel(prisma, "mediaRequest", {
     return { count };
   },
   findMany: async (args: unknown) => { rec("mediaRequest.findMany", args); return []; },
-  findFirst: async (args: { where: { status?: { in?: string[] } } }) => {
+  findFirst: async (args: { where: { status?: string | { in?: string[] }; id?: unknown } }) => {
     rec("mediaRequest.findFirst", args.where);
+    if (args.where.status === "PENDING" && args.where.id === undefined) {
+      pendingPeerReads.push({ inTx });
+      return pendingPeer;
+    }
+    if (typeof args.where.status === "string") return null;
     // Honour the queried status list, like the real lookup: a peer whose status
     // the caller did not ask for is not found.
     return greenlitPeer && args.where.status?.in?.includes(greenlitPeer.status) ? greenlitPeer : null;
   },
   count: async () => 0,
   groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
-  create: async (args: unknown) => { rec("mediaRequest.create", args); return { id: "x", createdAt: new Date() }; },
+  create: async (args: unknown) => {
+    rec("mediaRequest.create", args);
+    if (requestCreateThrows) throw requestCreateThrows;
+    return { id: "x", createdAt: new Date() };
+  },
   createMany: async () => ({ count: 0 }), update: async (args: unknown) => { rec("mediaRequest.update", args); return {}; },
   upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
 });
@@ -417,6 +446,7 @@ shadowPrismaModel(prisma, "hiddenItem", {
 const { clearRecentlyAddedCache } = await import("../src/lib/recently-added.ts");
 
 const interactions = await import("../src/app/api/interactions/route.ts");
+const signature = await import("../src/lib/discord-interactions/signature.ts");
 
 // ── invocation ───────────────────────────────────────────────────────────────
 let idSeq = 0;
@@ -495,10 +525,14 @@ beforeEach(async () => {
   settings.set("discordPublicKey", PUBLIC_KEY_HEX);
   settings.set("discordBotToken", "a-bot-token");
   settings.set("discordGuildId", GUILD_ID);
-  interactions.invalidatePublicKeyCache();
+  signature.invalidatePublicKeyCache();
   invalidateFeatureFlagCache();
   requestRows = [];
   greenlitPeer = null;
+  pendingPeer = null;
+  pendingPeerReads.length = 0;
+  requestCreateThrows = null;
+  radarrAddStatus = null;
   pendingRows.clear();
   arrAvailableRows.clear();
   agentRows.length = 0;
@@ -517,7 +551,7 @@ beforeEach(async () => {
 
 test("with NO public key configured the endpoint refuses with 503, never falls open", async () => {
   settings.delete("discordPublicKey");
-  interactions.invalidatePublicKeyCache();
+  signature.invalidatePublicKeyCache();
   const res = await post(ping());
   assert.equal(res.status, 503);
   assert.match(await res.text(), /not configured/i);
@@ -575,7 +609,7 @@ for (const [label, sig] of [
 
 test("a malformed public key setting yields 401 rather than throwing", async () => {
   settings.set("discordPublicKey", "not-a-key");
-  interactions.invalidatePublicKeyCache();
+  signature.invalidatePublicKeyCache();
   assert.equal((await post(ping())).status, 401);
 });
 
@@ -611,11 +645,35 @@ test("an oversized Content-Length is rejected before any signature work", async 
 });
 
 test("an oversized BODY is rejected even without a Content-Length header", async () => {
-  // A proxy can strip Content-Length on a chunked upload; the post-read byte
-  // check is the backstop.
+  // A proxy can strip Content-Length on a chunked upload; the capped read is the
+  // backstop, and it runs before the public-key read and the signature check.
   const huge = JSON.stringify({ id: "1", type: 1, pad: "z".repeat(1_100_000) });
   const res = await post(null, { rawBody: huge });
-  assert.ok(res.status === 400 || res.status === 413, `expected a cap rejection, got ${res.status}`);
+  assert.equal(res.status, 413);
+  assert.equal(opsOf("setting.findUnique").length, 0, "the public-key read must not happen for an oversized body");
+});
+
+test("a chunked over-cap body is refused without reading it to the end", async () => {
+  let pulls = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulls++;
+      controller.enqueue(new Uint8Array(64 * 1024).fill(0x7a));
+      if (pulls >= 200) controller.close(); // ~12.5 MB offered
+    },
+  }, { highWaterMark: 0 });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const req = new NextRequest("http://localhost:3000/api/interactions", {
+    method: "POST",
+    headers: { "x-signature-ed25519": "00".repeat(64), "x-signature-timestamp": timestamp },
+    body: stream,
+    duplex: "half",
+  } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+  assert.equal(req.headers.get("content-length"), null);
+  const res = await interactions.POST(req);
+  assert.equal(res.status, 413);
+  assert.ok(pulls <= 20, `read ${pulls} chunks of 64KB against a 1MB cap`);
+  assert.equal(opsOf("setting.findUnique").length, 0);
 });
 
 // ── 4: the asymmetric timestamp window ───────────────────────────────────────
@@ -926,11 +984,32 @@ test("an unknown token is refused without touching any account", async () => {
   assert.equal(opsOf("user.update").length, 0);
 });
 
-test("an EXPIRED token is deleted rather than left redeemable", async () => {
+test("an EXPIRED token is deleted rather than left redeemable — with deleteMany, never a bare delete", async () => {
   seedLinkToken({ expiresAt: new Date(Date.now() - 1000) });
   await post(command("link", [{ name: "token", value: LINK_CODE }]));
-  await waitFor(() => opsOf("discordLinkToken.delete").length > 0);
-  assert.ok(opsOf("discordLinkToken.delete").length > 0, "an expired token must be cleaned up");
+  await waitFor(() => opsOf("discordLinkToken.deleteMany").length > 0);
+  assert.deepEqual(opsOf("discordLinkToken.deleteMany").map((o) => o.args), [{ token: sha256(LINK_CODE), inTx: false }], "an expired token must be cleaned up");
+  assert.equal(opsOf("discordLinkToken.delete").length, 0, "a bare delete throws P2025 when the purge cron got there first");
+});
+
+test("an expired token the purge already removed still answers 'expired', not 'unexpected error'", async () => {
+  // The row was read, then swept before the cleanup ran: the cleanup finds
+  // nothing to delete, which must not turn into the generic failure.
+  const t = seedLinkToken({ expiresAt: new Date(Date.now() - 1000) });
+  linkReadGate = null;
+  const origFind = (prisma as unknown as { discordLinkToken: { findUnique: (a: unknown) => Promise<unknown> } }).discordLinkToken.findUnique;
+  (prisma as unknown as { discordLinkToken: { findUnique: (a: unknown) => Promise<unknown> } }).discordLinkToken.findUnique = async (a: unknown) => {
+    const row = await origFind(a);
+    linkTokens = []; // the purge cron's sweep lands right after the read
+    return row ?? t;
+  };
+  try {
+    await post(command("link", [{ name: "token", value: LINK_CODE }], "200000000000000009"));
+    await waitFor(() => discordEdits.length > 0);
+  } finally {
+    (prisma as unknown as { discordLinkToken: { findUnique: (a: unknown) => Promise<unknown> } }).discordLinkToken.findUnique = origFind;
+  }
+  assert.equal(discordEdits[0].content, "Could not link account: Token has expired — generate a new one on your Profile page.");
 });
 
 test("a successful redemption consumes the token with deleteMany, never a bare delete", async () => {
@@ -1575,6 +1654,47 @@ test("pick: auto-approve whose push fails announces the PENDING row to the outbo
   assert.deepEqual(agentPosts.map((p) => p.event), ["request.created"]);
 });
 
+test("pick: a plain pending pick decides its admin alert inside the create tx — the first PENDING request alerts, a later one does not", async () => {
+  // Checked after the commit, two concurrent picks for one title could each miss
+  // the other's row and both alert. Inside the Serializable tx, that pair is a
+  // read/write cycle Postgres aborts, and the retry sees the committed peer.
+  agentRows.push(agentRow("request.created"));
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(() => agentPosts.length >= 1, 400);
+  assert.deepEqual(agentPosts.map((p) => p.event), ["request.created"], "the first pending request alerts");
+  assert.deepEqual(pendingPeerReads, [{ inTx: true }], "the first-pending read runs inside the create tx");
+
+  agentPosts.length = 0;
+  appUsers = [];
+  pendingPeer = { id: "req-other-user" };
+  const sid2 = seedPick("USER");
+  await post(button(`pick:${sid2}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(opsOf("mediaRequest.create").length, 2, "fixture sanity: both picks filed a request");
+  assert.deepEqual(agentPosts, [], "a title already pending review does not alert again");
+});
+
+test("pick: an auto-approve whose push gets no definite answer (gateway 504) stays APPROVED — no rollback, no admin alert", async () => {
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  radarrAddStatus = 504;
+  agentRows.push(agentRow("request.created"));
+  const sid = seedPick("ADMIN");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.ok(fetchCalls.some((u) => u.hostname === RADARR_HOST && u.pathname.endsWith("/api/v3/movie")), "fixture sanity: the add was sent");
+  assert.deepEqual(
+    opsOf("mediaRequest.updateMany").filter((o) => (o.args as { data: { status?: string } }).data.status === "PENDING"),
+    [],
+    "no rollback to PENDING",
+  );
+  assert.deepEqual(agentPosts, [], "nothing for the admins to review");
+  assert.ok(errors.some((e) => e.includes("arr push outcome unknown")));
+});
+
 test("pick: an undated TMDB result is stored with releaseYear null, never the display word \"Unknown\"", async () => {
   const sid = seedPick("USER");
   const key = `p:${sid}:${PICKER}`;
@@ -1696,4 +1816,114 @@ test("discordVisibleInstances: a DEACTIVATED account's grants and ADMIN role ope
   assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, [""], "nor does a deactivated former ADMIN");
   appUsers[0].deactivatedAt = null;
   assert.deepEqual((await discordVisibleInstances(MEMBER)).plex, ["", "remote"]);
+});
+
+// ── an admin button's failure never wipes the shared admin card ──────────────
+
+test("admin_approve: a handler error leaves the shared card alone and tells only the clicker (ephemeral)", async () => {
+  // Components are deferred with type 6, so an edit rewrites the CLICKED
+  // message: the admin channel's request card. The error path used to clear its
+  // embed and buttons for every admin while the request stayed PENDING.
+  seedDecisionFixture("");
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  shadowPrismaModel(prisma, "mediaRequest", { ...orig, findUnique: async () => { throw new Error("db down"); } });
+  try {
+    await post(button("admin_approve:req-1"));
+    await waitFor(() => discordEdits.length > 0, 400);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
+  assert.ok(errors.some((e) => e.includes("handleComponent error") && e.includes("db down")));
+  assert.deepEqual(discordEdits, [{ content: "An unexpected error occurred.", flags: 64 }], "one ephemeral follow-up, no edit of the card");
+  const discord = fetchCalls.filter((u) => u.hostname === "discord.com").map((u) => u.pathname);
+  assert.deepEqual(discord, ["/api/v10/webhooks/app-1/interaction-token"], "a follow-up POST, never a PATCH of @original");
+  assert.equal(requestRows[0].status, "PENDING");
+});
+
+test("a user's own result message is still cleared when its handler fails", async () => {
+  const sid = seedPick("USER");
+  const orig = (prisma as unknown as { setting: Record<string, unknown> }).setting;
+  const origFindMany = orig.findMany as (a: { where?: { key?: { in?: string[] } } }) => Promise<unknown>;
+  shadowPrismaModel(prisma, "setting", {
+    ...orig,
+    // Only the pick's own settings read fails (the route's flag read passes).
+    findMany: async (a: { where?: { key?: { in?: string[] } } }) => {
+      if (a.where?.key?.in?.includes("maintenanceEnabled")) throw new Error("db down");
+      return origFindMany(a);
+    },
+  });
+  try {
+    await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+    await waitFor(() => discordEdits.length > 0, 400);
+  } finally {
+    shadowPrismaModel(prisma, "setting", orig);
+  }
+  assert.deepEqual(discordEdits, [{ content: "An unexpected error occurred.", embeds: [], components: [] }]);
+});
+
+// ── the pick clears the requester's deletion vote only once a request exists ─
+
+test("pick: a filed request clears the requester's own deletion vote — scoped to them and the title", async () => {
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  assert.deepEqual(opsOf("deletionVote.deleteMany").map((o) => o.args), [
+    { where: { userId: "u-pick", tmdbId: 603, mediaType: "MOVIE" } },
+  ]);
+});
+
+test("pick: a pick that files NOTHING leaves the deletion vote — a duplicate race, or a title already here", async () => {
+  // Cleared before the create, a refused pick had already removed the vote
+  // with no request to contradict it.
+  requestCreateThrows = new Prisma.PrismaClientKnownRequestError("unique violation", { code: "P2002", clientVersion: "0.0.0-test" });
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  assert.match(JSON.stringify(discordEdits), /already been requested|already requested/i);
+  assert.deepEqual(opsOf("deletionVote.deleteMany"), []);
+
+  // Already in the library: no request is filed (parity with the web route).
+  requestCreateThrows = null;
+  discordEdits.length = 0;
+  appUsers = [];
+  libraryTmdbIds = new Set([603]);
+  const sid2 = seedPick("ADMIN");
+  arrAvailableRows.add("603:");
+  await post(button(`pick:${sid2}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(opsOf("mediaRequest.create").length, 1, "fixture sanity: only the first pick reached a create");
+  assert.deepEqual(opsOf("deletionVote.deleteMany"), []);
+});
+
+// ── /request: the query is escaped like every other user text ────────────────
+
+test("/request with no results quotes the query markdown-escaped", async () => {
+  linkMember();
+  tmdbSearchResults = [];
+  await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "a**b_c" }]));
+  assert.equal(lastEdit().content, 'No movies found for **"a\\*\\*b\\_c"**.');
+});
+
+// ── the public-key cache: the lib is the import path, and it is process-wide ──
+
+test("instrumentation prewarms the key through the lib, not the interactions route module", async () => {
+  const { readFileSync } = await import("node:fs");
+  const boot = readFileSync("src/instrumentation.ts", "utf8");
+  assert.ok(!boot.includes('"@/app/api/interactions/route"'), "boot must not pull in the route's whole module graph");
+  assert.match(boot, /import\("@\/lib\/discord-interactions\/signature"\)/);
+  assert.match(readFileSync("src/lib/discord-interactions/signature.ts", "utf8"), /processSingleton\(/);
+});
+
+test("invalidating the key in ANOTHER chunk's copy of the signature module reaches the route's cache", async () => {
+  // A cache-busted import stands in for the settings route's chunk (27a).
+  const specifier = "../src/lib/discord-interactions/signature.ts?chunk=settings";
+  const otherChunk: typeof import("../src/lib/discord-interactions/signature.ts") = await import(specifier);
+  assert.equal((await post(ping())).status, 200, "the route cached the current key");
+  const other = generateKeyPairSync("ed25519");
+  settings.set("discordPublicKey", other.publicKey.export({ format: "der", type: "spki" }).subarray(SPKI_PREFIX_LEN).toString("hex"));
+  otherChunk.invalidatePublicKeyCache();
+  assert.equal((await post(ping())).status, 401, "the rotated key is read again: the old signer is refused");
 });

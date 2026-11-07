@@ -575,6 +575,10 @@ model TVEpisodeCache {
   addedAt     DateTime?
 
   @@id([source, tmdbId, seasonNumber, episodeNumber])
+  // Reads by `tmdbId IN (…)` with NO source predicate (For You's quit-show
+  // episode counts, the never-watched narrowed season read, which needs both
+  // sources) can't use the source-led PK: Postgres has no skip scan.
+  @@index([tmdbId, seasonNumber])
 }
 
 // ─── TV Episode Cache — staging buffer ────────────────────────────────────────
@@ -1065,6 +1069,10 @@ model UpstreamWatchEvidence {
   fetchedAt      DateTime
 
   @@id([source, serverInstance, itemKey, seasonNumber])
+  // The never-watched narrowed read looks evidence up by `itemKey IN (…)` with
+  // no source or server predicate (guardrail 14d: evidence is never filtered by
+  // either), which the source-led PK can't serve.
+  @@index([itemKey])
 }
 
 // ─── Watch sync (Plex ⇄ Jellyfin played state) ──────────────────────────────
@@ -1981,6 +1989,10 @@ model Notification {
   // Serves the unread-count query (userId, readAt: null) without scanning all
   // of a user's notifications.
   @@index([userId, readAt])
+  // The retention purge (notification-retention.ts) selects across ALL users
+  // by createdAt, ordered by it, one batch at a time; without this every batch
+  // was a sequential scan plus a sort.
+  @@index([createdAt])
 }
 
 enum MediaType {

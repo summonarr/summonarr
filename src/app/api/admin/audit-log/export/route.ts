@@ -3,23 +3,8 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
-import type { AuditAction, Prisma } from "@/generated/prisma";
-import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
-import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { buildAuditLogWhere } from "@/lib/audit-log-filter";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-
-const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
-
-// Coarse group filter — derived from the shared ACTION_GROUP so the schema enum
-// is the single source of truth, matching the audit-log list route.
-const GROUP_ACTIONS: Record<AuditGroup, AuditAction[]> = {
-  auth: [],
-  admin: [],
-  system: [],
-};
-for (const action of AUDIT_ACTIONS) {
-  GROUP_ACTIONS[ACTION_GROUP[action]].push(action);
-}
 
 const CHUNK_SIZE = 1000;
 const MAX_EXPORT_RECORDS = 100_000;
@@ -40,61 +25,18 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const url = req.nextUrl;
   const format = url.searchParams.get("format") === "json" ? "json" : "csv";
-  const action = url.searchParams.get("action") as AuditAction | null;
-  const groupParam = url.searchParams.get("group");
-  const group: AuditGroup | null =
-    groupParam === "auth" || groupParam === "admin" || groupParam === "system"
-      ? groupParam
-      : null;
-  const dateFrom = url.searchParams.get("dateFrom");
-  const dateTo = url.searchParams.get("dateTo");
-  const user = url.searchParams.get("user");
-  const target = url.searchParams.get("target");
-  const hideCron = url.searchParams.get("hideCron") === "1";
-
-  const where: Prisma.AuditLogWhereInput = {};
-  // Action is more specific than group — action wins if both are present
-  if (action && VALID_ACTIONS.includes(action)) {
-    where.action = action;
-  } else if (group) {
-    where.action = { in: GROUP_ACTIONS[group] };
+  // The same filter as the list and the page (audit-log-filter.ts), validated
+  // up front: an Invalid Date would otherwise throw inside the stream after the
+  // response headers were sent — a half-written export and, worse, an audit row
+  // never finalized (an exfil-evasion vector).
+  const filter = buildAuditLogWhere(url.searchParams);
+  if (filter.error) {
+    const msg = filter.error === "invalidDateFrom"
+      ? t("apiAdmin.auditLog.invalidDateFrom")
+      : t("apiAdmin.auditLog.invalidDateTo");
+    return NextResponse.json({ error: msg }, { status: 400 });
   }
-  if (dateFrom || dateTo) {
-    where.createdAt = {};
-    // Validate dates up front. An Invalid Date would otherwise throw inside the ReadableStream's
-    // start() callback after response headers were sent — producing a half-written export and,
-    // worse, skipping the audit row at the bottom of the stream (an exfil-evasion vector).
-    if (dateFrom) {
-      const d = new Date(dateFrom);
-      if (isNaN(d.getTime())) {
-        return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateFrom") }, { status: 400 });
-      }
-      where.createdAt.gte = d;
-    }
-    if (dateTo) {
-      const end = new Date(dateTo);
-      if (isNaN(end.getTime())) {
-        return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateTo") }, { status: 400 });
-      }
-      // UTC day arithmetic — see the list route; the two must agree on the bound.
-      end.setUTCDate(end.getUTCDate() + 1);
-      where.createdAt.lt = end;
-    }
-  }
-  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
-  // metacharacters and bound the length (search-box DoS, matches /api/votes).
-  if (user) where.userName = { contains: sanitizeContainsSearch(user), mode: "insensitive" };
-  if (target) where.target = { contains: sanitizeContainsSearch(target), mode: "insensitive" };
-  // "Hide cron" means hide the SYSTEM principal, not hide every row without a
-  // user. `{ not: "system" }` compiles to `"userId" <> 'system'`, and in SQL
-  // NULL <> 'system' is NULL, not TRUE — so Postgres drops every NULL-userId row
-  // too. Three writers produce those, and the one that matters is
-  // /api/auth/machine-session, which mints an ADMIN-impersonating JWT from
-  // CRON_SECRET and is deliberately attributed to the machine rather than to the
-  // assumed admin. That row is the only record the mint happened, and ticking a
-  // filter labelled "Showing only real users" silently removed it — including
-  // from the CSV/JSON export.
-  if (hideCron) where.AND = [{ OR: [{ userId: null }, { userId: { not: "system" } }] }];
+  const { where } = filter;
 
   // Audit-log export streams up to MAX_EXPORT_RECORDS rows of PII; throttle to 3/hour per admin.
   // The check sits AFTER parameter validation on purpose: `checkRateLimit` records a hit on every
@@ -109,17 +51,9 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const date = new Date().toISOString().slice(0, 10);
 
   // Capture filter values pre-stream so the audit row reflects what was actually
-  // queried; the row count is filled in once the stream completes.
-  const filters = {
-    format,
-    action: action ?? null,
-    group: group ?? null,
-    dateFrom: dateFrom ?? null,
-    dateTo: dateTo ?? null,
-    user: user ?? null,
-    target: target ?? null,
-    hideCron,
-  };
+  // queried (an unknown action is recorded as null: it filtered nothing); the
+  // row count is filled in once the stream completes.
+  const filters = { format, ...filter.filters };
   const ctx = auditContext(req, session);
   const exporter = {
     userId: session.user.id,
@@ -154,7 +88,32 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   // the paper-trail row's details. The header is the machine signal; the CSV
   // also carries a trailing comment line (a JSON body is a bare array, kept
   // as-is — scripts parse it — so JSON callers read the header).
-  const total = await prisma.auditLog.count({ where });
+  // It runs after the paper-trail row exists (the totals include that row), so
+  // a failure here must close the row as failed, or it reads "started" forever.
+  let total: number;
+  try {
+    total = await prisma.auditLog.count({ where });
+  } catch (err) {
+    console.error("[audit-log/export] count failed:", err);
+    try {
+      await prisma.auditLog.update({
+        where: { id: auditRow.id },
+        data: {
+          details: JSON.stringify({
+            kind: "audit-log",
+            filters,
+            rowCount: 0,
+            truncated: false,
+            status: "failed",
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        },
+      });
+    } catch (updateErr) {
+      console.error("[audit-log/export] failed to finalize audit row:", updateErr);
+    }
+    return NextResponse.json({ error: t("apiAdmin.auditLog.exportFailed") }, { status: 500 });
+  }
   const truncated = total > MAX_EXPORT_RECORDS;
 
   // Writing through a TransformStream makes `await writer.write(...)` suspend

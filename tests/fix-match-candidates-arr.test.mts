@@ -43,6 +43,7 @@ const settings = new Map<string, string>();
 type LibRow = { tmdbId: number; mediaType: string; serverInstance: string; filePath: string | null; jellyfinItemId: string; title: string; year: number };
 const jellyfinRows: LibRow[] = [];
 const tmdbCacheRows = new Map<string, string>();
+const tmdbCacheExpiry = new Map<string, Date>();
 
 (globalThis as unknown as { prisma: unknown }).prisma = {
   user: { findUnique: async (a: { where: { id: string } }) => { const u = usersById.get(a.where.id); return u ? { ...u } : null; } },
@@ -64,8 +65,11 @@ const tmdbCacheRows = new Map<string, string>();
   tmdbCache: {
     findUnique: async (a: { where: { key: string } }) => {
       const data = tmdbCacheRows.get(a.where.key);
-      return data === undefined ? null : { key: a.where.key, data };
+      if (data === undefined) return null;
+      const expiresAt = tmdbCacheExpiry.get(a.where.key);
+      return expiresAt ? { key: a.where.key, data, expiresAt } : { key: a.where.key, data };
     },
+    deleteMany: async () => ({ count: 0 }),
   },
   jellyfinLibraryItem: {
     findFirst: async (a: { where: { tmdbId: number; mediaType: string; serverInstance: string } }) =>
@@ -96,7 +100,7 @@ async function admin(): Promise<Record<string, string>> {
   return { authorization: `Bearer ${token}` };
 }
 
-type Body = { arrConfirmedTmdbId: number | null; arrPathAgrees: boolean | null };
+type Body = { arrConfirmedTmdbId: number | null; arrPathAgrees: boolean | null; targetTitle: string };
 async function confirmCard(mediaType: "MOVIE" | "TV"): Promise<{ status: number; body: Body }> {
   const params = new URLSearchParams({ server: "jellyfin", tmdbId: "111", mediaType, correctTmdbId: "222" });
   const res = await candidates(new NextRequest(`http://localhost:3000/api/admin/fix-match/candidates?${params}`, { headers: await admin() }), undefined);
@@ -122,6 +126,7 @@ beforeEach(() => {
     { tmdbId: 111, mediaType: "TV", serverInstance: "", filePath: "/media/tv/Right Show", jellyfinItemId: "bbbbbbbb", title: "Wrong", year: 2010 },
   );
   tmdbCacheRows.clear();
+  tmdbCacheExpiry.clear();
   errors.length = 0;
 });
 
@@ -161,4 +166,35 @@ test("a 130k-series Sonarr table is read whole: the confirmation is not lost", a
   assert.equal(status, 200);
   assert.deepEqual([body.arrConfirmedTmdbId, body.arrPathAgrees], [222, true]);
   assert.deepEqual(errors.filter((e) => e.includes("fix-match/candidates")), [], "nothing was rejected");
+});
+
+test("a Radarr entry with NO folder path confirms nothing — a path normalised from '' is '.', not a path", async () => {
+  respond = (url) => (url.search === "?tmdbId=222" ? [{ tmdbId: 222 }] : []);
+  const missing = await confirmCard("MOVIE");
+  assert.equal(missing.status, 200);
+  assert.deepEqual([missing.body.arrConfirmedTmdbId, missing.body.arrPathAgrees], [null, null]);
+
+  respond = (url) => (url.search === "?tmdbId=222" ? [{ tmdbId: 222, path: "" }, { tmdbId: 222, path: "   " }] : []);
+  const blank = await confirmCard("MOVIE");
+  assert.deepEqual([blank.body.arrConfirmedTmdbId, blank.body.arrPathAgrees], [null, null]);
+
+  // A real folder elsewhere still confirms membership; only the path disagrees
+  // (split-mount deployments).
+  respond = (url) => (url.search === "?tmdbId=222" ? [{ tmdbId: 222, path: "/elsewhere/Right Film" }] : []);
+  const elsewhere = await confirmCard("MOVIE");
+  assert.deepEqual([elsewhere.body.arrConfirmedTmdbId, elsewhere.body.arrPathAgrees], [222, false]);
+});
+
+test("an EXPIRED cached TMDB details row is a miss — its stale title never reaches the confirm card; a live row still does", async () => {
+  respond = () => [];
+  tmdbCacheRows.set("movie:222:details", JSON.stringify({ title: "Stale Title", imdbId: "tt0000001" }));
+  tmdbCacheExpiry.set("movie:222:details", new Date(Date.now() - 60_000));
+  const expired = await confirmCard("MOVIE");
+  assert.equal(expired.status, 200);
+  assert.equal(expired.body.targetTitle, "");
+
+  tmdbCacheRows.set("movie:222:details", JSON.stringify({ title: "Cached Title" }));
+  tmdbCacheExpiry.set("movie:222:details", new Date(Date.now() + 60_000));
+  const live = await confirmCard("MOVIE");
+  assert.equal(live.body.targetTitle, "Cached Title");
 });

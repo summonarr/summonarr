@@ -5,9 +5,10 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { readJsonCappedOr } from "@/lib/body-size";
-import { verifyStepUpPassword } from "@/lib/step-up-auth";
+import { isNativeSessionForStepUp, verifyStepUpPassword } from "@/lib/step-up-auth";
+import { mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
+import { deactivateUserInTx, LastAdminError, lockUserRolesInTx } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { tooManyRequests } from "@/lib/http";
 
@@ -24,6 +25,11 @@ import { tooManyRequests } from "@/lib/http";
 // (POST /api/admin/users/[id]/purge). App Store Review Guideline 5.1.1(v) expects
 // an in-app deletion to actually remove the account's data, so a user who wants
 // that must have an admin follow up with a purge — see account-lifecycle.ts.
+//
+// Body: { password, secondFactor? } for a local-password account. On one with an
+// active second factor, a WEB session must also send `secondFactor` — the shape
+// and the `400 { error, secondFactorRequired, methods }` answer of every other
+// 2FA step-up (src/lib/mfa/step-up.ts).
 export const DELETE = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
@@ -46,7 +52,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     if (!checkRateLimit(`profile-delete:${id}`, 5, 15 * 60 * 1000)) {
       return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
     }
-    const parsed = await readJsonCappedOr<{ password?: unknown }>(req, 16384, {});
+    const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 16384, {});
     if (parsed instanceof NextResponse) return parsed;
     const password = parsed.password;
     if (typeof password !== "string" || password.length === 0) {
@@ -64,6 +70,27 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     if (verdict === "invalid") {
       return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
     }
+    // The password alone is what a phishing relay or an autofilled, unlocked
+    // browser holds, and only an admin can undo this. So an account with an
+    // active second factor needs a fresh one too, checked after the password
+    // so a wrong password never burns a code (guardrail 6d).
+    //
+    // A NATIVE session is exempt: the shipped iOS app's in-app deletion (an App
+    // Store requirement) sends no `secondFactor` and has no prompt for one, so
+    // this is a wire contract like 6g's native exemption. It leaves the relay
+    // path open — a relay can choose a native sign-in — until the app shows its
+    // StepUpSheet on `secondFactorRequired` here and the exemption is removed.
+    if (!(await isNativeSessionForStepUp(session, req))) {
+      const proof = await mfaSecondFactorStepUp(
+        req,
+        session,
+        { id, name: target.name, email: target.email },
+        parsed.secondFactor,
+        undefined,
+        { context: "account-delete" },
+      );
+      if (proof instanceof NextResponse) return proof;
+    }
   }
 
   const now = new Date();
@@ -72,12 +99,15 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   // runs scrypt tuned to bcrypt cost 12. A promotion landing in that window would pass
   // the STALE "USER" here, and deactivateUserInTx only runs the last-admin CAS for an
   // admin — so the freshly-promoted last admin could delete themselves and leave the
-  // instance with none. Re-read inside the transaction, where the CAS can see it.
+  // instance with none. Re-read inside the transaction, where the CAS can see it,
+  // and under lock 42 FIRST: a promotion or an admin-side disable holds that lock
+  // while it commits, so an unlocked read could still miss either one.
   // The role this call actually disabled, or null when the in-tx re-read found the
   // row already gone/disabled (nothing was written by THIS request).
   let disabledRole: string | null;
   try {
     disabledRole = await prisma.$transaction(async (tx): Promise<string | null> => {
+      await lockUserRolesInTx(tx);
       const fresh = await tx.user.findUnique({ where: { id }, select: { role: true, deactivatedAt: true } });
       // Guardrail 33: re-running the deactivate on an already-disabled ADMIN excludes
       // its own row from the active-admin count and throws LastAdminError spuriously,

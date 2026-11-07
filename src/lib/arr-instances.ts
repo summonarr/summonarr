@@ -43,15 +43,17 @@ export const BUILTIN_ARR_INSTANCE_KEYS: readonly ArrInstanceKey[] = [
 // ExternalUrl is the address a BROWSER uses for the instance ("Open in Radarr"
 // links); `Url` is often a Docker-internal hostname the browser can't resolve.
 // It is never fetched by the server, and it is plaintext (not a secret).
-export type ArrSettingField =
-  | "Url"
-  | "ApiKey"
-  | "RootFolder"
-  | "QualityProfileId"
-  | "WebhookSecret"
-  | "MinimumAvailability"
-  | "LanguageProfileId"
-  | "ExternalUrl";
+export const ARR_SETTING_FIELDS = [
+  "Url",
+  "ApiKey",
+  "RootFolder",
+  "QualityProfileId",
+  "WebhookSecret",
+  "MinimumAvailability",
+  "LanguageProfileId",
+  "ExternalUrl",
+] as const;
+export type ArrSettingField = (typeof ARR_SETTING_FIELDS)[number];
 
 // The values Radarr's movie resource accepts for minimumAvailability. A stored
 // value outside this set reads as "unset" (getCfg drops it) so a hand-edited
@@ -64,16 +66,25 @@ export function isRadarrMinimumAvailability(value: string): value is RadarrMinim
 }
 
 // Named slugs are lowercase alnum starting with a letter, so the derived Setting
-// key is a valid camelCase identifier and can't collide with a built-in field
-// name. "" and "4k" are the two grandfathered exceptions.
+// key is a valid camelCase identifier. "" and "4k" are the two grandfathered
+// exceptions.
 const NAMED_SLUG_RE = /^[a-z][a-z0-9]{0,23}$/;
+
+// A named slug whose key segment plus one field spells ANOTHER field would
+// share the default instance's Setting row: "external" + "Url" is
+// radarrExternalUrl, the default's browser address. Derived from the field
+// list so a field added later can't reopen it.
+function collidesWithDefaultKey(slug: string): boolean {
+  const segment = instanceKeySegment(slug);
+  return ARR_SETTING_FIELDS.some((f) => (ARR_SETTING_FIELDS as readonly string[]).includes(segment + f));
+}
 
 export function isValidInstanceSlug(slug: string): boolean {
   if (slug === DEFAULT_ARR_INSTANCE || slug === FOURK_ARR_INSTANCE) return true;
   // "hd" is reserved — getCfg maps it to the default instance ("") for back-compat,
   // so a named instance can't claim it.
   if (slug === "hd") return false;
-  return NAMED_SLUG_RE.test(slug);
+  return NAMED_SLUG_RE.test(slug) && !collidesWithDefaultKey(slug);
 }
 
 // The Setting-key segment for an instance slug. "" → "", "4k" → "4k", "anime" →

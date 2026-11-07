@@ -36,9 +36,8 @@ const LIMIT_PER_MIN = 30;
 // does on its own schedule.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 32 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 32 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrTitleGate(body.service, body.instance, body.id, t);
   if (target instanceof NextResponse) return target;
   const action = parseTitleCommand(target.service, body.action);
@@ -49,7 +48,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.arr.commandInvalid") }, { status: 400 });
   }
   if (!checkRateLimit(`arr-title-command:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   const { service, instance, arrId } = target;
   try {

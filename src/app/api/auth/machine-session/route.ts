@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readJsonCappedOr } from "@/lib/body-size";
+import { readOptionalJsonCapped } from "@/lib/body-size";
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
@@ -65,9 +65,19 @@ export async function POST(req: NextRequest) {
   }
 
   let expiresIn = DEFAULT_EXPIRES_IN;
-  const body = await readJsonCappedOr<{ expiresIn?: number; userId?: string }>(req, 8192, {});
+  // A bodiless POST takes the defaults. A body that was sent must be meant: an
+  // unparseable one, or a userId/expiresIn of the wrong type, is a 400 — never
+  // silently the defaults, which would mint for the OLDEST admin instead of the
+  // userId the caller named.
+  const body = await readOptionalJsonCapped<{ expiresIn?: unknown; userId?: unknown }>(req, 8192, {});
   if (body instanceof NextResponse) return body;
-  if (typeof body?.expiresIn === "number" && Number.isFinite(body.expiresIn)) {
+  if (
+    (body.userId !== undefined && (typeof body.userId !== "string" || body.userId.length === 0)) ||
+    (body.expiresIn !== undefined && (typeof body.expiresIn !== "number" || !Number.isFinite(body.expiresIn)))
+  ) {
+    return NextResponse.json({ error: t("apiAdmin.common.invalidBody") }, { status: 400 });
+  }
+  if (typeof body.expiresIn === "number") {
     // Whole seconds only: the value is interpolated verbatim into the cookie's
     // Max-Age, and RFC 6265 §5.2.2 makes a cookie jar IGNORE a Max-Age with a
     // non-digit in it — a fractional request produced a cookie with NO expiry
@@ -79,8 +89,7 @@ export async function POST(req: NextRequest) {
   // (backward compatible). When provided, the named user MUST exist AND be an
   // ADMIN — the machine session always impersonates an admin, never an
   // arbitrary or lower-privileged account.
-  const requestedUserId =
-    typeof body?.userId === "string" && body.userId.length > 0 ? body.userId : null;
+  const requestedUserId = typeof body.userId === "string" ? body.userId : null;
 
   // `permissions` MUST be selected and carried into the JWT below — see the note
   // at the signSessionJwt call.

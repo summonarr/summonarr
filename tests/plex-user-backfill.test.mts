@@ -77,7 +77,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const { Prisma } = await import("../src/generated/prisma/index.js");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
-const { runPlexUserBackfillIfNeeded } = await import("../src/lib/plex-user-backfill.ts");
+const { runPlexUserBackfillIfNeeded, PLEX_USER_BACKFILL_RAN_AT_KEY } = await import("../src/lib/plex-user-backfill.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 type CandidateRow = { id: string; email: string };
@@ -317,7 +317,11 @@ test("happy path: owner + friend matched by normalized email; exact update shape
   // ranAt marker: written with an ISO timestamp. This helper never reads it —
   // its gate is the candidate query. (instrumentation.ts reads it at boot.)
   assert.equal(settingUpserts.length, 1);
-  assert.equal(settingUpserts[0].where.key, "plexUserIdBackfillRanAt");
+  // The stored key never changes (existing installs keep their marker), and the
+  // write goes through the same constant the boot gate reads.
+  assert.equal(PLEX_USER_BACKFILL_RAN_AT_KEY, "plexUserIdBackfillRanAt");
+  assert.equal(settingUpserts[0].where.key, PLEX_USER_BACKFILL_RAN_AT_KEY);
+  assert.equal(settingUpserts[0].create.key, PLEX_USER_BACKFILL_RAN_AT_KEY);
   assert.ok(!Number.isNaN(Date.parse(settingUpserts[0].create.value)));
   assert.ok(!Number.isNaN(Date.parse(settingUpserts[0].update.value)));
   // Registry read first (multi-server union), then the default instance's
@@ -645,4 +649,18 @@ test("no module-level once-guard: a second invocation runs the whole flow again"
   assert.equal(userUpdates.length, 2); // stub never mutates, so both runs bind
   assert.equal(settingUpserts.length, 2);
   assert.equal(fetchCalls.length, 4); // two plex.tv hops per run
+});
+
+test("the boot gate reads the marker through the exported key and stays in the caller", async () => {
+  // A rename on one side only would rerun the email-match backfill on every
+  // boot — the window the once-ever gate exists to close.
+  const { readFileSync } = await import("node:fs");
+  const boot = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
+  assert.match(
+    boot,
+    /\.then\(async \(\{ runPlexUserBackfillIfNeeded, PLEX_USER_BACKFILL_RAN_AT_KEY \}\) => \{[\s\S]*?prisma\.setting\.findUnique\(\{ where: \{ key: PLEX_USER_BACKFILL_RAN_AT_KEY \} \}\);\s*if \(ranAt\?\.value\) return;\s*await runPlexUserBackfillIfNeeded\(\);/,
+  );
+  const helper = readFileSync(new URL("../src/lib/plex-user-backfill.ts", import.meta.url), "utf8");
+  assert.equal((helper.match(/"plexUserIdBackfillRanAt"/g) ?? []).length, 1, "the literal lives only in the constant");
+  assert.equal((boot.match(/"plexUserIdBackfillRanAt"/g) ?? []).length, 0);
 });

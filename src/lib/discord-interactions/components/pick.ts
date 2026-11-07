@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrWriteOutcomeUnknown, type AddProgress } from "@/lib/arr";
 import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { emitNotificationEvent } from "@/lib/notify-agents";
 import { notifyAdminsNewRequest } from "@/lib/email";
@@ -12,6 +12,7 @@ import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import { isBlacklisted } from "@/lib/blacklist";
 import { exceedsCap } from "@/lib/content-rating";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
+import type { TmdbMedia } from "@/lib/tmdb-types";
 import { resolveUserQuota, parseQuotaLimit, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -21,15 +22,18 @@ import { dropStaleDeclined, restoreThread } from "@/lib/request-comment-carry";
 import { TMDB_POSTER_BASE, editOriginal, quotaWindowLabel, releaseYearOf } from "../reply";
 import type { ComponentContext, PendingSearch } from "../types";
 
+type PickMedia = { tmdbId: number; mediaType: "MOVIE" | "TV"; arrInstance: string; title: string; posterPath: string | null; releaseYear: string | null };
+
 // Admin fan-out for a request that ends up PENDING, shared by the plain pending
 // branch of a pick and the auto-approve rollback (a failed *arr push leaves a
 // PENDING row that otherwise reaches admins through no channel at all — the web
-// path, request-create.ts, announces it the same way). Only the EARLIEST pending
-// request for a title alerts, ordered by (createdAt, id), so concurrent
-// duplicates alert once.
-async function announcePendingToAdmins(
+// path, request-create.ts, announces it the same way). The plain pending branch
+// decides inside its create tx whether it is the first PENDING request for the
+// title (below); the rollback, which turns a committed row PENDING after the
+// fact, checks for an EARLIER pending request, ordered by (createdAt, id).
+async function announceRolledBackToAdmins(
   request: { id: string; createdAt: Date },
-  media: { tmdbId: number; mediaType: "MOVIE" | "TV"; arrInstance: string; title: string; posterPath: string | null; releaseYear: string | null },
+  media: PickMedia,
   requestedBy: string,
   requesterId: string,
 ): Promise<void> {
@@ -48,6 +52,15 @@ async function announcePendingToAdmins(
     select: { id: true },
   });
   if (earlierPending) return;
+  alertAdmins(request, media, requestedBy, requesterId);
+}
+
+function alertAdmins(
+  request: { id: string },
+  media: PickMedia,
+  requestedBy: string,
+  requesterId: string,
+): void {
   emitNotificationEvent({
     event: "request.created",
     media: { type: media.mediaType, tmdbId: media.tmdbId, title: media.title, year: media.releaseYear, posterPath: media.posterPath },
@@ -96,11 +109,16 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   // next pick from the same results answer "search expired". It is deleted
   // just before the create transactions, once a pick is actually being filed.
 
+  // Every setting this click reads, in one query.
+  const settingRows = await prisma.setting.findMany({
+    where: { key: { in: ["maintenanceEnabled", "discordRequireLinkedAccount", "discordAutoApproveRoles", "request4kAll", "quotaLimit", "quotaPeriod"] } },
+  });
+  const setting = new Map(settingRows.map((r) => [r.key, r.value]));
+
   // Maintenance gate: a user who ran /request BEFORE maintenance was enabled could
   // still click a result button afterward and create a request (incl. auto-approve
   // → ARR push). Block unless the clicker is a linked Discord admin (admins bypass).
-  const componentMaintRow = await prisma.setting.findUnique({ where: { key: "maintenanceEnabled" } });
-  if (componentMaintRow?.value === "true") {
+  if (setting.get("maintenanceEnabled") === "true") {
     const discordAdmin = await prisma.user.findFirst({ where: { discordId: discordUserId, role: "ADMIN" }, select: { id: true } });
     if (!discordAdmin) {
       await editOriginal(appId, token, { content: t("notify.bot.maintenance"), embeds: [], components: [] });
@@ -110,14 +128,15 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
 
   const mediaType = selected.mediaType === "movie" ? "MOVIE" : "TV";
 
-  const componentMemberRoles: string[] = interaction.member?.roles ?? [];
-  const requireLinkedComponent = (await prisma.setting.findUnique({ where: { key: "discordRequireLinkedAccount" } }))?.value === "true";
-  const componentAutoApproveRow = await prisma.setting.findUnique({ where: { key: "discordAutoApproveRoles" } });
-  const componentAutoApproveRoles = (componentAutoApproveRow?.value ?? "").split(",").map((r) => r.trim()).filter(Boolean);
-  const componentExempt = componentAutoApproveRoles.length > 0 && componentMemberRoles.some((r) => componentAutoApproveRoles.includes(r));
+  // A Discord auto-approve role both exempts the clicker from the linked-account
+  // requirement and auto-approves the request (mayAutoApprove below).
+  const memberRoles: string[] = interaction.member?.roles ?? [];
+  const requireLinkedComponent = setting.get("discordRequireLinkedAccount") === "true";
+  const autoApproveRoles = (setting.get("discordAutoApproveRoles") ?? "").split(",").map((r) => r.trim()).filter(Boolean);
+  const hasAutoApproveRole = autoApproveRoles.length > 0 && memberRoles.some((r) => autoApproveRoles.includes(r));
 
   let dbUser;
-  if (requireLinkedComponent && !componentExempt) {
+  if (requireLinkedComponent && !hasAutoApproveRole) {
     const linked = await prisma.user.findFirst({
       where: { discordId: discordUserId, NOT: { email: { endsWith: "@discord.local" } } },
     });
@@ -179,6 +198,12 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   // both the quota bypass and the auto-approve decision below.
   const effPerms = effectivePermissions(dbUser.role, dbUser.permissions);
 
+  // TMDB details, fetched at most once per click: the rating cap and the
+  // instance routing below both read them. Null when TMDB can't answer.
+  let detailsRead: Promise<TmdbMedia | null> | null = null;
+  const details = () =>
+    (detailsRead ??= (mediaType === "MOVIE" ? getMovieDetails(selected.id) : getTVDetails(selected.id)).catch(() => null));
+
   // Enforce request permission (parity with the web route, which 403s on this).
   // Without it, a user whose admin set a permission mask omitting the REQUEST
   // bits could still create a request through Discord.
@@ -204,13 +229,7 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   // the (cached) certification fetch; unknown/unrated titles and TMDB failures
   // are allowed — fail-open, same as requests/route.ts.
   if (dbUser.maxContentRating && !hasPermission(effPerms, Permission.ADMIN)) {
-    let cert: string | undefined;
-    try {
-      const detail = mediaType === "MOVIE" ? await getMovieDetails(selected.id) : await getTVDetails(selected.id);
-      cert = detail.certification;
-    } catch {
-      cert = undefined;
-    }
+    const cert = (await details())?.certification;
     if (exceedsCap(cert, dbUser.maxContentRating)) {
       confirmEmbed.color = 0xed4245;
       confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.rating")}`;
@@ -231,8 +250,9 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   let routedSlug = "";
   if (configuredInstances.some((i) => i.slug !== "" && i.autoRoute)) {
     let routable: RoutableMedia = { genreIds: [], originalLanguage: null, originCountries: [] };
-    try {
-      const detail = mediaType === "MOVIE" ? await getMovieDetails(selected.id) : await getTVDetails(selected.id);
+    // TMDB details unavailable ⇒ fall back to the default instance.
+    const detail = await details();
+    if (detail) {
       routable = {
         genreIds: detail.genreList?.map((g) => g.id) ?? [],
         originalLanguage: detail.originalLanguage ?? null,
@@ -241,15 +261,12 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
         // degrade to [] — exactly the previous behavior — until TTL refresh).
         originCountries: detail.originCountryCodes ?? [],
       };
-    } catch {
-      // TMDB details unavailable ⇒ fall back to the default instance.
     }
     routedSlug = routeMediaToSlug(configuredInstances, routable);
   }
   let routedInstance = configuredInstances.find((i) => i.slug === routedSlug);
   if (routedSlug !== "" && routedInstance) {
-    const request4kAllRow = await prisma.setting.findUnique({ where: { key: "request4kAll" } });
-    if (!canRequestInstance(effPerms, routedInstance, grants, mediaType, request4kAllRow?.value === "true")) {
+    if (!canRequestInstance(effPerms, routedInstance, grants, mediaType, setting.get("request4kAll") === "true")) {
       routedSlug = "";
       routedInstance = undefined;
     }
@@ -261,10 +278,6 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   // requests/route.ts): a re-request the quota then rejects must NOT have already
   // erased the user's DECLINED-history row. The authoritative enforcement is the
   // serializable-tx recheck at create time; this is the early user-facing reject.
-  const [quotaLimitRow, quotaPeriodRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "quotaLimit" } }),
-    prisma.setting.findUnique({ where: { key: "quotaPeriod" } }),
-  ]);
   let rq: ResolvedQuota | null = null;
   let quotaApplies = false;
   if (!hasPermission(effPerms, Permission.QUOTA_UNLIMITED)) {
@@ -277,8 +290,8 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
         tvQuotaLimit: dbUser.tvQuotaLimit ?? null,
         tvQuotaDays: dbUser.tvQuotaDays ?? null,
       },
-      parseQuotaLimit(quotaLimitRow?.value),
-      quotaPeriodRow?.value ?? "week",
+      parseQuotaLimit(setting.get("quotaLimit")),
+      setting.get("quotaPeriod") ?? "week",
     );
     if (rq && rq.limit > 0) {
       const count = await prisma.mediaRequest.count({
@@ -371,14 +384,6 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
     requestedBy: dbUser.id,
   } as const;
 
-  const memberRoles: string[] = interaction.member?.roles ?? [];
-  const autoApproveRow = await prisma.setting.findUnique({ where: { key: "discordAutoApproveRoles" } });
-  const autoApproveRoles = (autoApproveRow?.value ?? "")
-    .split(",")
-    .map((r) => r.trim())
-    .filter(Boolean);
-  const hasAutoApproveRole = autoApproveRoles.length > 0 && memberRoles.some((r) => autoApproveRoles.includes(r));
-
   const mayAutoApprove = hasAutoApproveRole || canAutoApproveInstance(effPerms, routedAccess, grants, mediaType);
 
   // A visible library copy is "already available" for everyone (skipped for
@@ -391,12 +396,17 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
   prisma.discordSearchCache.delete({ where: { queryKey: key } }).catch(() => {});
 
   // Clear the requester's own delete-vote for this title — a request and a deletion
-  // vote are contradictory, and the vote route already blocks the reverse.
-  // `.catch` (not bare `void`): a detached promise's rejection escapes the enclosing
-  // try/catch and surfaces as an unhandledRejection on the long-lived Node server.
-  prisma.deletionVote
-    .deleteMany({ where: { userId: dbUser.id, tmdbId: selected.id, mediaType } })
-    .catch((err) => console.error("[interactions] deletion-vote cleanup failed:", err));
+  // vote are contradictory, and the vote route already blocks the reverse. Only
+  // once a request EXISTS (parity with request-create.ts): a pick refused by the
+  // quota recount or a duplicate, or one that finds the title already here, files
+  // nothing, so nothing contradicts the vote. Outside any transaction, and
+  // `.catch` (not bare `void`): a Prisma promise is lazy, and a detached rejection
+  // would surface as an unhandledRejection on the long-lived Node server.
+  const clearOwnDeletionVote = () => {
+    prisma.deletionVote
+      .deleteMany({ where: { userId: dbUser.id, tmdbId: selected.id, mediaType } })
+      .catch((err) => console.error("[interactions] deletion-vote cleanup failed:", err));
+  };
 
   let note: string;
   try {
@@ -410,9 +420,9 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
       // title and clears the deletionVoteNotified gate. This branch transitions
       // nothing — the title was already available — so calling it let any user
       // reset the whole community tally just by re-requesting, and the threshold
-      // could never accumulate. The requester's own contradictory vote is
-      // already cleared by the userId-scoped delete above, which is the only
-      // half the web route does.
+      // could never accumulate. Nor is the requester's own vote cleared: no
+      // request is filed, so nothing contradicts it (the web route returns
+      // before its clear on this branch too).
       note = t("notify.bot.pick.inLibrary");
       confirmEmbed.color = 0x57f287;
     } else if (mayAutoApprove) {
@@ -445,23 +455,34 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
           return row;
         }, { isolationLevel: "Serializable" })
       );
+      clearOwnDeletionVote();
       // Keep the admin request list live (every other creation path emits).
       emitSSE({ type: "request:new", requestId: request.id, userId: dbUser.id });
       let arrFailed = false;
       let pushedTvdbId: number | null = null;
+      const pushProgress: AddProgress = { sent: false };
       try {
         if (mediaType === "MOVIE") {
-          await addMovieToRadarr(selected.id, routedSlug, undefined, dbUser.id);
+          await addMovieToRadarr(selected.id, routedSlug, undefined, dbUser.id, pushProgress);
         } else {
-          pushedTvdbId = await addSeriesToSonarr(selected.id, routedSlug, undefined, dbUser.id);
+          pushedTvdbId = await addSeriesToSonarr(selected.id, routedSlug, undefined, dbUser.id, pushProgress);
         }
       } catch (err) {
-        console.error("[interactions] arr push failed:", err);
-        // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
-        // may have flipped this row to AVAILABLE between create and here. Clear
-        // pendingNotifyAt too: the push failed, so there's no download to pend.
-        await prisma.mediaRequest.updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
-        arrFailed = true;
+        // Unknown only once the add itself was sent (AddProgress).
+        if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {
+          // No definite answer (a timeout, a dropped connection, a gateway
+          // 502/504): the arr may have added it. Left APPROVED, like the web
+          // path (request-create.ts); the sync re-pushes an APPROVED title the
+          // arr doesn't hold.
+          console.error("[interactions] arr push outcome unknown, left APPROVED:", arrErrorMessage(err));
+        } else {
+          console.error("[interactions] arr push failed:", arrErrorMessage(err));
+          // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
+          // may have flipped this row to AVAILABLE between create and here. Clear
+          // pendingNotifyAt too: the push failed, so there's no download to pend.
+          await prisma.mediaRequest.updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
+          arrFailed = true;
+        }
       }
       // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
       // series by this point, so a P2025 (row deleted mid-push) or transient DB error
@@ -478,7 +499,7 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
         emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: dbUser.id });
         // The row now sits in the admin queue like any pending request and
         // pendingNotifyAt is cleared, so this is the only alert admins get.
-        await announcePendingToAdmins(
+        await announceRolledBackToAdmins(
           request,
           { tmdbId: selected.id, mediaType, arrInstance: routedSlug, title: selected.title, posterPath: selected.posterPath ?? null, releaseYear: releaseYearOf(selected) },
           dbUser.name ?? dbUser.email ?? dbUser.id,
@@ -511,9 +532,11 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
       // are APPROVED/AVAILABLE and count against the quota window, so a create
       // outside the tx would let concurrent picks overshoot the boundary.
       let mirrored = false;
+      let announce = false;
       const createdRequest = await runWithSerializableRetry(async () =>
         prisma.$transaction(async (tx) => {
           mirrored = false; // reset — the callback re-runs on a P2034 retry
+          announce = false;
           if (quotaApplies && rq && rq.limit > 0) {
             const count = await tx.mediaRequest.count({
               where: quotaUsageWhere(dbUser.id, mediaType, rq.since),
@@ -556,23 +579,36 @@ export async function handlePick(ctx: ComponentContext): Promise<void> {
             await restoreThread(tx, copy.id, carried);
             return copy;
           }
+          // Only the first PENDING request for the title alerts the admins —
+          // decided here, in the Serializable tx (parity with request-create.ts):
+          // two concurrent picks that each read "no PENDING peer" and insert one
+          // form a read/write cycle Postgres aborts (P2034), and the retry sees
+          // the committed peer.
+          const pendingPeer = await tx.mediaRequest.findFirst({
+            where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: "PENDING" },
+            select: { id: true },
+          });
           const row = await tx.mediaRequest.create({ data: baseData });
           await restoreThread(tx, row.id, carried);
+          announce = !pendingPeer;
           return row;
         }, { isolationLevel: "Serializable" })
       );
+      clearOwnDeletionVote();
       // Keep the admin request list live (every other creation path emits).
       emitSSE({ type: "request:new", requestId: createdRequest.id, userId: dbUser.id });
       if (mirrored) {
         note = t("notify.bot.pick.mirrored");
         confirmEmbed.color = 0x57f287;
       } else {
-        await announcePendingToAdmins(
-          createdRequest,
-          { tmdbId: selected.id, mediaType, arrInstance: routedSlug, title: selected.title, posterPath: selected.posterPath ?? null, releaseYear: releaseYearOf(selected) },
-          dbUser.name ?? dbUser.email ?? dbUser.id,
-          dbUser.id,
-        );
+        if (announce) {
+          alertAdmins(
+            createdRequest,
+            { tmdbId: selected.id, mediaType, arrInstance: routedSlug, title: selected.title, posterPath: selected.posterPath ?? null, releaseYear: releaseYearOf(selected) },
+            dbUser.name ?? dbUser.email ?? dbUser.id,
+            dbUser.id,
+          );
+        }
         note = t("notify.bot.pick.pending");
         confirmEmbed.color = 0x57f287;
       }

@@ -28,6 +28,7 @@
 //   node scripts/migrate-is4k-to-arrinstance.mjs   # then: prisma db push
 
 import { Client } from "pg";
+import { existsSync, readFileSync } from "node:fs";
 
 // Every model that carried the `is4k` discriminator.
 const TABLES = [
@@ -63,8 +64,21 @@ function decodeCredential(value) {
   }
 }
 
+// docker-entrypoint.sh reads the bundled Postgres password from this Docker
+// secret when it is mounted (it wins over the env var), and a `docker compose
+// exec` process never sees the entrypoint's export — so read it the same way.
+const POSTGRES_PASSWORD_FILE = "/run/secrets/postgres_password";
+function loadPostgresPasswordFile() {
+  if (!existsSync(POSTGRES_PASSWORD_FILE)) return;
+  // The entrypoint's `$(cat …)` drops trailing newlines; match it.
+  const value = readFileSync(POSTGRES_PASSWORD_FILE, "utf8").replace(/\n+$/, "");
+  if (!value) throw new Error(`${POSTGRES_PASSWORD_FILE} is empty`);
+  process.env.POSTGRES_PASSWORD = value;
+}
+
 async function main() {
   let user, password, host, port, database;
+  loadPostgresPasswordFile();
   if (process.env.PGHOST && process.env.PGUSER && process.env.PGPASSWORD && process.env.PGDATABASE) {
     user = process.env.PGUSER;
     password = process.env.PGPASSWORD;

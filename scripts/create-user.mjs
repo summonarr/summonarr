@@ -35,6 +35,7 @@
 // To change an existing user's password instead, use scripts/reset-password.mjs.
 
 import { Client } from "pg";
+import { existsSync, readFileSync } from "node:fs";
 import { scrypt as scryptCb, randomBytes, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
@@ -139,7 +140,20 @@ function decodeCredential(value) {
   }
 }
 
+// docker-entrypoint.sh reads the bundled Postgres password from this Docker
+// secret when it is mounted (it wins over the env var), and a `docker compose
+// exec` process never sees the entrypoint's export — so read it the same way.
+const POSTGRES_PASSWORD_FILE = "/run/secrets/postgres_password";
+function loadPostgresPasswordFile() {
+  if (!existsSync(POSTGRES_PASSWORD_FILE)) return;
+  // The entrypoint's `$(cat …)` drops trailing newlines; match it.
+  const value = readFileSync(POSTGRES_PASSWORD_FILE, "utf8").replace(/\n+$/, "");
+  if (!value) throw new Error(`${POSTGRES_PASSWORD_FILE} is empty`);
+  process.env.POSTGRES_PASSWORD = value;
+}
+
 function connectionParams() {
+  loadPostgresPasswordFile();
   if (process.env.PGHOST && process.env.PGUSER && process.env.PGPASSWORD && process.env.PGDATABASE) {
     return {
       user: process.env.PGUSER,
@@ -187,7 +201,8 @@ async function main() {
   }
 
   const password = opts.fromStdin ? await readStdin() : opts.password;
-  // The app's floor (registration, password change, admin create).
+  // The app's floor (registration, password change, admin create) —
+  // MIN_PASSWORD_LENGTH in src/lib/password-policy.ts; this script is standalone.
   if (!password || password.length < 12) {
     console.error("Password must be at least 12 characters.");
     process.exit(1);

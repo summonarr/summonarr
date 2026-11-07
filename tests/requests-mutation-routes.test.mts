@@ -69,6 +69,8 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 const fetchCalls: Array<{ url: URL; method: string; body?: string }> = [];
 let arrOk = true;
 let arrFailTmdbIds = new Set<number>();
+// Adds for these tmdbIds get a gateway 504: no definite answer from the arr.
+let arrGatewayTmdbIds = new Set<number>();
 let profilesOk = true;
 // A Sonarr library for PATCH { search: true } on a TV request: the series row
 // the tvdbId resolves to (id 77) and its episode list. null ⇒ the branches
@@ -128,6 +130,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       new RegExp(`"tmdbId"\\s*:\\s*${id}\\b`).test(body) || new RegExp(`"tvdbId"\\s*:\\s*${id}\\b`).test(body),
     );
     if (!arrOk || failing) return json({ message: "ARR ADD FAILED" }, 500);
+    if ([...arrGatewayTmdbIds].some((id) => new RegExp(`"tmdbId"\\s*:\\s*${id}\\b`).test(body))) {
+      return new Response("upstream timed out", { status: 504 });
+    }
     return json({ id: 1, tvdbId: 4242 });
   }
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) return json({ id: 603, title: "The Matrix", results: [] });
@@ -439,6 +444,7 @@ beforeEach(() => {
   settings.set("sonarrApiKey", "sonarr-key");
   arrOk = true;
   arrFailTmdbIds = new Set();
+  arrGatewayTmdbIds = new Set();
   profilesOk = true;
   sonarrSearch = null;
   failTvdbBookkeeping = false;
@@ -1416,6 +1422,103 @@ test("a single approve is audited with the before/after status", async () => {
   const details = JSON.parse(data.details);
   assert.equal(details.before.status, "PENDING");
   assert.equal(details.after.status, "APPROVED");
+});
+
+// The approval is audited once the push's outcome is known, so the trail says
+// whether the request reached Radarr/Sonarr or went back to PENDING.
+async function approveAuditDetails(tmdbId: number): Promise<Record<string, unknown>> {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: `r${tmdbId}`, requestedBy: owner.userId, tmdbId })];
+  await doPatch(token, `r${tmdbId}`, { status: "APPROVED" });
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  const rows = opsOf("auditLog.create").map((o) => (o.args as { data: { action: string; details: string } }).data);
+  const approve = rows.filter((d) => d.action === "REQUEST_APPROVE");
+  assert.equal(approve.length, 1, "one REQUEST_APPROVE row");
+  return JSON.parse(approve[0].details) as Record<string, unknown>;
+}
+
+test("the single approve audit records the push outcome: landed, rolled back, or unknown", async () => {
+  const landed = await approveAuditDetails(100);
+  assert.equal(landed.arrPushSucceeded, true);
+  assert.equal(landed.rolledBack, false);
+  assert.equal("arrPushOutcomeUnknown" in landed, false);
+
+  ops = [];
+  arrFailTmdbIds = new Set([999]);
+  const refused = await approveAuditDetails(999);
+  assert.equal(reqRows[0].status, "PENDING", "fixture sanity: the push failed and rolled back");
+  assert.equal(refused.arrPushSucceeded, false);
+  assert.equal(refused.rolledBack, true);
+
+  ops = [];
+  arrGatewayTmdbIds = new Set([777]);
+  const unknown = await approveAuditDetails(777);
+  assert.equal(unknown.arrPushSucceeded, false);
+  assert.equal(unknown.rolledBack, false);
+  assert.equal(unknown.arrPushOutcomeUnknown, true);
+});
+
+test("a single approve whose push gets no definite answer (gateway 504) stays APPROVED: arrError + marker, notified, download check queued", async () => {
+  // Radarr may have added the title before the gateway gave up. Rolled back, the
+  // queue would offer to decline a title already downloading; the sync re-pushes
+  // an APPROVED title the arr doesn't hold instead.
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "slow", requestedBy: owner.userId, tmdbId: 777 })];
+  arrGatewayTmdbIds = new Set([777]);
+  const { result, queued } = await withTimeoutSpy(() => doPatch(token, "slow", { status: "APPROVED" }));
+  assert.equal(result.status, 200);
+  const body = await result.json();
+  assert.equal(body.status, "APPROVED");
+  assert.ok(typeof body.arrError === "string" && body.arrError.length > 0, "the admin is still told the push had trouble");
+  assert.equal(body.arrPushOutcomeUnknown, true);
+  assert.equal(reqRows[0].status, "APPROVED", "no rollback");
+  assert.ok(reqRows[0].pendingNotifyAt instanceof Date, "the backstop stays armed");
+  assert.equal(queued, 1, "the download check consumes the armed backstop");
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(opsOf("notification.create").length, 1, "the approval stands, so the requester is told");
+});
+
+test("search/retry flags must be the boolean true: a truthy string never reaches Radarr/Sonarr", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, status: "APPROVED" })];
+  for (const body of [{ search: "false" }, { retry: "false" }, { search: 1 }, { retry: "yes" }]) {
+    fetchCalls.length = 0;
+    const res = await doPatch(token, "r1", body);
+    assert.equal(res.status, 400, `${JSON.stringify(body)} is not a search or retry`);
+    const json = await res.json();
+    assert.equal("arrError" in json, false, "not answered as a search/retry");
+    assert.equal(fetchCalls.length, 0, `${JSON.stringify(body)} made no arr call`);
+  }
+  assert.equal(reqRows[0].status, "APPROVED");
+  // The real booleans still work.
+  const search = await doPatch(token, "r1", { search: true });
+  assert.equal(search.status, 200);
+  assert.ok(fetchCalls.length > 0, "search: true reaches Radarr");
+});
+
+test("the batch audit keeps every requested id and records what actually changed: claimed, rolled back, transitioned", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [
+    reqRow({ id: "ok", requestedBy: owner.userId, tmdbId: 100 }),
+    reqRow({ id: "already", requestedBy: owner.userId, tmdbId: 200, status: "APPROVED" }),
+    reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999 }),
+  ];
+  arrFailTmdbIds = new Set([999]);
+  await doBatch(token, { ids: ["ok", "already", "bad"], status: "APPROVED" });
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  const data = (opsOf("auditLog.create")[0].args as { data: { action: string; target: string; details: string } }).data;
+  assert.equal(data.action, "REQUEST_APPROVE");
+  assert.equal(data.target, "batch:3", "the target still counts the requested ids (the purge scrub keys on it)");
+  const details = JSON.parse(data.details);
+  assert.deepEqual(details.ids, ["ok", "already", "bad"]);
+  assert.equal(details.count, 3);
+  assert.deepEqual([...details.claimedIds].sort(), ["bad", "ok"]);
+  assert.deepEqual(details.rolledBackIds, ["bad"]);
+  assert.equal(details.transitioned, 1);
 });
 
 // ── the 90s download-check job is queued only for a push that LANDED ─────────

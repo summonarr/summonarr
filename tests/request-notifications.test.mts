@@ -29,9 +29,10 @@
 //     burning the once-only CAS;
 //   - notifyRequestStatusChange: returns void synchronously, writes the in-app
 //     inbox row regardless of the user's prefs, and fans out discord/push/email
-//     per status — the email leg reading exactly the per-status pref column
+//     per status — the email leg honouring the per-status pref column
 //     (emailOnApproved/emailOnAvailable/emailOnDeclined) and staying silent when
-//     it's off;
+//     it's off; on APPROVED/DECLINED the disabled-account gate's one user read
+//     carries those prefs, so there is no second read;
 //   - disabled accounts (guardrail 33): a deactivated requester gets nothing on
 //     any channel, on both the single-request path and the batch CAS path.
 //
@@ -183,7 +184,8 @@ shadowPrismaModel(prisma, "user", {
     }
     if (args.select.deactivatedAt) {
       activeGateReads.push(args);
-      return { deactivatedAt: requesterDisabled ? new Date("2026-07-01T00:00:00.000Z") : null };
+      // The same read carries the email leg's address and opt-ins.
+      return { ...(emailUserRow ?? {}), deactivatedAt: requesterDisabled ? new Date("2026-07-01T00:00:00.000Z") : null };
     }
     if (args.select.pushOnApproved || args.select.pushOnDeclined) {
       pushUserReads.push(args);
@@ -660,12 +662,13 @@ test("APPROVED: synchronous void, unconditional in-app row, discord+push+email l
   assert.equal(discordUserReads[0].where.id, "u-app");
   assert.deepEqual(pushUserReads[0], { where: { id: "u-app" }, select: { pushOnApproved: true, locale: true } });
 
-  // Email leg read exactly the per-status pref column (+ the recipient's
-  // language), then mailed the user.
-  assert.deepEqual(emailUserReads[0], {
+  // ONE user read per notification: the disabled-account gate carries the email
+  // leg's address, opt-ins and language, so the email leg reads nothing more.
+  assert.deepEqual(activeGateReads, [{
     where: { id: "u-app" },
-    select: { email: true, notificationEmail: true, emailOnApproved: true, locale: true },
-  });
+    select: { deactivatedAt: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
+  }]);
+  assert.equal(emailUserReads.length, 0, "no second user read for the email leg");
   assert.equal(resendPosts[0].body.to, "app@example.com");
   assert.ok(resendPosts[0].body.subject.includes("Approved"), resendPosts[0].body.subject);
   assert.ok(resendPosts[0].body.subject.includes("Dune"));
@@ -683,7 +686,7 @@ test("DECLINED with emailOnDeclined off: the inbox row is still written but no e
     adminNote: "duplicate request",
   });
 
-  await waitFor(() => notifCreates.length === 1 && emailUserReads.length === 1, "declined fan-out");
+  await waitFor(() => notifCreates.length === 1 && pushUserReads.length === 1, "declined fan-out");
   await quiesce();
 
   assert.deepEqual(notifCreates[0].data, {
@@ -696,9 +699,30 @@ test("DECLINED with emailOnDeclined off: the inbox row is still written but no e
     posterPath: null,
     data: { v: 1 },
   });
-  assert.deepEqual(emailUserReads[0].select, { email: true, notificationEmail: true, emailOnDeclined: true, locale: true });
+  assert.equal(activeGateReads.length, 1, "one user read per notification");
+  assert.equal(emailUserReads.length, 0);
   assert.deepEqual(pushUserReads[0].select, { pushOnDeclined: true, locale: true });
   assert.equal(resendPosts.length, 0); // the opt-out gate lives in THIS module
+  assert.deepEqual(errors, []);
+});
+
+test("the email leg reads its opt-ins off the gate's one read: emailOnDeclined on mails, emailOnApproved off does not", async () => {
+  configureChannels();
+  emailUserRow = { email: "dec@example.com", notificationEmail: null, emailOnApproved: false, emailOnDeclined: true, locale: null };
+  notifyRequestStatusChange("DECLINED", { requestedBy: "u-dec2", title: "Andor", mediaType: "TV", adminNote: "no" });
+  await waitFor(() => resendPosts.length === 1, "declined email");
+  await quiesce();
+  assert.equal(resendPosts[0].body.to, "dec@example.com");
+  assert.equal(activeGateReads.length, 1);
+  assert.equal(emailUserReads.length, 0);
+
+  resendPosts.length = 0;
+  activeGateReads.length = 0;
+  notifyRequestStatusChange("APPROVED", { requestedBy: "u-dec2", title: "Andor", mediaType: "TV" });
+  await waitFor(() => notifCreates.length === 2, "approved inbox row");
+  await quiesce();
+  assert.equal(resendPosts.length, 0, "emailOnApproved off sends no approval email");
+  assert.equal(activeGateReads.length, 1);
   assert.deepEqual(errors, []);
 });
 
@@ -828,7 +852,9 @@ test("a DISABLED requester reaches NO channel — one gate read and nothing else
   await waitFor(() => activeGateReads.length === 1, "disabled-account gate read");
   await quiesce();
 
-  assert.deepEqual(activeGateReads[0], { where: { id: "u-gone" }, select: { deactivatedAt: true } });
+  assert.equal(activeGateReads.length, 1);
+  assert.deepEqual(activeGateReads[0].where, { id: "u-gone" });
+  assert.equal(activeGateReads[0].select.deactivatedAt, true);
   // Not one channel resolved a recipient, and no inbox row was written.
   assert.equal(notifCreates.length, 0, "in-app");
   assert.equal(discordUserReads.length, 0, "discord");

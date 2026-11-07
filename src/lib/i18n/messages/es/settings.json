@@ -187,7 +187,7 @@
   "settings.arr.minAvail.announced": "Anunciada",
   "settings.arr.minAvail.inCinemas": "En cines",
   "settings.arr.minAvail.released": "Estrenada",
-  "settings.arr.invalidSlug": "Slug no válido «{slug}»: usa letras minúsculas y dígitos, empezando por una letra (no «hd»).",
+  "settings.arr.invalidSlug": "Slug no válido «{slug}»: usa letras minúsculas y dígitos, empezando por una letra (no «hd» ni «external»).",
   "settings.arr.heading": "{label}: instancias adicionales",
   "settings.arr.intro": "Instancias adicionales de {label} (p. ej., una dedicada al anime). Las solicitudes se envían aquí automáticamente cuando coincide la regla de una instancia; una solicitud también puede elegir una explícitamente. Las instancias restringidas requieren un permiso por usuario (Usuarios → Acceso a instancias).",
   "settings.arr.none": "No hay instancias adicionales de {label} configuradas.",

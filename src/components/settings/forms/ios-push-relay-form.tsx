@@ -94,6 +94,9 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
           <Input
             id="apns-relay-key"
             type="password"
+            autoComplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
             value={relayKey}
             onChange={(e) => { setRelayKey(e.target.value); setStatus("idle"); }}
             placeholder="••••••••"

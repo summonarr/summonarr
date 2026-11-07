@@ -22,7 +22,10 @@ import type { SummonarrSession } from "@/lib/api-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { getMfaState, type MfaState, type SecondFactorInput } from "./mfa-store";
-import { verifySecondFactorGuarded } from "./lockout";
+import { verifySecondFactorGuarded, type GuardContext } from "./lockout";
+
+// What a second-factor step-up confirms (everything but a sign-in).
+type StepUpContext = Exclude<GuardContext["context"], "sign-in">;
 import { commitToken, releaseToken, reserveToken, verifyMfaStepUpToken } from "./mfa-token";
 import { webAuthnConfigFromEnv, type AuthenticationResponseJSON } from "./webauthn";
 
@@ -36,8 +39,12 @@ export interface StepUpUser {
   email: string;
 }
 
-// The non-password half: is this session's account eligible at all?
-export async function mfaEligibleUser(session: SummonarrSession, t: Translator): Promise<StepUpUser | NextResponse> {
+// The one eligibility rule (both entry points below use it, so they can't
+// drift): a local-credentials session on an account that has a password.
+async function loadEligibleUser(
+  session: SummonarrSession,
+  t: Translator,
+): Promise<(StepUpUser & { passwordHash: string }) | NextResponse> {
   const user = await prisma.user.findUnique({
     where: { id: session.user.id },
     select: { id: true, name: true, email: true, passwordHash: true },
@@ -46,6 +53,13 @@ export async function mfaEligibleUser(session: SummonarrSession, t: Translator):
   if (session.user.provider !== "credentials" || !user.passwordHash) {
     return NextResponse.json({ error: t("apiAuth.mfa.unavailable") }, { status: 403 });
   }
+  return { id: user.id, name: user.name, email: user.email, passwordHash: user.passwordHash };
+}
+
+// The non-password half: is this session's account eligible at all?
+export async function mfaEligibleUser(session: SummonarrSession, t: Translator): Promise<StepUpUser | NextResponse> {
+  const user = await loadEligibleUser(session, t);
+  if (user instanceof NextResponse) return user;
   return { id: user.id, name: user.name, email: user.email };
 }
 
@@ -58,14 +72,8 @@ export async function mfaReauthStepUp(
   if (!checkRateLimit(`mfa-stepup:${session.user.id}`, 10, 15 * 60 * 1000)) {
     return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
   }
-  const user = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { id: true, name: true, email: true, passwordHash: true },
-  });
-  if (!user) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
-  if (session.user.provider !== "credentials" || !user.passwordHash) {
-    return NextResponse.json({ error: t("apiAuth.mfa.unavailable") }, { status: 403 });
-  }
+  const user = await loadEligibleUser(session, t);
+  if (user instanceof NextResponse) return user;
   if (typeof password !== "string" || password.length === 0) {
     return NextResponse.json({ error: t("apiAuth.mfa.currentPasswordRequired") }, { status: 400 });
   }
@@ -163,7 +171,8 @@ export async function mfaSecondFactorStepUp(
   user: StepUpUser,
   raw: unknown,
   state?: MfaState,
-  opts: { requiredMessage?: string } = {},
+  // `context` names the action in a lockout's audit row (lockout.ts).
+  opts: { requiredMessage?: string; context?: StepUpContext } = {},
 ): Promise<SecondFactorProof | NextResponse> {
   const t = translatorForRequest(req);
   const current = state ?? (await getMfaState(user.id));
@@ -197,7 +206,7 @@ export async function mfaSecondFactorStepUp(
     verdict = await verifySecondFactorGuarded(user.id, parsed.input, {
       webauthnChallenge,
       webauthnConfig: webAuthnConfigFromEnv(),
-      context: "enrollment",
+      context: opts.context ?? "enrollment",
       ipAddress: getClientIp(req.headers),
       userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
     });

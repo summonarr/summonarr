@@ -220,6 +220,15 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown, opts?: { t
   }
   return Promise.all(arg as Promise<unknown>[]);
 });
+// The registry save lock (readArrInstanceRegistryForSave). Recorded with its
+// SQL so the ordering pins below can find it; `onLock` lets a test commit a
+// "concurrent" save at the moment this one holds the lock.
+let onLock: (() => void) | null = null;
+shadowPrismaClientMethod(prisma, "$executeRaw", async (query: { sql?: string } | TemplateStringsArray) => {
+  rec("$executeRaw", "sql" in query && typeof query.sql === "string" ? query.sql : String(query));
+  onLock?.();
+  return 0;
+});
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => { rec("$queryRawUnsafe"); return []; });
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => { rec("$queryRaw"); return []; });
 
@@ -284,6 +293,7 @@ beforeEach(() => {
   arrTestOk = true;
   ipinfoOk = true;
   openRequestCount = 0;
+  onLock = null;
 });
 
 // ── gating ───────────────────────────────────────────────────────────────────
@@ -812,6 +822,159 @@ test("qualityProfileId must be a positive integer when provided — mirrors lang
     settings.set(arrSettingKey("radarr", "anime", "QualityProfileId"), "1");
     assert.equal((await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", qualityProfileId: v }] })).status, 200);
     assert.equal(settings.get(arrSettingKey("radarr", "anime", "QualityProfileId")), stored);
+  }
+});
+
+// ── secrets are type-checked and bounded before any write ───────────────────
+
+test("a non-string or over-long apiKey / webhookSecret is 400 with nothing written", async () => {
+  // Each reached tx.setting.upsert as-is and failed inside the transaction —
+  // a 500 instead of a 400.
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "real-key");
+  for (const inst of [
+    { apiKey: 123 },
+    { apiKey: { set: "x" } },
+    { apiKey: null },
+    { webhookSecret: [] },
+    { webhookSecret: false },
+    { apiKey: "k".repeat(513) },
+    { webhookSecret: "s".repeat(513) },
+  ]) {
+    ops = [];
+    const res = await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime", ...inst }] });
+    assert.equal(res.status, 400, `${JSON.stringify(inst).slice(0, 60)} should be refused`);
+    assert.match((await res.json()).error, /for "anime" must be text of at most 512 characters/);
+    assert.equal(opsOf("setting.upsert").length, 0);
+    assert.equal(opsOf("$transaction").length, 0, "refused before the transaction opens");
+  }
+  assert.equal(settings.get(arrSettingKey("radarr", "anime", "ApiKey")), "real-key");
+
+  const ok = await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime", apiKey: "k".repeat(512) }] });
+  assert.equal(ok.status, 200, "exactly the cap is accepted");
+  assert.equal(settings.get(arrSettingKey("radarr", "anime", "ApiKey")), "k".repeat(512));
+});
+
+test("the slug \"external\" is refused: its Url key is the default instance's ExternalUrl", async () => {
+  const t = await mintSession();
+  settings.set(arrSettingKey("radarr", "", "ExternalUrl"), "https://radarr.example.com");
+  const res = await saveInstances(t, { service: "radarr", instances: [{ slug: "external", name: "Ext", url: "http://10.0.0.8:7878" }] });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "invalid instance slug: external");
+  assert.equal(opsOf("setting.upsert").length, 0);
+  assert.equal(settings.get(arrSettingKey("radarr", "", "ExternalUrl")), "https://radarr.example.com");
+});
+
+// ── concurrent saves: the removal diff runs under the lock ──────────────────
+
+test("the registry read that decides removals runs inside the transaction, after the save lock and before the registry write", async () => {
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  await saveInstances(t, { service: "radarr", instances: [] });
+
+  const txAt = ops.findIndex((o) => o.op === "$transaction");
+  const lockAt = ops.findIndex((o) => o.op === "$executeRaw");
+  const readAt = ops.findIndex((o) => o.op === "setting.findUnique" && o.args === "arrRadarrInstances");
+  const writeAt = ops.findIndex((o) => o.op === "setting.upsert" && (o.args as { key: string }).key === "arrRadarrInstances");
+  assert.ok(txAt >= 0 && lockAt > txAt, "the lock is taken inside the transaction");
+  assert.match(String(ops[lockAt].args), /pg_advisory_xact_lock\(2101, 1\)/, "Radarr's own save lock");
+  assert.ok(readAt > lockAt, "the registry is read after the lock — never before the transaction");
+  assert.ok(writeAt > readAt, "…and before it is rewritten");
+});
+
+test("an instance another save added while this one waited for the lock is REMOVED with its rows, not orphaned", async () => {
+  // Read before the transaction, the diff never saw "west": the registry write
+  // dropped it, but its Setting rows (the encrypted API key) stayed forever.
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  onLock = () => {
+    onLock = null;
+    registry("radarr", [{ slug: "anime", name: "Anime" }, { slug: "west", name: "West" }]);
+    settings.set(arrSettingKey("radarr", "west", "Url"), "http://10.0.0.7:7878");
+    settings.set(arrSettingKey("radarr", "west", "ApiKey"), "west-key");
+  };
+  const res = await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime" }] });
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()).removed, [{ slug: "west", openRequests: 0 }]);
+  assert.equal(settings.get(arrSettingKey("radarr", "west", "ApiKey")), undefined, "no orphaned API key");
+  assert.equal(settings.get(arrSettingKey("radarr", "west", "Url")), undefined);
+  assert.deepEqual(JSON.parse(settings.get("arrRadarrInstances") ?? "[]").map((e: { slug: string }) => e.slug), ["anime"]);
+});
+
+test("\"keep the saved key\" for a named instance another save just removed is a 409, not a keyless re-add", async () => {
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "anime-key");
+  onLock = () => {
+    onLock = null;
+    registry("radarr", []);
+    settings.delete(arrSettingKey("radarr", "anime", "ApiKey"));
+  };
+  const res = await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime", apiKey: "••••••••" }] });
+  assert.equal(res.status, 409);
+  assert.deepEqual(JSON.parse(settings.get("arrRadarrInstances") ?? "[]"), [], "not re-registered without its key");
+  assert.equal(opsOf("setting.upsert").length, 0);
+});
+
+// ── baseVersion: a stale list is refused, never applied ──────────────────────
+
+test("GET hands out a version per service that tracks the NAMED instances only", async () => {
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  const v1 = (await (await getInstances(t)).json()).versions;
+  assert.equal(typeof v1.radarr, "string");
+  assert.equal(typeof v1.sonarr, "string");
+
+  // The default and 4K instances have their own forms; an edit there must not
+  // refuse the named-instance manager's next save.
+  settings.set(arrSettingKey("radarr", "", "Url"), "http://10.0.0.2:7878");
+  seed4k("radarr");
+  assert.equal((await (await getInstances(t)).json()).versions.radarr, v1.radarr);
+
+  settings.set(arrSettingKey("radarr", "anime", "RootFolder"), "/anime");
+  const v2 = (await (await getInstances(t)).json()).versions;
+  assert.notEqual(v2.radarr, v1.radarr, "a named instance's field is part of the version");
+  assert.equal(v2.sonarr, v1.sonarr, "the other service's version is untouched");
+});
+
+test("a save from a stale list (baseVersion no longer current) is 409 with NO write; the current version saves", async () => {
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "anime-key");
+  const stale = (await (await getInstances(t)).json()).versions.radarr;
+
+  // Another tab adds "west" with the same base version: that save is current.
+  const added = await saveInstances(t, {
+    service: "radarr",
+    baseVersion: stale,
+    instances: [{ slug: "anime", name: "Anime" }, { slug: "west", name: "West", url: "http://10.0.0.7:7878", apiKey: "west-key" }],
+  });
+  assert.equal(added.status, 200);
+  const current = (await added.json()).version;
+  assert.equal(current, (await (await getInstances(t)).json()).versions.radarr, "the POST's version is what GET now reports");
+
+  // The first tab still holds the old version and a list without "west".
+  ops = [];
+  const res = await saveInstances(t, { service: "radarr", baseVersion: stale, instances: [{ slug: "anime", name: "Anime" }] });
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /changed elsewhere/);
+  assert.equal(opsOf("setting.upsert").length, 0, "nothing written");
+  assert.equal(opsOf("setting.deleteMany").length, 0, "nothing removed");
+  assert.equal(settings.get(arrSettingKey("radarr", "west", "ApiKey")), "west-key", "the instance added elsewhere survives");
+
+  const ok = await saveInstances(t, { service: "radarr", baseVersion: current, instances: [{ slug: "anime", name: "Anime" }] });
+  assert.equal(ok.status, 200, "the current version is accepted — and removes west as asked");
+  assert.equal(settings.get(arrSettingKey("radarr", "west", "ApiKey")), undefined);
+});
+
+test("baseVersion must be a string when sent", async () => {
+  const t = await mintSession();
+  for (const baseVersion of [1, null, {}, []]) {
+    ops = [];
+    const res = await saveInstances(t, { service: "radarr", baseVersion, instances: [] });
+    assert.equal(res.status, 400);
+    assert.equal(opsOf("$transaction").length, 0);
   }
 });
 

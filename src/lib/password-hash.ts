@@ -1,6 +1,7 @@
 import { scrypt as scryptCb, randomBytes, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 import { processSingleton } from "@/lib/process-singleton";
+import { MAX_PASSWORD_LENGTH } from "@/lib/password-policy";
 
 const scrypt = promisify(scryptCb) as (
   pw: string,
@@ -47,12 +48,11 @@ const MAX_R = 16;
 const MAX_P = 4;
 const MAX_MEMORY_BYTES = 256 * 1024 * 1024;
 
-// Shared upper bound for user-supplied passwords. Enforced identically on every
-// write (register, password change) AND on credential sign-in, so a password that
-// is accepted can always authenticate — a write cap above the sign-in cap would
-// silently lock out anyone whose password landed in the gap. scrypt has no length
-// limit of its own; this just bounds the work an unauthenticated caller can demand.
-export const MAX_PASSWORD_LENGTH = 1024;
+// The shared length cap (password-policy.ts), re-exported for the server callers
+// that already import it from here. Callers check it first to answer with their
+// own translated 400; hashPassword and verifyPassword enforce it again below, so
+// a caller that forgets can't feed unbounded input into the hash slot.
+export { MAX_PASSWORD_LENGTH };
 
 // ─── the hash slot ──────────────────────────────────────────────────────────
 //
@@ -214,13 +214,29 @@ function getDummyHash(): Promise<string> {
 // dummy-verify paths. Errors are irrelevant here; the lazy path recomputes.
 void getDummyHash().catch(() => {});
 
+export class PasswordTooLongError extends Error {
+  constructor() {
+    super(`password exceeds ${MAX_PASSWORD_LENGTH} characters`);
+    this.name = "PasswordTooLongError";
+  }
+}
+
 export async function hashPassword(password: string): Promise<string> {
+  // A password that could never sign in (verifyPassword refuses it) must never
+  // be stored either.
+  if (password.length > MAX_PASSWORD_LENGTH) throw new PasswordTooLongError();
   const salt = randomBytes(SCRYPT_SALT_BYTES);
   const key = await withHashSlot(() => derive(password, salt, SCRYPT_KEYLEN, SCRYPT_PARAMS));
   return encode(SCRYPT_PARAMS, salt, key);
 }
 
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  // Over the cap: refused, but only after the same work as a current-cost
+  // verify, so the length can't be told apart by timing either.
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    await dummyVerify();
+    return false;
+  }
   const parsed = parseHash(hash);
   if (!parsed) return false;
   return withHashSlot(async () => {

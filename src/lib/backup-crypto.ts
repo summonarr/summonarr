@@ -33,10 +33,17 @@ export class BackupCryptoError extends Error {
   }
 }
 
-async function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
+// Both wrappers check the password SYNCHRONOUSLY, before any stream exists, so a
+// caller's try/catch around them sees the refusal (and nothing has started
+// reading the source). deriveKey keeps the same check as a second line.
+function assertPassword(password: string): void {
   if (typeof password !== "string" || password.length === 0) {
     throw new BackupCryptoError("Password is required for encrypted backups");
   }
+}
+
+async function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
+  assertPassword(password);
   // NFKC normalisation ensures identical passphrases with different Unicode forms produce the same key
   return pbkdf2P(password.normalize("NFKC"), salt, KDF_ITERATIONS, KEY_LEN, "sha256");
 }
@@ -70,6 +77,7 @@ export function wrapEncryptStream(
   source: ReadableStream<Uint8Array>,
   password: string,
 ): ReadableStream<Uint8Array> {
+  assertPassword(password);
   const salt = randomBytes(SALT_LEN);
   const iv = randomBytes(IV_LEN);
   const header = buildHeader(salt, iv);
@@ -113,6 +121,9 @@ export function wrapEncryptStream(
           }
         }
       } catch (err) {
+        // Release the source too: a producer suspended on backpressure (the
+        // db-export snapshot transaction) would otherwise wait for its timeout.
+        reader.cancel(err).catch(() => {});
         controller.error(err);
       }
     },
@@ -129,6 +140,7 @@ export function wrapDecryptStream(
   source: ReadableStream<Uint8Array>,
   password: string,
 ): ReadableStream<Uint8Array> {
+  assertPassword(password);
   const reader = source.getReader();
 
   let headerBuf = Buffer.alloc(0);
@@ -223,6 +235,8 @@ export function wrapDecryptStream(
           }
         }
       } catch (err) {
+        // Stop the upload being read: nothing after a failed header or tag is used.
+        reader.cancel(err).catch(() => {});
         controller.error(err);
       }
     },

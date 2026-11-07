@@ -7,6 +7,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isNativeSessionForStepUp, requireStepUp } from "@/lib/step-up-auth";
 import { generateDiscordMergeCode } from "@/lib/discord-merge-code";
+import { isFeatureEnabled } from "@/lib/features";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
@@ -14,6 +15,12 @@ const SNOWFLAKE_RE = /^\d{17,20}$/;
 
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // With the Discord integration switched off nothing is linked and nobody is
+  // DM'd, even with a bot token still saved. First, so a refusal spends no rate
+  // limit, step-up or write.
+  if (!(await isFeatureEnabled("feature.integration.discord"))) {
+    return NextResponse.json({ error: t("apiUser.discord.disabled") }, { status: 403 });
+  }
   const parsed = await readJsonCapped<{ discordId?: unknown; confirmPassword?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const discordId = String(parsed.discordId ?? "").trim();

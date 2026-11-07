@@ -21,6 +21,7 @@ import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/bac
 import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
 import { invalidateCachedSessionChecks } from "@/lib/session-revocation";
 import { clearArrSnapshots } from "@/lib/arr-snapshot";
+import { lockSetupInTx } from "@/lib/setup-lock";
 
 // Verbose INSERT-per-row encoding inflates row data 3–5×. The validated
 // statements are spooled to a temp file (never held in memory), so this cap
@@ -37,10 +38,18 @@ function configuredMaxRestoreBytes(): number {
 export const MAX_PLAINTEXT_BYTES = configuredMaxRestoreBytes();
 export const MAX_CIPHERTEXT_BYTES = MAX_PLAINTEXT_BYTES + 4096;
 // 10 minutes minimum, then one second per MB of plaintext, so a multi-GB
-// restore isn't rolled back by a timeout sized for 500 MB.
+// restore isn't rolled back by a timeout sized for 500 MB. Every statement is
+// its own round trip inside the one transaction, so a dump of many small rows
+// (PlayHistory, AuditLog: thousands per MB) also gets time per statement.
 const MIN_RESTORE_TX_TIMEOUT_MS = 10 * 60 * 1000;
-function restoreTxTimeoutMs(plaintextBytes: number): number {
-  return Math.max(MIN_RESTORE_TX_TIMEOUT_MS, Math.ceil(plaintextBytes / (1024 * 1024)) * 1000);
+const RESTORE_MS_PER_MB = 1000;
+const RESTORE_MS_PER_STATEMENT = 2;
+export function restoreTxTimeoutMs(plaintextBytes: number, statements: number): number {
+  return Math.max(
+    MIN_RESTORE_TX_TIMEOUT_MS,
+    Math.ceil(plaintextBytes / (1024 * 1024)) * RESTORE_MS_PER_MB,
+    statements * RESTORE_MS_PER_STATEMENT,
+  );
 }
 
 // Validated statements, length-prefixed (uint32 BE + UTF-8) in a temp file so a
@@ -87,17 +96,28 @@ class StatementSpool {
       this.fh = null;
     }
     if (!this.file) return;
-    let carry: Buffer = Buffer.alloc(0);
+    // Read chunks are collected and joined only once enough bytes have arrived
+    // for the next whole statement (`need`). Joining on every 64 KB read copied
+    // a multi-MB statement once per read, quadratic in its size.
+    let pending: Buffer[] = [];
+    let pendingBytes = 0;
+    let need = 4;
     for await (const chunk of createReadStream(this.file)) {
-      carry = carry.length === 0 ? (chunk as Buffer) : Buffer.concat([carry, chunk as Buffer]);
+      pending.push(chunk as Buffer);
+      pendingBytes += (chunk as Buffer).length;
+      if (pendingBytes < need) continue;
+      const buf = pending.length === 1 ? pending[0] : Buffer.concat(pending, pendingBytes);
       let off = 0;
-      while (carry.length - off >= 4) {
-        const len = carry.readUInt32BE(off);
-        if (carry.length - off - 4 < len) break;
-        yield carry.toString("utf8", off + 4, off + 4 + len);
+      while (buf.length - off >= 4) {
+        const len = buf.readUInt32BE(off);
+        if (buf.length - off - 4 < len) break;
+        yield buf.toString("utf8", off + 4, off + 4 + len);
         off += 4 + len;
       }
-      carry = off === 0 ? carry : carry.subarray(off);
+      const rest = buf.subarray(off);
+      pending = rest.length > 0 ? [rest] : [];
+      pendingBytes = rest.length;
+      need = rest.length >= 4 ? 4 + rest.readUInt32BE(0) : 4;
     }
   }
 
@@ -437,6 +457,57 @@ export type BackupImportResult =
 
 export type BackupImportMode = "setup" | "admin";
 
+// The pre-auth ("setup") restore runs before any admin account exists and
+// authenticates solely with BACKUP_DB_PASSWORD, so on an internet-facing
+// instance a leaked/weak password lets an attacker replace the database before
+// the legitimate operator registers. TRUST_PROXY=true marks the deployment as
+// internet-facing; it then needs an explicit opt-in. A LAN/loopback deployment
+// (the default) is already protected by the proxy's local-only Host guard, so
+// its first-run restore keeps working with no extra configuration. The setup
+// routes check the same predicate at chunk 0 (backup-routes.ts).
+export function setupRestoreDisabled(): boolean {
+  return process.env.TRUST_PROXY === "true" && process.env.SUMMONARR_ALLOW_SETUP_RESTORE !== "true";
+}
+
+// The messages a client can see for these fixed failures. backup-messages.ts
+// translates them by this exact text.
+export const SETUP_NOT_FRESH_MESSAGE = "Setup import is only available on a fresh server with no users.";
+export const RESTORE_ROLLED_BACK_MESSAGE =
+  "Restore failed and was rolled back — the database is unchanged. Check the server logs for details.";
+export const SETUP_RESTORE_DISABLED_MESSAGE =
+  "Pre-authentication restore is disabled on this internet-facing instance. " +
+  "Set SUMMONARR_ALLOW_SETUP_RESTORE=true to enable a first-run restore, then unset it once the admin account exists.";
+const READ_FAILED_MESSAGE = "Failed to read backup";
+
+// Drops every other process memo built from the tables a restore replaces.
+// After the commit only (guardrail 27), and best-effort: a failure here must not
+// turn a committed restore into an error. Loaded on demand so the restore
+// pipeline doesn't pull auth, play history and the rest into every module that
+// imports it (import-session.ts does, for the size cap).
+async function invalidateRestoredCaches(): Promise<void> {
+  try {
+    const { invalidateCachesAfterRestore } = await import("@/lib/restore-caches");
+    invalidateCachesAfterRestore();
+  } catch (err) {
+    console.error("[backup/import] cache invalidation after restore failed:", err);
+  }
+}
+
+// Raised by the replay stream when the upload passes MAX_CIPHERTEXT_BYTES.
+class CiphertextOverflowError extends Error {}
+
+function ciphertextOverflow(): BackupImportResult {
+  return { ok: false, status: 413, error: `Encrypted body exceeds ${MAX_CIPHERTEXT_BYTES} bytes` };
+}
+
+// A failure while reading or decrypting the upload, as a client result.
+function readFailure(err: unknown, where: "drain" | "stream"): BackupImportResult {
+  if (err instanceof BackupCryptoError) return { ok: false, status: err.status, error: err.message };
+  if (err instanceof CiphertextOverflowError) return ciphertextOverflow();
+  console.error(`[backup] db-import ${where} error:`, err);
+  return { ok: false, status: 400, error: READ_FAILED_MESSAGE };
+}
+
 export async function processBackupImport(
   body: ReadableStream<Uint8Array>,
   password: string,
@@ -456,29 +527,10 @@ async function runBackupImport(
   mode: BackupImportMode,
   spool: StatementSpool,
 ): Promise<BackupImportResult> {
-  // Pre-auth ("setup") restore runs before any admin account exists and
-  // authenticates solely with BACKUP_DB_PASSWORD, so on an internet-facing
-  // instance a leaked/weak password lets an attacker replace the database
-  // before the legitimate operator registers. Require an explicit opt-in to
-  // keep that path open when the instance is reachable from untrusted networks.
-  //
-  // The opt-in is only enforced when TRUST_PROXY=true (the deployment is behind
-  // a public-facing reverse proxy). A LAN/loopback deployment — the default —
-  // is already protected by the proxy's local-only Host guard, so its
-  // first-run restore keeps working with no extra configuration.
-  if (
-    mode === "setup" &&
-    process.env.TRUST_PROXY === "true" &&
-    process.env.SUMMONARR_ALLOW_SETUP_RESTORE !== "true"
-  ) {
+  // The authoritative check of the setup routes' internet-facing opt-in.
+  if (mode === "setup" && setupRestoreDisabled()) {
     body.cancel().catch(() => {});
-    return {
-      ok: false,
-      status: 403,
-      error:
-        "Pre-authentication restore is disabled on this internet-facing instance. " +
-        "Set SUMMONARR_ALLOW_SETUP_RESTORE=true to enable a first-run restore, then unset it once the admin account exists.",
-    };
+    return { ok: false, status: 403, error: SETUP_RESTORE_DISABLED_MESSAGE };
   }
 
   const sourceReader = body.getReader();
@@ -496,10 +548,9 @@ async function runBackupImport(
   }
 
   let totalCiphertextBytes = head.length;
-  const CIPHERTEXT_OVERFLOW_TAG = "__BACKUP_CIPHERTEXT_OVERFLOW__";
   if (totalCiphertextBytes > MAX_CIPHERTEXT_BYTES) {
     sourceReader.cancel().catch(() => {});
-    return { ok: false, status: 413, error: `Encrypted body exceeds ${MAX_CIPHERTEXT_BYTES} bytes` };
+    return ciphertextOverflow();
   }
 
   let firstEmitted = false;
@@ -518,7 +569,7 @@ async function runBackupImport(
       if (value) {
         totalCiphertextBytes += value.byteLength;
         if (totalCiphertextBytes > MAX_CIPHERTEXT_BYTES) {
-          controller.error(new Error(CIPHERTEXT_OVERFLOW_TAG));
+          controller.error(new CiphertextOverflowError());
           sourceReader.cancel().catch(() => {});
           return;
         }
@@ -534,6 +585,9 @@ async function runBackupImport(
   try {
     plaintextStream = wrapDecryptStream(replay, password);
   } catch (err) {
+    // wrapDecryptStream refuses an empty password synchronously, before it
+    // takes the replay stream, so release the upload here.
+    replay.cancel(err).catch(() => {});
     if (err instanceof BackupCryptoError) {
       return { ok: false, status: err.status, error: err.message };
     }
@@ -551,7 +605,9 @@ async function runBackupImport(
     pendingDash: false,
   };
   let totalStatements = 0;
-  let skipped = 0;
+  // The splitter only ever emits non-empty statements, so nothing is skipped;
+  // the field stays in the summary (the routes and audit rows report it).
+  const skipped = 0;
   const errors: string[] = [];
   let totalPlaintextBytes = 0;
   let aborted = false;
@@ -565,7 +621,6 @@ async function runBackupImport(
   function collectStatement(stmt: string): void {
     if (aborted) return;
     totalStatements++;
-    if (!stmt) { skipped++; return; }
     const safe = isStatementSafe(stmt);
     if (!safe.ok) {
       errors.push(safe.reason);
@@ -625,25 +680,13 @@ async function runBackupImport(
       try {
         await drainPlaintext(ptReader);
       } catch (err) {
-        if (err instanceof BackupCryptoError) {
-          cryptoVerifyError = err;
-        } else if (err instanceof Error && err.message === CIPHERTEXT_OVERFLOW_TAG) {
-          return { ok: false, status: 413, error: `Encrypted body exceeds ${MAX_CIPHERTEXT_BYTES} bytes` };
-        } else {
-          console.error("[backup] db-import drain error:", err);
-          return { ok: false, status: 400, error: "Failed to read backup" };
-        }
+        // A tag failure is held, not returned: it outranks the abort reason below.
+        if (err instanceof BackupCryptoError) cryptoVerifyError = err;
+        else return readFailure(err, "drain");
       }
     }
   } catch (err) {
-    if (err instanceof BackupCryptoError) {
-      return { ok: false, status: err.status, error: err.message };
-    }
-    if (err instanceof Error && err.message === CIPHERTEXT_OVERFLOW_TAG) {
-      return { ok: false, status: 413, error: `Encrypted body exceeds ${MAX_CIPHERTEXT_BYTES} bytes` };
-    }
-    console.error("[backup] db-import stream error:", err);
-    return { ok: false, status: 400, error: "Failed to read backup" };
+    return readFailure(err, "stream");
   } finally {
     ptReader.releaseLock();
   }
@@ -725,24 +768,21 @@ async function runBackupImport(
   let executed = 0;
   const conflictSkippedByTable: Record<string, number> = {};
   let conflictSkippedTotal = 0;
-  let lockGateRejection: { status: number; error: string } | null = null;
+  let rejection: { status: number; error: string } | null;
   try {
-    await prisma.$transaction(async (tx) => {
-      // Advisory lock 43 is shared with /api/auth/register and /api/setup/import. Holding it
-      // inside the TRUNCATE+INSERT transaction guarantees a racing register can't sneak a new
-      // user row between an outer freshness check and the truncate. In "setup" mode we also
-      // re-check the freshness invariant under the lock so an attacker can't pre-stage a
-      // chunked import and fire the final chunk after a legitimate admin completes setup.
-      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
+    rejection = await prisma.$transaction(async (tx) => {
+      // Advisory lock 43 (setup-lock.ts) is shared with /api/auth/register and the setup
+      // gates. Holding it inside the TRUNCATE+INSERT transaction guarantees a racing register
+      // can't sneak a new user row between an outer freshness check and the truncate. In
+      // "setup" mode we also re-check the freshness invariant under the lock so an attacker
+      // can't pre-stage a chunked import and fire the final chunk after a legitimate admin
+      // completes setup.
+      await lockSetupInTx(tx);
       if (mode === "setup") {
         const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
         const userCount = await tx.user.count();
         if (setupCompleted !== null || userCount > 0) {
-          lockGateRejection = {
-            status: 409,
-            error: "Setup import is only available on a fresh server with no users.",
-          };
-          return;
+          return { status: 409, error: SETUP_NOT_FRESH_MESSAGE };
         }
       }
       await tx.$executeRawUnsafe(truncateStmt);
@@ -779,21 +819,16 @@ async function runBackupImport(
       // same transaction, so a rolled-back restore leaves sessions untouched.
       await tx.authSession.deleteMany({});
       await tx.user.updateMany({ data: { sessionsRevokedAt: new Date() } });
-    }, { timeout: restoreTxTimeoutMs(totalPlaintextBytes), maxWait: 10_000 });
+      return null;
+    }, { timeout: restoreTxTimeoutMs(totalPlaintextBytes, spool.count), maxWait: 10_000 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Log the underlying DB error server-side; do not echo it to the client.
     // The raw message can disclose schema/column/constraint internals.
     console.error("[backup/import] import failed:", msg);
-    return {
-      ok: false,
-      status: 500,
-      error:
-        "Restore failed and was rolled back — the database is unchanged. Check the server logs for details.",
-    };
+    return { ok: false, status: 500, error: RESTORE_ROLLED_BACK_MESSAGE };
   }
 
-  const rejection = lockGateRejection as { status: number; error: string } | null;
   if (rejection) {
     return { ok: false, status: rejection.status, error: rejection.error };
   }
@@ -806,6 +841,9 @@ async function runBackupImport(
   // `cached=1` read skips its route's instance checks, so a kept answer could
   // paint an instance the restored config no longer has (guardrail 5h).
   clearArrSnapshots();
+  // Every other memo built from the replaced tables (feature flags, the
+  // Discord key, session lengths, agents, library and activity caches).
+  await invalidateRestoredCaches();
 
   warnings.push(
     "Every account was signed out by the restore (sessions in the backup are never brought back). Sign in again.",

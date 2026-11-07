@@ -207,8 +207,23 @@ function isSafeAddr(addr: string): boolean {
   if (/^64:ff9b::/i.test(addr)) return false;
   // ULA (fc00::/7) — private IPv6
   if (/^f[cd][0-9a-f]{2}:/i.test(addr)) return false;
+  // Special-purpose space a deployment can route internally: IETF protocol
+  // assignments (192.0.0.0/24), benchmarking (198.18.0.0/15, often reused as
+  // private LAN space), and RFC 8215 local-use NAT64 (64:ff9b:1::/48), which
+  // translates to IPv4 behind a local NAT64 — private IPv4 included — at an
+  // operator-chosen prefix length, so its payload can't be unwrapped reliably.
+  if (/^192\.0\.0\./.test(addr)) return false;
+  if (/^198\.1[89]\./.test(addr)) return false;
+  if (isLocalUseNat64(addr)) return false;
 
   return true;
+}
+
+function isLocalUseNat64(addr: string): boolean {
+  if (!addr.includes(":")) return false;
+  const v = ipv6ToBigInt(addr);
+  if (v !== null) return v >> 80n === 0x64ff9b0001n;
+  return /^64:ff9b:1:/i.test(addr); // unparseable spelling — fail closed on the prefix
 }
 
 // For admin-configured server URLs (Plex/Radarr/Sonarr/Jellyfin). Permits RFC1918, ULA,

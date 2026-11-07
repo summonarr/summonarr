@@ -22,7 +22,6 @@ const PAGES: Array<{ file: string; raws: string[] }> = [
   { file: "src/app/(app)/requests/page.tsx", raws: ["qRaw"] },
   { file: "src/app/(app)/issues/page.tsx", raws: ["qRaw", "selectedRaw"] },
   { file: "src/app/(app)/admin/issues/page.tsx", raws: ["selectedRaw"] },
-  { file: "src/app/(app)/admin/audit-log/page.tsx", raws: ["userRaw", "targetRaw"] },
   { file: "src/app/(app)/admin/activity/users/page.tsx", raws: ["searchRaw"] },
 ];
 
@@ -43,6 +42,17 @@ for (const { file, raws } of PAGES) {
     }
   });
 }
+
+// The audit-log page reads its filter the way the list and export routes do:
+// through a URLSearchParams (a repeated key is its first value) handed to the
+// shared builder, never by calling a string method on a raw prop.
+test("src/app/(app)/admin/audit-log/page.tsx reads its filter through a URLSearchParams, first value per key", () => {
+  const src = read("src/app/(app)/admin/audit-log/page.tsx");
+  assert.match(src, /new URLSearchParams\(\)/);
+  assert.match(src, /Array\.isArray\(value\) \? value : /, "an array value must be appended item by item");
+  assert.match(src, /buildAuditLogWhere\(query\)/);
+  assert.doesNotMatch(src, /sanitizeContainsSearch/, "the builder sanitizes; the page never touches a raw value");
+});
 
 test("smoke-test.sh checks every static sensitive Setting key for plaintext", () => {
   const script = read("scripts/smoke-test.sh");

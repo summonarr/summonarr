@@ -2,7 +2,9 @@
 // (setup-mode at /api/setup/import-chunk and admin at /api/admin/backup/
 // db-import-chunk). Restore is a destructive, single-shot operation — two
 // concurrent runs would race the same transaction — so a single global
-// slot is enough. A second open while one is active returns 409.
+// slot is enough. A second open while one is active returns 409. The slot is
+// process-wide (processSingleton, guardrail 27a): the two routes live in
+// different chunks, and a per-chunk slot would give each its own.
 //
 // Each session gets a mkdtemp-generated directory so the path is unpredictable.
 // The directory (and its contents) is removed on success, cancel, or expiry.
@@ -12,6 +14,7 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import { MAX_CIPHERTEXT_BYTES } from "@/lib/backup-import";
 import { restoreScratchDir } from "@/lib/restore-scratch";
+import { processSingleton } from "@/lib/process-singleton";
 
 // IDLE window: bumped to now+TTL on every chunk (appendChunkUnsafe), so this is the
 // allowed gap BETWEEN chunks, not the total upload time. Kept tight so an attacker
@@ -36,19 +39,21 @@ type Session = {
   importing?: boolean;
 };
 
-let active: Session | null = null;
-// Serializes startSession calls so the active-slot check + mkdtemp + assignment
-// run atomically. Without this, two concurrent first-chunk POSTs with different
-// uploadIds can both pass the `active` check (one synchronous, one before the
-// other's mkdtemp resolves), each mkdtemp their own dir, and the loser's tempDir
-// is leaked when `active = session` clobbers the winner.
-let startMutex: Promise<unknown> = Promise.resolve();
-
-// Per-session chained promise so concurrent appendChunk calls for the same
-// session serialize their reads/writes. Without this, two first-chunk POSTs
-// can both pass the receivedChunks check and both open the file with "w",
-// interleaving writes and corrupting the upload.
-const appendQueue = new Map<string, Promise<unknown>>();
+const state = processSingleton("import-session:state", () => ({
+  active: null as Session | null,
+  // Serializes startSession calls so the active-slot check + mkdtemp + assignment
+  // run atomically. Without this, two concurrent first-chunk POSTs with different
+  // uploadIds can both pass the `active` check (one synchronous, one before the
+  // other's mkdtemp resolves), each mkdtemp their own dir, and the loser's tempDir
+  // is leaked when `active = session` clobbers the winner.
+  startMutex: Promise.resolve() as Promise<unknown>,
+  // Per-session chained promise so concurrent appendChunk calls for the same
+  // session serialize their reads/writes. Without this, two first-chunk POSTs
+  // can both pass the receivedChunks check and both open the file with "w",
+  // interleaving writes and corrupting the upload. clearSession and
+  // cancelSession wait on it too, so they never remove the file mid-write.
+  appendQueue: new Map<string, Promise<unknown>>(),
+}));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -81,7 +86,11 @@ export async function startSession(
 ): Promise<{ ok: true; session: Session } | { ok: false; error: SessionStartError }> {
   if (!UUID_RE.test(opts.uploadId)) return { ok: false, error: { kind: "invalid-id" } };
   if (!Number.isFinite(opts.totalSize) || opts.totalSize <= 0) return { ok: false, error: { kind: "invalid-size" } };
-  if (!Number.isFinite(opts.totalChunks) || opts.totalChunks <= 0) return { ok: false, error: { kind: "invalid-size" } };
+  // Every chunk but a (degenerate) empty last one carries at least one byte, so
+  // more chunks than bytes is never a real upload.
+  if (!Number.isInteger(opts.totalChunks) || opts.totalChunks <= 0 || opts.totalChunks > opts.totalSize) {
+    return { ok: false, error: { kind: "invalid-size" } };
+  }
   if (opts.totalSize > MAX_CIPHERTEXT_BYTES) {
     return { ok: false, error: { kind: "size-too-large", max: MAX_CIPHERTEXT_BYTES } };
   }
@@ -90,12 +99,13 @@ export async function startSession(
   // (whether it claimed the slot or rejected). The earlier check-then-mkdtemp
   // shape let two callers each pass the `active` check before either's mkdtemp
   // resolved, leaving the loser's tempDir orphaned.
-  const prev = startMutex;
+  const prev = state.startMutex;
   let resolveMutex!: () => void;
-  startMutex = new Promise<void>((r) => { resolveMutex = r; });
+  state.startMutex = new Promise<void>((r) => { resolveMutex = r; });
   await prev;
 
   try {
+    const active = state.active;
     if (active && !isExpired(active) && active.uploadId !== opts.uploadId) {
       return { ok: false, error: { kind: "in-progress" } };
     }
@@ -112,11 +122,11 @@ export async function startSession(
     }
 
     if (active && isExpired(active)) {
+      // Detach first: an append still writing to it sees the slot change and
+      // reports no-session instead of touching whatever comes next.
+      if (state.active === active) state.active = null;
       await cleanupSession(active);
-      active = null;
-    }
-
-    if (active && active.uploadId === opts.uploadId) {
+    } else if (active && active.uploadId === opts.uploadId) {
       return { ok: true, session: active };
     }
 
@@ -133,7 +143,7 @@ export async function startSession(
       bytesWritten: 0,
       expiresAt: Date.now() + SESSION_TTL_MS,
     };
-    active = session;
+    state.active = session;
     return { ok: true, session };
   } finally {
     resolveMutex();
@@ -152,59 +162,84 @@ type AppendResult =
   | { ok: true; received: number; total: number; bytesWritten: number; complete: boolean }
   | { ok: false; error: AppendError };
 
+// Detach the session from the slot (if it still holds it), then remove its files.
+async function dropSession(s: Session): Promise<void> {
+  if (state.active === s) state.active = null;
+  await cleanupSession(s);
+}
+
 async function appendChunkUnsafe(
   uploadId: string,
   chunkIndex: number,
   data: Uint8Array,
 ): Promise<AppendResult> {
-  if (!active) return { ok: false, error: { kind: "no-session" } };
-  if (active.uploadId !== uploadId) return { ok: false, error: { kind: "session-mismatch" } };
+  // The session this append works on, captured once: the slot can be cleared
+  // or reclaimed (an expired session) while the write below is awaited, and
+  // the counters must never move on whatever replaced it.
+  const s = state.active;
+  if (!s) return { ok: false, error: { kind: "no-session" } };
+  if (s.uploadId !== uploadId) return { ok: false, error: { kind: "session-mismatch" } };
   // Same never-reclaim-while-importing rule as startSession: an importing
   // session that outlived the idle TTL must not have its tempDir rm'd out from
   // under the in-flight read by a retried chunk. It falls through to the index
   // check instead (receivedChunks == totalChunks once importing, so any retry
   // reads as out-of-order and touches nothing).
-  if (isExpired(active) && !active.importing) {
-    await cleanupSession(active);
-    active = null;
+  if (isExpired(s) && !s.importing) {
+    await dropSession(s);
     return { ok: false, error: { kind: "expired" } };
   }
-  if (chunkIndex !== active.receivedChunks) {
-    return { ok: false, error: { kind: "out-of-order", expected: active.receivedChunks } };
+  if (chunkIndex !== s.receivedChunks) {
+    return { ok: false, error: { kind: "out-of-order", expected: s.receivedChunks } };
   }
-  if (active.bytesWritten + data.byteLength > active.totalSize) {
-    return { ok: false, error: { kind: "size-overflow", max: active.totalSize } };
+  if (s.bytesWritten + data.byteLength > s.totalSize) {
+    return { ok: false, error: { kind: "size-overflow", max: s.totalSize } };
   }
 
-  const handle = await fs.open(active.filePath, active.receivedChunks === 0 ? "w" : "a");
   try {
-    await handle.write(data);
-  } finally {
-    await handle.close();
+    const handle = await fs.open(s.filePath, s.receivedChunks === 0 ? "w" : "a");
+    try {
+      await handle.write(data);
+    } finally {
+      await handle.close();
+    }
+  } catch (err) {
+    // A half-written chunk must never be resumed: drop the session (fail
+    // closed). Its directory gone under it (a concurrent reclaim) is just a
+    // session that no longer exists.
+    if (state.active !== s || (err as NodeJS.ErrnoException).code === "ENOENT") {
+      await dropSession(s);
+      return { ok: false, error: { kind: "no-session" } };
+    }
+    await dropSession(s);
+    throw err;
   }
-  active.receivedChunks += 1;
-  active.bytesWritten += data.byteLength;
-  active.expiresAt = Date.now() + SESSION_TTL_MS;
+  if (state.active !== s) {
+    // Reclaimed while writing: the bytes went to a session that is gone.
+    await cleanupSession(s);
+    return { ok: false, error: { kind: "no-session" } };
+  }
+  s.receivedChunks += 1;
+  s.bytesWritten += data.byteLength;
+  s.expiresAt = Date.now() + SESSION_TTL_MS;
 
   // On the final declared chunk the assembled file must match the declared
   // size exactly. The overflow guard above rejects too-many bytes; this rejects
   // a SHORT upload (client truncated, or sent fewer/smaller chunks than
   // declared), which would otherwise feed an incomplete ciphertext straight
   // into the importer.
-  if (active.receivedChunks === active.totalChunks && active.bytesWritten !== active.totalSize) {
-    const expected = active.totalSize;
-    const received = active.bytesWritten;
-    await cleanupSession(active);
-    active = null;
+  if (s.receivedChunks === s.totalChunks && s.bytesWritten !== s.totalSize) {
+    const expected = s.totalSize;
+    const received = s.bytesWritten;
+    await dropSession(s);
     return { ok: false, error: { kind: "size-mismatch", expected, received } };
   }
 
   return {
     ok: true,
-    received: active.receivedChunks,
-    total: active.totalChunks,
-    bytesWritten: active.bytesWritten,
-    complete: active.receivedChunks === active.totalChunks,
+    received: s.receivedChunks,
+    total: s.totalChunks,
+    bytesWritten: s.bytesWritten,
+    complete: s.receivedChunks === s.totalChunks,
   };
 }
 
@@ -213,16 +248,22 @@ export async function appendChunk(
   chunkIndex: number,
   data: Uint8Array,
 ): Promise<AppendResult> {
-  const prev = appendQueue.get(uploadId) ?? Promise.resolve();
+  const prev = state.appendQueue.get(uploadId) ?? Promise.resolve();
   const next = prev
     .catch(() => undefined)
     .then(() => appendChunkUnsafe(uploadId, chunkIndex, data));
-  appendQueue.set(uploadId, next);
+  state.appendQueue.set(uploadId, next);
   try {
     return await next;
   } finally {
-    if (appendQueue.get(uploadId) === next) appendQueue.delete(uploadId);
+    if (state.appendQueue.get(uploadId) === next) state.appendQueue.delete(uploadId);
   }
+}
+
+// Resolves once every append queued for `uploadId` so far has finished.
+function appendsSettled(uploadId: string): Promise<unknown> {
+  const pending = state.appendQueue.get(uploadId);
+  return pending ? pending.catch(() => undefined) : Promise.resolve();
 }
 
 // Cheap, side-effect-free check for whether `uploadId` owns the current active,
@@ -230,10 +271,12 @@ export async function appendChunk(
 // no prior chunk-0) BEFORE doing any expensive work (advisory lock, DB reads), so an
 // unauthenticated flood of junk chunks can't amplify into lock contention / DB load.
 export function hasActiveUploadSession(uploadId: string): boolean {
+  const active = state.active;
   return !!active && active.uploadId === uploadId && !isExpired(active);
 }
 
 export function getSessionStream(uploadId: string): ReadableStream<Uint8Array> | null {
+  const active = state.active;
   if (!active || active.uploadId !== uploadId) return null;
   // Mark the slot as importing so a concurrent startSession can't reclaim + rm
   // its tempDir while this stream is being read. clearSession (always called in
@@ -243,8 +286,24 @@ export function getSessionStream(uploadId: string): ReadableStream<Uint8Array> |
   return Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
 }
 
+// Unconditional release, for the server's own paths: the importer's finally
+// and the routes' refusals. Waits for any in-flight append of this upload.
 export async function clearSession(uploadId: string): Promise<void> {
-  if (!active || active.uploadId !== uploadId) return;
-  await cleanupSession(active);
-  active = null;
+  await appendsSettled(uploadId);
+  const s = state.active;
+  if (!s || s.uploadId !== uploadId) return;
+  await dropSession(s);
+}
+
+// A client's cancel (the routes' DELETE). Same as clearSession, except it never
+// touches a session whose file is being imported: the client cancels when the
+// final chunk's request fails at a proxy (502/504) while the server is still
+// restoring, and removing the file mid-read, or freeing the slot for a second
+// upload beside the running restore, is exactly what the importing flag forbids.
+// The importer's own clearSession frees it when the restore ends.
+export async function cancelSession(uploadId: string): Promise<void> {
+  await appendsSettled(uploadId);
+  const s = state.active;
+  if (!s || s.uploadId !== uploadId || s.importing) return;
+  await dropSession(s);
 }

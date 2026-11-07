@@ -35,6 +35,7 @@
 // sessions are REAL jose JWTs against in-memory AuthSession/User rows.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { Client } from "pg";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
 process.env.NEXTAUTH_SECRET = "sync-routes-test-secret-0123456789abcdef";
@@ -42,6 +43,35 @@ process.env.AUTH_URL = "http://localhost:3000"; // unprefixed cookie name + sess
 process.env.TRUST_PROXY = "true"; // silence rate-limit's module-load warning
 const CRON_SECRET = "sync-routes-cron-secret-0123456789abcdef"; // ≥32 chars, boot-shaped
 process.env.CRON_SECRET = CRON_SECRET;
+process.env.DATABASE_URL = "postgres://u:p@127.0.0.1:5432/db"; // Client.prototype is stubbed; never dialed
+
+// ── pg Client prototype stub (the withAdvisoryLock seam) ────────────────────
+// Both routes are single-flight under their own session lock (2111 Plex, 2112
+// Jellyfin). withAdvisoryLock news up its own Client, so patching the prototype
+// runs the REAL lock control flow with no network; lockAcquire decides
+// pg_try_advisory_lock per id.
+type PgResult = { rows: unknown[] };
+const pgLockCalls: Array<{ op: "try" | "unlock"; lockId: number }> = [];
+let lockAcquire: (lockId: number) => boolean = () => true;
+const pgProto = Client.prototype as unknown as {
+  connect: () => Promise<void>;
+  query: (text: string, values?: unknown[]) => Promise<PgResult>;
+  end: () => Promise<void>;
+};
+pgProto.connect = async () => {};
+pgProto.query = async (text, values) => {
+  if (text.includes("pg_try_advisory_lock")) {
+    const lockId = Number((values ?? [])[0]);
+    pgLockCalls.push({ op: "try", lockId });
+    return { rows: [{ acquired: lockAcquire(lockId) }] };
+  }
+  if (text.includes("pg_advisory_unlock")) {
+    pgLockCalls.push({ op: "unlock", lockId: Number((values ?? [])[0]) });
+    return { rows: [] };
+  }
+  return { rows: [] };
+};
+pgProto.end = async () => {};
 
 // ── console capture (guardrail 7: warn/error only, [scope]-prefixed) ────────
 const warns: string[] = [];
@@ -350,6 +380,8 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { POST: postPlexSync } = await import("../src/app/api/sync/plex/route.ts");
 const { POST: postJellyfinSync } = await import("../src/app/api/sync/jellyfin/route.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+const { CRON_SKIPPED_HEADER } = await import("../src/lib/cron-auth.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -541,6 +573,9 @@ async function settleFireAndForget(): Promise<void> {
 }
 
 beforeEach(() => {
+  pgLockCalls.length = 0;
+  lockAcquire = () => true;
+  resetLogDedup(); // warnOnChange is process-wide; a prior test's signature must not mute this one's warn
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
@@ -817,6 +852,29 @@ test("a NAMED instance's full resync does NOT stamp last-success — the stamp i
   assert.ok(!settings.has("lastPlexSyncSucceededAt"), "a healthy named server says nothing about the default one");
 });
 
+test("the DEFAULT server's full resync does NOT stamp last-success while another server is registered — that server may be the one that is down", async () => {
+  // The orchestrator stamps only when EVERY configured instance synced clean. A
+  // stamp from the default alone kept plexStale false for 24h while a named
+  // server was down, holding back the fallback that notifies its pinned users.
+  configurePlex();
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = plexMovieResponder([PLEX_ITEM_FULL]);
+  const plexRes = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(plexRes.status, 200);
+  await settleFireAndForget();
+  assert.ok(stagedLibraryRows("plexLibraryItemStaging").length > 0, "control: the default server WAS resynced");
+  assert.ok(!settings.has("lastPlexSyncSucceededAt"), "one server's success says nothing about the other's");
+
+  configureJellyfin();
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = jellyfinMovieResponder([JF_ITEM_FULL]);
+  const jfRes = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(jfRes.status, 200);
+  await settleFireAndForget();
+  assert.ok(stagedLibraryRows("jellyfinLibraryItemStaging").length > 0, "control: the default server WAS resynced");
+  assert.ok(!settings.has("lastJellyfinSyncSucceededAt"));
+});
+
 test("a malformed instance slug is REJECTED, never coerced to the default", async () => {
   // Coercion would aim a destructive scoped delete at the default server on a
   // request that named something else — the worst possible reading of bad input.
@@ -936,6 +994,23 @@ test("with a SECOND Jellyfin server registered, a resync leaves the shared TVEpi
     0,
     "a resync that cannot own the episode cache must not pay for the library-wide Episode walk",
   );
+});
+
+test("guardrail 7b: the 'leaving the episode cache to the orchestrator' warning is logged once per server count, not on every resync", async () => {
+  configurePlex();
+  configureJellyfin();
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  for (let i = 0; i < 2; i++) {
+    respond = plexMovieResponder([]);
+    assert.equal((await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }))).status, 200);
+    respond = jellyfinMovieResponder([]);
+    assert.equal((await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }))).status, 200);
+    await settleFireAndForget();
+  }
+  const ownerLines = (prefix: string) => warns.filter((w) => w.startsWith(prefix) && w.includes("leaving the shared TVEpisodeCache"));
+  assert.equal(ownerLines("[sync/plex]").length, 1, warns.join(" | "));
+  assert.equal(ownerLines("[sync/jellyfin]").length, 1, warns.join(" | "));
 });
 
 test("as the ONLY Jellyfin server it still walks episodes and rewrites the cache — single-server behaviour is unchanged", async () => {
@@ -1514,6 +1589,45 @@ test("guardrail 14a: a wanted row on an UNCONFIGURED Sonarr does not hold (stale
   assert.equal((await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }))).status, 200);
   await settleFireAndForget();
   assert.equal(casCalls, 1, "a wanted row on the DEFAULT instance does not hold a request on another instance");
+});
+
+// ── single-flight: one resync per source at a time ──────────────────────────
+
+test("a resync while another one holds the source's lock answers 200 {skipped} with X-Cron-Skipped — no fetch, no write, no ledger row", async () => {
+  configurePlex();
+  configureJellyfin();
+  lockAcquire = () => false; // both sources' locks are held by a run already going
+  for (const [label, post, lockId] of [["plex", postPlexSync, 2111], ["jellyfin", postJellyfinSync, 2112]] as const) {
+    const res = await post(label === "plex"
+      ? plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) })
+      : jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+    assert.equal(res.status, 200, `${label}: busy is not an error`);
+    assert.equal(res.headers.get(CRON_SKIPPED_HEADER), "1", `${label}: a busy answer must stay out of the run ledger`);
+    assert.equal((await bodyOf(res)).skipped, true);
+    assert.ok(pgLockCalls.some((c) => c.op === "try" && c.lockId === lockId), `${label}: must try its own lock ${lockId}`);
+  }
+  await settleFireAndForget();
+  assert.equal(fetchCalls.length, 0, "a skipped resync must not walk the library");
+  assert.equal(transactions.length, 0, "a skipped resync must not write");
+  assert.equal(libraryStagingLoads.length, 0);
+  assert.equal(ledgerFor("plex-sync"), null, "no run happened, so no ledger row");
+  assert.equal(ledgerFor("jellyfin-sync"), null);
+});
+
+test("each source has its OWN lock: a busy Plex resync does not block Jellyfin's", async () => {
+  configureJellyfin();
+  lockAcquire = (id) => id !== 2111;
+  respond = jellyfinMovieResponder([JF_ITEM_FULL]);
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get(CRON_SKIPPED_HEADER), null);
+  assert.equal((await bodyOf(res)).full, true);
+  await settleFireAndForget();
+  assert.deepEqual(
+    pgLockCalls.filter((c) => c.op === "try").map((c) => c.lockId),
+    [2112],
+    "the Jellyfin resync takes 2112 only",
+  );
 });
 
 test("i18n: the admin Resync's error follows the caller's language; cron (no hints) stays English", async () => {

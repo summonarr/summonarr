@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
-import { assignDiscordRolesOnLink, escMd } from "@/lib/discord-notify";
-import { DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
+import { assignDiscordRolesForUser, escMd } from "@/lib/discord-notify";
+import { DiscordAlreadyLinkedError, DiscordCodeAlreadyUsedError, mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { hashDiscordLinkToken, isWellFormedDiscordLinkToken, normalizeDiscordLinkToken } from "@/lib/discord-link-token";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { editOriginal } from "../reply";
@@ -34,13 +34,18 @@ export async function handleLinkCommand(ctx: CommandContext): Promise<void> {
   // hashing shipped (plaintext in the column) therefore misses here and the
   // user generates a new one (discord-link-token.ts).
   const tokenHash = hashDiscordLinkToken(tokenValue);
-  const row = await prisma.discordLinkToken.findUnique({ where: { token: tokenHash }, include: { user: true } });
+  const row = await prisma.discordLinkToken.findUnique({
+    where: { token: tokenHash },
+    select: { userId: true, discordId: true, expiresAt: true, user: { select: { name: true, email: true, deactivatedAt: true } } },
+  });
   if (!row) {
     await editOriginal(appId, token, { content: t("notify.bot.link.invalid") });
     return;
   }
   if (row.expiresAt < new Date()) {
-    await prisma.discordLinkToken.delete({ where: { token: tokenHash } });
+    // deleteMany: the purge cron or a concurrent /link may have removed the row
+    // already, and a bare delete would throw P2025 into "unexpected error".
+    await prisma.discordLinkToken.deleteMany({ where: { token: tokenHash } });
     await editOriginal(appId, token, { content: t("notify.bot.link.expired") });
     return;
   }
@@ -85,6 +90,12 @@ export async function handleLinkCommand(ctx: CommandContext): Promise<void> {
       transferNote = ` ${t("notify.bot.link.transferred", { count: migrated })}`;
     }
   } catch (err) {
+    if (err instanceof DiscordAlreadyLinkedError) {
+      // The pre-check above ran outside the transaction; another account
+      // claimed this Discord id in between.
+      await editOriginal(appId, token, { content: t("notify.bot.link.alreadyLinked") });
+      return;
+    }
     if (err instanceof DiscordCodeAlreadyUsedError) {
       // Lost the claim. The same Discord account submitting twice already
       // has its link, so tell it so; any other account gets "invalid".
@@ -101,6 +112,7 @@ export async function handleLinkCommand(ctx: CommandContext): Promise<void> {
     return;
   }
 
-  void assignDiscordRolesOnLink(discordUserId, row.user.email, row.user.role);
+  // The roles follow the account's own row: its role and how it signs in.
+  void assignDiscordRolesForUser(discordUserId, row.userId);
   await editOriginal(appId, token, { content: t("notify.bot.link.success", { name: escMd(userName), transfer: transferNote }) });
 }

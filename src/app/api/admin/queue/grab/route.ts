@@ -18,9 +18,8 @@ const MAX_IDS = 500;
 // (guardrail 26), with the ids SENT.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await serviceGate(body.service, body.instance, t);
   if (target instanceof NextResponse) return target;
   const ids = body.ids;

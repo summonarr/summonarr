@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
-import { buildResultsPayload, editOriginal } from "../reply";
+import { escMd } from "@/lib/discord-notify";
+import { buildResultsPayload, editOriginal, savePending } from "../reply";
 import { attachAvailability, cachedSearchTmdb, discordVisibleInstances } from "../search";
 import type { CommandContext, CommandOption, PendingSearch, TmdbResult } from "../types";
 
@@ -56,19 +57,18 @@ export async function handleRequestCommand(ctx: CommandContext): Promise<void> {
   }
 
   if (results.length === 0) {
+    // The query is the user's own text inside **"…"**: escaped like every other
+    // query that reaches Discord (buildResultsPayload, /issue).
     await editOriginal(appId, token, {
-      content: type === "movie" ? t("notify.bot.noResults.movie", { query }) : t("notify.bot.noResults.tv", { query }),
+      content: type === "movie" ? t("notify.bot.noResults.movie", { query: escMd(query) }) : t("notify.bot.noResults.tv", { query: escMd(query) }),
     });
     return;
   }
 
+  // Read back by the result buttons (components/pick.ts) under this key.
   const key = `p:${interactionId}:${discordUserId}`;
   const pendingPayload: PendingSearch = { results, discordUserId, discordUsername };
-  await prisma.discordSearchCache.upsert({
-    where:  { queryKey: key },
-    create: { queryKey: key, data: JSON.stringify(pendingPayload), expiresAt: new Date(Date.now() + 5 * 60_000) },
-    update: { data: JSON.stringify(pendingPayload), expiresAt: new Date(Date.now() + 5 * 60_000) },
-  });
+  await savePending(key, pendingPayload);
 
   await editOriginal(appId, token, buildResultsPayload(t, query, results, interactionId, discordUserId));
 }

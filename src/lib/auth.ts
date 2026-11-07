@@ -16,7 +16,7 @@ import type { SummonarrSession } from "@/lib/api-auth";
 import { machineIpAllowed } from "@/lib/api-auth";
 import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-server";
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
-import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
+import { sanitizeOptional } from "@/lib/sanitize";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { MAX_CONFIGURABLE_SESSION_SECONDS, NEVER_EXPIRES_AT_SEC } from "@/lib/session-lifetime";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, plexSettingKey, mediaInstanceLabel } from "@/lib/media-instances";
@@ -35,6 +35,8 @@ import { isReservedEmailDomain } from "@/lib/reserved-email";
 import { normalizeEmail } from "@/lib/email-normalize";
 import { passwordVersion } from "@/lib/mfa/mfa-store";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
+import { processSingleton } from "@/lib/process-singleton";
+import { lockSetupInTx } from "@/lib/setup-lock";
 // Re-exported so existing imports of `normalizeEmail` from "@/lib/auth"
 // continue to work.
 export { normalizeEmail };
@@ -120,14 +122,7 @@ async function isPreSetupBootstrapBlocked(): Promise<boolean> {
   return !existingAdmin;
 }
 
-export async function findOrCreatePlexUser({
-  plexUserId,
-  email,
-  name,
-  image,
-  plexClientId,
-  emailIsFresh = true,
-}: {
+export interface PlexUserInput {
   plexUserId: string;
   email: string;
   name?: string | null;
@@ -139,7 +134,37 @@ export async function findOrCreatePlexUser({
   // must not overwrite notificationEmail, which would revert a newer address the
   // last live sign-in (or the user's profile) had set.
   emailIsFresh?: boolean;
-}): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
+}
+
+// Two FIRST sign-ins of one provider identity at once (a double submit, the app
+// and the web together) both pass the lookups and both create; the loser hits
+// the unique subject/email key (P2002, read by code — guardrail 23b). Run the
+// whole lookup again: it now finds the winner's row and takes the returning-user
+// path, with every binding check that path makes (34e), or refuses a collision
+// on the email the same way step 2 does. Once only: a second P2002 propagates.
+async function retryOnProvisionRace<T>(provision: () => Promise<T>): Promise<T> {
+  try {
+    return await provision();
+  } catch (err) {
+    if (!isPrismaErrorCode(err, "P2002")) throw err;
+    return provision();
+  }
+}
+
+export async function findOrCreatePlexUser(
+  input: PlexUserInput,
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
+  return retryOnProvisionRace(() => provisionPlexUser(input));
+}
+
+async function provisionPlexUser({
+  plexUserId,
+  email,
+  name,
+  image,
+  plexClientId,
+  emailIsFresh = true,
+}: PlexUserInput): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   const normalized = normalizeEmail(email);
   // Provider-supplied display names are untrusted — strip HTML/control chars so
   // the name can't carry markup into any downstream sink (email/Discord/push),
@@ -179,7 +204,9 @@ export async function findOrCreatePlexUser({
   //    admin to perform an explicit, logged-in "link account" (rebind) instead.
   const byEmail = await prisma.user.findUnique({ where: { email: normalized } });
   if (byEmail) {
-    console.warn(`[auth] Refused plex sign-in: ${normalized} matches an existing user with no plexUserId. Manual rebind required.`);
+    // Named by the colliding row's id (what an admin needs to rebind) and the
+    // email's keyed hash (to correlate with the audit row) — never the address.
+    console.warn(`[auth] Refused plex sign-in: the email (hash ${hashAuditEmail(normalized)}) matches user ${byEmail.id}, which has no plexUserId. Manual rebind required.`);
     return PROVIDER_REBIND_REQUIRED;
   }
 
@@ -193,7 +220,7 @@ export async function findOrCreatePlexUser({
 
   // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
   if (await isPreSetupBootstrapBlocked()) {
-    console.warn(`[auth] Refused pre-setup plex sign-in for ${normalized}: complete initial setup (create the first admin) first.`);
+    console.warn("[auth] Refused pre-setup plex sign-in: complete initial setup (create the first admin) first.");
     return PROVIDER_SETUP_REQUIRED;
   }
 
@@ -222,9 +249,19 @@ export async function findOrCreateJellyfinUser(
   // any other server is refused, and so is a new one first seen elsewhere.
   instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
 ): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
+  return retryOnProvisionRace(() => provisionJellyfinUser(jellyfinId, name, instance));
+}
+
+async function provisionJellyfinUser(
+  jellyfinId: string,
+  rawName: string,
+  instance: MediaInstanceKey,
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   // Provider-supplied display name is untrusted — strip HTML/control chars so it
-  // can't carry markup into any downstream sink (email/Discord/push).
-  name = sanitizeText(name);
+  // can't carry markup into any downstream sink (email/Discord/push). A name that
+  // is nothing but stripped characters is NO name (null, like the Plex and OIDC
+  // paths), never "" — which would override the stored one.
+  const name = sanitizeOptional(rawName);
   // Jellyfin's API exposes no user email (UserDto carries none in any version),
   // so every Jellyfin account's login address is this placeholder. It is an
   // ADDRESS only — never a lookup key (see step 2).
@@ -340,7 +377,16 @@ export interface OidcUserClaims {
 // that would mint a new account is refused instead.
 export async function findOrCreateOidcUser(
   claims: OidcUserClaims,
-  { allowCreate = true }: { allowCreate?: boolean } = {},
+  opts: { allowCreate?: boolean } = {},
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
+  // The P2002 of a racing first sign-in surfaces from the create $transaction
+  // below, so it is caught out here — never inside the tx (guardrail 23).
+  return retryOnProvisionRace(() => provisionOidcUser(claims, opts));
+}
+
+async function provisionOidcUser(
+  claims: OidcUserClaims,
+  { allowCreate = true }: { allowCreate?: boolean },
 ): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired | ProviderRefusal> {
   const accountTokens = {
     access_token: claims.accessToken,
@@ -421,7 +467,7 @@ export async function findOrCreateOidcUser(
   // explicit, logged-in "Link account" flow.
   const byEmail = await prisma.user.findUnique({ where: { email: normalizedEmail } });
   if (byEmail) {
-    console.warn(`[auth/oidc] Refused sign-in: ${normalizedEmail} matches an existing user with no oidc account binding. Manual rebind required.`);
+    console.warn(`[auth/oidc] Refused sign-in: the email (hash ${hashAuditEmail(normalizedEmail)}) matches user ${byEmail.id}, which has no oidc account binding. Manual rebind required.`);
     return PROVIDER_REBIND_REQUIRED;
   }
 
@@ -438,7 +484,7 @@ export async function findOrCreateOidcUser(
     if (!setupRow) {
       const existingAdmin = await prisma.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
       if (!existingAdmin) {
-        console.warn(`[auth/oidc] Refused pre-setup OIDC sign-in for ${normalizedEmail}: complete initial setup (create the first admin) first.`);
+        console.warn("[auth/oidc] Refused pre-setup OIDC sign-in: complete initial setup (create the first admin) first.");
         return PROVIDER_SETUP_REQUIRED;
       }
     }
@@ -505,19 +551,29 @@ const MAX_ALLOWED_SESSION_SECONDS = MAX_CONFIGURABLE_SESSION_SECONDS;
 type SessionDurations = { desktopDuration: number; mobileDuration: number; maxDuration: number };
 
 const SESSION_DURATIONS_TTL_MS = 5 * 60 * 1000;
-let sessionDurationsCache: { value: SessionDurations; expiresAt: number } | null = null;
+// Process-wide (guardrail 27a): /api/settings and a database restore invalidate
+// it from their own chunks, and every sign-in route must see that. `gen` stops a
+// read in flight across an invalidation from caching the old lengths, which
+// sessions minted meanwhile would carry for life (guardrail 6c).
+const sessionDurationsState = processSingleton("auth:sessionDurations", () => ({
+  cache: null as { value: SessionDurations; expiresAt: number } | null,
+  gen: 0,
+}));
 
 export function invalidateSessionDurationsCache(): void {
-  sessionDurationsCache = null;
+  sessionDurationsState.gen++;
+  sessionDurationsState.cache = null;
 }
 
 // Reads the admin-configurable desktop/mobile/max session TTLs (5-min cached),
 // each capped at MAX_ALLOWED_SESSION_SECONDS, falling back to the DEFAULT_* consts.
 export async function getSessionDurations(): Promise<SessionDurations> {
   const now = Date.now();
-  if (sessionDurationsCache && sessionDurationsCache.expiresAt > now) {
-    return sessionDurationsCache.value;
+  const cached = sessionDurationsState.cache;
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
   }
+  const gen = sessionDurationsState.gen;
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["sessionDefaultDuration", "sessionMobileDuration", "sessionMaxDuration"] } },
   });
@@ -532,7 +588,9 @@ export async function getSessionDurations(): Promise<SessionDurations> {
     mobileDuration:  cap(parseInt(map.sessionMobileDuration  ?? "") || DEFAULT_MOBILE_SESSION_SECONDS),
     maxDuration:     cap(parseInt(map.sessionMaxDuration     ?? "") || DEFAULT_MAX_SESSION_SECONDS),
   };
-  sessionDurationsCache = { value, expiresAt: now + SESSION_DURATIONS_TTL_MS };
+  if (gen === sessionDurationsState.gen) {
+    sessionDurationsState.cache = { value, expiresAt: now + SESSION_DURATIONS_TTL_MS };
+  }
   return value;
 }
 
@@ -976,7 +1034,10 @@ export async function authorizeWithPlex(
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "rate_limited" } });
     return null;
   }
-  const tokenKey = (credentials.plexToken as string).slice(0, 16);
+  // Per-token bucket so one Plex token can't be replayed from rotating IPs.
+  // Hashed, like the QuickConnect secret below: a 16-character prefix was most
+  // of a live token, held in the limiter map.
+  const tokenKey = createHash("sha256").update(credentials.plexToken as string).digest("hex").slice(0, 16);
   if (!checkRateLimit(`plex:${tokenKey}`, 10, 5 * 60 * 1000)) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "rate_limited" } });
     return null;
@@ -1058,13 +1119,16 @@ export async function authorizeWithPlex(
           if (existing?.plexUserId) {
             verifiedEmail = cached.email;
             plexUserSub   = existing.plexUserId;
+            // Best-effort, like the purge below: the row only bumps the cache's
+            // lifetime, and a concurrent purge of it (P2025) must not turn a
+            // verified sign-in into invalid_credentials.
             await prisma.plexTokenCache.update({
               where: { tokenHash },
               data: {
                 lastUsedAt: new Date(),
                 expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
               },
-            });
+            }).catch(() => {});
           }
           // No bound row for this sub yet — fall through to the full
           // lookup so we can properly bind plexUserId on first sign-in.
@@ -1386,11 +1450,11 @@ async function runFirstAdminPromotion(
   const allowOauthBootstrap = process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true";
   if (providerId !== "credentials" && !allowOauthBootstrap) return false;
   return prisma.$transaction(async (tx) => {
-    // Lock 43 is the SAME advisory lock /api/auth/register holds for its
-    // count→create-ADMIN→setup_completed_at sequence. Sharing it serializes the
-    // two first-admin paths so a concurrent register + OAuth bootstrap can't both
-    // observe "no admin yet" and each mint an ADMIN.
-    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
+    // Lock 43 (setup-lock.ts) is the SAME advisory lock /api/auth/register holds
+    // for its count→create-ADMIN→setup_completed_at sequence. Sharing it
+    // serializes the two first-admin paths so a concurrent register + OAuth
+    // bootstrap can't both observe "no admin yet" and each mint an ADMIN.
+    await lockSetupInTx(tx);
     const setupRow = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
     if (setupRow) return false;
     const existingAdmin = await tx.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
@@ -1451,10 +1515,27 @@ export async function signInAndMintSession(params: {
     if (state?.deactivatedAt) throw new AccountDeactivatedError();
   }
 
+  // Everything that can fail runs BEFORE initializeTokenOnSignIn writes the
+  // AuthSession row: a promotion or permissions read that threw afterwards left
+  // a row with no token behind it, listed as a device — and, for a native
+  // client, one that never expires.
+  let role = (user as { role?: string }).role;
+  let permissionsClaim = "0";
+  if (userId) {
+    const promoted = await runFirstAdminPromotion(userId, providerId);
+    if (promoted) role = "ADMIN";
+    // Carry the user's stored permission bitmask (raw decimal) in the token. New
+    // users were seeded at the create site; a just-promoted first admin was
+    // re-seeded in runFirstAdminPromotion. If this read somehow returns 0,
+    // effectivePermissions() on the read side still falls back to the role preset.
+    const permRow = await prisma.user.findUnique({ where: { id: userId }, select: { permissions: true } });
+    if (permRow) permissionsClaim = serializePermissions(permRow.permissions);
+  }
+
   // The claims that go into the session JWT.
   const token: Record<string, unknown> = {
     id: user.id,
-    role: (user as { role?: string }).role,
+    role,
     provider: providerId,
     // mediaServer is provider-determined for plex/jellyfin*; otherwise null —
     // initializeTokenOnSignIn will look up the DB column for credentials/oidc.
@@ -1479,19 +1560,38 @@ export async function signInAndMintSession(params: {
   // AuthSession row.
   await initializeTokenOnSignIn(token, user);
 
-  if (userId) {
-    const promoted = await runFirstAdminPromotion(userId, providerId);
-    if (promoted) token.role = "ADMIN";
-  }
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = token.expiresAt as number;
+  const expiresInSeconds = Math.max(60, expiresAt - now);
+  const transport: SessionTransport = token.transport === "bearer" ? "bearer" : "cookie";
 
-  // Carry the user's stored permission bitmask (raw decimal) in the token. New
-  // users were seeded at the create site; a just-promoted first admin was
-  // re-seeded in runFirstAdminPromotion. If this read somehow returns 0,
-  // effectivePermissions() on the read side still falls back to the role preset.
-  let permissionsClaim = "0";
-  if (userId) {
-    const permRow = await prisma.user.findUnique({ where: { id: userId }, select: { permissions: true } });
-    if (permRow) permissionsClaim = serializePermissions(permRow.permissions);
+  let jwt: string;
+  try {
+    jwt = await signSessionJwt(
+      {
+        id: token.id as string,
+        role: token.role as string,
+        permissions: permissionsClaim,
+        email: (user.email as string | null) ?? null,
+        name: (user.name as string | null) ?? null,
+        provider: token.provider as string,
+        mediaServer: (token.mediaServer as string | null | undefined) ?? null,
+        sessionId: token.sessionId as string,
+        uaFingerprint: token.uaFingerprint as string | undefined,
+        isMobile: token.isMobile as boolean | undefined,
+        deviceLabel: token.deviceLabel as string | undefined,
+        expiresAt,
+        transport,
+      },
+      { expiresInSeconds },
+    );
+  } catch (err) {
+    // No token, so no session: drop the row just written (best-effort — the
+    // signing failure is what the caller must hear about).
+    if (userId) {
+      await prisma.authSession.delete({ where: { sessionId: token.sessionId as string } }).catch(() => {});
+    }
+    throw err;
   }
 
   void logAudit({
@@ -1514,30 +1614,6 @@ export async function signInAndMintSession(params: {
       browser: ((user as { _auditUa?: string })._auditUa)?.slice(0, 100),
     },
   });
-
-  const now = Math.floor(Date.now() / 1000);
-  const expiresAt = token.expiresAt as number;
-  const expiresInSeconds = Math.max(60, expiresAt - now);
-  const transport: SessionTransport = token.transport === "bearer" ? "bearer" : "cookie";
-
-  const jwt = await signSessionJwt(
-    {
-      id: token.id as string,
-      role: token.role as string,
-      permissions: permissionsClaim,
-      email: (user.email as string | null) ?? null,
-      name: (user.name as string | null) ?? null,
-      provider: token.provider as string,
-      mediaServer: (token.mediaServer as string | null | undefined) ?? null,
-      sessionId: token.sessionId as string,
-      uaFingerprint: token.uaFingerprint as string | undefined,
-      isMobile: token.isMobile as boolean | undefined,
-      deviceLabel: token.deviceLabel as string | undefined,
-      expiresAt,
-      transport,
-    },
-    { expiresInSeconds },
-  );
 
   // A NATIVE session was just minted (the X-Summonarr-Client caller, whose
   // deadline is the never-reached sentinel — guardrail 6c). Nothing time-based

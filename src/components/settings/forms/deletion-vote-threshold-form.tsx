@@ -14,7 +14,7 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
   const t = useT();
   const [threshold, setThreshold] = useState(initialThreshold);
   const [status, setStatus] = useState<SaveStatus>("idle");
-  const [error, setError] = useState(t("settings.form.common.saveFailed"));
+  const [error, setError] = useState("");
   // Only the "Saved" tick fades; a server error stays until the next edit or
   // save. Ref'd so a second save cancels the first save's timer and unmount
   // clears it.
@@ -25,18 +25,21 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
     e.preventDefault();
     if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("saving");
+    setError("");
     try {
+      // A blank field is saved as blank, which the vote routes read as 0 (off) —
+      // what the help text and the "0" placeholder promise.
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ deletionVoteThreshold: threshold }),
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      setError(data.error ?? t("settings.form.common.saveFailed"));
       if (res.ok && data.ok !== false) {
         setStatus("ok");
         resetTimer.current = setTimeout(() => setStatus("idle"), 3000);
       } else {
+        setError(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       }
     } catch {
@@ -52,7 +55,9 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
         <Input
           id="deletion-vote-threshold"
           type="number"
+          // The route's range (0–10000); the browser says so before the request.
           min="0"
+          max="10000"
           value={threshold}
           onChange={(e) => { setThreshold(e.target.value); setStatus("idle"); }}
           placeholder="0"
@@ -66,7 +71,7 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
         <Button type="submit" size="sm" disabled={status === "saving"}>
           {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("settings.form.common.save")}
         </Button>
-        <SaveStatusMessage status={status} errorLabel={error} />
+        <SaveStatusMessage status={status} errorLabel={error || undefined} />
       </div>
     </form>
   );

@@ -120,8 +120,8 @@ test("guardrail 5a: no bare fetch() in server code outside the documented except
 // ── Guardrail 30: every JSON body is size-capped ────────────────────────────
 
 test("guardrail 30: zero bare `await req.json()` in src/app/api", () => {
-  // Why: next.config.ts sets proxyClientMaxBodySize: "50mb" as a BACKSTOP, not a
-  // per-route limit, so a bare req.json() will happily parse 50MB. On the
+  // Why: next.config.ts sets proxyClientMaxBodySize as a BACKSTOP, not a
+  // per-route limit, so a bare req.json() will happily parse ~20MB. On the
   // anonymous first-run register route — and on any authenticated request/issue/
   // vote route — that is a memory/CPU denial of service for the cost of one POST.
   // readJsonCapped combines a Content-Length fast-reject with a post-read byte
@@ -134,6 +134,49 @@ test("guardrail 30: zero bare `await req.json()` in src/app/api", () => {
     "use readJsonCapped(req, maxBytes) — or readJsonCappedOr for routes where an " +
       "empty body is valid. Caps: ~16KB single object, 32–64KB text-bearing, ~1MB bulk arrays.",
   );
+});
+
+test("guardrail 30: the proxy body buffer sits just above the largest legitimate body", () => {
+  // Why: Next clones EVERY non-GET body up to proxyClientMaxBodySize before
+  // src/proxy.ts runs — before any auth — so the value is a per-request memory
+  // bound for anonymous callers. It was 50mb while nothing needed more than a
+  // restore chunk. It must still stay ABOVE the chunk cap: an over-limit body is
+  // truncated, not refused, so a cut-off chunk has to land over MAX_CHUNK_BYTES
+  // and be rejected rather than fit and be appended corrupt.
+  const MiB = 1024 * 1024;
+  const config = readFileSync(join(process.cwd(), "next.config.ts"), "utf8");
+  const m = /proxyClientMaxBodySize:\s*"(\d+)mb"/.exec(config);
+  assert.ok(m, "proxyClientMaxBodySize must be a whole-mb string");
+  const proxyLimit = Number(m[1]) * MiB; // Next parses "mb" as 1024*1024 (bytes.parse)
+  const chunkCap = (file: string) => {
+    const src = readFileSync(join(SRC, file), "utf8");
+    const c = /const MAX_CHUNK_BYTES = (\d+) \* 1024 \* 1024;/.exec(src);
+    assert.ok(c, `${file}: MAX_CHUNK_BYTES must be a literal N * 1024 * 1024`);
+    return Number(c[1]) * MiB;
+  };
+  const setupCap = chunkCap("app/api/setup/import-chunk/route.ts");
+  const adminCap = chunkCap("app/api/admin/backup/db-import-chunk/route.ts");
+  const d = /DEFAULT_CHUNK_SIZE = (\d+) \* 1024 \* 1024;/.exec(readFileSync(join(SRC, "lib/chunked-upload.ts"), "utf8"));
+  assert.ok(d);
+  const clientChunk = Number(d[1]) * MiB;
+  assert.equal(setupCap, adminCap, "the two chunk routes share one cap");
+  assert.ok(clientChunk <= setupCap, "the client's default chunk must fit the route cap");
+  assert.ok(setupCap < proxyLimit, "the proxy limit must stay strictly above the chunk cap");
+  assert.ok(proxyLimit <= 24 * MiB, "the proxy buffer must not drift back up for every anonymous POST");
+});
+
+test("HSTS covers this host only: includeSubDomains and preload are the operator's call", () => {
+  // Why: a self-hosted instance often sits on the operator's own apex or parent
+  // domain (https://example.com/request). includeSubDomains forced HTTPS on
+  // every sibling subdomain for a year, and preload consented to the browsers'
+  // preload list. The value is baked in at build time, so the opt-in lives at
+  // the reverse proxy (docker-container/README.md).
+  const config = readFileSync(join(process.cwd(), "next.config.ts"), "utf8");
+  const m = /key: "Strict-Transport-Security",\s*value: "([^"]*)"/.exec(config);
+  assert.ok(m, "the Strict-Transport-Security header");
+  assert.match(m[1], /^max-age=\d+$/);
+  assert.ok(Number(m[1].slice("max-age=".length)) >= 31536000, "still a year");
+  assert.doesNotMatch(m[1], /includeSubDomains|preload/i);
 });
 
 // ── Guardrail 7a: the Prisma extension owns Setting/Account encryption ──────

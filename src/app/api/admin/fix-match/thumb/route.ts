@@ -16,6 +16,14 @@ const PLEX_AGENT_THUMB_HOSTS = [
   "assets.fanart.tv",
 ];
 
+// The only Plex-relative paths this proxy fetches: an item's own artwork. The
+// fetch carries the admin X-Plex-Token and the caller only needs MANAGE_ISSUES,
+// so any other path would let a delegate fire side-effecting Plex GETs
+// (/library/sections/N/refresh, /:/scrobble) or make Plex itself fetch a URL
+// (/photo/:/transcode?url=…). The content-type check runs AFTER the request, so
+// it can't stop those — this does. No query string, no other segments.
+const PLEX_THUMB_PATH = /^\/library\/metadata\/\d+\/(?:thumb|art|banner|poster)(?:\/\d+)?$/;
+
 const MAX_THUMB_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"];
 
@@ -96,6 +104,9 @@ export async function GET(request: NextRequest) {
     // the Plex host (SSRF / internal port scan). The `//` reject stops a
     // protocol-relative authority from smuggling a different host past the join.
     if (!thumbPath.startsWith("/") || thumbPath.startsWith("//")) {
+      return new NextResponse("Invalid path", { status: 400 });
+    }
+    if (!PLEX_THUMB_PATH.test(thumbPath)) {
       return new NextResponse("Invalid path", { status: 400 });
     }
     const plexConfig = await getPlexConfig(serverInstance);

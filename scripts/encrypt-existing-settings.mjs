@@ -19,6 +19,7 @@
 // Idempotent — running it twice is harmless.
 
 import { Client } from "pg";
+import { existsSync, readFileSync } from "node:fs";
 import { createCipheriv, randomBytes } from "node:crypto";
 
 // MUST match SETTINGS_SENSITIVE_KEYS in src/lib/settings-sensitive-keys.ts
@@ -99,12 +100,25 @@ function decodeCredential(value) {
   }
 }
 
+// docker-entrypoint.sh reads the bundled Postgres password from this Docker
+// secret when it is mounted (it wins over the env var), and a `docker compose
+// exec` process never sees the entrypoint's export — so read it the same way.
+const POSTGRES_PASSWORD_FILE = "/run/secrets/postgres_password";
+function loadPostgresPasswordFile() {
+  if (!existsSync(POSTGRES_PASSWORD_FILE)) return;
+  // The entrypoint's `$(cat …)` drops trailing newlines; match it.
+  const value = readFileSync(POSTGRES_PASSWORD_FILE, "utf8").replace(/\n+$/, "");
+  if (!value) throw new Error(`${POSTGRES_PASSWORD_FILE} is empty`);
+  process.env.POSTGRES_PASSWORD = value;
+}
+
 async function main() {
   const key = getKey();
 
   // Prefer explicit PG* env vars when set (lets the operator override the
   // host without re-encoding the password). Fall back to parsing DATABASE_URL.
   let user, password, host, port, database;
+  loadPostgresPasswordFile();
   if (process.env.PGHOST && process.env.PGUSER && process.env.PGPASSWORD && process.env.PGDATABASE) {
     user = process.env.PGUSER;
     password = process.env.PGPASSWORD;

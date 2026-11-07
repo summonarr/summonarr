@@ -1,8 +1,9 @@
 import { after } from "next/server";
 import { emitNotificationEvent } from "@/lib/notify-agents";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, arrWriteOutcomeUnknown, listQualityProfiles, type AddProgress } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
+import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -108,6 +109,11 @@ export type CreateMediaRequestResult =
       branch: CreateMediaRequestBranch;
       // The auto-approve push failed and the row was rolled back to PENDING.
       pushFailed: boolean;
+      // The auto-approve add was sent and got no definite answer (a timeout, a
+      // dropped connection, a gateway 502/504 — arrWriteOutcomeUnknown): Radarr/Sonarr
+      // may have added the title. The row stays APPROVED; the sync re-pushes an
+      // APPROVED title the arr doesn't hold.
+      pushOutcomeUnknown: boolean;
       // The row as the route answers it (status already PENDING after a rollback).
       request: MediaRequest;
     };
@@ -127,6 +133,40 @@ function fail(status: number, error: string, reason: CreateMediaRequestFailure):
   return { ok: false, status, error, reason };
 }
 
+/**
+ * The admin "new request" alert for one PENDING request: the outbound channels
+ * (through emitNotificationEvent, guardrail 14c) plus the admin email, push and
+ * Discord notifiers, after the response (after()). Must run in a request scope.
+ * `excludeUserId` is the account that acted, which needs no alert about it.
+ */
+export function alertAdminsNewRequest(r: {
+  requestId: string;
+  tmdbId: number;
+  mediaType: "MOVIE" | "TV";
+  instance: string;
+  title: string;
+  posterPath: string | null;
+  releaseYear: string | null;
+  requestedBy: string;
+  note: string | null;
+  excludeUserId: string;
+}): void {
+  after(async () => {
+    emitNotificationEvent({
+      event: "request.created",
+      media: { type: r.mediaType, tmdbId: r.tmdbId, title: r.title, year: r.releaseYear, posterPath: r.posterPath },
+      request: { id: r.requestId, instance: r.instance },
+      actor: { name: r.requestedBy },
+      text: r.note,
+    });
+    await Promise.allSettled([
+      notifyAdminsNewRequest({ title: r.title, mediaType: r.mediaType, requestedBy: r.requestedBy, note: r.note, posterPath: r.posterPath, tmdbId: r.tmdbId, releaseYear: r.releaseYear, excludeUserId: r.excludeUserId }),
+      notifyAdminsNewRequestPush({ title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId, requestedBy: r.requestedBy, requestId: r.requestId, excludeUserId: r.excludeUserId }),
+      notifyAdminsNewRequestDiscord({ requestId: r.requestId, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId, requestedBy: r.requestedBy, note: r.note, posterPath: r.posterPath }),
+    ]);
+  });
+}
+
 export async function createMediaRequest(
   session: SummonarrSession,
   ctx: RequestContext,
@@ -139,6 +179,16 @@ export async function createMediaRequest(
   const { settings, userRecord } = ctx;
   const body = input;
   const { tmdbId, mediaType, note } = input;
+
+  // The TMDB details, read at most once: auto-routing and the content-rating cap
+  // both want them. A failure is not kept, so the second caller retries exactly
+  // as it did when each site fetched on its own.
+  let detailsPromise: Promise<TmdbMedia> | null = null;
+  const loadDetails = (): Promise<TmdbMedia> =>
+    (detailsPromise ??= (mediaType === "MOVIE" ? getMovieDetails(tmdbId) : getTVDetails(tmdbId)).catch((err: unknown) => {
+      detailsPromise = null;
+      throw err;
+    }));
 
   // Resolve which Radarr/Sonarr instance this request targets. Precedence:
   //   explicit `arrInstance` slug (validated) > legacy `is4k:true` (→ "4k") >
@@ -166,7 +216,7 @@ export async function createMediaRequest(
     } else {
       let routable: RoutableMedia = { genreIds: [], originalLanguage: null, originCountries: [] };
       try {
-        const detail = mediaType === "MOVIE" ? await getMovieDetails(tmdbId) : await getTVDetails(tmdbId);
+        const detail = await loadDetails();
         routable = {
           genreIds: detail.genreList?.map((g) => g.id) ?? [],
           originalLanguage: detail.originalLanguage ?? null,
@@ -332,7 +382,7 @@ export async function createMediaRequest(
   if (userRecord?.maxContentRating && !hasPermission(session.user.permissions, Permission.ADMIN)) {
     let cert: string | undefined;
     try {
-      const detail = mediaType === "MOVIE" ? await getMovieDetails(tmdbId) : await getTVDetails(tmdbId);
+      const detail = await loadDetails();
       cert = detail.certification;
     } catch {
       cert = undefined;
@@ -406,12 +456,15 @@ export async function createMediaRequest(
 
   let createdRequest: MediaRequest | null = null;
   let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
+  // Whether the pending row alerts the admins — decided inside the tx (below).
+  let announcePending = false;
 
   try {
     // Serializable + P2034 retry: concurrent creates at the quota boundary conflict
     // on the count+create and Postgres aborts one; without the retry that's a 500
     // instead of the correct 429/409. (bulk/route.ts wraps its tx the same way.)
     await runWithSerializableRetry(() => prisma.$transaction(async (tx) => {
+      announcePending = false; // the callback re-runs on a P2034 retry
 
       // Re-check quota inside the transaction to prevent races on concurrent requests
       if (enforceQuota && resolvedQuota) {
@@ -504,9 +557,20 @@ export async function createMediaRequest(
         return;
       }
 
+      // Only the first PENDING request for (tmdbId, mediaType, instance) alerts the
+      // admins. Decided here, in the Serializable tx, rather than after the commit:
+      // two concurrent requests for one title (different users) that each read "no
+      // PENDING peer" and insert one form a read/write cycle Postgres aborts
+      // (P2034), and the retry sees the committed peer. Checked after the commit,
+      // an interleaving where neither saw the other alerted twice.
+      const pendingPeer = await tx.mediaRequest.findFirst({
+        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: "PENDING" },
+        select: { id: true },
+      });
       createdRequest = await tx.mediaRequest.create({ data: baseData });
       await restoreThread(tx, createdRequest.id, carried);
       createdBranch = "pending";
+      announcePending = !pendingPeer;
     }, { isolationLevel: "Serializable" }));
   } catch (err) {
     if (err instanceof Error && err.message === "QUOTA_EXCEEDED") {
@@ -533,46 +597,48 @@ export async function createMediaRequest(
   // below and the auto-approve rollback — a failed ARR push leaves a PENDING request that
   // otherwise reached admins through no out-of-band channel at all (the earlier
   // request:new SSE only lands for admins with the web app already open).
-  //
-  // Suppress duplicate admin alerts for a title that's still pending review: only
-  // the EARLIEST pending request for (tmdbId, mediaType, arrInstance) fires the admin
-  // notifications. Total ordering by (createdAt, id) makes this race-safe — among
-  // concurrent duplicate requests exactly one (the earliest) has no earlier peer
-  // and alerts; the rest find this row and skip.
   const meta = verified;
-  const announcePendingToAdmins = async () => {
-    const earlierPending = await prisma.mediaRequest.findFirst({
-      where: {
-        tmdbId,
-        mediaType,
-        arrInstance: instanceSlug,
-        status: "PENDING",
-        id: { not: request.id },
-        OR: [
-          { createdAt: { lt: request.createdAt } },
-          { createdAt: request.createdAt, id: { lt: request.id } },
-        ],
-      },
-      select: { id: true },
+  const announceToAdmins = () =>
+    alertAdminsNewRequest({
+      requestId: request.id,
+      tmdbId,
+      mediaType,
+      instance: instanceSlug,
+      title: meta.title,
+      posterPath: meta.posterPath ?? null,
+      releaseYear: meta.releaseYear ?? null,
+      requestedBy: session.user.name ?? session.user.email ?? session.user.id,
+      note: sanitizedNote ?? null,
+      excludeUserId: session.user.id,
     });
 
-    if (!earlierPending) {
-      const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
-      after(async () => {
-        emitNotificationEvent({
-          event: "request.created",
-          media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId, title: meta.title, year: meta.releaseYear ?? null, posterPath: meta.posterPath ?? null },
-          request: { id: request.id, instance: instanceSlug },
-          actor: { name: requestedBy },
-          text: sanitizedNote ?? null,
-        });
-        await Promise.allSettled([
-          notifyAdminsNewRequest({ title: meta.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath, tmdbId, releaseYear: meta.releaseYear, excludeUserId: session.user.id }),
-          notifyAdminsNewRequestPush({ title: meta.title, mediaType, tmdbId, requestedBy, requestId: request.id, excludeUserId: session.user.id }),
-          notifyAdminsNewRequestDiscord({ requestId: request.id, title: meta.title, mediaType, tmdbId, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath }),
-        ]);
+  // The auto-approve rollback turns a committed row PENDING after the fact, so its
+  // dedupe can only be a post-commit read: alert unless an EARLIER pending request
+  // for (tmdbId, mediaType, arrInstance) exists, ordered by (createdAt, id). A
+  // failed read alerts anyway — a duplicate alert is cheaper than a lost one, and
+  // the row is already committed, so a throw here would answer 500 for a request
+  // that exists (and its retry 409).
+  const announceRolledBackToAdmins = async () => {
+    let earlierPending: { id: string } | null = null;
+    try {
+      earlierPending = await prisma.mediaRequest.findFirst({
+        where: {
+          tmdbId,
+          mediaType,
+          arrInstance: instanceSlug,
+          status: "PENDING",
+          id: { not: request.id },
+          OR: [
+            { createdAt: { lt: request.createdAt } },
+            { createdAt: request.createdAt, id: { lt: request.id } },
+          ],
+        },
+        select: { id: true },
       });
+    } catch (err) {
+      console.error(`[requests] earlier-pending check failed, alerting anyway: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
     }
+    if (!earlierPending) announceToAdmins();
   };
 
   // A request and a deletion vote for the same title are contradictory. The vote route
@@ -595,44 +661,78 @@ export async function createMediaRequest(
     emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
 
     let pushedTvdbId: number | null = null;
+    let pushOutcomeUnknown = false;
+    const pushProgress: AddProgress = { sent: false };
     try {
       if (mediaType === "MOVIE") {
-        await addMovieToRadarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
+        await addMovieToRadarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id, pushProgress);
       } else {
-        pushedTvdbId = await addSeriesToSonarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
+        pushedTvdbId = await addSeriesToSonarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id, pushProgress);
       }
     } catch (err) {
-      console.error(`[arr] Auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
-      // CAS on status: only roll back if still APPROVED. A concurrent webhook/sync could
-      // have flipped this freshly-created row to AVAILABLE; a blind update would clobber
-      // that back to PENDING. Clear the pendingNotifyAt too — the ARR push failed, so
-      // there's no download to pend.
-      await prisma.mediaRequest.updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
-      // The client already saw request:new with status APPROVED; emit a corrective
-      // update so it reflects the rolled-back PENDING state, and return the PENDING
-      // shape rather than the stale APPROVED row (mirrors the PATCH rollback path).
-      emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: session.user.id });
-      // The row now sits in the admin queue exactly like a normal pending request, so it
-      // must be announced like one — and it can't rely on the pendingNotifyAt backstop
-      // (cleared just above), leaving this the only alert admins get.
-      await announcePendingToAdmins();
-      // Both rolled-back fields, like the PATCH rollback body (requests/[id]): the
-      // row's pendingNotifyAt is null now, so the body must not carry the armed one.
-      return { ok: true, kind: "created", branch: "auto-approve", pushFailed: true, request: { ...request, status: "PENDING", pendingNotifyAt: null } };
+      const message = sanitizeForLog(err instanceof Error ? err.message : String(err));
+      // Unknown only once the add itself was sent: a failure before it (a lookup,
+      // a dark arr refusing the connection) added nothing.
+      if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {
+        // No definite answer: Radarr/Sonarr may well have added the title and be
+        // downloading it. Rolling back to PENDING would show admins a request to
+        // review for a title already on its way (declining it leaves it
+        // downloading). It stays APPROVED with the 90s backstop armed; the sync
+        // re-pushes an APPROVED title the arr doesn't hold, so an add that never
+        // landed is retried there.
+        console.error(`[arr] Auto-approve push outcome unknown, left APPROVED: ${message}`);
+        pushOutcomeUnknown = true;
+      } else {
+        console.error(`[arr] Auto-approve push failed: ${message}`);
+        // CAS on status: only roll back if still APPROVED. A concurrent webhook/sync could
+        // have flipped this freshly-created row to AVAILABLE; a blind update would clobber
+        // that back to PENDING. Clear the pendingNotifyAt too — the ARR push failed, so
+        // there's no download to pend. A failed write is logged, not thrown: the row is
+        // committed, so a throw would answer 500 for a request that exists.
+        const rolledBack = await prisma.mediaRequest
+          .updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } })
+          .catch((rbErr: unknown) => {
+            console.error(`[requests] rollback to PENDING failed: ${sanitizeForLog(rbErr instanceof Error ? rbErr.message : String(rbErr))}`);
+            return { count: 0 };
+          });
+        if (rolledBack.count === 1) {
+          // The client already saw request:new with status APPROVED; emit a corrective
+          // update so it reflects the rolled-back PENDING state, and return the PENDING
+          // shape rather than the stale APPROVED row (mirrors the PATCH rollback path).
+          emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: session.user.id });
+          // The row now sits in the admin queue exactly like a normal pending request, so it
+          // must be announced like one — and it can't rely on the pendingNotifyAt backstop
+          // (cleared just above), leaving this the only alert admins get.
+          await announceRolledBackToAdmins();
+          // Both rolled-back fields, like the PATCH rollback body (requests/[id]): the
+          // row's pendingNotifyAt is null now, so the body must not carry the armed one.
+          return { ok: true, kind: "created", branch: "auto-approve", pushFailed: true, pushOutcomeUnknown: false, request: { ...request, status: "PENDING", pendingNotifyAt: null } };
+        }
+        // Not rolled back: the row moved on (a webhook flipped it AVAILABLE, or it was
+        // deleted) or the write failed. Whatever it is, it is not PENDING, so it is not
+        // announced; an APPROVED row the arr lacks is re-pushed by the sync, and its
+        // armed backstop is consumed by the check below.
+      }
     }
 
     // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
     // by this point, so a P2025 (row deleted mid-push) or transient DB error must not trip
     // the APPROVED->PENDING rollback and leave Sonarr grabbing content the DB says is
-    // pending. updateMany no-ops on a concurrently deleted row instead of throwing.
+    // pending. updateMany no-ops on a concurrently deleted row instead of throwing, and a
+    // failed write is logged rather than thrown: the push landed, so the request still
+    // answers 201 and its download check is still queued.
     if (pushedTvdbId !== null) {
-      await prisma.mediaRequest.updateMany({ where: { id: request.id }, data: { tvdbId: pushedTvdbId } });
+      await prisma.mediaRequest
+        .updateMany({ where: { id: request.id }, data: { tvdbId: pushedTvdbId } })
+        .catch((err: unknown) => {
+          console.error(`[requests] tvdbId stamp failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+        });
     }
 
     // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
-    // orchestrator's next sweep. Scheduled only here, on the push-succeeded path:
-    // unlike /api/requests/[id] the rollback above returns early having already
-    // cleared pendingNotifyAt, so a job queued for it would have nothing to do.
+    // orchestrator's next sweep. Scheduled whenever the row kept its armed
+    // pendingNotifyAt — never after the rollback above, which returned early having
+    // cleared it, so a job queued for it would have nothing to do.
     scheduleDownloadCheck({
       requestId: request.id,
       tmdbId,
@@ -642,7 +742,7 @@ export async function createMediaRequest(
       title: request.title,
     }, { name: "requests:auto-approve-90s-download-check" });
 
-    return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, request };
+    return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, pushOutcomeUnknown, request };
   }
 
   if (createdBranch === "mirror-approved") {
@@ -651,11 +751,11 @@ export async function createMediaRequest(
     // is still tracked, so the sync's "now available" pass notifies them just
     // like the original requester.
     emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
-    return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, request };
+    return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, pushOutcomeUnknown: false, request };
   }
 
   emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
 
-  await announcePendingToAdmins();
-  return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, request };
+  if (announcePending) announceToAdmins();
+  return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, pushOutcomeUnknown: false, request };
 }

@@ -2658,7 +2658,8 @@ const spec = {
             description:
               "Instance lists keyed by service. Each carries its registry entry plus url, externalUrl, rootFolder, " +
               "qualityProfileId, minimumAvailability, languageProfileId (stored strings, \"\" when unset); secrets only as " +
-              "hasApiKey / hasWebhookSecret.",
+              "hasApiKey / hasWebhookSecret. `versions` (additive) holds an opaque version per service of the NAMED " +
+              "instances, to send back as POST `baseVersion`.",
           },
         },
       },
@@ -2674,6 +2675,10 @@ const spec = {
                 required: ["service", "instances"],
                 properties: {
                   service: { type: "string", enum: ["radarr", "sonarr"] },
+                  baseVersion: {
+                    type: "string",
+                    description: "Optional: the `version` this list was edited from (GET `versions[service]` or the last POST's `version`). When it is no longer current the save is refused with 409 and nothing is written. Omitted, the save is unconditional.",
+                  },
                   instances: {
                     type: "array",
                     items: {
@@ -2692,10 +2697,10 @@ const spec = {
                           nullable: true,
                           description: "The address a BROWSER uses for the instance (Open in Radarr/Sonarr links) — never fetched by the server; blank or null falls back to url",
                         },
-                        apiKey: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
+                        apiKey: { type: "string", maxLength: 512, description: "Write-only; send the mask sentinel to keep unchanged" },
                         rootFolder: { type: "string" },
                         qualityProfileId: { type: "integer", nullable: true },
-                        webhookSecret: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
+                        webhookSecret: { type: "string", maxLength: 512, description: "Write-only; send the mask sentinel to keep unchanged" },
                         minimumAvailability: { type: "string", nullable: true, enum: ["", "announced", "inCinemas", "released", null], description: "Radarr only; \"\" or null clears (Radarr's default)" },
                         languageProfileId: { type: "integer", nullable: true, description: "Sonarr v3 only; null clears" },
                       },
@@ -2708,7 +2713,7 @@ const spec = {
         },
         responses: {
           "200": {
-            description: "Saved. `instances` is the configured set as GET lists it (secrets masked as has* flags), `testResults` one entry per instance whose connection was tested, and `removed` (additive — the iOS app decodes it) one entry per de-registered slug with the PENDING/APPROVED requests it left behind.",
+            description: "Saved. `instances` is the configured set as GET lists it (secrets masked as has* flags), `testResults` one entry per instance whose connection was tested, `removed` (additive — the iOS app decodes it) one entry per de-registered slug with the PENDING/APPROVED requests it left behind, and `version` (additive) the list's new version for the next `baseVersion`.",
             content: {
               "application/json": {
                 schema: {
@@ -2718,12 +2723,14 @@ const spec = {
                     instances: { type: "array", items: { type: "object" } },
                     testResults: { type: "array", items: { type: "object", properties: { slug: { type: "string" }, ok: { type: "boolean" }, message: { type: "string" } } } },
                     removed: { type: "array", items: { type: "object", properties: { slug: { type: "string" }, openRequests: { type: "integer" } } } },
+                    version: { type: "string" },
                   },
                 },
               },
             },
           },
-          "400": { description: "Invalid service or slug, or `instances` is not an array" },
+          "400": { description: "Invalid service or slug, `instances` is not an array, `baseVersion` is not a string, or an apiKey/webhookSecret is not a string of at most 512 characters" },
+          "409": { description: "The stored list changed since `baseVersion`, or the body keeps a secret (mask sentinel) for a named instance that is no longer registered; nothing was written — reload and save again" },
           "413": { description: "Request body over the 64 KB cap" },
         },
       },
@@ -2768,7 +2775,7 @@ const spec = {
       get: {
         tags: ["Admin – Settings"],
         summary: "List all Plex/Jellyfin server instances with connection state (ADMIN)",
-        responses: { "200": { description: "Instance lists keyed by service (secrets masked as has* flags)" } },
+        responses: { "200": { description: "Instance lists keyed by service (secrets masked as has* flags). `versions` (additive) holds an opaque version per service of the NAMED servers, to send back as POST `baseVersion`." } },
       },
       post: {
         tags: ["Admin – Settings"],
@@ -2782,6 +2789,10 @@ const spec = {
                 required: ["service", "instances"],
                 properties: {
                   service: { type: "string", enum: ["plex", "jellyfin"] },
+                  baseVersion: {
+                    type: "string",
+                    description: "Optional: the `version` this list was edited from (GET `versions[service]` or the last POST's `version`). When it is no longer current the save is refused with 409 and nothing is written. Omitted, the save is unconditional.",
+                  },
                   instances: {
                     type: "array",
                     items: {
@@ -2791,10 +2802,10 @@ const spec = {
                         slug: { type: "string", description: "'' = default, or a named slug (lowercase alnum)" },
                         name: { type: "string" },
                         serverUrl: { type: "string", description: "Plex only" },
-                        adminToken: { type: "string", description: "Plex only; write-only, send the mask sentinel to keep unchanged" },
+                        adminToken: { type: "string", maxLength: 4096, description: "Plex only; write-only, send the mask sentinel to keep unchanged" },
                         adminEmail: { type: "string", description: "Plex only" },
                         url: { type: "string", description: "Jellyfin only" },
-                        apiKey: { type: "string", description: "Jellyfin only; write-only, send the mask sentinel to keep unchanged" },
+                        apiKey: { type: "string", maxLength: 4096, description: "Jellyfin only; write-only, send the mask sentinel to keep unchanged" },
                         restrictSignIn: { type: "boolean", description: "Jellyfin only; omit to leave the stored value untouched" },
                         restricted: { type: "boolean", description: "Gate this server's library behind a per-user view grant (never the default instance)" },
                         libraries: { type: "string", description: "Comma-joined library ids/section keys to sync from THIS server; omit to leave untouched, \"\" syncs all" },
@@ -2809,8 +2820,9 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Saved ({ ok, instances, testResults }); includes per-instance connection test results" },
-          "400": { description: "Invalid service, slug, server URL or name, or `instances` is not an array" },
+          "200": { description: "Saved ({ ok, instances, testResults, version }); includes per-instance connection test results and (additive) the list's new version for the next `baseVersion`" },
+          "400": { description: "Invalid service, slug, server URL or name, `instances` is not an array, `baseVersion` is not a string, or an adminToken/apiKey is not a string of at most 4096 characters" },
+          "409": { description: "The stored list changed since `baseVersion`, or the body keeps a token (mask sentinel) for a named server that is no longer registered; nothing was written — reload and save again" },
           "413": { description: "Request body over the 64 KB cap" },
         },
       },
@@ -5057,7 +5069,7 @@ const spec = {
               "5 minutes during an outage is worse than a missed hour.",
             headers: {
               "X-Cron-Degraded": {
-                description: "Comma-separated failed sources. Present only on a degraded run.",
+                description: "Comma-separated failed sources (\"wind-down\" for a run that stopped early). Present only on a degraded run.",
                 schema: { type: "string" },
               },
             },
@@ -5090,6 +5102,12 @@ const spec = {
                     error: { type: "string", description: "Present only on a degraded run, alongside failedSources." },
                     skipped: { type: "boolean", description: "true when another sync held the advisory lock. Every count field is then ABSENT." },
                     reason: { type: "string" },
+                    windDown: {
+                      type: "boolean",
+                      description:
+                        "true when the run lost its lock and stopped at a step boundary: only checked, marked, " +
+                        "reverted and repushed are present, `error` is set and X-Cron-Degraded is \"wind-down\".",
+                    },
                   },
                 },
               },
@@ -5112,10 +5130,11 @@ const spec = {
           instance: { type: "string", description: "Registered Plex instance slug; absent = the default server" },
         } } } } },
         responses: {
-          "200": { description: "{ scanned: { movies, tv }, checked, marked, full }" },
+          "200": { description: "{ scanned: { movies, tv }, checked, marked, full }; or { skipped: true, reason } with X-Cron-Skipped when a Plex resync is already running" },
           "400": { description: "Malformed or unregistered `instance`, or Plex not configured" },
           "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
           "502": { description: "The Plex library could not be fetched" },
+          "503": { description: "{ error } — the run lost its lock and stopped before writing" },
         },
       },
     },
@@ -5131,10 +5150,11 @@ const spec = {
           instance: { type: "string", description: "Registered Jellyfin instance slug; absent = the default server" },
         } } } } },
         responses: {
-          "200": { description: "{ scanned: { movies, tv }, checked, marked, full }" },
+          "200": { description: "{ scanned: { movies, tv }, checked, marked, full }; or { skipped: true, reason } with X-Cron-Skipped when a Jellyfin resync is already running" },
           "400": { description: "Malformed or unregistered `instance`, or Jellyfin not configured" },
           "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
           "502": { description: "The Jellyfin library could not be fetched" },
+          "503": { description: "{ error } — the run lost its lock and stopped before writing" },
         },
       },
     },
@@ -5144,9 +5164,9 @@ const spec = {
         summary: "Sync Radarr wanted/available items",
         security: [{ session: [] }, { cronSecret: [] }],
         responses: {
-          "200": { description: "{ wanted, available }" },
+          "200": { description: "{ wanted, available }; with `failedInstances` (and the X-Cron-Degraded header) when a named instance failed and kept its rows" },
           "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
-          "502": { description: "{ error }, or { skipped: true, reason: \"arr-unavailable\" } when every instance's fetch failed" },
+          "502": { description: "{ error }, or { skipped: true, reason: \"arr-unavailable\" } when the default instance's fetch failed" },
         },
       },
     },
@@ -5156,9 +5176,9 @@ const spec = {
         summary: "Sync Sonarr wanted/available items",
         security: [{ session: [] }, { cronSecret: [] }],
         responses: {
-          "200": { description: "{ wanted, available }" },
+          "200": { description: "{ wanted, available }; with `failedInstances` (and the X-Cron-Degraded header) when a named instance failed and kept its rows" },
           "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
-          "502": { description: "{ error }, or { skipped: true, reason: \"arr-unavailable\" } when every instance's fetch failed" },
+          "502": { description: "{ error }, or { skipped: true, reason: \"arr-unavailable\" } when the default instance's fetch failed" },
         },
       },
     },
@@ -5358,9 +5378,10 @@ const spec = {
       get: {
         tags: ["Admin – Backup"],
         summary: "Export encrypted database backup (ADMIN)",
-        description: "Streams the whole database as an AES-encrypted SQL dump (key from the BACKUP_DB_PASSWORD env var, at least 12 characters). Audited BACKUP_EXPORT. 5 per hour per admin.",
+        description: "Streams the whole database as an AES-encrypted SQL dump (key from the BACKUP_DB_PASSWORD env var, at least 12 characters). Audited BACKUP_EXPORT (the row records how the export ended). 5 per hour per admin; one export at a time.",
         responses: {
           "200": { description: "Encrypted dump, application/octet-stream, attachment `summonarr-full-backup-<date>.sql.enc`" },
+          "409": { description: "Another export is still streaming" },
           "429": { description: "More than 5 exports in an hour" },
           "503": { description: "BACKUP_DB_PASSWORD is unset or shorter than 12 characters" },
         },
@@ -5370,7 +5391,7 @@ const spec = {
       post: {
         tags: ["Admin – Backup"],
         summary: "Import database backup (ADMIN)",
-        description: "DESTRUCTIVE: truncates and replaces the database from an encrypted dump. The body is the raw encrypted dump bytes (not multipart), at most 500 MB plus 4 KB. The dump's schema fingerprint must match this server's. Audited BACKUP_IMPORT. 5 per hour per admin.",
+        description: "DESTRUCTIVE: truncates and replaces the database from an encrypted dump. The body is the raw encrypted dump bytes (not multipart), at most 500 MB plus 4 KB. The dump's schema fingerprint must match this server's. Audited BACKUP_IMPORT, failed attempts included. 5 per hour per admin.",
         requestBody: {
           required: true,
           content: { "application/octet-stream": { schema: { type: "string", format: "binary" } } },
@@ -5516,7 +5537,7 @@ const spec = {
           "202": { description: "`async: true` — the job was started (or an identical one was already running); body carries `jobId`" },
           "400": { description: "Bad body, an invalid serverInstance slug, or a malformed itemKey" },
           "404": { description: "No library row for that tmdbId on that instance — re-sync first; in item mode, the last match check didn't flag that item" },
-          "429": { description: "Rate limited (10/min/admin)" },
+          "429": { description: "Rate limited (10/min/admin), or too many fix-match operations already queued" },
           "502": { description: "Remote remap or the follow-up cache write failed" },
         },
       },
@@ -5585,9 +5606,11 @@ const spec = {
             description:
               "plexFilePath / jellyfinFilePath (for the requested instance) + arrTmdbId / arrTitle, " +
               "plus plexServerInstance / jellyfinServerInstance (the instance each path came from, null when that server has no row) " +
-              "and plexInstances / jellyfinInstances — every instance holding the title, as `{ serverInstance, filePath }`.",
+              "and plexInstances / jellyfinInstances — every instance holding the title, as `{ serverInstance, filePath }`. " +
+              "`arrError` is true when a Radarr/Sonarr lookup failed, so a null arrTmdbId means \"could not tell\".",
           },
           "400": { description: "Missing params, or an invalid serverInstance slug" },
+          "429": { description: "Rate limited (30/min/admin)" },
         },
       },
     },
@@ -5598,7 +5621,7 @@ const spec = {
         parameters: [
           {
             name: "path", in: "query", required: true, schema: { type: "string" },
-            description: "A Plex-relative thumb path, or an absolute URL from an allowlisted metadata-agent CDN",
+            description: "A Plex item's artwork path (/library/metadata/{id}/thumb|art|banner|poster[/{ts}], no query string), or an absolute URL from an allowlisted metadata-agent CDN",
           },
           {
             name: "serverInstance", in: "query", schema: { type: "string", default: "" },
@@ -5700,6 +5723,7 @@ const spec = {
           },
           "400": { description: "`discordId` is present but not a valid snowflake" },
           "401": { description: "Step-up authentication required or failed (guardrail 6g). `error` is a code: password-required (send `confirmPassword`), invalid-password, or session-too-old (an SSO caller whose session is older than 5 minutes)" },
+          "403": { description: "The Discord integration is switched off (feature.integration.discord)" },
           "429": { description: "Rate limited" },
         },
       },
@@ -5717,6 +5741,7 @@ const spec = {
           "200": { description: "{ ok: true } — the code was DMed (it is never returned)" },
           "400": { description: "Invalid Discord user id" },
           "401": { description: "Step-up authentication required or failed (guardrail 6g). `error` is a code: password-required (send `confirmPassword`), invalid-password, or session-too-old (an SSO caller whose session is older than 5 minutes)" },
+          "403": { description: "The Discord integration is switched off (feature.integration.discord)" },
           "429": { description: "More than 10 initiations an hour, or 3 per target Discord id per 15 minutes" },
           "502": { description: "The bot could not open or send the DM" },
           "503": { description: "No Discord bot token configured" },
@@ -5742,6 +5767,7 @@ const spec = {
         responses: {
           "200": { description: "{ ok: true, migrated, discordId }" },
           "400": { description: "No pending code, expired, or incorrect code" },
+          "403": { description: "The Discord integration is switched off (feature.integration.discord)" },
           "409": { description: "The merge was refused (for example the Discord id is linked to another account)" },
           "429": { description: "{ error: \"rate_limit\", message } — more than 5 attempts in 10 minutes; the pending code is deleted" },
         },
@@ -5753,7 +5779,7 @@ const spec = {
         summary: "Sync Discord roles for every linked account (ADMIN)",
         description: "Assigns the linked/server/admin roles to every active linked account (shadow `@discord.local` accounts excluded) and strips them from deactivated ones. Audited SETTINGS_CHANGE.",
         responses: {
-          "200": { description: "{ synced, revoked } (just { synced: 0 } when no account is linked or deactivated)" },
+          "200": { description: "{ synced, revoked, failed, skipped }: synced/revoked count the members Discord accepted, failed the ones with a refused or failed call, skipped the ones with nothing to do (integration off, no guild or role configured). Just { synced: 0 } when no account is linked or deactivated." },
           "403": { description: "Not ADMIN" },
         },
       },

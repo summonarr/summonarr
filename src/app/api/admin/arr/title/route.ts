@@ -54,9 +54,8 @@ export const GET = withAdmin(snapshotted(async (req) => {
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 64 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 64 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrTitleGate(body.service, body.instance, body.id, t);
   if (target instanceof NextResponse) return target;
   const edit = parseTitleEdit(target.service, body);

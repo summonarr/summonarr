@@ -1,99 +1,47 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { AuditLogView } from "@/components/admin/audit-log-table";
 import { requireFeature } from "@/lib/features";
-import type { AuditAction, Prisma } from "@/generated/prisma";
 import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
-import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
-import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { buildAuditLogWhere } from "@/lib/audit-log-filter";
+import { AUDIT_VIEW_COOKIE, parseAuditViewMode } from "@/lib/audit-log-view";
 import { REDACTED_USER_NAME } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 50;
 
-// Derived from the shared audit-actions module so the schema enum is the single
-// source of truth. A hand-maintained list previously missed values, so a filter
-// for any missing enum value silently returned the full unfiltered set.
-const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
-
-const GROUP_ACTIONS: Record<AuditGroup, AuditAction[]> = {
-  auth: [],
-  admin: [],
-  system: [],
-};
-for (const action of AUDIT_ACTIONS) {
-  GROUP_ACTIONS[ACTION_GROUP[action]].push(action);
-}
-
 export default async function AuditLogPage({
   searchParams,
 }: {
-  searchParams: Promise<{ action?: string; group?: string; dateFrom?: string; dateTo?: string; user?: string | string[]; target?: string | string[]; hideCron?: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   await requireFeature("feature.admin.auditLog");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const { action: actionParam, group: groupParam, dateFrom, dateTo, user: userRaw, target: targetRaw, hideCron: hideCronParam } = await searchParams;
-  // A repeated query key arrives as an array at runtime; sanitizeContainsSearch
-  // calls .replace, which would 500 the page. Take the first value.
-  const user = Array.isArray(userRaw) ? userRaw[0] : userRaw;
-  const target = Array.isArray(targetRaw) ? targetRaw[0] : targetRaw;
-  const action = VALID_ACTIONS.includes(actionParam as AuditAction)
-    ? (actionParam as AuditAction)
-    : undefined;
-  const group: AuditGroup | undefined =
-    groupParam === "auth" || groupParam === "admin" || groupParam === "system"
-      ? groupParam
-      : undefined;
-  const hideCron = hideCronParam === "1";
-
-  const where: Prisma.AuditLogWhereInput = {};
-  // Action is more specific than group — action wins if both are present
-  if (action) where.action = action;
-  else if (group) where.action = { in: GROUP_ACTIONS[group] };
-  if (dateFrom || dateTo) {
-    where.createdAt = {};
-    // Both bounds arrive as ISO instants — the START of the viewer's LOCAL
-    // calendar day (the filter bar converts the date input's YYYY-MM-DD with
-    // `new Date(y, m - 1, d)`), so the filter cuts where the Timeline view's
-    // day headings do rather than at UTC midnight. A bare YYYY-MM-DD from an
-    // old bookmark still parses (as UTC midnight, the previous behaviour).
-    // An Invalid Date reaches Prisma's DateTime filter and throws, taking the
-    // whole page render down — mirrors the isNaN guard in /api/admin/audit-log.
-    if (dateFrom) {
-      const start = new Date(dateFrom);
-      if (!isNaN(start.getTime())) where.createdAt.gte = start;
-    }
-    if (dateTo) {
-      const end = new Date(dateTo);
-      if (!isNaN(end.getTime())) {
-        // +1 day in UTC = exactly 24h past the local-day start the client
-        // sent, i.e. the start of the viewer's next day — same arithmetic as
-        // the list API and the export, so the three pages always agree.
-        end.setUTCDate(end.getUTCDate() + 1);
-        where.createdAt.lt = end;
-      }
-    }
+  // As a URLSearchParams, the filter reads exactly as the list and export
+  // routes read theirs: a repeated key (an ARRAY here at runtime, whatever the
+  // prop type says) is its first value.
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(await searchParams)) {
+    for (const v of Array.isArray(value) ? value : value === undefined ? [] : [value]) query.append(key, v);
   }
-  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
-  // metacharacters and bound the length (search-box DoS, matches /api/votes).
-  if (user) where.userName = { contains: sanitizeContainsSearch(user), mode: "insensitive" };
-  if (target) where.target = { contains: sanitizeContainsSearch(target), mode: "insensitive" };
-  // "Hide cron" means hide the SYSTEM principal, not hide every row without a
-  // user. `{ not: "system" }` compiles to `"userId" <> 'system'`, and in SQL
-  // NULL <> 'system' is NULL, not TRUE — so Postgres drops every NULL-userId row
-  // too. Three writers produce those, and the one that matters is
-  // /api/auth/machine-session, which mints an ADMIN-impersonating JWT from
-  // CRON_SECRET and is deliberately attributed to the machine rather than to the
-  // assumed admin. That row is the only record the mint happened, and ticking a
-  // filter labelled "Showing only real users" silently removed it — including
-  // from the CSV/JSON export.
-  if (hideCron) where.AND = [{ OR: [{ userId: null }, { userId: { not: "system" } }] }];
+  // The filter the list and export routes build too (audit-log-filter.ts). An
+  // unparseable date is a 400 there, so it can't be shown here either: drop it
+  // from the URL, so the bar, the first page, "Load more" and the export all
+  // agree on the filter actually applied (a second bad date takes one more hop).
+  const filter = buildAuditLogWhere(query);
+  if (filter.error) {
+    query.delete(filter.param);
+    const rest = query.toString();
+    redirect(rest ? `/admin/audit-log?${rest}` : "/admin/audit-log");
+  }
+  const { where, filters } = filter;
 
   const logs = await prisma.auditLog.findMany({
     where,
@@ -118,6 +66,11 @@ export default async function AuditLogPage({
   }));
 
   const t = await getTranslator();
+  // The saved Table/Timeline choice is a cookie so the FIRST paint is already in
+  // that view: read from localStorage after mount, timeline users saw the table
+  // flash first. Null = no cookie yet (the view falls back to a one-time read
+  // of the old localStorage value).
+  const initialViewMode = parseAuditViewMode((await cookies()).get(AUDIT_VIEW_COOKIE)?.value);
 
   return (
     <div className="ds-page-enter">
@@ -130,13 +83,16 @@ export default async function AuditLogPage({
         initialLogs={rows}
         initialNextCursor={nextCursor}
         initialHasMore={hasMore}
-        currentAction={action ?? ""}
-        currentGroup={group ?? ""}
-        currentDateFrom={dateFrom ?? ""}
-        currentDateTo={dateTo ?? ""}
-        currentUser={user ?? ""}
-        currentTarget={target ?? ""}
-        currentHideCron={hideCron}
+        filters={{
+          action: filters.action ?? "",
+          group: filters.group ?? "",
+          dateFrom: filters.dateFrom ?? "",
+          dateTo: filters.dateTo ?? "",
+          user: filters.user ?? "",
+          target: filters.target ?? "",
+          hideCron: filters.hideCron,
+        }}
+        initialViewMode={initialViewMode}
         redactedUserName={REDACTED_USER_NAME}
       />
     </div>

@@ -314,12 +314,15 @@ const profileMfa = await import("../src/app/api/profile/mfa/route.ts");
 const totpSetup = await import("../src/app/api/profile/mfa/totp/setup/route.ts");
 const totpEnable = await import("../src/app/api/profile/mfa/totp/enable/route.ts");
 const recoveryRoute = await import("../src/app/api/profile/mfa/recovery-codes/route.ts");
+const passwordRoute = await import("../src/app/api/profile/password/route.ts");
 const passkeyOptions = await import("../src/app/api/profile/mfa/passkeys/options/route.ts");
 const passkeyRegister = await import("../src/app/api/profile/mfa/passkeys/route.ts");
 const passkeyItem = await import("../src/app/api/profile/mfa/passkeys/[id]/route.ts");
 const totpRoute = await import("../src/app/api/profile/mfa/totp/route.ts");
 const stepUpChallenge = await import("../src/app/api/profile/mfa/challenge/route.ts");
 const adminReset = await import("../src/app/api/admin/users/[id]/mfa/route.ts");
+const profileRoute = await import("../src/app/api/profile/route.ts");
+const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 
 // ── request plumbing ────────────────────────────────────────────────────────
 
@@ -749,6 +752,16 @@ test("rate limit per IP: the 31st attempt from one address in 5 minutes is 429 b
   }
   const res = await mfa({ mfaToken: "garbage", method: "totp", code: "000000" });
   assert.equal(res.status, 429);
+  // A flood past the limit stays refused — and writes ONE audit row per window,
+  // not one per request (the refusal itself must not become an unbounded insert).
+  for (let i = 0; i < 10; i++) {
+    assert.equal((await mfa({ mfaToken: "garbage", method: "totp", code: "000000" })).status, 429);
+  }
+  // An over-cap body is refused by the limit too: it is checked before the 32 KB read.
+  assert.equal((await mfa({ mfaToken: "x".repeat(40_000) })).status, 429);
+  await new Promise((r) => setImmediate(r));
+  const limited = audit.filter((a) => (a.details as string | undefined)?.includes('"mfa_rate_limited"'));
+  assert.equal(limited.length, 1, "the per-IP refusal is audited once per window");
 });
 
 test("malformed second-step input is a 400, never a mint", async () => {
@@ -1092,6 +1105,27 @@ test("W3: a password-only passkey registration is refused when a factor lands wh
   assert.equal(rawSql[0], MFA_LOCK_SQL(u.id as string), "the lock is the transaction's FIRST statement");
 });
 
+test("recovery-code regeneration re-reads the factor state under the MFA lock: 2FA turned off meanwhile ⇒ 400, no codes written, no audit", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  const key = seedTotp(u.id as string);
+  seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+  // A DELETE /api/profile/mfa from another tab commits after this request's
+  // step-up passed, before it gets the lock.
+  onFirstLock(u.id as string, () => {
+    totps = totps.filter((r) => r.userId !== u.id);
+    codes = codes.filter((c) => c.userId !== u.id);
+  });
+  const res = await call(recoveryRoute.POST as never, "/api/profile/mfa/recovery-codes", {
+    body: { password: PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } }, headers: bearer(jwt),
+  });
+  assert.equal(res.status, 400);
+  assert.equal(rawSql[0], MFA_LOCK_SQL(u.id as string), "the lock is the transaction's FIRST statement");
+  assert.equal(codes.filter((c) => c.userId === u.id).length, 0, "no live codes for a 2FA that no longer exists");
+  await new Promise((r) => setImmediate(r));
+  assert.ok(!audit.some((a) => a.action === "MFA_CHANGE"), "nothing changed, so nothing is audited");
+});
+
 test("W3: the passkey cap is judged under the lock too", async () => {
   const u = await seedUser();
   const jwt = await sessionFor(u);
@@ -1413,6 +1447,82 @@ test("M2: a wrong code at the ENROLLMENT step-up spends the same persistent budg
   u.mfaLockedUntil = new Date(Date.now() + 60_000);
   const locked = await call(recoveryRoute.POST as never, "/api/profile/mfa/recovery-codes", { body: { password: PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } }, headers: bearer(jwt) });
   assert.equal(locked.status, 429);
+});
+
+test("the lockout audit row names the step-up that tripped it: a password change says password-change, an enrollment change says enrollment", async () => {
+  const lockoutContexts = () =>
+    audit
+      .map((a) => JSON.parse(a.details as string) as { reason?: string; context?: string })
+      .filter((d) => d.reason === "mfa_lockout")
+      .map((d) => d.context);
+
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  const key = seedTotp(u.id as string);
+  const wrong = currentCode(key) === "000000" ? "111111" : "000000";
+  u.mfaFailedAttempts = MFA_LOCKOUT_THRESHOLD - 1; // the next wrong code imposes the lockout
+  const pw = await call(passwordRoute.PATCH as never, "/api/profile/password", {
+    method: "PATCH",
+    body: { currentPassword: PASSWORD, newPassword: "a-brand-new-password-1", secondFactor: { method: "totp", code: wrong } },
+    headers: bearer(jwt),
+  });
+  assert.equal(pw.status, 429);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(lockoutContexts(), ["password-change"]);
+
+  const v = await seedUser();
+  const vJwt = await sessionFor(v);
+  const vKey = seedTotp(v.id as string);
+  v.mfaFailedAttempts = MFA_LOCKOUT_THRESHOLD - 1;
+  const vWrong = currentCode(vKey) === "000000" ? "111111" : "000000";
+  const regen = await call(recoveryRoute.POST as never, "/api/profile/mfa/recovery-codes", { body: { password: PASSWORD, secondFactor: { method: "totp", code: vWrong } }, headers: bearer(vJwt) });
+  assert.equal(regen.status, 429);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(lockoutContexts(), ["password-change", "enrollment"]);
+});
+
+// ── closing your own account ────────────────────────────────────────────────
+
+const deleteOwnAccount = (jwt: string, body: Row) =>
+  call(profileRoute.DELETE as never, "/api/profile", { method: "DELETE", body, headers: bearer(jwt) });
+
+test("self-deletion of an account with 2FA needs the password AND a fresh second factor (web session); a wrong password burns no code", async () => {
+  const u = await seedUser();
+  const jwt = await sessionFor(u);
+  const key = seedTotp(u.id as string);
+  seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+
+  const pwOnly = await deleteOwnAccount(jwt, { password: PASSWORD });
+  assert.equal(pwOnly.status, 400);
+  const body = await pwOnly.json();
+  assert.equal(body.secondFactorRequired, true);
+  assert.deepEqual(body.methods, ["totp", "recovery"]);
+  assert.equal(u.deactivatedAt ?? null, null, "the password alone disables nothing");
+
+  const wrongPw = await deleteOwnAccount(jwt, { password: "not-the-password", secondFactor: { method: "recovery", code: "AAAA-BBBB-CCCC-DDDD" } });
+  assert.equal(wrongPw.status, 400);
+  assert.equal(codes.filter((c) => c.usedAt == null).length, 1, "the recovery code is not spent on a wrong password");
+
+  const ok = await deleteOwnAccount(jwt, { password: PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } });
+  assert.equal(ok.status, 200);
+  assert.ok(u.deactivatedAt instanceof Date, "disabled once both factors are proven");
+});
+
+test("self-deletion from the native app keeps its shipped contract: password only, no second factor asked", async () => {
+  const u = await seedUser();
+  seedTotp(u.id as string);
+  const sessionId = `sess-${++seq}`;
+  sessions.push({ sessionId, userId: u.id, expiresAt: new Date(NEVER_EXPIRES_AT_SEC * 1000), createdAt: new Date() });
+  const nativeJwt = await signSessionJwt(
+    {
+      id: u.id as string, role: "USER", permissions: "0", provider: "credentials", sessionId,
+      expiresAt: NEVER_EXPIRES_AT_SEC, transport: "bearer",
+    },
+    { expiresInSeconds: 7_200 },
+  );
+  const res = await deleteOwnAccount(nativeJwt, { password: PASSWORD });
+  assert.equal(res.status, 200);
+  assert.ok(u.deactivatedAt instanceof Date);
 });
 
 // ── L6: one challenge, one factor spend ─────────────────────────────────────

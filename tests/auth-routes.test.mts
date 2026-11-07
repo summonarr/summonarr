@@ -123,10 +123,18 @@ function applySelect(
   return out;
 }
 
+// Every Setting/User read, so a test can prove a refusal came before the DB.
+let dbReads = 0;
+// When set, the next user.create throws it (a racing registration's unique violation).
+let userCreateThrows: unknown = null;
+
 const settingModel = {
-  findUnique: async (args: { where: { key: string } }) =>
-    settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null,
+  findUnique: async (args: { where: { key: string } }) => {
+    dbReads++;
+    return settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null;
+  },
   findMany: async (args: { where?: { key?: { in?: string[] } } }) => {
+    dbReads++;
     const keys = args.where?.key?.in ?? [...settings.keys()];
     return keys.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k)! }));
   },
@@ -144,8 +152,9 @@ const settingModel = {
 };
 
 const userModel = {
-  count: async () => users.length,
+  count: async () => { dbReads++; return users.length; },
   findUnique: async (args: { where: { id: string }; select?: Record<string, boolean> }) => {
+    dbReads++;
     const u = users.find((x) => x.id === args.where.id);
     return u ? applySelect(u as unknown as Record<string, unknown>, args.select) : null;
   },
@@ -162,6 +171,11 @@ const userModel = {
     return u ? applySelect(u as unknown as Record<string, unknown>, args.select) : null;
   },
   create: async (args: { data: Record<string, unknown>; select?: Record<string, boolean> }) => {
+    if (userCreateThrows) {
+      const err = userCreateThrows;
+      userCreateThrows = null;
+      throw err;
+    }
     const d = args.data;
     const row: UserRow = {
       id: (d.id as string | undefined) ?? `u-${++userSeq}`,
@@ -379,6 +393,8 @@ beforeEach(() => {
   userCreates.length = 0;
   userSeq = 0;
   failTransactions = false;
+  dbReads = 0;
+  userCreateThrows = null;
   warns.length = 0;
   errors.length = 0;
 });
@@ -572,6 +588,33 @@ test("register rejects before reading the body: maintenance (503), disabled loca
   assert.deepEqual(await bodyOf(limited), { error: "Too many requests — try again later" });
 
   assert.equal(users.length, 0, "no gate-rejected request may create a user");
+});
+
+test("register: a fixed per-IP pre-limit answers 429 before ANY Setting or User read", async () => {
+  const ip = freshIp();
+  // Fill the DB-free bucket the route checks first.
+  for (let i = 0; i < 30; i++) checkRateLimit(`register-pre:${ip}`, 30, 15 * 60 * 1000);
+  dbReads = 0;
+  const res = await registerPost(registerReq({ email: "flood@example.com", password: STRONG_PASSWORD }, { ip }));
+  assert.equal(res.status, 429);
+  assert.deepEqual(await bodyOf(res), { error: "Too many requests — try again later" });
+  assert.equal(dbReads, 0, "the anonymous refusal costs no DB read");
+  assert.equal(users.length, 0);
+});
+
+test("register: a racing registration's unique violation is read by its Prisma CODE (P2002 → 403 closed), never by message text", async () => {
+  userCreateThrows = Object.assign(new Error("something unrelated"), { name: "PrismaClientKnownRequestError", code: "P2002" });
+  const raced = await registerPost(registerReq({ email: "race@example.com", password: STRONG_PASSWORD }));
+  assert.equal(raced.status, 403);
+  assert.deepEqual(await bodyOf(raced), { error: "Registration is closed" });
+
+  // A plain error that merely MENTIONS a unique constraint is not one: it propagates.
+  userCreateThrows = new Error("Unique constraint failed on the fields: (`email`)");
+  await assert.rejects(
+    () => registerPost(registerReq({ email: "race2@example.com", password: STRONG_PASSWORD })),
+    /Unique constraint failed/,
+  );
+  assert.equal(users.length, 0);
 });
 
 // ── POST /api/auth/sign-out ─────────────────────────────────────────────────
@@ -832,6 +875,29 @@ test("machine-session target resolution: no admin → 404; a non-admin requested
   const notAdmin = await machineSessionPost(machineReq({ bearer: CRON_SECRET, body: { userId: "plain-user" } }));
   assert.equal(notAdmin.status, 403);
   assert.deepEqual(await bodyOf(notAdmin), { error: "Requested user is not an admin" });
+});
+
+test("machine-session refuses a body it cannot use instead of minting for the oldest admin", async () => {
+  // A userId lost to a parse error (or sent with the wrong type) used to take the
+  // no-userId branch and mint a session for the OLDEST admin — a different
+  // principal than the caller asked for, with no error.
+  settings.set("enableMachineSession", "true");
+  seedUser({ id: "admin-1", email: "admin@example.com", role: "ADMIN" });
+  for (const body of ["{not json", '["admin-1"]', "null", { userId: 123 }, { userId: "" }, { userId: null }, { expiresIn: "300" }, { expiresIn: null }]) {
+    const res = await machineSessionPost(machineReq({ bearer: CRON_SECRET, body }));
+    assert.equal(res.status, 400, `body ${JSON.stringify(body)} must be refused`);
+    assert.deepEqual(await bodyOf(res), { error: "Invalid request body" });
+    assert.equal(res.headers.getSetCookie().length, 0, "no session cookie");
+  }
+  assert.equal(authSessions.size, 0, "no AuthSession may be created");
+
+  // A bodiless POST (and an empty object) still mints for the oldest active admin.
+  for (const body of [undefined, "", {}]) {
+    const ok = await machineSessionPost(machineReq({ bearer: CRON_SECRET, body }));
+    assert.equal(ok.status, 200, `body ${JSON.stringify(body)} keeps the default`);
+    const token = ok.headers.getSetCookie()[0].slice(COOKIE.length + 1).split(";")[0];
+    assert.equal((await verifySessionJwt(token))?.id, "admin-1");
+  }
 });
 
 // ── GET /api/auth/setup-status ──────────────────────────────────────────────

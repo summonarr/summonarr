@@ -5,6 +5,18 @@ import type { TmdbMedia } from "./tmdb-types";
 
 const LIST_TTL_MS = 12 * 3600 * 1000;
 
+const toDbMediaType = (m: TmdbMedia): "MOVIE" | "TV" => (m.mediaType === "movie" ? "MOVIE" : "TV");
+
+// The columns every writer sets the same way on create AND update. Certification
+// and expiresAt are deliberately NOT here: each path has its own rule for them
+// (see the call sites), and folding them in is how the two drifted before.
+const coreColumns = (m: TmdbMedia) => ({
+  title:       m.title,
+  posterPath:  m.posterPath  ?? null,
+  releaseYear: m.releaseYear || null,
+  voteAverage: m.voteAverage ?? 0,
+});
+
 // Items are sorted before the batch upsert to prevent deadlocks on concurrent transactions
 // that write overlapping sets in different orders.
 export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
@@ -21,24 +33,18 @@ export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
         where: {
           tmdbId_mediaType: {
             tmdbId: m.id,
-            mediaType: m.mediaType === "movie" ? "MOVIE" : "TV",
+            mediaType: toDbMediaType(m),
           },
         },
         create: {
           tmdbId:        m.id,
-          mediaType:     m.mediaType === "movie" ? "MOVIE" : "TV",
-          title:         m.title,
-          posterPath:    m.posterPath    ?? null,
-          releaseYear:   m.releaseYear   || null,
-          voteAverage:   m.voteAverage   ?? 0,
+          mediaType:     toDbMediaType(m),
+          ...coreColumns(m),
           certification: m.certification ?? null,
           expiresAt,
         },
         update: {
-          title:         m.title,
-          posterPath:    m.posterPath    ?? null,
-          releaseYear:   m.releaseYear   || null,
-          voteAverage:   m.voteAverage   ?? 0,
+          ...coreColumns(m),
           // undefined (skip), NOT null — same rule as upsertTmdbMediaCore below:
           // list-shaped TmdbMedia never carries certification, so null here
           // erased the cert a full details fetch or the library prewarm stored
@@ -61,7 +67,7 @@ export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
         expiresAt: { lt: expiresAt },
         OR: sorted.map((m) => ({
           tmdbId:    m.id,
-          mediaType: m.mediaType === "movie" ? ("MOVIE" as const) : ("TV" as const),
+          mediaType: toDbMediaType(m),
         })),
       },
       data: { expiresAt },
@@ -84,24 +90,18 @@ export async function upsertTmdbMediaCore(media: TmdbMedia): Promise<void> {
     where: {
       tmdbId_mediaType: {
         tmdbId:    media.id,
-        mediaType: media.mediaType === "movie" ? "MOVIE" : "TV",
+        mediaType: toDbMediaType(media),
       },
     },
     create: {
       tmdbId:        media.id,
-      mediaType:     media.mediaType === "movie" ? "MOVIE" : "TV",
-      title:         media.title,
-      posterPath:    media.posterPath    ?? null,
-      releaseYear:   media.releaseYear   || null,
-      voteAverage:   media.voteAverage   ?? 0,
+      mediaType:     toDbMediaType(media),
+      ...coreColumns(media),
       certification: media.certification ?? null,
       expiresAt,
     },
     update: {
-      title:         media.title,
-      posterPath:    media.posterPath    ?? null,
-      releaseYear:   media.releaseYear   || null,
-      voteAverage:   media.voteAverage   ?? 0,
+      ...coreColumns(media),
       // undefined (skip), NOT null: writers with a leaner TMDB fetch (the
       // prewarm) have no certification on their media object — null here would
       // erase the value a full getMovieDetails/getTVDetails stored, regressing

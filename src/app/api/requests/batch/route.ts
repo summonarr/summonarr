@@ -361,7 +361,12 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   }
 
   // Permanent declines get their own audit action so they're trivially queryable;
-  // the (capped) typedIds list is preserved in full so the trail is reproducible.
+  // the (capped) typedIds list is preserved in full so the trail is reproducible,
+  // beside what actually happened: `claimedIds` are the rows THIS call moved off
+  // PENDING (an id already non-PENDING, or claimed by a concurrent batch, is not
+  // among them), `rolledBackIds` the approvals whose push failed and went back to
+  // PENDING, and `transitioned` the rows left in the batch's target status.
+  // Request ids only — batch rows name no requester (guardrail 33).
   const auditAction =
     typedStatus === "APPROVED"
       ? "REQUEST_APPROVE"
@@ -378,6 +383,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       batch: true,
       count: typedIds.length,
       ids: typedIds,
+      claimedIds,
+      rolledBackIds: [...failedIds],
+      transitioned: claimedIds.length - failedIds.size,
       adminNote: typedAdminNote ?? null,
       permanent: typedPermanent,
     },

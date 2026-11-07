@@ -3,10 +3,8 @@ import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import { autoResolveIssueForGrab } from "@/lib/issue-auto-resolve";
 import { CLAIMABLE_GRAB_ISSUE } from "@/lib/issue-grab";
-import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
-import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
+import { notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -15,18 +13,9 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { forwardArrHealthEvent } from "@/lib/arr-health-notify";
-import { checkBodySize } from "@/lib/body-size";
-import { checkRateLimit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
 import { isSeriesDownloadedInSonarr, resolveSingleTvdbToTmdb } from "@/lib/arr";
-import { getArrInstances } from "@/lib/arr-instance-registry";
-import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
-
-function safeCompare(a: string, b: string): boolean {
-  const ha = createHash("sha256").update(a).digest();
-  const hb = createHash("sha256").update(b).digest();
-  return timingSafeEqual(ha, hb);
-}
+import { claimCompletedGrabs, handleArrWebhook, type ArrWebhookContext } from "@/lib/arr-webhook";
+import { lockArrCacheInTx } from "@/lib/arr-cache-refresh";
 
 interface SonarrWebhookPayload {
   eventType: string;
@@ -35,138 +24,49 @@ interface SonarrWebhookPayload {
     tmdbId?: number;
     title: string;
   };
-  episodes?: Array<{ seasonNumber?: number; episodeNumber?: number }>;
+  episodes?: unknown;
+}
+
+type SonarrEpisodeRef = { seasonNumber?: unknown; episodeNumber?: unknown };
+
+// The ManualInteractionRequired one-shot marker. The `manualInteractionNotified:`
+// prefix is what the 30-day prune (both webhooks) matches; markers written
+// before the id type was tagged simply age out through it.
+type SeriesMarkerId = `tvdb:${number}` | `tmdb:${number}`;
+function manualMarkerKey(arrInstance: string, seriesId: SeriesMarkerId): string {
+  return `manualInteractionNotified:sonarr:${arrInstance}:${seriesId}`;
+}
+
+// Guardrail 2: the presented token is compared as SHA-256 digests with
+// timingSafeEqual. Defined here, not in the shared module, so the route audit
+// sees this route perform it.
+function safeCompare(a: string, b: string): boolean {
+  const ha = createHash("sha256").update(a).digest();
+  const hb = createHash("sha256").update(b).digest();
+  return timingSafeEqual(ha, hb);
 }
 
 export async function POST(req: NextRequest) {
-  const tooLarge = checkBodySize(req, 1_048_576);
-  if (tooLarge) return tooLarge;
+  // Auth, instance, body caps, Test/Health and the replay digest (rolled back
+  // only when the handler throws) are shared with the Radarr twin (arr-webhook.ts).
+  return handleArrWebhook<SonarrWebhookPayload>(req, "sonarr", safeCompare, handleSonarrEvent);
+}
 
-  const clientIp = getClientIp(req.headers);
-  // 600/min (~10/s): a legitimate season-pack import fires one Download event
-  // per episode, and 120/min rejected the tail of a large burst. Still bounds
-  // the pre-auth cost (two Setting reads + a hash compare) per IP.
-  if (!checkRateLimit(`webhook:sonarr:${ipBucketKey(clientIp)}`, 600, 60_000)) {
-    return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
-  }
-
-  // Every configured instance carries its own webhook secret (Setting key
-  // sonarr<Slug>WebhookSecret). The legacy shared `webhookSecret` remains the
-  // DEFAULT instance's ("") secret when it has no per-instance secret of its own.
-  const instances = await getArrInstances("sonarr");
-  const [secretRows, legacyRow] = await Promise.all([
-    prisma.setting.findMany({
-      where: { key: { in: instances.map((i) => arrSettingKey("sonarr", i.slug, "WebhookSecret")) } },
-    }),
-    prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
-  ]);
-  const secretByKey = new Map(secretRows.map((r) => [r.key, r.value ?? ""]));
-  const instanceSecrets = instances.map((inst) => {
-    const own = secretByKey.get(arrSettingKey("sonarr", inst.slug, "WebhookSecret")) || "";
-    const secret = own || (inst.slug === DEFAULT_ARR_INSTANCE ? legacyRow?.value || "" : "");
-    return { slug: inst.slug, secret };
-  });
-
-  if (instanceSecrets.every((i) => i.secret.length === 0)) {
-    console.warn("[webhook/sonarr] secret not configured");
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const authHeader = req.headers.get("authorization") ?? "";
-  // ?token= fallback is load-bearing: Sonarr webhook UI has no Authorization header field
-  const queryToken = req.nextUrl.searchParams.get("token");
-  const token = authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : queryToken;
-  // Secret-as-discriminator (see webhooks/radarr): each instance is configured with
-  // its own webhook secret, so the matching secret selects the instance that fired.
-  // Compare against EVERY instance secret with no early return (no timing oracle).
-  // Guardrail 2: keep ?token= + the timing-safe compare; no HMAC.
-  let matchedSlug: string | null = null;
-  let secret = "";
-  for (const inst of instanceSecrets) {
-    const isMatch = token != null && inst.secret.length > 0 && safeCompare(token, inst.secret);
-    if (!isMatch) continue;
-    // Equal-secret collision (misconfig): the DEFAULT instance ("") wins; otherwise
-    // the first configured instance in registry order wins (getArrInstances lists
-    // the default first, so keeping the first match already yields that ordering).
-    if (matchedSlug === null || inst.slug === DEFAULT_ARR_INSTANCE) {
-      matchedSlug = inst.slug;
-      secret = inst.secret;
-    }
-  }
-  if (!token || matchedSlug === null) {
-    console.warn("[webhook/sonarr] 401 unauthorized");
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  const arrInstance = matchedSlug;
-
-  const rawBytes = new Uint8Array(await req.arrayBuffer());
-  if (rawBytes.length > 1_048_576) {
-    console.warn(`[webhook/sonarr] 413 payload too large bytes=${rawBytes.length}`);
-    return NextResponse.json({ error: "Payload too large" }, { status: 413 });
-  }
-  const rawBody = new TextDecoder().decode(rawBytes);
-
-  let payload: SonarrWebhookPayload;
-  try {
-    const parsed = JSON.parse(rawBody);
-    // JSON.parse("null") / primitives / arrays are valid JSON but not a payload
-    // object; guard so the eventType dereference below can't throw a 500.
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-    }
-    payload = parsed;
-  } catch (err) {
-    console.warn("[webhook/sonarr] 400 invalid JSON:", err);
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
-  // Test events have a fixed payload shape — admins clicking "Test" twice within
-  // the 24h replay TTL would otherwise see the second click 409. Skip the digest
-  // check and short-circuit before recording.
-  if (payload.eventType === "Test") {
-    return NextResponse.json({ ok: true, message: "Sonarr webhook connected" });
-  }
-
-  // Health / HealthRestored are the same shape: a fixed per-issue payload
-  // (level/message/type/wikiUrl — nothing per delivery). An indexer flapping
-  // twice inside the 24h replay TTL would otherwise see its second identical
-  // POST answered 409, and Sonarr then records Summonarr's notification as
-  // failing and raises its own health warning. Acknowledge before the digest,
-  // like Test; the only thing done with one is forwarding it to the admin's
-  // notification channels (arr.health / arr.health_restored), which keeps its
-  // own short dedupe window instead (arr-health-notify.ts). Every OTHER
-  // unhandled eventType stays replay-recorded (the Grab pin in
-  // tests/webhook-routes.test.mts): those payloads carry per-delivery fields,
-  // so a byte-identical repeat IS a replay.
-  if (payload.eventType === "Health" || payload.eventType === "HealthRestored") {
-    const forwarded = forwardArrHealthEvent({
-      service: "sonarr",
-      instance: arrInstance,
-      instanceName: arrInstance === DEFAULT_ARR_INSTANCE ? null : instances.find((i) => i.slug === arrInstance)?.name ?? arrInstance,
-      eventType: payload.eventType,
-      payload,
-    });
-    return NextResponse.json({ ok: true, health: true, forwarded });
-  }
-
-  // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
-  if (!await checkAndRecordWebhookJson("sonarr", secret, payload)) {
-    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
-  }
-
-  // Track whether the synchronous body completed; if it throws we roll back the
-  // replay digest so Sonarr's source-side retry can re-deliver.
-  let syncCompleted = false;
-  try {
+async function handleSonarrEvent({ payload, arrInstance, instances }: ArrWebhookContext<SonarrWebhookPayload>): Promise<NextResponse> {
+  // Only the top level is shape-checked before this point, and the payload is
+  // attacker-shaped (secret-only auth): `episodes: [null]` or a non-array would
+  // throw below — a 500 that rolls the replay digest back. A derived copy, never
+  // a rewrite of `payload`: the digest is recorded (and cleared) over that object.
+  const episodes = Array.isArray(payload.episodes)
+    ? payload.episodes.filter((e): e is SonarrEpisodeRef => e !== null && typeof e === "object")
+    : [];
 
   // Sonarr fires ManualInteractionRequired when a grabbed release can't be imported
   // automatically and is parked in the queue. There's nothing to mark available — alert admins
   // (best-effort) so they can resolve it in Sonarr's queue.
   if (payload.eventType === "ManualInteractionRequired") {
     const seriesTitle = payload.series?.title ?? "A series";
-    const eps = payload.episodes ?? [];
+    const eps = episodes;
     let scope = "";
     if (eps.length === 1 && eps[0].seasonNumber != null && eps[0].episodeNumber != null) {
       scope = ` S${String(eps[0].seasonNumber).padStart(2, "0")}E${String(eps[0].episodeNumber).padStart(2, "0")}`;
@@ -186,19 +86,21 @@ export async function POST(req: NextRequest) {
     // the replay digest hashes the full payload so each one passes — push exactly
     // once per stuck series. Key on the STABLE series id (tvdbId, falling back to
     // tmdbId) + service, never the volatile queue id/progress. ISO value lets the
-    // marker be pruned later.
+    // marker be pruned later. The id TYPE is in the key: the two id spaces
+    // overlap, so an untagged key let one series' tmdbId clear (or suppress)
+    // another series' tvdbId-keyed marker.
     // No usable tvdbId/tmdbId → fail closed (no notify). A shouldNotify=true
     // fallback re-fires on every queue tick: replay hashes the whole payload,
     // and these events change queue id/progress each time.
-    const stableSeriesId =
+    const stableSeriesId: SeriesMarkerId | null =
       Number.isInteger(payload.series?.tvdbId) && (payload.series!.tvdbId as number) > 0
-        ? payload.series!.tvdbId
+        ? `tvdb:${payload.series!.tvdbId}`
         : Number.isInteger(payload.series?.tmdbId) && (payload.series!.tmdbId as number) > 0
-        ? payload.series!.tmdbId
+        ? `tmdb:${payload.series!.tmdbId as number}`
         : null;
     let shouldNotify = false;
     if (stableSeriesId !== null) {
-      const manualKey = `manualInteractionNotified:sonarr:${arrInstance}:${stableSeriesId}`;
+      const manualKey = manualMarkerKey(arrInstance, stableSeriesId);
       const claim = await prisma.setting.createMany({
         data: [{ key: manualKey, value: new Date().toISOString() }],
         skipDuplicates: true,
@@ -227,7 +129,6 @@ export async function POST(req: NextRequest) {
           .catch((err) => console.warn("[webhook/sonarr] manual-interaction marker prune failed:", err)),
       );
     }
-    syncCompleted = true;
     return NextResponse.json({ ok: true, manualInteraction: true });
   }
 
@@ -260,7 +161,6 @@ export async function POST(req: NextRequest) {
     // confirmed like any other below.
     const delTmdbId = payloadTmdbId ?? (delTvdbId !== null ? await resolveSingleTvdbToTmdb(delTvdbId) : null);
     if (delTmdbId === null) {
-      syncCompleted = true;
       return NextResponse.json({ ok: true, evicted: false });
     }
     const byTvdb = delTvdbId !== null && (await prisma.mediaRequest.findFirst({
@@ -275,22 +175,19 @@ export async function POST(req: NextRequest) {
       if (verdict !== null && byTvdb) {
         console.warn("[webhook/sonarr] SeriesDelete for tmdbId=%s not confirmed by Sonarr; cache left to the next sync.", sanitizeForLog(delTmdbId));
       }
-      syncCompleted = true;
       const reason = verdict === null ? "unverified" : byTvdb ? "not_deleted" : "unconfirmed";
       return NextResponse.json({ ok: true, evicted: false, reason });
     }
     const evictTmdbId = delTmdbId;
     await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
+      await lockArrCacheInTx(tx, "sonarr");
       await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: evictTmdbId, arrInstance } });
       await tx.sonarrAvailableItem.deleteMany({ where: { tmdbId: evictTmdbId, arrInstance } });
     }, { timeout: 30_000 });
-    syncCompleted = true;
     return NextResponse.json({ ok: true, evicted: true });
   }
 
   if (payload.eventType !== "Download" || !payload.series) {
-    syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true });
   }
 
@@ -341,7 +238,6 @@ export async function POST(req: NextRequest) {
   );
   if (verdict !== null && !verdict.downloaded && verdict.reason !== "incomplete") {
     console.warn("[webhook/sonarr] Download event for tvdbId=%s tmdbId=%s not confirmed downloaded in Sonarr (%s); skipping status flip.", sanitizeForLog(safeVdbId ?? "?"), sanitizeForLog(safeMdbId ?? "?"), verdict.reason);
-    syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
   }
   const seriesComplete = verdict?.downloaded === true;
@@ -352,21 +248,16 @@ export async function POST(req: NextRequest) {
   // (Sonarr omits tmdbId on some events). Factored out because it runs from two
   // places — synchronously on a confirmed-complete verdict, and from the after()
   // task when the verdict was unverifiable and the deferred re-check confirms.
-  const flipApprovedRequests = async (): Promise<FlipResult> => {
+  // `libraryTmdbId` is the confirming verdict's: Sonarr's own tmdbId for the series.
+  const flipApprovedRequests = async (libraryTmdbId: number | null): Promise<FlipResult> => {
     let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
     let effectiveMdbId: number | null = null;
     let effectiveVdbId: number | null = null;
-    // Lifted out of the tvdb-path tx so we can wipe DeletionVotes after the tx commits.
-    let tvdbPathTmdbId: number | null = null;
-    // True when the tvdb-path flipped a request but no MediaRequest carried the tvdbId,
-    // so the tmdbId-keyed wanted row couldn't be evicted inside the tx — resolve + evict
-    // it after the tx commits (best-effort; the next full sync rewrites it regardless).
-    let tvdbWantedEvictPending = false;
 
     if (safeMdbId) {
       // Advisory lock 1001,2 prevents a concurrent Sonarr sync from overwriting the wanted table mid-transaction
       await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
+        await lockArrCacheInTx(tx, "sonarr");
         // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
         // One UPDATE covers both a fresh approval (availableAt null) and a re-push
         // of an already-available title — the two used to differ only in a
@@ -400,13 +291,26 @@ export async function POST(req: NextRequest) {
     }
 
     if (updated.count === 0 && safeVdbId) {
+      // A request on this instance storing the tvdbId: its tvdbId is written only
+      // from Sonarr-sourced answers, so it ties the two ids (guardrail 14a).
+      const tied = await prisma.mediaRequest.findFirst({
+        where: { tvdbId: safeVdbId, mediaType: "TV", arrInstance },
+        select: { tmdbId: true },
+      });
+      // The tmdbId this series' cache rows are keyed on, so a tvdb-only event
+      // leaves the cache exactly as a tmdb-carrying one does — whether or not a
+      // request flipped. The sync writer's order: Sonarr's own tmdbId, then
+      // (here) the tied request's, then the tvdb→tmdb mapping. Resolved BEFORE
+      // the transaction: the mapping may call TMDB. Skipped when the tmdbId
+      // path above already wrote this series' rows.
+      const cacheTmdbId = safeMdbId !== null
+        ? null
+        : libraryTmdbId ?? tied?.tmdbId ?? await resolveSingleTvdbToTmdb(safeVdbId);
+      if (safeMdbId === null && cacheTmdbId === null) {
+        console.warn(`[webhooks/sonarr] no tmdbId for tvdbId ${sanitizeForLog(safeVdbId)}; its cache rows are left to the next sync`);
+      }
       await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-
-        const req = await tx.mediaRequest.findFirst({
-          where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance },
-          select: { tmdbId: true },
-        });
+        await lockArrCacheInTx(tx, "sonarr");
         // Do NOT touch notifiedAvailable here (guardrail #14); one UPDATE covers
         // both availableAt branches, same as the tmdbId path above.
         updated = await tx.mediaRequest.updateMany({
@@ -415,39 +319,21 @@ export async function POST(req: NextRequest) {
           // false "download pending" after a later revert.
           data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
         });
-        if (req && updated.count > 0) {
-          await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, arrInstance } });
-          await tx.sonarrAvailableItem.createMany({ data: [{ tmdbId: req.tmdbId, arrInstance }], skipDuplicates: true });
-          tvdbPathTmdbId = req.tmdbId;
-        } else if (!req && updated.count > 0) {
-          // No MediaRequest mapped this tvdbId; the wanted table is tmdbId-keyed, so
-          // defer the eviction to after the tx where we can resolve tvdb→tmdb.
-          tvdbWantedEvictPending = true;
+        if (cacheTmdbId !== null) {
+          await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: cacheTmdbId, arrInstance } });
+          await tx.sonarrAvailableItem.createMany({ data: [{ tmdbId: cacheTmdbId, arrInstance }], skipDuplicates: true });
         }
       }, { timeout: 30_000 });
       if (updated.count > 0) {
         effectiveVdbId = safeVdbId;
-        if (tvdbPathTmdbId !== null) {
-          void clearDeletionVotesForTmdbs([{ tmdbId: tvdbPathTmdbId, mediaType: "TV" }]);
-        }
-        if (tvdbWantedEvictPending) {
-          void (async () => {
-            const resolved = await resolveSingleTvdbToTmdb(safeVdbId!);
-            if (resolved !== null) {
-              await prisma.sonarrWantedItem.deleteMany({ where: { tmdbId: resolved, arrInstance } });
-              await prisma.sonarrAvailableItem.createMany({ data: [{ tmdbId: resolved, arrInstance }], skipDuplicates: true });
-            } else {
-              console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: unresolvable tvdbId ${sanitizeForLog(safeVdbId)}`);
-            }
-          })().catch((err) => console.warn("[webhooks/sonarr] deferred wanted eviction failed:", err));
-        }
+        if (tied) void clearDeletionVotesForTmdbs([{ tmdbId: tied.tmdbId, mediaType: "TV" }]);
       }
     }
     return { count: updated.count, effectiveMdbId, effectiveVdbId };
   };
 
-  const flip: FlipResult = seriesComplete
-    ? await flipApprovedRequests()
+  const flip: FlipResult = verdict?.downloaded === true
+    ? await flipApprovedRequests(verdict.tmdbId)
     : { count: 0, effectiveMdbId: null, effectiveVdbId: null };
 
   // A completed import ends the "stuck" episode the ManualInteractionRequired
@@ -456,9 +342,10 @@ export async function POST(req: NextRequest) {
   // tmdbId, so clear both candidates. Post-commit fire-and-forget, idempotent;
   // the not-confirmed/skipped paths return before reaching here. An INCOMPLETE
   // series still imported an episode, so the marker clears on that path too.
-  const manualMarkerKeys = [safeVdbId, safeMdbId]
-    .filter((id): id is number => id !== null)
-    .map((id) => `manualInteractionNotified:sonarr:${arrInstance}:${id}`);
+  const manualMarkerKeys = [
+    ...(safeVdbId !== null ? [manualMarkerKey(arrInstance, `tvdb:${safeVdbId}`)] : []),
+    ...(safeMdbId !== null ? [manualMarkerKey(arrInstance, `tmdb:${safeMdbId}`)] : []),
+  ];
   if (manualMarkerKeys.length > 0) {
     void prisma.setting.deleteMany({ where: { key: { in: manualMarkerKeys } } }).catch(() => {});
   }
@@ -480,7 +367,7 @@ export async function POST(req: NextRequest) {
       try {
         const recheck = await isSeriesDownloadedInSonarr({ tvdbId: safeVdbId, tmdbId: safeMdbId }, arrInstance);
         if (recheck?.downloaded !== true) return;
-        late = await flipApprovedRequests();
+        late = await flipApprovedRequests(recheck.tmdbId);
       } catch (err) {
         console.warn("[webhooks/sonarr] deferred verification failed:", err instanceof Error ? err.message : err);
         return;
@@ -557,8 +444,8 @@ export async function POST(req: NextRequest) {
     // shape the releases route writes) keeps the old any-delivery behaviour
     // rather than being stranded. The Radarr twin needs none of this — one
     // file per movie.
-    const delivered = (payload.episodes ?? []).filter(
-      (e): e is { seasonNumber: number; episodeNumber?: number } => Number.isInteger(e?.seasonNumber),
+    const delivered = episodes.filter(
+      (e): e is { seasonNumber: number; episodeNumber?: unknown } => Number.isInteger(e.seasonNumber),
     );
     const matchesDelivery = (grab: { scope: string; seasonNumber: number | null; episodeNumber: number | null }): boolean => {
       if (grab.scope === "EPISODE" && grab.seasonNumber != null && grab.episodeNumber != null) {
@@ -569,62 +456,10 @@ export async function POST(req: NextRequest) {
       }
       return true;
     };
-    const matchingGrabs = candidateGrabs.filter(matchesDelivery);
-    if (matchingGrabs.length > 0) {
-      const now = new Date();
-      await Promise.all(
-        matchingGrabs.map(async (grab) => {
-          const retryKey = `grabPushRetry:${grab.id}`;
-          if (grab.notifiedAt !== null) {
-            // Already emitted. Consume the push-retry marker (CAS): a 0 count
-            // means no pending retry, or another delivery already took it.
-            const taken = await prisma.setting.deleteMany({ where: { key: { in: [retryKey] } } });
-            if (taken.count === 0) return;
-          } else {
-            // CAS: ensure only one concurrent webhook fires the notification for this grab
-            const claimed = await prisma.issueGrab.updateMany({
-              where: { id: grab.id, notifiedAt: null },
-              data: { notifiedAt: now },
-            });
-            if (claimed.count === 0) return;
-
-            emitNotificationEvent({
-              event: "arr.grab_completed",
-              media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
-              request: { instance: grab.arrInstance },
-            });
-            // First claim only: the replacement landed, so close the issue (when enabled).
-            void autoResolveIssueForGrab(grab, now);
-          }
-
-          const outcome = await notifyAdminGrabCompletedPush({
-            userId: grab.triggeredById,
-            title: grab.title,
-            tmdbId: grab.tmdbId,
-            mediaType: grab.mediaType,
-            scope: grab.scope,
-            seasonNumber: grab.seasonNumber,
-            episodeNumber: grab.episodeNumber,
-            issueId: grab.issueId,
-          });
-          // "failed" → keep notifiedAt (emit stays claimed) and record a push-only
-          // retry. "skipped-no-subs" / "skipped-no-keys" → leave notifiedAt set,
-          // but log so an operator can wire up email/Discord backstop notification.
-          if (outcome === "failed") {
-            await prisma.setting.createMany({
-              data: [{ key: retryKey, value: now.toISOString() }],
-              skipDuplicates: true,
-            });
-            console.warn("[webhook/sonarr] grab notification failed, will retry push");
-          } else if (outcome === "skipped-no-subs" || outcome === "skipped-no-keys") {
-            console.warn(`[webhook/sonarr] grab push skipped (${outcome}) for user=${grab.triggeredById} issue=${grab.issueId}`);
-          }
-        })
-      );
-    }
+    // The claim itself (and its push retry) is shared with the Radarr twin.
+    await claimCompletedGrabs(candidateGrabs.filter(matchesDelivery), "sonarr");
   }
 
-  syncCompleted = true;
   if (seriesComplete) return NextResponse.json({ ok: true, marked: flip.count });
   if (deferVerify) return NextResponse.json({ ok: true, deferred: true, reason: "unverified" });
   // Incomplete: no transition, and deliberately no log line — this is the
@@ -640,9 +475,4 @@ export async function POST(req: NextRequest) {
     episodeFileCount: incomplete.episodeFileCount,
     episodeCount: incomplete.episodeCount,
   });
-  } finally {
-    if (!syncCompleted) {
-      await clearWebhookReplayDigestJson("sonarr", secret, payload);
-    }
-  }
 }

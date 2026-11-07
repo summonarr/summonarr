@@ -1,6 +1,6 @@
 // Unit tests for the capped JSON body readers (src/lib/body-size.ts) — the
 // guardrail-30 helper every non-upload JSON route must use. next.config.ts's
-// proxyClientMaxBodySize (50 MB) is only a backstop, so these helpers are the
+// proxyClientMaxBodySize is only a backstop, so these helpers are the
 // real memory/CPU DoS boundary: the Content-Length fast path must reject
 // BEFORE reading the body, the post-read byte check must catch
 // Transfer-Encoding: chunked bypasses (no Content-Length header at all), and
@@ -12,8 +12,10 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   checkBodySize,
   assertBodyBytesUnderCap,
+  readBodyBytesCapped,
   readJsonCapped,
   readJsonCappedOr,
+  readOptionalJsonCapped,
 } from "../src/lib/body-size.ts";
 
 const ENDPOINT = "http://localhost/api/test";
@@ -61,7 +63,7 @@ test("413 message formats KB under 1 MiB, MB at/above, and never renders 0KB/0MB
     [64 * KB, "64KB"],
     [MB - 1, "1024KB"], // last KB-branch value: unit switches exactly at 1 MiB
     [MB, "1MB"],
-    [50 * MB, "50MB"], // same size as the 50 MB proxy backstop
+    [50 * MB, "50MB"],
     [100, "1KB"], // sub-KB cap must not render "0KB"
     [512, "1KB"],
   ];
@@ -203,4 +205,104 @@ test("readJsonCappedOr resolves a `null` body the tolerant way — the fallback,
   const fallback = { full: false };
   assert.equal(await readJsonCappedOr(postJson("null"), 16 * KB, fallback), fallback);
   assert.equal(await readJsonCappedOr(postJson("42"), 16 * KB, fallback), fallback);
+});
+
+// ── top-level arrays are not objects ────────────────────────────────────────
+
+test("readJsonCapped 400s a top-level array — `typeof [] === \"object\"` must not let it through", async () => {
+  // A handler reading `body.ids` off `["a"]` got undefined, i.e. its defaults,
+  // with no validation error.
+  for (const body of ["[1,2]", "[]", '[{"ids":["a"]}]']) {
+    const res = await readJsonCapped(postJson(body), 16 * KB);
+    assert.ok(res instanceof NextResponse, `${body} should be rejected`);
+    assert.equal(res.status, 400);
+    assert.deepEqual(await errorBody(res), { error: "Invalid request body" });
+  }
+});
+
+test("readJsonCappedOr resolves a top-level array to the fallback", async () => {
+  const fallback = { full: false };
+  assert.equal(await readJsonCappedOr(postJson("[1,2]"), 16 * KB, fallback), fallback);
+});
+
+// ── the read stops at the cap ───────────────────────────────────────────────
+
+// A chunked body with no Content-Length, served one chunk per pull, counting the
+// pulls — the shape a streaming uploader (or an attacker) sends.
+function streamingRequest(chunks: number, chunkBytes: number): { req: NextRequest; pulls: () => number; cancelled: () => boolean } {
+  let pulled = 0;
+  let wasCancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (pulled >= chunks) { controller.close(); return; }
+      pulled++;
+      controller.enqueue(new Uint8Array(chunkBytes).fill(0x20));
+    },
+    cancel() { wasCancelled = true; },
+  }, { highWaterMark: 0 });
+  const req = new NextRequest(ENDPOINT, {
+    method: "POST",
+    body: stream,
+    duplex: "half",
+  } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+  return { req, pulls: () => pulled, cancelled: () => wasCancelled };
+}
+
+test("readBodyBytesCapped stops reading as soon as a chunked body passes the cap", async () => {
+  const s = streamingRequest(1000, 4 * KB); // ~4 MB offered
+  assert.equal(s.req.headers.get("content-length"), null);
+  assert.equal(await readBodyBytesCapped(s.req, 16 * KB), null);
+  assert.ok(s.pulls() <= 6, `read ${s.pulls()} chunks of a 16KB cap — the whole body was buffered`);
+  assert.ok(s.cancelled(), "the rest of the body is cancelled, not drained");
+});
+
+test("readBodyBytesCapped returns the whole body at or under the cap, and empty for no body", async () => {
+  const s = streamingRequest(4, 4 * KB);
+  const bytes = await readBodyBytesCapped(s.req, 16 * KB);
+  assert.ok(bytes);
+  assert.equal(bytes.byteLength, 16 * KB);
+  assert.equal((await readBodyBytesCapped(new NextRequest(ENDPOINT, { method: "POST" }), 1))?.byteLength, 0);
+});
+
+test("readJsonCapped and readJsonCappedOr 413 a chunked body without reading past the cap", async () => {
+  for (const read of [
+    (r: NextRequest) => readJsonCapped(r, 16 * KB),
+    (r: NextRequest) => readJsonCappedOr(r, 16 * KB, {}),
+    (r: NextRequest) => readOptionalJsonCapped(r, 16 * KB, {}),
+  ]) {
+    const s = streamingRequest(1000, 4 * KB);
+    const res = await read(s.req);
+    assert.ok(res instanceof NextResponse);
+    assert.equal(res.status, 413);
+    assert.ok(s.pulls() <= 6, `read ${s.pulls()} chunks of a 16KB cap`);
+  }
+});
+
+// ── readOptionalJsonCapped: empty means defaults, anything else must be meant ──
+
+test("readOptionalJsonCapped: an empty or whitespace body is the fallback", async () => {
+  const fallback = { all: true };
+  assert.equal(await readOptionalJsonCapped(new NextRequest(ENDPOINT, { method: "POST" }), 16 * KB, fallback), fallback);
+  assert.equal(await readOptionalJsonCapped(postJson(""), 16 * KB, fallback), fallback);
+  assert.equal(await readOptionalJsonCapped(postJson("  \n"), 16 * KB, fallback), fallback);
+});
+
+test("readOptionalJsonCapped: a valid object is returned", async () => {
+  const res = await readOptionalJsonCapped(postJson('{"ids":["a"]}'), 16 * KB, {});
+  assert.deepEqual(res, { ids: ["a"] });
+});
+
+test("readOptionalJsonCapped: malformed JSON, arrays and primitives are a 400, never the fallback", async () => {
+  for (const body of ["{not json", '["a"]', "null", "42", '"x"']) {
+    const res = await readOptionalJsonCapped(postJson(body), 16 * KB, {});
+    assert.ok(res instanceof NextResponse, `${body} should be rejected`);
+    assert.equal(res.status, 400, body);
+    assert.deepEqual(await errorBody(res), { error: "Invalid request body" });
+  }
+});
+
+test("readOptionalJsonCapped: the Content-Length fast path still 413s", async () => {
+  const res = await readOptionalJsonCapped(postJson("{}", { "content-length": String(MB) }), 16 * KB, {});
+  assert.ok(res instanceof NextResponse);
+  assert.equal(res.status, 413);
 });

@@ -36,9 +36,8 @@ const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 // LIMIT_PER_MIN.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
+  if (body instanceof NextResponse) return body;
   const service = parseQueueService(body.service);
   const instance = body.instance === undefined ? "" : body.instance;
   if (!service || typeof instance !== "string" || instance.length > 100) {

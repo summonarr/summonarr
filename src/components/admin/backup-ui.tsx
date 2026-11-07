@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText, AlertTriangle } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
@@ -24,9 +24,10 @@ async function isEncryptedFile(file: File): Promise<boolean> {
   return true;
 }
 
-// `exportReady` is the server page's read of BACKUP_DB_PASSWORD (set, ≥12
-// chars — the db-export route's own 503 gate); false swaps the Download button
-// for a warning so the admin learns it here instead of from a tab of raw JSON.
+// `exportReady` is the server page's read of BACKUP_DB_PASSWORD
+// (isBackupPasswordReady — the db-export route's own 503 gate); false swaps the
+// Download button for a warning so the admin learns it here instead of from a
+// tab of raw JSON.
 export function BackupUI({
   mode,
   exportReady = true,
@@ -129,6 +130,10 @@ function DbImportSection() {
   const formatSize = (bytes: number) =>
     bytes > MB ? `${sizeFmt.format(bytes / MB)} MB` : `${sizeFmt.format(bytes / 1024)} KB`;
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Leaving the page mid-upload cancels it (before the final chunk; once that
+  // is sent the server is already restoring and finishes on its own).
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => uploadAbortRef.current?.abort(), []);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<
     | {
@@ -142,6 +147,9 @@ function DbImportSection() {
   >(null);
 
   async function handleFileChange(f: File | null) {
+    // The file being restored stays put until its restore ends: swapping it
+    // reset the progress and result while the old upload kept running.
+    if (importing) return;
     setFile(f);
     setResult(null);
     setProgress(null);
@@ -173,11 +181,14 @@ function DbImportSection() {
     // secure context — a plain-HTTP LAN deployment). Unguarded, that rejection
     // left `importing` true forever: a spinner with no way to retry.
     let outcome: Awaited<ReturnType<typeof uploadInChunks>>;
+    const abort = new AbortController();
+    uploadAbortRef.current = abort;
     try {
       outcome = await uploadInChunks({
         file,
         endpoint: withBasePath("/api/admin/backup/db-import-chunk"),
         onProgress: setProgress,
+        signal: abort.signal,
       });
     } catch (err) {
       setImporting(false);
@@ -201,6 +212,7 @@ function DbImportSection() {
   }
 
   function clearFile() {
+    if (importing) return;
     // Reset the uncontrolled input too, or re-picking the same file fires no
     // change event and the drop zone stays empty.
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -224,14 +236,15 @@ function DbImportSection() {
       <div
         onDragEnter={(e) => {
           e.preventDefault();
-          setDragging(true);
+          if (!importing) setDragging(true);
         }}
         onDragOver={(e) => {
           // Without preventDefault the browser's own drop runs and navigates
-          // away to (or downloads) the dropped file.
+          // away to (or downloads) the dropped file — mid-restore too, so it
+          // stays; "none" shows the drop won't be taken.
           e.preventDefault();
-          e.dataTransfer.dropEffect = "copy";
-          setDragging(true);
+          e.dataTransfer.dropEffect = importing ? "none" : "copy";
+          if (!importing) setDragging(true);
         }}
         onDragLeave={(e) => {
           // dragleave fires when the pointer crosses onto a CHILD of the zone
@@ -242,6 +255,7 @@ function DbImportSection() {
         onDrop={(e) => {
           e.preventDefault();
           setDragging(false);
+          if (importing) return;
           const dropped = e.dataTransfer.files[0];
           if (dropped) void handleFileChange(dropped);
         }}
@@ -331,6 +345,9 @@ function DbImportSection() {
           className={cn(
             buttonVariants({ variant: "secondary", size: "sm" }),
             "cursor-pointer focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
+            // The base recipe's disabled look keys off :disabled, which a
+            // <label> never has — mirror it while the input inside is disabled.
+            importing && "pointer-events-none opacity-50",
           )}
         >
           {t("adminManage.backup.chooseFile")}
@@ -338,6 +355,7 @@ function DbImportSection() {
             ref={fileInputRef}
             type="file"
             accept=".enc"
+            disabled={importing}
             onChange={(e) => {
               const picked = e.target.files?.[0] ?? null;
               // Empty the input once read: a later drop or Clear replaces the
@@ -352,7 +370,7 @@ function DbImportSection() {
           />
         </label>
         {file && (
-          <Button variant="secondary" size="sm" onClick={clearFile}>
+          <Button variant="secondary" size="sm" onClick={clearFile} disabled={importing}>
             {t("adminManage.backup.clear")}
           </Button>
         )}

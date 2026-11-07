@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { sanitizeText } from "@/lib/sanitize";
-import { checkRateLimit, getClientIp, getClientIpKey } from "@/lib/rate-limit";
-import { checkBodySize } from "@/lib/body-size";
+import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
+import { checkBodySize, readBodyBytesCapped } from "@/lib/body-size";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
@@ -12,65 +10,20 @@ import {
   appendChunk,
   getSessionStream,
   clearSession,
+  cancelSession,
   hasActiveUploadSession,
 } from "@/lib/import-session";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
-import { localizeBackupMessage } from "@/lib/backup-messages";
+import { auditSetupImport, importResultResponse, setupRestoreGate } from "@/lib/backup-routes";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const MIN_BACKUP_PASSWORD_LEN = 12;
-// Client uploader defaults to 16 MiB chunks; cap at 32 MiB to leave headroom while still bounding memory.
-const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
-
-async function gate(t: Translator): Promise<NextResponse | { password: string } | { closed: true }> {
-  // Mirror processBackupImport's internet-facing opt-in HERE, at chunk 0 — the
-  // authoritative check only runs on the FINAL chunk, which would let an
-  // unauthenticated caller stream the full ciphertext (up to the session cap)
-  // onto the server's temp disk before the 403. Same condition + message as
-  // backup-import.ts so the two gates can't drift apart silently.
-  if (process.env.TRUST_PROXY === "true" && process.env.SUMMONARR_ALLOW_SETUP_RESTORE !== "true") {
-    return NextResponse.json(
-      {
-        error: t("apiAuth.setup.restoreDisabled"),
-      },
-      { status: 403 },
-    );
-  }
-  // Advisory lock 43 is shared with /api/auth/register and /api/setup/import. Mirroring the
-  // setup/import gate guarantees a racing register can't sneak between the freshness check and
-  // the eventual processBackupImport on the final chunk. processBackupImport re-takes the lock
-  // and re-checks the invariant for full safety; this gate provides fast-fail UX so a chunked
-  // uploader doesn't buffer hundreds of megabytes against an already-set-up server.
-  const closed = await prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
-    const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
-    const userCount = await tx.user.count();
-    return setupCompleted !== null || userCount > 0;
-  });
-  if (closed) {
-    // Signalled distinctly so the caller can release the single global upload
-    // slot for this uploadId. Otherwise an in-flight session keeps the slot
-    // pinned until its TTL when a legitimate admin completes setup mid-upload.
-    return { closed: true };
-  }
-  const password = process.env.BACKUP_DB_PASSWORD ?? "";
-  if (password.length === 0) {
-    return NextResponse.json(
-      { error: t("apiAuth.setup.backupNotConfigured") },
-      { status: 503 },
-    );
-  }
-  if (password.length < MIN_BACKUP_PASSWORD_LEN) {
-    return NextResponse.json(
-      { error: t("apiAuth.setup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
-      { status: 503 },
-    );
-  }
-  return { password };
-}
+// Client uploader defaults to 16 MiB chunks; cap at 20 MiB to leave headroom while
+// still bounding memory. MUST stay below next.config.ts proxyClientMaxBodySize, which
+// TRUNCATES a longer body instead of refusing it: a cut-off chunk has to arrive
+// over this cap and be refused, never fit under it and be appended corrupt.
+const MAX_CHUNK_BYTES = 20 * 1024 * 1024;
 
 // POST: append a chunk. On the final chunk, run the import.
 //
@@ -99,7 +52,7 @@ export async function POST(req: NextRequest) {
   }
 
   // A non-zero chunk with no matching active session is bogus (no rate-limited
-  // chunk-0 opened it). Reject it HERE, before gate() takes Postgres advisory-lock
+  // chunk-0 opened it). Reject it HERE, before the setup gate takes advisory lock
   // 43 and runs DB reads — otherwise an unauthenticated flood of junk chunk-N
   // requests skips the chunk-0 limiter yet amplifies into advisory-lock contention
   // (shared with /api/auth/register) and DB load. Legit chunk-N always has a session.
@@ -110,7 +63,10 @@ export async function POST(req: NextRequest) {
   const sizeCheck = checkBodySize(req, MAX_CHUNK_BYTES);
   if (sizeCheck) return sizeCheck;
 
-  const g = await gate(t);
+  // The internet-facing opt-in, freshness under lock 43, and the password —
+  // shared with /api/setup/import (backup-routes.ts). At every chunk, so a
+  // registration that lands mid-upload stops it.
+  const g = await setupRestoreGate(t);
   if (g instanceof NextResponse) return g;
   if ("closed" in g) {
     // Setup completed (or a user appeared) mid-upload. Free the single global
@@ -159,10 +115,12 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const chunkBytes = new Uint8Array(await req.arrayBuffer());
-  // Post-read cap for Transfer-Encoding: chunked uploads, where checkBodySize's
-  // Content-Length check above can't fire (mirrors db-import-chunk).
-  if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
+  // Capped read for Transfer-Encoding: chunked uploads, where checkBodySize's
+  // Content-Length check above can't fire (mirrors db-import-chunk). It stops at
+  // the cap instead of buffering the whole body first: this route is
+  // unauthenticated while the first-run gate is open.
+  const chunkBytes = await readBodyBytesCapped(req, MAX_CHUNK_BYTES);
+  if (chunkBytes === null) {
     // An oversized chunk corrupts the upload — release the slot for ANY index
     // (not just chunk 0) so it isn't stranded until the session TTL.
     await clearSession(uploadId);
@@ -184,7 +142,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: t("apiAuth.setup.sessionExpired") }, { status: 410 });
     }
     if (e.kind === "out-of-order") {
-      return NextResponse.json({ error: t("apiAuth.setup.outOfOrder", { expected: e.expected }) }, { status: 409 });
+      // `expected` lets a retrying uploader tell "my earlier attempt landed"
+      // (expected === its index + 1) from a real ordering error.
+      return NextResponse.json(
+        { error: t("apiAuth.setup.outOfOrder", { expected: e.expected }), expected: e.expected },
+        { status: 409 },
+      );
     }
     if (e.kind === "size-mismatch") {
       return NextResponse.json(
@@ -218,50 +181,8 @@ export async function POST(req: NextRequest) {
     await clearSession(uploadId);
   }
 
-  if (!result.ok) {
-    if (result.errors) {
-      return NextResponse.json({
-        ok: false,
-        complete: true,
-        summary: result.summary,
-        errors: result.errors,
-      });
-    }
-    return NextResponse.json({ error: localizeBackupMessage(result.error, t), complete: true }, { status: result.status });
-  }
-
-  try {
-    await prisma.auditLog.create({
-      data: {
-        userId: null,
-        userName: "system (setup)",
-        action: "BACKUP_IMPORT",
-        target: "backup:full-db",
-        details: JSON.stringify({
-          format: "sql",
-          encrypted: true,
-          mode: "setup-chunked",
-          after: {
-            totalStatements: result.summary.total,
-            executed: result.summary.executed,
-            skipped: result.summary.skipped,
-            errors: result.summary.errors,
-          },
-        }),
-        ipAddress: getClientIp(req.headers),
-        userAgent: sanitizeText(req.headers.get("user-agent")?.slice(0, 512) ?? ""),
-      },
-    });
-  } catch (err) {
-    console.error("[audit] Setup-import audit log failed:", err);
-  }
-
-  return NextResponse.json({
-    ok: true,
-    complete: true,
-    summary: result.summary,
-    ...(result.warning ? { warning: result.warning } : {}),
-  });
+  if (result.ok) await auditSetupImport(req, result, "setup-chunked");
+  return importResultResponse(result, t, { chunked: true });
 }
 
 // DELETE: cancel the in-flight upload and remove the temp file.
@@ -272,9 +193,10 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.setup.missingUploadId") }, { status: 400 });
   }
   // Cancel only releases the in-memory upload slot + temp file for this
-  // uploadId (no DB mutation), and clearSession is a no-op unless this uploadId
-  // owns the active session. It must always succeed so a stale slot can be
-  // freed even after setup has closed or backup config changed.
-  await clearSession(uploadId);
+  // uploadId (no DB mutation), and is a no-op unless this uploadId owns the
+  // active session — or while that session's file is being imported (the
+  // importer frees it when the restore ends). It must always succeed so a
+  // stale slot can be freed even after setup has closed or backup config changed.
+  await cancelSession(uploadId);
   return NextResponse.json({ ok: true });
 }

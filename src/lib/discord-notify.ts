@@ -7,6 +7,8 @@ import type { Translator } from "@/lib/i18n/translate";
 import type { Locale } from "@/lib/i18n/locales";
 import { localizedTitleFor, titleResolver, type TitleRef } from "@/lib/tmdb-localize";
 import { discordIssueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
+import { processSingleton } from "@/lib/process-singleton";
+import { deriveUserSource, JELLYFIN_SYNTHETIC_EMAIL_SUFFIX, type UserSourceInput } from "@/lib/user-source";
 
 // Language rule: a DM is written in the linked user's language (their stored
 // User.locale, else the instance default); anything posted to a SHARED channel
@@ -80,6 +82,88 @@ function clampEmbed<T extends { title?: unknown; description?: unknown }>(embed:
   return out as T;
 }
 
+// ── Discord rate limits ─────────────────────────────────────────────────────
+// Every discord.com call in this module goes through discordRequest. A 429 is
+// retried after Discord's own wait (the Retry-After header, else the JSON
+// body's retry_after) at most DISCORD_MAX_429_RETRIES times, and a route whose
+// bucket reported nothing left (X-RateLimit-Remaining: 0) holds its next call
+// until X-RateLimit-Reset-After — so a bulk approve's channel posts are paced
+// instead of mostly dropped. All waiting for one call stays under
+// DISCORD_MAX_WAIT_MS. The answer is always handed back, never thrown: callers
+// keep logging a failure as before.
+const DISCORD_MAX_429_RETRIES = 3;
+const DISCORD_MAX_WAIT_MS = 15_000;
+
+// Route key → when its bucket refills (epoch ms). Process-wide (guardrail 27a):
+// every chunk that posts to Discord shares one bucket view.
+const rateHolds = processSingleton("discord-notify:rateHolds", () => new Map<string, number>());
+
+// Discord buckets a route by its MAJOR parameter (the channel or guild id);
+// later ids in the path (a member, a role) share that bucket.
+function discordRouteKey(method: string, url: string): string {
+  let ids = 0;
+  const path = new URL(url).pathname.replace(/\d{5,}/g, (id) => (ids++ === 0 ? id : ":id"));
+  return `${method} ${path}`;
+}
+
+function secondsHeader(res: Response, name: string): number | null {
+  const raw = res.headers.get(name);
+  if (raw === null || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+async function retryAfterMs(res: Response): Promise<number | null> {
+  const header = secondsHeader(res, "retry-after");
+  if (header !== null) return Math.ceil(header * 1000);
+  try {
+    const body = (await res.clone().json()) as { retry_after?: unknown };
+    const s = body.retry_after;
+    if (typeof s === "number" && Number.isFinite(s) && s >= 0) return Math.ceil(s * 1000);
+  } catch {
+    // Not JSON — no wait to honour.
+  }
+  return null;
+}
+
+function noteRateLimit(key: string, res: Response): void {
+  const remaining = res.headers.get("x-ratelimit-remaining");
+  const resetAfter = secondsHeader(res, "x-ratelimit-reset-after");
+  if (remaining === "0" && resetAfter !== null) rateHolds.set(key, Date.now() + Math.ceil(resetAfter * 1000));
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+async function discordRequest(
+  url: string,
+  init: { method: string; headers: Record<string, string>; body?: string },
+): Promise<Response> {
+  const key = discordRouteKey(init.method, url);
+  let waited = 0;
+  for (let attempt = 0; ; attempt++) {
+    const holdUntil = rateHolds.get(key);
+    if (holdUntil !== undefined) {
+      const hold = holdUntil - Date.now();
+      if (hold <= 0) rateHolds.delete(key);
+      else {
+        const wait = Math.min(hold, DISCORD_MAX_WAIT_MS - waited);
+        if (wait > 0) {
+          await sleep(wait);
+          waited += wait;
+        }
+      }
+    }
+    const res = await safeFetchTrusted(url, { ...init, allowedHosts: DISCORD_HOSTS, timeoutMs: DISCORD_FETCH_TIMEOUT_MS });
+    noteRateLimit(key, res);
+    if (res.status !== 429 || attempt >= DISCORD_MAX_429_RETRIES) return res;
+    const wait = await retryAfterMs(res);
+    if (wait === null || waited + wait > DISCORD_MAX_WAIT_MS) return res;
+    await res.body?.cancel().catch(() => {});
+    await sleep(wait);
+    waited += wait;
+  }
+}
+
 async function getConfig(): Promise<{ botToken: string; channelId: string | null } | null> {
   if (!(await isFeatureEnabled("feature.integration.discord"))) return null;
   const rows = await prisma.setting.findMany({
@@ -93,19 +177,60 @@ async function getConfig(): Promise<{ botToken: string; channelId: string | null
   };
 }
 
-export async function assignDiscordRolesOnLink(discordUserId: string, userEmail: string, userRole: "ADMIN" | "ISSUE_ADMIN" | "USER" = "USER"): Promise<void> {
-  try {
-    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
-    const rows = await prisma.setting.findMany({
-      where: { key: { in: ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"] } },
-    });
-    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (!cfg.discordBotToken || !cfg.discordGuildId) return;
-    if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return;
+// What the role sync needs to know about the linked account: its app role
+// (admin / issue-admin roles) and how it signs in (the server role).
+export type DiscordRoleAccount = UserSourceInput & { role: "ADMIN" | "ISSUE_ADMIN" | "USER" };
 
-    // Synthetic @jellyfin.local email is the only reliable way to distinguish Jellyfin-only accounts at link time
-    const isJellyfin = userEmail.endsWith("@jellyfin.local");
-    const serverRoleId = isJellyfin ? cfg.discordJellyfinRoleId : cfg.discordPlexRoleId;
+// The outcome of one member's role sync: "skipped" when there was nothing to do
+// (the integration is off, no guild or no managed role is configured, or the
+// member id is not a snowflake), "failed" when any Discord call failed.
+export type DiscordRoleSyncOutcome = "ok" | "skipped" | "failed";
+
+// Which media-server role the account earns: the Jellyfin role for a Jellyfin
+// identity (subject id, or the synthetic address every Jellyfin account is
+// anchored on), the Plex role for a Plex one (subject id, or a legacy Plex row
+// deriveUserSource still reads as Plex), and NONE for a local-password or OIDC
+// account that signs in through neither server.
+export function discordServerRoleSource(u: UserSourceInput): "plex" | "jellyfin" | null {
+  if (u.jellyfinUserId != null || u.email.endsWith(JELLYFIN_SYNTHETIC_EMAIL_SUFFIX)) return "jellyfin";
+  if (u.plexUserId != null) return "plex";
+  return deriveUserSource(u) === "plex" ? "plex" : null;
+}
+
+// The role-sync input for one account, read fresh: its role and the sign-in
+// facts deriveUserSource uses. Null when the row is gone.
+export async function loadDiscordRoleAccount(userId: string): Promise<DiscordRoleAccount | null> {
+  const [user, oidc] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true, role: true, plexUserId: true, jellyfinUserId: true, passwordHash: true },
+    }),
+    prisma.account.findFirst({ where: { userId, provider: "oidc" }, select: { id: true } }),
+  ]);
+  if (!user) return null;
+  return {
+    email: user.email,
+    role: user.role,
+    plexUserId: user.plexUserId,
+    jellyfinUserId: user.jellyfinUserId,
+    hasLocalCredentials: user.passwordHash != null,
+    hasOidcAccount: oidc !== null,
+  };
+}
+
+const ROLE_SETTING_KEYS = ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"];
+
+export async function assignDiscordRolesOnLink(discordUserId: string, account: DiscordRoleAccount): Promise<DiscordRoleSyncOutcome> {
+  try {
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return "skipped";
+    const rows = await prisma.setting.findMany({ where: { key: { in: ROLE_SETTING_KEYS } } });
+    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    if (!cfg.discordBotToken || !cfg.discordGuildId) return "skipped";
+    if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return "skipped";
+
+    const source = discordServerRoleSource(account);
+    const serverRoleId = source === "jellyfin" ? cfg.discordJellyfinRoleId : source === "plex" ? cfg.discordPlexRoleId : undefined;
+    const userRole = account.role;
     const adminRoleId = userRole === "ADMIN" ? cfg.discordAdminRoleId : userRole === "ISSUE_ADMIN" ? cfg.discordIssueAdminRoleId : undefined;
 
     const roleIds = [cfg.discordLinkedRoleId, serverRoleId, adminRoleId].filter((id): id is string => isValidSnowflake(id));
@@ -129,43 +254,54 @@ export async function assignDiscordRolesOnLink(discordUserId: string, userEmail:
     ].filter((id): id is string => isValidSnowflake(id));
     const stale = [...new Set(managed)].filter((id) => !desired.has(id));
 
-    if (roleIds.length === 0 && stale.length === 0) return;
+    if (roleIds.length === 0 && stale.length === 0) return "skipped";
 
     const memberRoleUrl = (roleId: string) =>
       `${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`;
     const auth = { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" };
 
-    await Promise.allSettled([
+    const results = await Promise.allSettled([
       ...roleIds.map((roleId) =>
-        safeFetchTrusted(memberRoleUrl(roleId), {
-          allowedHosts: DISCORD_HOSTS,
-          method: "PUT",
-          headers: auth,
-          timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
-        }).then(async (res) => {
+        discordRequest(memberRoleUrl(roleId), { method: "PUT", headers: auth }).then(async (res) => {
           if (!res.ok) {
             const text = await res.text();
             console.error(`[discord-notify] Failed to assign role ${roleId} (${res.status}): ${text}`);
+            return false;
           }
+          return true;
         })
       ),
       ...stale.map((roleId) =>
-        safeFetchTrusted(memberRoleUrl(roleId), {
-          allowedHosts: DISCORD_HOSTS,
-          method: "DELETE",
-          headers: auth,
-          timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
-        }).then(async (res) => {
+        discordRequest(memberRoleUrl(roleId), { method: "DELETE", headers: auth }).then(async (res) => {
           // 404 is the common, benign case: the member never had the role.
           if (!res.ok && res.status !== 404) {
             const text = await res.text();
             console.error(`[discord-notify] Failed to revoke role ${roleId} (${res.status}): ${text}`);
+            return false;
           }
+          return true;
         })
       ),
     ]);
+    return results.every((r) => r.status === "fulfilled" && r.value) ? "ok" : "failed";
   } catch (err) {
     console.error("[discord-notify] assignDiscordRolesOnLink failed:", err);
+    return "failed";
+  }
+}
+
+// The role sync for an account that was just linked, read fresh from its row.
+// Never throws: the link has already committed, and losing the Discord side
+// must not fail it.
+export async function assignDiscordRolesForUser(discordUserId: string, userId: string): Promise<DiscordRoleSyncOutcome> {
+  try {
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return "skipped";
+    const account = await loadDiscordRoleAccount(userId);
+    if (!account) return "skipped";
+    return await assignDiscordRolesOnLink(discordUserId, account);
+  } catch (err) {
+    console.error("[discord-notify] assignDiscordRolesForUser failed:", err);
+    return "failed";
   }
 }
 
@@ -179,15 +315,13 @@ export async function assignDiscordRolesOnLink(discordUserId: string, userEmail:
 //
 // Best-effort and self-swallowing (mirrors assignDiscordRolesOnLink): losing the
 // Discord side must never fail the unlink itself, which has already committed.
-export async function revokeDiscordRolesOnUnlink(discordUserId: string): Promise<void> {
+export async function revokeDiscordRolesOnUnlink(discordUserId: string): Promise<DiscordRoleSyncOutcome> {
   try {
-    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
-    const rows = await prisma.setting.findMany({
-      where: { key: { in: ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"] } },
-    });
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return "skipped";
+    const rows = await prisma.setting.findMany({ where: { key: { in: ROLE_SETTING_KEYS } } });
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (!cfg.discordBotToken || !cfg.discordGuildId) return;
-    if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return;
+    if (!cfg.discordBotToken || !cfg.discordGuildId) return "skipped";
+    if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return "skipped";
 
     const managed = [...new Set([
       cfg.discordLinkedRoleId,
@@ -196,26 +330,28 @@ export async function revokeDiscordRolesOnUnlink(discordUserId: string): Promise
       cfg.discordAdminRoleId,
       cfg.discordIssueAdminRoleId,
     ].filter((id): id is string => isValidSnowflake(id)))];
-    if (managed.length === 0) return;
+    if (managed.length === 0) return "skipped";
 
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       managed.map((roleId) =>
-        safeFetchTrusted(`${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`, {
-          allowedHosts: DISCORD_HOSTS,
+        discordRequest(`${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`, {
           method: "DELETE",
           headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-          timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
         }).then(async (res) => {
           // 404 = the member never had the role (or already left the guild).
           if (!res.ok && res.status !== 404) {
             const text = await res.text();
             console.error(`[discord-notify] Failed to revoke role ${roleId} on unlink (${res.status}): ${text}`);
+            return false;
           }
+          return true;
         })
       )
     );
+    return results.every((r) => r.status === "fulfilled" && r.value) ? "ok" : "failed";
   } catch (err) {
     console.error("[discord-notify] revokeDiscordRolesOnUnlink failed:", err);
+    return "failed";
   }
 }
 
@@ -262,12 +398,10 @@ export async function notifyAdminsNewRequestDiscord(data: {
       ],
     }];
 
-    const res = await safeFetchTrusted(`${DISCORD_API}/channels/${cfg.discordAdminRequestChannelId}/messages`, {
-      allowedHosts: DISCORD_HOSTS,
+    const res = await discordRequest(`${DISCORD_API}/channels/${cfg.discordAdminRequestChannelId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ embeds: [clampEmbed(embed)], components, allowed_mentions: { parse: [] } }),
-      timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
     });
     if (!res.ok) {
       const text = await res.text();
@@ -319,12 +453,10 @@ export async function notifyAdminsNewIssueDiscord(data: {
       embed.thumbnail = { url: `${TMDB_POSTER_BASE}${data.posterPath}` };
     }
 
-    const res = await safeFetchTrusted(`${DISCORD_API}/channels/${cfg.discordAdminRequestChannelId}/messages`, {
-      allowedHosts: DISCORD_HOSTS,
+    const res = await discordRequest(`${DISCORD_API}/channels/${cfg.discordAdminRequestChannelId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ embeds: [clampEmbed(embed)], allowed_mentions: { parse: [] } }),
-      timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
     });
     if (!res.ok) {
       const text = await res.text();
@@ -339,8 +471,7 @@ async function postToChannel(botToken: string, channelId: string, discordId: str
   if (!isValidSnowflake(channelId) || !isValidSnowflake(discordId)) {
     throw new Error(`Invalid snowflake: channelId=${channelId} discordId=${discordId}`);
   }
-  const res = await safeFetchTrusted(`${DISCORD_API}/channels/${channelId}/messages`, {
-    allowedHosts: DISCORD_HOSTS,
+  const res = await discordRequest(`${DISCORD_API}/channels/${channelId}/messages`, {
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -349,7 +480,6 @@ async function postToChannel(botToken: string, channelId: string, discordId: str
       // parse:[] suppresses @everyone/@here; explicit users array allows the single target mention
       allowed_mentions: { parse: [], users: [discordId] },
     }),
-    timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     const text = await res.text();
@@ -398,24 +528,20 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
   if (!isValidSnowflake(discordId)) {
     throw new Error(`Invalid Discord snowflake for DM: ${discordId}`);
   }
-  const dmRes = await safeFetchTrusted(`${DISCORD_API}/users/@me/channels`, {
-    allowedHosts: DISCORD_HOSTS,
+  const dmRes = await discordRequest(`${DISCORD_API}/users/@me/channels`, {
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ recipient_id: discordId }),
-    timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
   });
   if (!dmRes.ok) {
     const text = await dmRes.text();
     throw new Error(`Failed to open DM channel (${dmRes.status}): ${text}`);
   }
   const { id: channelId } = await dmRes.json() as { id: string };
-  const msgRes = await safeFetchTrusted(`${DISCORD_API}/channels/${channelId}/messages`, {
-    allowedHosts: DISCORD_HOSTS,
+  const msgRes = await discordRequest(`${DISCORD_API}/channels/${channelId}/messages`, {
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ embeds: [clampEmbed(embed)] }),
-    timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
   });
   if (!msgRes.ok) {
     const text = await msgRes.text();
@@ -433,7 +559,8 @@ async function notifyUser(
   userId: string,
   // `shared`: the post lands in the shared notification channel every linked user
   // can read, not a DM — a builder carrying private text (a request comment,
-  // guardrail 14e) leaves it out there.
+  // guardrail 14e; an issue message or resolution; an admin's decline note)
+  // leaves it out there.
   build: (t: Translator, locale: Locale, title: string, shared: boolean) => Embed,
   prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue" | "notifyOnComment",
   titleRef?: TitleRef,
@@ -483,11 +610,15 @@ function availableEmbed(t: Translator, title: string, mediaType: string): Embed 
   };
 }
 
-function declinedEmbed(t: Translator, title: string, mediaType: string, adminNote?: string | null): Embed {
+// `shared`: the post lands in the shared channel, where the admin's note to
+// this requester is not everyone's to read — it says a note exists instead.
+function declinedEmbed(t: Translator, title: string, mediaType: string, adminNote: string | null | undefined, shared: boolean): Embed {
   const base = t("notify.discord.declined.description", { media: mediaLabelT(t, mediaType) });
-  const description = adminNote
-    ? `${base}\n\n${t("notify.discord.declined.note", { note: escMd(adminNote) })}`
-    : base;
+  const description = !adminNote
+    ? base
+    : shared
+      ? `${base}\n\n${t("notify.discord.declined.noteShared")}`
+      : `${base}\n\n${t("notify.discord.declined.note", { note: escMd(adminNote) })}`;
   return {
     color: COLORS.declined,
     title: t("notify.discord.declined.title", { title: escMd(title) }),
@@ -535,7 +666,7 @@ export async function notifyUserAwaitingRelease(userId: string, title: string, m
 }
 
 export async function notifyUserRequestDeclined(userId: string, title: string, mediaType: string, adminNote?: string | null, tmdbId?: number | null): Promise<void> {
-  await notifyUser(userId, (t, _locale, local) => declinedEmbed(t, local, mediaType, adminNote), "notifyOnDeclined", { title, tmdbId, mediaType });
+  await notifyUser(userId, (t, _locale, local, shared) => declinedEmbed(t, local, mediaType, adminNote, shared), "notifyOnDeclined", { title, tmdbId, mediaType });
 }
 
 export async function notifyUserIssueMessage(
@@ -545,10 +676,14 @@ export async function notifyUserIssueMessage(
   body: string,
   media?: { tmdbId?: number | null; mediaType?: string | null },
 ): Promise<void> {
-  await notifyUser(userId, (t, _locale, local) => ({
+  // An issue thread is private to the reporter and MANAGE_ISSUES holders: a DM
+  // carries the message, a post in the shared channel only pings the reporter.
+  await notifyUser(userId, (t, _locale, local, shared) => ({
     color: 0x5865F2,
     title: t("notify.discord.userIssueMessage.title", { title: escMd(local) }),
-    description: `${t("notify.discord.userIssueMessage.description", { user: escMd(adminName) })}\n\n> ${escMd(body)}`,
+    description: shared
+      ? t("notify.discord.userIssueMessage.descriptionShared", { user: escMd(adminName) })
+      : `${t("notify.discord.userIssueMessage.description", { user: escMd(adminName) })}\n\n> ${escMd(body)}`,
     timestamp: new Date().toISOString(),
   }), "notifyOnIssue", { title, ...media });
 }
@@ -556,7 +691,8 @@ export async function notifyUserIssueMessage(
 export async function notifyAdminsIssueMessage(
   title: string,
   userName: string,
-  body: string,
+  // Never posted: this fan-out only reaches the shared channel (see below).
+  _body: string,
   opts: { excludeUserId?: string; fromAdmin?: boolean; restrictToUserId?: string; tmdbId?: number | null; mediaType?: string | null } = {},
 ): Promise<void> {
   try {
@@ -591,6 +727,9 @@ export async function notifyAdminsIssueMessage(
     if (!admins.length) return;
 
     // Posted to the shared channel → the instance default language, title included.
+    // Every linked user reads that channel, and the thread is private to the
+    // reporter and MANAGE_ISSUES holders (a claimed issue narrows even that to
+    // the claimer), so the post pings the admins and leaves the message out.
     const t = channelTranslator();
     const localTitle = await localizedTitleFor({ title, tmdbId: opts.tmdbId, mediaType: opts.mediaType }, null);
     const embed: Embed = {
@@ -598,11 +737,9 @@ export async function notifyAdminsIssueMessage(
       title: opts.fromAdmin
         ? t("notify.discord.adminIssueMessage.titleFromAdmin", { title: escMd(localTitle) })
         : t("notify.discord.adminIssueMessage.title", { title: escMd(localTitle) }),
-      description: `${
-        opts.fromAdmin
-          ? t("notify.discord.adminIssueMessage.descriptionFromAdmin", { user: escMd(userName) })
-          : t("notify.discord.adminIssueMessage.description", { user: escMd(userName) })
-      }\n\n> ${escMd(body)}`,
+      description: opts.fromAdmin
+        ? t("notify.discord.adminIssueMessage.descriptionFromAdmin", { user: escMd(userName) })
+        : t("notify.discord.adminIssueMessage.description", { user: escMd(userName) }),
       timestamp: new Date().toISOString(),
     };
 
@@ -698,10 +835,14 @@ export async function notifyAdminsRequestComment(
 }
 
 export async function notifyUserIssueResolved(userId: string, title: string, mediaType: string, resolution?: string | null, tmdbId?: number | null): Promise<void> {
-  await notifyUser(userId, (t, _locale, local) => {
-    const resolutionPart = resolution
-      ? `\n\n${t("notify.discord.issueResolved.resolution", { resolution: escMd(resolution) })}`
-      : "";
+  // The resolution note belongs to the issue thread: a DM carries it, the
+  // shared channel only says there is one.
+  await notifyUser(userId, (t, _locale, local, shared) => {
+    const resolutionPart = !resolution
+      ? ""
+      : shared
+        ? `\n\n${t("notify.discord.issueResolved.resolutionShared")}`
+        : `\n\n${t("notify.discord.issueResolved.resolution", { resolution: escMd(resolution) })}`;
     return {
       color: COLORS.available,
       title: t("notify.discord.issueResolved.title", { title: escMd(local) }),
@@ -817,7 +958,7 @@ export async function notifyUsersRequestsDeclined(
       if (!discordId) return Promise.resolve();
       const locale = recipientLocale(!!cfg.channelId, userById.get(r.requestedBy));
       const t = translatorFor(locale);
-      const embed = declinedEmbed(t, resolve(r, locale), r.mediaType, adminNote);
+      const embed = declinedEmbed(t, resolve(r, locale), r.mediaType, adminNote, !!cfg.channelId);
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));

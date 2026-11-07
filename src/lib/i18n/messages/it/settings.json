@@ -187,7 +187,7 @@
   "settings.arr.minAvail.announced": "Annunciato",
   "settings.arr.minAvail.inCinemas": "Al cinema",
   "settings.arr.minAvail.released": "Uscito",
-  "settings.arr.invalidSlug": "Slug non valido \"{slug}\" — usa lettere minuscole/cifre, iniziando con una lettera (non \"hd\").",
+  "settings.arr.invalidSlug": "Slug non valido \"{slug}\" — usa lettere minuscole/cifre, iniziando con una lettera (non \"hd\" né \"external\").",
   "settings.arr.heading": "{label} — istanze aggiuntive",
   "settings.arr.intro": "Istanze {label} aggiuntive (es. un'istanza dedicata agli anime). Le richieste vengono instradate automaticamente qui quando la regola di un'istanza corrisponde; una richiesta può anche indicarne una esplicitamente. Le istanze riservate richiedono un'autorizzazione per utente (Utenti → Accesso alle istanze).",
   "settings.arr.none": "Nessuna istanza {label} aggiuntiva configurata.",

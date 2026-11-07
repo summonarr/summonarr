@@ -13,6 +13,7 @@ import {
   isAnimeMedia,
   matchesAutoRoute,
   routeMediaToSlug,
+  ARR_SETTING_FIELDS,
   BUILTIN_ARR_INSTANCE_KEYS,
   DEFAULT_ARR_INSTANCE,
   FOURK_ARR_INSTANCE,
@@ -85,6 +86,35 @@ test("isValidInstanceSlug accepts built-ins + named slugs, rejects reserved/malf
   assert.equal(isValidInstanceSlug("an ime"), false);
   assert.equal(isValidInstanceSlug("anime!"), false);
   assert.equal(isValidInstanceSlug("radarr:anime"), false);
+});
+
+test("\"external\" is not a valid named slug: \"external\" + Url is the default instance's ExternalUrl key", () => {
+  assert.equal(arrSettingKey("radarr", "external", "Url"), arrSettingKey("radarr", "", "ExternalUrl"), "the collision this rule exists for");
+  assert.equal(isValidInstanceSlug("external"), false);
+  // A slug that merely starts the same way does not collide.
+  assert.equal(isValidInstanceSlug("externals"), true);
+  assert.equal(isValidInstanceSlug("ext"), true);
+});
+
+test("every accepted slug maps every field to its OWN Setting key — no instance shares a row with another", () => {
+  // Every lowercase segment that, capitalized, starts some field name is a
+  // candidate prefix collision; plus ordinary slugs and the two built-ins.
+  const candidates = new Set<string>(["", "4k", "anime", "kids2", "remote", "url", "apikey", "webhook", "root"]);
+  for (const field of ARR_SETTING_FIELDS) {
+    for (let i = 1; i < field.length; i++) candidates.add(field.slice(0, i).toLowerCase());
+  }
+  for (const service of ["radarr", "sonarr"] as const) {
+    const owner = new Map<string, string>();
+    for (const slug of candidates) {
+      if (!isValidInstanceSlug(slug)) continue;
+      for (const field of ARR_SETTING_FIELDS) {
+        const key = arrSettingKey(service, slug, field);
+        const prior = owner.get(key);
+        assert.equal(prior, undefined, `${key} is claimed by ${prior} and by ${JSON.stringify(slug)}/${field}`);
+        owner.set(key, `${JSON.stringify(slug)}/${field}`);
+      }
+    }
+  }
 });
 
 test("isAnimeMedia = Animation genre (16) AND Japanese origin/language", () => {

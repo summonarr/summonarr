@@ -142,13 +142,25 @@ async function doFetch(
   const signal = opts.signal
     ? AbortSignal.any([opts.signal, timeoutSignal])
     : timeoutSignal;
+  // Only OUR budget is a timeout. The caller's own abort is classified the way
+  // the request phase classifies it (doFetch's catch below): its own
+  // TimeoutError is a timeout, anything else is "network" carrying the caller's
+  // reason — never "timed out" for a request the caller cancelled.
+  const dnsAbortError = (timeoutMessage: string): SafeFetchError => {
+    const reason: unknown = timeoutSignal.aborted ? undefined : opts.signal?.reason;
+    if (reason === undefined || (reason instanceof Error && reason.name === "TimeoutError")) {
+      return new SafeFetchError("timeout", rawUrl, timeoutMessage);
+    }
+    const why = reason instanceof Error ? reason.message : String(reason);
+    return new SafeFetchError("network", rawUrl, `Request to ${rawUrl} was aborted by the caller during DNS resolution: ${why}`);
+  };
   const withDnsDeadline = async <T>(work: Promise<T>): Promise<T> => {
     if (signal.aborted) {
-      throw new SafeFetchError("timeout", rawUrl, `Request to ${rawUrl} timed out after ${timeoutMs}ms (before DNS resolution)`);
+      throw dnsAbortError(`Request to ${rawUrl} timed out after ${timeoutMs}ms (before DNS resolution)`);
     }
     return await new Promise<T>((resolve, reject) => {
       const onAbort = () =>
-        reject(new SafeFetchError("timeout", rawUrl, `DNS resolution for ${rawUrl} exceeded the ${timeoutMs}ms budget`));
+        reject(dnsAbortError(`DNS resolution for ${rawUrl} exceeded the ${timeoutMs}ms budget`));
       signal.addEventListener("abort", onAbort, { once: true });
       work.then(
         (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
@@ -282,11 +294,16 @@ async function doFetch(
             `Request to ${targetUrl} timed out after ${timeoutMs}ms`,
           );
         }
-        if (err instanceof TypeError && /redirect/i.test(err.message)) {
+        // Both transports refuse a redirect as TypeError("fetch failed") whose
+        // CAUSE says why — pinnedFetch's refuse() and undici's redirect:"error"
+        // alike — so the message alone never matched and a deterministic 3xx
+        // surfaced as a retryable "network" failure.
+        const causeMessage = (err as { cause?: { message?: unknown } }).cause?.message;
+        if (err instanceof TypeError && (/redirect/i.test(err.message) || causeMessage === "unexpected redirect")) {
           throw new SafeFetchError(
             "redirect",
             targetUrl,
-            `Request to ${targetUrl} attempted to redirect (blocked by safeFetch)`,
+            `Request to ${targetUrl} attempted to redirect (unexpected redirect, blocked by safeFetch)`,
           );
         }
       }
@@ -430,17 +447,30 @@ const BROTLI_LENIENT = {
 // "deflate" should be zlib-wrapped, but some servers send raw DEFLATE under it.
 // Like fetch, pick the decoder from the first byte: a zlib header's low nibble
 // is 8 (CM=deflate).
-function createDeflateDecoder(): Transform {
+//
+// Backpressure, as pipe() gives the gzip/br decoders: the inflater is paused
+// whenever this stream's readable side is full and resumed when it is read.
+// Without that, its 'data' listener kept it flowing and ONE input chunk was
+// inflated completely into this buffer (deflate reaches ~1000:1) before the byte
+// cap downstream (limitResponseBody) could see any of it. Paused, zlib itself
+// stops inflating once its own buffer is full and holds the write callback, so
+// no further input is taken either. Exported for the unit suite.
+export function createDeflateDecoder(): Transform {
   let inner: zlib.Inflate | zlib.InflateRaw | null = null;
   const t: Transform = new Transform({
     transform(chunk: Buffer, _enc, cb) {
       if (!inner) {
         if (chunk.length === 0) { cb(); return; }
-        inner = (chunk[0] & 0x0f) === 0x08 ? zlib.createInflate(ZLIB_LENIENT) : zlib.createInflateRaw(ZLIB_LENIENT);
-        inner.on("data", (d: Buffer) => t.push(d));
-        inner.on("error", (err) => t.destroy(err));
+        const created = (chunk[0] & 0x0f) === 0x08 ? zlib.createInflate(ZLIB_LENIENT) : zlib.createInflateRaw(ZLIB_LENIENT);
+        created.on("data", (d: Buffer) => { if (!t.push(d)) created.pause(); });
+        created.on("error", (err) => t.destroy(err));
+        inner = created;
       }
       inner.write(chunk, () => cb());
+    },
+    read(size) {
+      inner?.resume();
+      Transform.prototype._read.call(this, size);
     },
     flush(cb) {
       if (!inner) { cb(); return; }

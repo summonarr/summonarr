@@ -1,23 +1,7 @@
-// Two duration formatters that used to be defined as same-named local
-// `formatDuration` helpers in different components with INCOMPATIBLE units
-// (one milliseconds, one seconds) — a maintenance trap. Distinct names here.
-
-// Milliseconds → "Nms" under a second, "X.Xs" above. For short machine
-// timings (cron last-run durations).
-export function formatDurationMs(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-// Seconds → "Xh Ym" / "Xm", em-dash for non-positive. For human watch/play
-// durations.
-export function formatDurationSeconds(seconds: number): string {
-  if (seconds <= 0) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
+// Localized duration formatters. The ms and seconds variants keep distinct
+// names: they used to be same-named local `formatDuration` helpers in different
+// components with INCOMPATIBLE units (one milliseconds, one seconds) — a
+// maintenance trap.
 
 type DurationUnit = "hour" | "minute" | "second" | "millisecond";
 
@@ -43,14 +27,15 @@ function unitFormatter(locale: string, unit: DurationUnit, fractionDigits = 0): 
 
 const ENGLISH_ABBR: Record<DurationUnit, string> = { hour: "h", minute: "m", second: "s", millisecond: "ms" };
 
-// Localized twin of formatDurationMs for the admin cron table: "170.7s" was
-// the one English-only cell in a column whose neighbours were translated.
-// "Nms" under a second, one-decimal seconds above, through Intl's narrow unit
-// style; bare English abbreviations if Intl rejects the locale tag.
+// Milliseconds for the admin cron table: "170.7s" was the one English-only
+// cell in a column whose neighbours were translated. "Nms" under a second,
+// one-decimal seconds above, through Intl's narrow unit style; bare English
+// abbreviations if Intl rejects the locale tag. The ms branch is chosen on the
+// ROUNDED value, so 999.6 reads as seconds rather than "1,000 ms".
 export function formatDurationMsLocalized(ms: number, locale: string): string {
   if (!Number.isFinite(ms) || ms < 0) return "—";
-  if (ms < 1000) {
-    const n = Math.round(ms);
+  const n = Math.round(ms);
+  if (n < 1000) {
     return unitFormatter(locale, "millisecond")?.format(n) ?? `${n}ms`;
   }
   const secs = Math.round(ms / 100) / 10;
@@ -60,8 +45,8 @@ export function formatDurationMsLocalized(ms: number, locale: string): string {
 // Seconds → a LOCALIZED "2h 15m" / "15m" / "45s" through Intl's narrow unit
 // style (en "2h 15m", de "2h 15 Min.", zh "2小时 15分钟"), em-dash for
 // non-positive. The personal watch pages (history list, My Stats KPIs, the
-// wrapped tiles) read this instead of their old hardcoded-English `${h}h ${m}m`
-// copies, so a zh/de/fr UI no longer shows an untranslated "h" beside strings
+// wrapped tiles) and the admin activity views read this instead of their old
+// hardcoded-English `${h}h ${m}m` copies, so a zh/de/fr UI no longer shows an untranslated "h" beside strings
 // the translator already localized. If Intl rejects the locale tag the bare
 // English abbreviations are used — a bad tag must never blank a duration cell.
 export function formatDurationHM(seconds: number, locale: string): string {

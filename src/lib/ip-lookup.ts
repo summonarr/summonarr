@@ -66,7 +66,10 @@ function isPrivateOrReserved(ip: string): boolean {
   if (v === 6) {
     const lower = ip.toLowerCase();
     if (lower === "::1" || lower === "::") return true;
-    if (lower.startsWith("fe80:") || lower.startsWith("fc") || lower.startsWith("fd")) return true;
+    // Link-local is fe80::/10 (fe80–febf), not just `fe80:`; then the deprecated
+    // site-local fec0::/10, multicast ff00::/8, and ULA fc00::/7.
+    if (/^fe[89ab][0-9a-f]:/.test(lower) || /^fe[c-f][0-9a-f]:/.test(lower) || /^ff[0-9a-f]{2}:/.test(lower)) return true;
+    if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
     // An IPv4 address carried inside IPv6 (`::ffff:192.168.1.10`, the hex-pair
     // `::ffff:c0a8:10a`, NAT64/SIIT/IPv4-compatible) is classified by the IPv4
     // table on its payload. Jellyfin on a dual-stack host reports RemoteEndPoint
@@ -87,6 +90,8 @@ function isPrivateOrReserved(ip: string): boolean {
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  if (a === 192 && b === 0 && parts[2] === 0) return true; // IETF protocol assignments
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
   if (a === 0) return true;
   if (a >= 224) return true; // multicast / reserved
   return false;

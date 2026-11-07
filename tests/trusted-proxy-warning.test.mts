@@ -66,3 +66,32 @@ test("the deploy docs carry both rules, and the compose default binding is uncha
   // Left as-is so LAN deployments keep working; the docs and the boot warning do the steering.
   assert.match(compose, /\n\s+- "3001:3000"\n/);
 });
+
+// TRUSTED_PROXY_HOPS: parseTrustedHops (rate-limit.ts) silently turns a typo
+// into 1 hop and clamps an oversized value, so boot tells the operator what is
+// actually used. The cap in the message comes from the constant, not a literal.
+test("TRUSTED_PROXY_HOPS warns on a value the app can't use as typed, and on an unusually high one", async () => {
+  const { trustedProxyHopsWarning, MAX_TRUSTED_HOPS, parseTrustedHops } = await import("../src/lib/rate-limit.ts");
+  for (const quiet of [undefined, "", "  ", "1", "2", "3", " 2 "]) {
+    assert.equal(trustedProxyHopsWarning(quiet), null, `TRUSTED_PROXY_HOPS=${JSON.stringify(quiet)}`);
+  }
+  for (const junk of ["abc", "0", "-1", "3abc", "1.5"]) {
+    const w = trustedProxyHopsWarning(junk) ?? "";
+    assert.match(w, /^\[startup\] TRUSTED_PROXY_HOPS=/, junk);
+    assert.ok(w.includes(`not a whole number from 1 to ${MAX_TRUSTED_HOPS}; using ${parseTrustedHops(junk)}.`), `${junk}: ${w}`);
+  }
+  const over = trustedProxyHopsWarning("9") ?? "";
+  assert.ok(over.includes(`above the maximum of ${MAX_TRUSTED_HOPS}; using ${MAX_TRUSTED_HOPS}.`), over);
+  assert.match(over, /spoof/);
+  const high = trustedProxyHopsWarning("4") ?? "";
+  assert.match(high, /TRUSTED_PROXY_HOPS=4 is unusually high \(>3\)/);
+  assert.ok(high.includes(`The maximum is ${MAX_TRUSTED_HOPS}.`), high);
+});
+
+test("boot wires the TRUSTED_PROXY_HOPS rule from rate-limit.ts — no inline parse or literal cap", () => {
+  const src = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
+  assert.match(src, /const \{ trustedProxyHopsWarning \} = await import\("@\/lib\/rate-limit"\);/);
+  assert.match(src, /const hopsWarning = trustedProxyHopsWarning\(process\.env\.TRUSTED_PROXY_HOPS\);\s*if \(hopsWarning\) console\.warn\(hopsWarning\);/);
+  assert.doesNotMatch(src, /clamped to 5|parseInt\(hopsRaw/);
+  assert.doesNotMatch(src, /hopsWarning\)[^;]*process\.exit/, "warn-only");
+});

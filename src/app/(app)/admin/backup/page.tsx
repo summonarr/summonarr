@@ -6,6 +6,7 @@ import { BackupUI } from "@/components/admin/backup-ui";
 import { requireFeature } from "@/lib/features";
 import { PageHeader } from "@/components/ui/design";
 import { getTranslator } from "@/lib/i18n/server";
+import { isBackupPasswordReady } from "@/lib/backup-password";
 
 export const dynamic = "force-dynamic";
 
@@ -14,10 +15,10 @@ export default async function BackupPage() {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
   const t = await getTranslator();
-  // Mirrors the db-export route's MIN_BACKUP_PASSWORD_LEN gate (it answers 503
-  // below this), so the card can say "not configured" before a click opens a tab
-  // of raw JSON. Read on the server only — the value itself never leaves here.
-  const exportReady = (process.env.BACKUP_DB_PASSWORD ?? "").length >= 12;
+  // The db-export route's own gate (it answers 503 otherwise), so the card can
+  // say "not configured" before a click opens a tab of raw JSON. Read on the
+  // server only — the value itself never leaves here.
+  const exportReady = isBackupPasswordReady();
 
   return (
     <div className="ds-page-enter">

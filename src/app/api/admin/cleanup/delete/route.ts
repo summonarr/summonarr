@@ -3,7 +3,6 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { readJsonCapped } from "@/lib/body-size";
 import { logAudit, auditContext } from "@/lib/audit";
-import { isFeatureEnabled } from "@/lib/features";
 import { invalidateBlacklistCache } from "@/lib/blacklist";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { scheduleLibraryScan } from "@/lib/library-scan";
@@ -12,7 +11,8 @@ import { ArrResponseError, arrErrorKind, arrErrorMessage, arrWriteOutcomeUnknown
 import type { ArrErrorKind } from "@/lib/arr-error-kind";
 import { deleteArrEntry, failedArrInstances, invalidateArrLibraryIndexCache, loadArrLibraryIndex, resolveArrTargets, type ArrLibraryEntry } from "@/lib/library-cleanup-arr";
 import { CLEANUP_MAX_ITEMS, cleanupKey, parseCleanupItems, type CleanupMediaType } from "@/lib/library-cleanup";
-import { CLEANUP_FEATURE_KEY, cleanupRequestIdentity, computeCleanupReport, type CleanupRow, type TitleKey } from "@/lib/library-cleanup-data";
+import { cleanupRequestIdentity, computeCleanupReport, type CleanupRow, type TitleKey } from "@/lib/library-cleanup-data";
+import { cleanupDisabledResponse } from "@/lib/library-cleanup-gate";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 import { dropArrTitleSnapshots } from "@/lib/arr-snapshot";
@@ -68,9 +68,8 @@ type Skipped = { tmdbId: number; mediaType: CleanupMediaType; title: string | nu
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  if (!(await isFeatureEnabled(CLEANUP_FEATURE_KEY))) {
-    return NextResponse.json({ error: t("apiAdmin.cleanup.disabled") }, { status: 404 });
-  }
+  const off = await cleanupDisabledResponse(t);
+  if (off) return off;
   const execute = req.nextUrl.searchParams.get("execute") === "true";
   const parsed = await readJsonCapped<Body>(req, 65_536);
   if (parsed instanceof NextResponse) return parsed;

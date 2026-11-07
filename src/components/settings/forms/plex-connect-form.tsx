@@ -161,7 +161,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   const [allowFallback, setAllowFallback] = useState(true);
   const [resolving, setResolving] = useState<string | null>(null);
   const [relayPicked, setRelayPicked] = useState(false);
-  const [importStatus, setImportStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [importStatus, setImportStatus] = useState<"idle" | "running" | "done" | "busy" | "error">("idle");
   const [importResult, setImportResult] = useState<{ marked: number; scanned: { movies: number; tv: number } } | null>(null);
 
   const [sections, setSections] = useState<PlexSection[]>([]);
@@ -357,7 +357,13 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         body: JSON.stringify({ full: true }),
       });
       if (!res.ok) throw new Error(await res.text());
-      const data: { marked: number; scanned: { movies: number; tv: number } } = await res.json();
+      const data = (await res.json()) as { marked: number; scanned: { movies: number; tv: number } } | { skipped: true };
+      // 200 { skipped: true }: a sync of this server is already running; it
+      // carries no counts.
+      if ("skipped" in data) {
+        setImportStatus("busy");
+        return;
+      }
       setImportResult(data);
       setImportStatus("done");
     } catch {
@@ -584,6 +590,11 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                     <span className="text-zinc-500">
                       {t("settings.form.library.scanned", { movies: importResult.scanned.movies, tv: importResult.scanned.tv })}
                     </span>
+                  </span>
+                )}
+                {importStatus === "busy" && (
+                  <span role="status" aria-live="polite" className="text-sm text-zinc-400">
+                    {t("settings.form.library.alreadyRunning")}
                   </span>
                 )}
                 {importStatus === "error" && (

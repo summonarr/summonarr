@@ -187,7 +187,7 @@
   "settings.arr.minAvail.announced": "Anunciado",
   "settings.arr.minAvail.inCinemas": "Nos cinemas",
   "settings.arr.minAvail.released": "Lançado",
-  "settings.arr.invalidSlug": "Slug inválido \"{slug}\" — use letras minúsculas/dígitos, começando com uma letra (não \"hd\").",
+  "settings.arr.invalidSlug": "Slug inválido \"{slug}\" — use letras minúsculas/dígitos, começando com uma letra (não \"hd\" nem \"external\").",
   "settings.arr.heading": "{label} — instâncias adicionais",
   "settings.arr.intro": "Instâncias extras do {label} (ex.: uma instância dedicada a anime). As solicitações são encaminhadas automaticamente para cá quando a regra de uma instância corresponde; uma solicitação também pode escolher uma delas explicitamente. Instâncias restritas exigem uma concessão por usuário (Usuários → Acesso a instâncias).",
   "settings.arr.none": "Nenhuma instância adicional do {label} configurada.",

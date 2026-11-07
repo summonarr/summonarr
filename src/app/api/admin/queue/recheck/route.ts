@@ -15,7 +15,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   if (!checkRateLimit(`queue-recheck:${session.user.id}`, 6, 60_000)) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   return NextResponse.json(await recheckDownloads(), { status: 202 });
 });

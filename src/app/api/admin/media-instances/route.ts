@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
@@ -5,9 +6,10 @@ import { readJsonCapped } from "@/lib/body-size";
 import { logAudit, auditContext } from "@/lib/audit";
 import { pingPlexToken, getPlexMachineId, checkPlexServerAccess, PLEX_IDENTITY_TIMEOUT_MS } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
-import { type MediaServerService, type PlexSettingField, type JellyfinSettingField, DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
+import { type MediaServerService, type PlexSettingField, type JellyfinSettingField, DEFAULT_MEDIA_INSTANCE, MEDIA_INSTANCE_NAME_MAX_LEN, isValidMediaInstanceSlug, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { settleLimit } from "@/lib/concurrency";
-import { getMediaInstances, buildMediaInstanceRegistryWrite } from "@/lib/media-instance-registry";
+import { type MediaInstanceConfig, getMediaInstances, buildMediaInstanceRegistryWrite, readMediaInstanceRegistryForSave } from "@/lib/media-instance-registry";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { validateServerUrl, stripUrlUserinfo } from "@/lib/server-url";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -37,13 +39,23 @@ import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 // slugs, and silently drops (200, no write) anything it doesn't recognize; the
 // default instance's own keys stay with /api/settings unchanged.
 //
-// Secrets are never returned; the UI receives a hasSecret flag and sends the
-// sentinel MASKED_VALUE back unchanged for a field it didn't edit.
+// Secrets are never returned; the UI receives a hasSecret flag and sends
+// SECRET_MASK_SENTINEL back unchanged for a field it didn't edit.
+//
+// A save replaces the whole list. GET and POST hand out a `version` per service
+// (a hash of the named instances as GET shows them); a POST that sends it back
+// as `baseVersion` is refused with a 409 and no write when the stored list has
+// changed since, so a stale tab can't delete a server added elsewhere (and its
+// library, sessions and watch-sync pairs with it). Without `baseVersion` the
+// save is unconditional, as before.
 
-const MASKED_VALUE = "••••••••";
 // The display name renders on the server picker, availability badges and admin
-// chips; bounded like the arr-instances and notification-agent siblings.
-const INSTANCE_NAME_MAX_LEN = 100;
+// chips; bounded like the arr-instances and notification-agent siblings. The
+// registry truncates to the same constant on read.
+const INSTANCE_NAME_MAX_LEN = MEDIA_INSTANCE_NAME_MAX_LEN;
+// A Plex token or Jellyfin API key is a few dozen characters (a plex.tv JWT a
+// few hundred); this bounds a paste error, not a real credential.
+const SECRET_MAX_LEN = 4096;
 
 // EVERY per-instance Setting field a service owns. Removing an instance must
 // delete ALL of them: the cleanup used to drop only the connection pair, so
@@ -123,7 +135,16 @@ interface InstancePayload {
 interface SavePayload {
   service?: string;
   instances?: InstancePayload[];
+  // The `version` from the GET/POST this list was edited from; optional.
+  baseVersion?: unknown;
 }
+
+// The interactive-tx client of the EXTENDED prisma (the generated
+// Prisma.TransactionClient is not assignable to it — see account-lifecycle.ts).
+type TxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+
+const PLEX_VIEW_FIELDS: PlexSettingField[] = ["ServerUrl", "AdminToken", "AdminEmail", "Libraries", "MoviePathStripPrefix", "TvPathStripPrefix"];
+const JELLYFIN_VIEW_FIELDS: JellyfinSettingField[] = ["Url", "ApiKey", "RestrictSignIn", "Libraries", "MoviePathStripPrefix", "TvPathStripPrefix"];
 
 // Same parse as isJellyfinSignInAllowed (auth.ts): fail-CLOSED, so a missing row
 // reads as restricted. The GET view must report that default rather than `false`,
@@ -132,21 +153,32 @@ function readRestrictSignIn(value: string | undefined): boolean {
   return (value ?? "true").trim().toLowerCase() !== "false";
 }
 
+// Every listed instance's view from ONE Setting read, so the same code serves
+// the GET, the in-transaction staleness check (one query at a time, guardrail
+// 23c) and the POST response.
+async function readInstanceViews(db: Pick<TxClient, "setting">, service: MediaServerService, instances: MediaInstanceConfig[]) {
+  if (instances.length === 0) return [];
+  const keys = instances.flatMap((i) =>
+    service === "plex"
+      ? PLEX_VIEW_FIELDS.map((f) => plexSettingKey(i.slug, f))
+      : JELLYFIN_VIEW_FIELDS.map((f) => jellyfinSettingKey(i.slug, f)),
+  );
+  const rows = await db.setting.findMany({ where: { key: { in: keys } } });
+  const map: Record<string, string> = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  return instances.map((i) => instanceView(service, i.slug, i.name, i.restricted, map));
+}
+
+// What a client edits from: the named instances only — the default has its own
+// form, and a change there must not refuse a manager's save.
+function instancesVersion(views: ReturnType<typeof instanceView>[]): string {
+  return createHash("sha256").update(JSON.stringify(views.filter((v) => v.slug !== DEFAULT_MEDIA_INSTANCE))).digest("hex");
+}
+
 // `restricted` is echoed straight from the registry entry (not a Setting row):
 // the manager UI round-trips this view back through POST, so omitting it here
 // would make every save silently clear the flag.
-async function readInstanceView(service: MediaServerService, slug: string, name: string, restricted: boolean) {
+function instanceView(service: MediaServerService, slug: string, name: string, restricted: boolean, map: Record<string, string>) {
   if (service === "plex") {
-    const keys = [
-      plexSettingKey(slug, "ServerUrl"),
-      plexSettingKey(slug, "AdminToken"),
-      plexSettingKey(slug, "AdminEmail"),
-      plexSettingKey(slug, "Libraries"),
-      plexSettingKey(slug, "MoviePathStripPrefix"),
-      plexSettingKey(slug, "TvPathStripPrefix"),
-    ];
-    const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
-    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     return {
       slug,
       name,
@@ -163,16 +195,6 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
       tvPathStripPrefix: map[plexSettingKey(slug, "TvPathStripPrefix")] ?? "",
     };
   }
-  const keys = [
-    jellyfinSettingKey(slug, "Url"),
-    jellyfinSettingKey(slug, "ApiKey"),
-    jellyfinSettingKey(slug, "RestrictSignIn"),
-    jellyfinSettingKey(slug, "Libraries"),
-    jellyfinSettingKey(slug, "MoviePathStripPrefix"),
-    jellyfinSettingKey(slug, "TvPathStripPrefix"),
-  ];
-  const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
-  const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   return {
     slug,
     name,
@@ -188,14 +210,11 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [plex, jellyfin] = await Promise.all([
-    getMediaInstances("plex").then((list) =>
-      Promise.all(list.map((i) => readInstanceView("plex", i.slug, i.name, i.restricted))),
-    ),
-    getMediaInstances("jellyfin").then((list) =>
-      Promise.all(list.map((i) => readInstanceView("jellyfin", i.slug, i.name, i.restricted))),
-    ),
+    getMediaInstances("plex").then((list) => readInstanceViews(prisma, "plex", list)),
+    getMediaInstances("jellyfin").then((list) => readInstanceViews(prisma, "jellyfin", list)),
   ]);
-  return NextResponse.json({ plex, jellyfin });
+  // `versions` is additive: clients that decode only the two lists are unaffected.
+  return NextResponse.json({ plex, jellyfin, versions: { plex: instancesVersion(plex), jellyfin: instancesVersion(jellyfin) } });
 });
 
 export const POST = withAdmin(async (req, _ctx, session) => {
@@ -216,10 +235,21 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (!Array.isArray(body.instances)) {
     return NextResponse.json({ error: t("apiAdmin.common.instancesArray") }, { status: 400 });
   }
+  if (body.baseVersion !== undefined && typeof body.baseVersion !== "string") {
+    return NextResponse.json({ error: t("apiAdmin.common.invalidBody") }, { status: 400 });
+  }
+  const baseVersion = body.baseVersion;
   const instances = body.instances;
   for (const inst of instances) {
     if (typeof inst?.slug !== "string" || !isValidMediaInstanceSlug(inst.slug)) {
       return NextResponse.json({ error: t("apiAdmin.common.invalidSlug", { slug: String(inst?.slug) }) }, { status: 400 });
+    }
+    // The token/key goes to a String column as sent: anything but a string (a
+    // number, null, an object) failed inside the transaction as a 500.
+    for (const [field, value] of [["adminToken", inst.adminToken], ["apiKey", inst.apiKey]] as const) {
+      if (value !== undefined && (typeof value !== "string" || value.length > SECRET_MAX_LEN)) {
+        return NextResponse.json({ error: t("apiAdmin.common.invalidSecret", { slug: inst.slug, field, max: SECRET_MAX_LEN }) }, { status: 400 });
+      }
     }
     // Same URL rules as the /api/settings sibling: the value ships out on every
     // safeFetchAdminConfigured call, so reject a bad scheme or an embedded
@@ -234,27 +264,16 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     }
   }
 
-  // Which named slugs existed before — so removing one from the list cleans up
-  // its rows. This read MUST stay ahead of the registry write: the set
-  // difference is the only signal that a removal happened. The default ("") is
-  // never a cleanup candidate: it's synthesized (not registry-backed) and the
-  // manager UI omits it from its POST — treating its absence as "removed" would
-  // wipe the base plexServerUrl/jellyfinUrl connection Settings and the whole
-  // default server's library cache.
-  const isNamedSlug = (slug: string) => slug !== DEFAULT_MEDIA_INSTANCE;
-  const before = await getMediaInstances(service);
-  const beforeNamed = new Set(before.filter((i) => isNamedSlug(i.slug)).map((i) => i.slug));
-  const nextNamed = new Set(instances.filter((i) => isNamedSlug(i.slug)).map((i) => i.slug));
-  const removed = [...beforeNamed].filter((slug) => !nextNamed.has(slug));
-
   // Registry metadata (built-in default excluded — synthesized in
   // getMediaInstances, never registry-backed; a "" entry here would shadow it).
-  // Serialized through the registry module's own normalizer so the in-tx write
-  // below can't drift from saveMediaInstances().
+  // Serialized through the registry module's own normalizer so this in-tx write
+  // can't drift from what the readers parse.
+  const isNamedSlug = (slug: string) => slug !== DEFAULT_MEDIA_INSTANCE;
+  const nextNamed = new Set(instances.filter((i) => isNamedSlug(i.slug)).map((i) => i.slug));
   const registryWrite = buildMediaInstanceRegistryWrite(
     service,
     instances
-      .filter((i) => i.slug !== DEFAULT_MEDIA_INSTANCE)
+      .filter((i) => isNamedSlug(i.slug))
       .map((i) => ({
         slug: i.slug,
         name: (typeof i.name === "string" ? i.name.trim() : "") || i.slug,
@@ -274,12 +293,38 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   //
   // Guardrail 23: nothing in here catches a write error. A failure propagates,
   // the whole transaction rolls back, and the route 500s — the admin retries
-  // against unchanged state.
+  // against unchanged state. Every query is awaited in turn (23c).
+  let removed: string[] = [];
   const removedCounts: Record<string, { libraryItems: number; activeSessions: number; serverUsersDisabled: number; watchSyncPairs: number }> = {};
-  await prisma.$transaction(async (tx) => {
-    // The registry row FIRST: its row lock is what orders this removal against
-    // an upstream watch refresh in flight (stillRegisteredInTx in
-    // upstream-watch-data.ts locks the same row before writing a slug's
+  const outcome = await prisma.$transaction(async (tx) => {
+    // Which named slugs existed before — so removing one from the list cleans
+    // up its rows. The set difference is the only signal that a removal
+    // happened, so this read is taken HERE, under the per-service save lock and
+    // ahead of the registry write — never before the transaction, where a save
+    // committing in between was lost: a slug it added was overwritten without
+    // its rows ever being cleaned up, and one it re-added lost its token to this
+    // save's cleanup. The default ("") is never a cleanup candidate: it's
+    // synthesized (this read returns named entries only) and the manager UI
+    // omits it from its POST — treating its absence as "removed" would wipe the
+    // base plexServerUrl/jellyfinUrl connection Settings and the whole default
+    // server's library cache.
+    const before = await readMediaInstanceRegistryForSave(tx, service);
+    // The list the client edited is not the one stored: refuse before any write.
+    if (typeof baseVersion === "string" && instancesVersion(await readInstanceViews(tx, service, before)) !== baseVersion) {
+      return "stale" as const;
+    }
+    // Even without a version: "keep the saved token" for a named server that is
+    // not registered means the client's list is stale (another save removed it,
+    // and its token, meanwhile). Re-adding it would register a server with none.
+    const registered = new Set(before.map((i) => i.slug));
+    if (instances.some((i) => isNamedSlug(i.slug) && !registered.has(i.slug) && (i.adminToken === SECRET_MASK_SENTINEL || i.apiKey === SECRET_MASK_SENTINEL))) {
+      return "stale" as const;
+    }
+    removed = before.map((i) => i.slug).filter((slug) => !nextNamed.has(slug));
+
+    // The registry row is the first WRITE: its row lock is what orders this
+    // removal against an upstream watch refresh in flight (stillRegisteredInTx
+    // in upstream-watch-data.ts locks the same row before writing a slug's
     // evidence or status, so it never re-creates them for a removed slug).
     await tx.setting.upsert({
       where: { key: registryWrite.key },
@@ -294,7 +339,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // (guardrail 7a).
     const set = async (key: string, value: string | undefined, isSecret: boolean) => {
       if (value === undefined) return;
-      if (isSecret && value === MASKED_VALUE) return;
+      if (isSecret && value === SECRET_MASK_SENTINEL) return;
       await tx.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
     };
     // Strip prefixes are the one field where "" must DELETE the row rather than
@@ -388,7 +433,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
       removedCounts[slug] = { libraryItems: library.count, activeSessions: sessions.count, serverUsersDisabled: serverUsers.count, watchSyncPairs: watchSyncPairs.count };
     }
+    return "saved" as const;
   }, { timeout: BATCH_TX_TIMEOUT });
+  if (outcome === "stale") {
+    return NextResponse.json({ error: t("apiAdmin.common.instancesChanged", { service: service === "plex" ? "Plex" : "Jellyfin" }) }, { status: 409 });
+  }
   // A removal changed the never-watched report's inputs (library rows, evidence,
   // the coverage rows); the cached report must not outlive it (guardrail 14d).
   if (removed.length > 0) invalidateNeverWatchedReport();
@@ -465,6 +514,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     ...auditContext(req, session),
   });
 
-  const view = await Promise.all(configured.map((i) => readInstanceView(service, i.slug, i.name, i.restricted)));
-  return NextResponse.json({ ok: true, instances: view, testResults });
+  const view = await readInstanceViews(prisma, service, configured);
+  // `version` is additive: the client's next `baseVersion`.
+  return NextResponse.json({ ok: true, instances: view, testResults, version: instancesVersion(view) });
 });

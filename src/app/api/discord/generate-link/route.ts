@@ -7,11 +7,18 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { requireStepUp } from "@/lib/step-up-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { generateDiscordLinkToken } from "@/lib/discord-link-token";
+import { isFeatureEnabled } from "@/lib/features";
 
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // A code is useless with the integration off (/link is refused), so none is
+  // minted. Before the rate limit, so a refusal spends nothing. Unlinking stays
+  // open: a user can always remove a link.
+  if (!(await isFeatureEnabled("feature.integration.discord"))) {
+    return NextResponse.json({ error: t("apiUser.discord.disabled") }, { status: 403 });
+  }
   if (!checkRateLimit(`discord-link:${session.user.id}`, 5, 10 * 60 * 1000)) {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }

@@ -45,6 +45,18 @@ export async function logAudit(params: AuditParams): Promise<void> {
   }
 }
 
+// logAudit for a row the caller finalizes later (an export's outcome): the same
+// swallowing contract, returning the row's id, or null when the write failed.
+export async function logAuditReturningId(params: AuditParams): Promise<string | null> {
+  try {
+    const row = await prisma.auditLog.create({ data: auditRowData(params), select: { id: true } });
+    return row.id;
+  } catch (err) {
+    console.error("[audit] Failed to write audit log:", err);
+    return null;
+  }
+}
+
 // logAuditOrFail is for writes that must succeed (e.g. inside a transaction where failure should roll back)
 export async function logAuditOrFail(params: AuditParams): Promise<void> {
   await prisma.auditLog.create({ data: auditRowData(params) });
@@ -60,9 +72,9 @@ export const AUDIT_PII_RETENTION_MIN_DAYS = 7;
 export const AUDIT_PII_RETENTION_MAX_DAYS = 3650;
 
 // The userName the PII scrub (DELETE /api/admin/audit-log + the
-// scrub-audit-pii cron) writes over every row past the retention window. The
-// scrub route writes this literal; the admin audit-log viewer compares against
-// it to render a muted, translated "redacted" instead of an English token
+// scrub-audit-pii cron) writes over every row past the retention window. Both
+// scrub paths write and filter on this constant; the admin audit-log viewer
+// compares against it to render a muted, translated "redacted" instead of an English token
 // dressed as an account name — so the two must keep agreeing. This module pulls
 // in prisma, so a "use client" component never imports it: the audit-log page
 // (a server component) hands the value down as a prop.

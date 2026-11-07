@@ -11,6 +11,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
+import { FLUSH_DELAY_MS, flushOutcome, nextRetryDelay, settleBatch } from "@/lib/feature-toggle-queue";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
@@ -44,8 +45,8 @@ interface FeaturesFormProps {
 // toggle() just updates the screen + pendingTarget and schedules a save.
 // flush() keeps going until nothing is pending, so a switch flipped again
 // while a save was running gets sent in the next round, and an older reply
-// never overwrites it.
-const FLUSH_DELAY_MS = 400;
+// never overwrites it. A 429 from that limit is "not sent yet": the batch stays
+// pending and is retried after a backoff (feature-toggle-queue.ts).
 
 // Feature labels/descriptions live in the registry (src/lib/features.ts) in
 // English; the catalogs carry a translation per flag under a slug of its key
@@ -81,6 +82,11 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   const inFlightKeys = useRef<Map<string, boolean>>(new Map());
   const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const statusTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // The rate-limit backoff: the last delay used (null when not backing off),
+  // and whether the retry timer is pending — while it is, a new flip waits for
+  // it instead of firing straight into another 429.
+  const retryDelay = useRef<number | null>(null);
+  const backingOff = useRef(false);
 
   function scheduleStatusClear(key: string) {
     const existing = statusTimers.current.get(key);
@@ -138,7 +144,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
           return next;
         });
 
-        let success = false;
+        let reply: { status: number; ok: boolean | undefined } | null = null;
         let message = "";
         for (const [key, target] of batch) inFlightKeys.current.set(key, target);
         try {
@@ -148,33 +154,40 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
             body: JSON.stringify(bodyFor(batch)),
           });
           const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
-          success = res.ok && data.ok === true;
-          if (!success) message = data.error ?? t("settings.common.saveFailedStatus", { status: res.status });
+          reply = { status: res.status, ok: data.ok };
+          message = data.error ?? t("settings.common.saveFailedStatus", { status: res.status });
         } catch {
-          success = false;
           message = t("settings.common.networkError");
         } finally {
           for (const [key] of batch) inFlightKeys.current.delete(key);
         }
 
-        for (const [key, target] of batch) {
-          if (success) savedState.current[key] = target;
-          // Only finish off a switch that's still set to what we just sent. If
-          // the user flipped it again meanwhile, the next loop round sends the
-          // newer value instead of letting this older reply overwrite it.
-          if (pendingTarget.current.get(key) !== target) continue;
-          pendingTarget.current.delete(key);
-          if (!success) setFlags((prev) => ({ ...prev, [key]: savedState.current[key] ?? false }));
-          setStatusByKey((prev) => ({ ...prev, [key]: success ? "ok" : "error" }));
+        const outcome = flushOutcome(reply);
+        if (outcome === "rateLimited") {
+          // Not sent yet: the switches keep the admin's choice and their
+          // spinner, and the whole batch goes out again after the backoff.
+          retryDelay.current = nextRetryDelay(retryDelay.current);
+          scheduleRetry(retryDelay.current);
+          return;
+        }
+        retryDelay.current = null;
+
+        // Only switches still set to what we just sent are finished; one the
+        // user flipped again meanwhile goes out in the next loop round instead
+        // of letting this older reply overwrite it.
+        const settled = settleBatch({ saved: savedState.current, pending: pendingTarget.current }, batch, outcome);
+        for (const { key, ok, revertTo } of settled) {
+          if (!ok) setFlags((prev) => ({ ...prev, [key]: revertTo ?? false }));
+          setStatusByKey((prev) => ({ ...prev, [key]: ok ? "ok" : "error" }));
           setErrorByKey((prev) => {
             const next = { ...prev };
-            if (success) delete next[key];
+            if (ok) delete next[key];
             else next[key] = message;
             return next;
           });
           // A failure stays on screen (icon + message) until the next toggle
           // of this switch; only the success tick fades.
-          if (success) scheduleStatusClear(key);
+          if (ok) scheduleStatusClear(key);
         }
       }
     } finally {
@@ -186,11 +199,23 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   }
 
   function scheduleFlush() {
+    // While backing off after a 429, the retry timer sends everything pending.
+    if (backingOff.current) return;
     if (flushTimer.current) clearTimeout(flushTimer.current);
     flushTimer.current = setTimeout(() => {
       flushTimer.current = null;
       void flush();
     }, FLUSH_DELAY_MS);
+  }
+
+  function scheduleRetry(delayMs: number) {
+    backingOff.current = true;
+    if (flushTimer.current) clearTimeout(flushTimer.current);
+    flushTimer.current = setTimeout(() => {
+      flushTimer.current = null;
+      backingOff.current = false;
+      void flush();
+    }, delayMs);
   }
 
   useEffect(() => {

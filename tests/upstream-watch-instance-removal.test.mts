@@ -84,6 +84,8 @@ function makeClient(txId: number | null) {
     },
   });
   return {
+    // The registry save lock (readMediaInstanceRegistryForSave); nothing to model.
+    $executeRaw: async () => 0,
     setting: {
       findMany: async (args?: { where?: { key?: { in?: string[] } } }) => {
         const only = args?.where?.key?.in;

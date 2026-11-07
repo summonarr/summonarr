@@ -57,6 +57,8 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const settings = new Map<string, string>();
 const upserts: Array<{ key: string; value: string }> = [];
 shadowPrismaModel(prisma, "setting", {
+  findUnique: async (args: { where: { key: string } }) =>
+    settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null,
   findMany: async (args: { where?: { key?: { in?: string[] } } }) => {
     const keys = args.where?.key?.in ?? [];
     return keys.flatMap((k) => (settings.has(k) ? [{ key: k, value: settings.get(k)! }] : []));
@@ -68,7 +70,7 @@ shadowPrismaModel(prisma, "setting", {
   },
 });
 
-const { syncDiscordCommandsIfChanged, discordSchemaHash, DISCORD_SCHEMA_HASH_KEY } = await import("../src/lib/discord-register.ts");
+const { syncDiscordCommandsIfChanged, discordSchemaHash, recordDiscordSchemaHash, DISCORD_SCHEMA_HASH_KEY } = await import("../src/lib/discord-register.ts");
 const { DISCORD_LINK_TOKEN_LENGTH } = await import("../src/lib/discord-commands.ts");
 
 beforeEach(() => {
@@ -108,13 +110,13 @@ test("a stale/absent hash registers GLOBALLY, records the hash, and the /link to
   assert.equal(linkToken?.max_length, DISCORD_LINK_TOKEN_LENGTH);
   assert.equal(linkToken?.max_length, 32);
 
-  assert.deepEqual(upserts, [{ key: DISCORD_SCHEMA_HASH_KEY, value: discordSchemaHash(null) }], "the schema hash is recorded on success");
+  assert.deepEqual(upserts, [{ key: DISCORD_SCHEMA_HASH_KEY, value: discordSchemaHash("12345", null) }], "the schema hash is recorded on success");
 });
 
 test("an UP-TO-DATE hash makes ZERO Discord calls — the rate-limit guard", async () => {
   settings.set("discordBotToken", "bot-tok");
   settings.set("discordClientId", "12345");
-  settings.set(DISCORD_SCHEMA_HASH_KEY, discordSchemaHash(null)); // already current
+  settings.set(DISCORD_SCHEMA_HASH_KEY, discordSchemaHash("12345", null)); // already current
 
   await syncDiscordCommandsIfChanged();
   assert.equal(puts.length, 0, "an unchanged schema must not hit the Discord API");
@@ -127,7 +129,7 @@ test("a guild id targets the GUILD endpoint and the hash is scope-specific (a gu
   settings.set("discordGuildId", "67890");
   // The GLOBAL hash is stored — but the scope is now guild, so it must NOT count
   // as current.
-  settings.set(DISCORD_SCHEMA_HASH_KEY, discordSchemaHash(null));
+  settings.set(DISCORD_SCHEMA_HASH_KEY, discordSchemaHash("12345", null));
 
   await syncDiscordCommandsIfChanged();
   assert.equal(puts.length, 2, "a scope flip (global->guild) must re-register, then clear the global set");
@@ -137,8 +139,8 @@ test("a guild id targets the GUILD endpoint and the hash is scope-specific (a gu
   assert.equal(puts[1].url, "https://discord.com/api/v10/applications/12345/commands");
   assert.equal(puts[1].method, "PUT");
   assert.equal(puts[1].body, "[]");
-  assert.deepEqual(upserts, [{ key: DISCORD_SCHEMA_HASH_KEY, value: discordSchemaHash("67890") }]);
-  assert.notEqual(discordSchemaHash("67890"), discordSchemaHash(null), "guild and global hashes must differ");
+  assert.deepEqual(upserts, [{ key: DISCORD_SCHEMA_HASH_KEY, value: discordSchemaHash("12345", "67890") }]);
+  assert.notEqual(discordSchemaHash("12345", "67890"), discordSchemaHash("12345", null), "guild and global hashes must differ");
 });
 
 test("a failed registration warns and does NOT record the hash (so the next boot retries)", async () => {
@@ -170,4 +172,31 @@ test("a global-scope registration (no Guild ID) makes no clear call", async () =
   await syncDiscordCommandsIfChanged();
   assert.equal(puts.length, 1);
   assert.notEqual(puts[0].body, "[]");
+});
+
+test("a different bot APPLICATION re-registers: the hash covers the client id, not only the schema and scope", async () => {
+  // The stored hash is the one application A's registration recorded. A move to
+  // application B that skipped (or failed) the settings-save registration used
+  // to match it, and every boot answered "already current" for an app that had
+  // no commands.
+  settings.set("discordBotToken", "bot-tok");
+  settings.set("discordClientId", "22222");
+  settings.set(DISCORD_SCHEMA_HASH_KEY, discordSchemaHash("11111", null));
+
+  await syncDiscordCommandsIfChanged();
+  assert.equal(puts.length, 1, "the new application gets its commands");
+  assert.equal(puts[0].url, "https://discord.com/api/v10/applications/22222/commands");
+  assert.deepEqual(upserts, [{ key: DISCORD_SCHEMA_HASH_KEY, value: discordSchemaHash("22222", null) }]);
+  assert.notEqual(discordSchemaHash("11111", null), discordSchemaHash("22222", null));
+});
+
+test("recordDiscordSchemaHash without a client id hashes the STORED one; with none stored it writes nothing", async () => {
+  settings.set("discordClientId", "33333");
+  await recordDiscordSchemaHash("67890");
+  assert.deepEqual(upserts, [{ key: DISCORD_SCHEMA_HASH_KEY, value: discordSchemaHash("33333", "67890") }]);
+
+  upserts.length = 0;
+  settings.clear();
+  await recordDiscordSchemaHash(null);
+  assert.deepEqual(upserts, [], "no application to describe — nothing recorded, so the boot sync registers");
 });

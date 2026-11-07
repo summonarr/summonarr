@@ -82,6 +82,9 @@ function WebhookSecretField({
           <Input
             id={id}
             type="password"
+            autoComplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
             value={secret}
             onChange={(e) => { setSecret(e.target.value); setStatus("idle"); }}
             placeholder={t("settings.form.webhookSecret.placeholder")}

@@ -216,9 +216,11 @@ function auditMatch(r: AuditRow, where: Record<string, unknown> | undefined): bo
 }
 
 let auditCountOverride: number | null = null;
+let auditCountThrows = false;
 shadowPrismaModel(prisma, "auditLog", {
   count: async (args: { where?: Record<string, unknown> } = {}) => {
     rec("auditLog.count", args.where);
+    if (auditCountThrows) throw new Error("simulated count failure");
     return auditCountOverride ?? auditRows.filter((r) => auditMatch(r, args.where)).length;
   },
   findMany: async (args: { where?: Record<string, unknown>; take?: number; cursor?: { id: string }; skip?: number }) => {
@@ -345,6 +347,7 @@ beforeEach(() => {
   nextUserCreateThrows = null;
   findManyThrowsAfter = null;
   findManyCalls = 0;
+  auditCountThrows = false;
 });
 
 // ── /api/admin/users — gating ────────────────────────────────────────────────
@@ -752,6 +755,27 @@ test("audit-log: dateTo is inclusive of the requested day, advanced in UTC on bo
   assert.equal(exportWhere.createdAt.lt.toISOString(), "2026-07-02T00:00:00.000Z");
 });
 
+test("audit-log: the list and the export hand Prisma the SAME filter for one query", async () => {
+  // Three copies of this filter (page, list, export) had drifted; one builder
+  // now serves all three, so "Load more" and "Export" of a view match it.
+  const t = await mintSession();
+  const q = "?action=AUTH_LOGIN&group=admin&dateFrom=2026-06-01T07:00:00.000Z&dateTo=2026-06-30T07:00:00.000Z" +
+    "&user=al%25ice&target=user%3A&hideCron=1";
+  await listAudit(t, q);
+  const listWhere = (opsOf("auditLog.findMany")[0].args as { where: unknown }).where;
+  ops = [];
+  await readAll(await exportAudit(t, q));
+  const exportWhere = (opsOf("auditLog.findMany")[0].args as { where: unknown }).where;
+  assert.deepEqual(exportWhere, listWhere);
+  assert.deepEqual(listWhere, {
+    action: "AUTH_LOGIN",
+    createdAt: { gte: new Date("2026-06-01T07:00:00.000Z"), lt: new Date("2026-07-01T07:00:00.000Z") },
+    userName: { contains: "alice", mode: "insensitive" },
+    target: { contains: "user:", mode: "insensitive" },
+    AND: [{ OR: [{ userId: null }, { userId: { not: "system" } }] }],
+  });
+});
+
 test("audit-log: hideCron excludes the system actor but KEEPS null-actor rows", async () => {
   // Asserts on the rows returned, not on the where-shape. The previous version
   // pinned `{ not: "system" }` literally, so it locked the defect in: that
@@ -920,6 +944,30 @@ test("export: a mid-stream read failure still finalizes the audit row as aborted
   const details = JSON.parse((upd[upd.length - 1].args as { data: { details: string } }).data.details);
   assert.equal(details.status, "aborted");
   assert.ok(details.error, "the failure reason should be recorded");
+});
+
+test("export: a failed count closes the paper-trail row as failed — it never stays 'started'", async () => {
+  // The count runs after the row is written (the totals include it) and before
+  // the stream that finalizes it; a DB error there used to 500 and leave the
+  // row reading "started" for good.
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" })];
+  auditCountThrows = true;
+  const res = await exportAudit(t, "?format=csv");
+  assert.equal(res.status, 500);
+  assert.equal(typeof (await res.json()).error, "string");
+  const created = opsOf("auditLog.create");
+  assert.equal(created.length, 1, "the paper trail is still written before anything is read");
+  const upd = opsOf("auditLog.update");
+  assert.equal(upd.length, 1, "the row must be finalized");
+  const args = upd[0].args as { where: { id: string }; data: { details: string } };
+  const row = auditRows.find((r) => r.action === "AUDIT_LOG_EXPORT");
+  assert.equal(args.where.id, row?.id);
+  const details = JSON.parse(args.data.details);
+  assert.equal(details.status, "failed");
+  assert.equal(details.rowCount, 0);
+  assert.match(details.error, /simulated count failure/);
+  assert.equal(opsOf("auditLog.findMany").length, 0, "no row is exported");
 });
 
 test("export: CSV formula-injection characters are neutralized", async () => {

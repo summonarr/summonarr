@@ -275,11 +275,37 @@ function isValidIp(addr: string): boolean {
 // hole getClientIp exists to close. No realistic deployment fronts the app with
 // more than a handful of trusted proxies, so we clamp rather than trust an
 // oversized configured value.
-const MAX_TRUSTED_HOPS = 5;
-function parseTrustedHops(value: string | undefined): number {
+export const MAX_TRUSTED_HOPS = 5;
+export function parseTrustedHops(value: string | undefined): number {
   const n = parseInt(value ?? "", 10);
   if (Number.isNaN(n) || n < 1) return 1;
   return Math.min(n, MAX_TRUSTED_HOPS);
+}
+
+/**
+ * The boot warning for TRUSTED_PROXY_HOPS (null when there is nothing to say).
+ * parseTrustedHops quietly turns a typo ("abc", "0", "-1", "3abc") into 1 hop
+ * and an oversized value into MAX_TRUSTED_HOPS, so the operator is told what
+ * the app actually uses. Above 3 is unusual: each hop is one more
+ * X-Forwarded-For entry trusted for the client IP, and too many lets a client
+ * spoof its address. Warn-only; parseTrustedHops is the backstop.
+ */
+export function trustedProxyHopsWarning(raw: string | undefined): string | null {
+  const typed = raw?.trim() ?? "";
+  if (!typed) return null;
+  const hops = parseTrustedHops(typed);
+  const advice = "Set it to the actual number of trusted proxies in front of the app.";
+  const spoof =
+    "Each hop is an X-Forwarded-For entry trusted for client-IP derivation; an over-generous value lets clients spoof their IP.";
+  if (String(hops) !== typed) {
+    return parseInt(typed, 10) > MAX_TRUSTED_HOPS
+      ? `[startup] TRUSTED_PROXY_HOPS=${JSON.stringify(typed)} is above the maximum of ${MAX_TRUSTED_HOPS}; using ${hops}. ${spoof} ${advice}`
+      : `[startup] TRUSTED_PROXY_HOPS=${JSON.stringify(typed)} is not a whole number from 1 to ${MAX_TRUSTED_HOPS}; using ${hops}. ${advice}`;
+  }
+  if (hops > 3) {
+    return `[startup] TRUSTED_PROXY_HOPS=${hops} is unusually high (>3). ${spoof} The maximum is ${MAX_TRUSTED_HOPS}. ${advice}`;
+  }
+  return null;
 }
 
 // Bucket key for clients whose IP can't be trusted (TRUST_PROXY off, or no

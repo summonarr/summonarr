@@ -88,11 +88,15 @@ const pgProto = Client.prototype as unknown as {
   query: (text: string, values?: unknown[]) => Promise<PgResult>;
   end: () => Promise<void>;
 };
+// The Client each lock id was taken on, so a test can drop that connection
+// mid-run (withAdvisoryLock aborts its signal on the client's "end" event).
+const lockClients = new Map<number, { emit: (event: string) => boolean }>();
 pgProto.connect = async () => {};
-pgProto.query = async (text, values) => {
+pgProto.query = async function (this: { emit: (event: string) => boolean }, text, values) {
   if (text.includes("pg_try_advisory_lock")) {
     const lockId = Number((values ?? [])[0]);
     pgLockCalls.push({ op: "try", lockId });
+    lockClients.set(lockId, this);
     return { rows: [{ acquired: lockAcquire(lockId) }] };
   }
   if (text.includes("pg_advisory_unlock")) {
@@ -797,6 +801,7 @@ beforeEach(() => {
   sonarrWantedRows.length = 0;
   sonarrWantedFindManyWheres.length = 0;
   pgLockCalls.length = 0;
+  lockClients.clear();
   requests.clear();
   usersById.clear();
   sessionRows.clear();
@@ -3000,6 +3005,39 @@ test("guardrail 32: the SECOND ARR pass (fresh cache) names the request's own in
   );
 });
 
+// ── a disabled integration's cache never marks a request available ─────────
+// Turning Radarr/Sonarr off stops the cache refresh, but nothing clears the
+// default instance's last-synced rows. The first ARR pass read them before the
+// feature flags were consulted, so a new approval of a title that sat in that
+// stale cache flipped AVAILABLE and notified off an integration the admin had
+// switched off (the second pass and the revert were already flag-gated).
+
+test("a DISABLED integration's stale available-cache rows never flip or notify an APPROVED request; the enabled one still does", async () => {
+  configureBothServers();
+  respond = bothServersRespond([], []); // libraries empty: the ARR cache is the only mover
+  settings.set("feature.integration.radarr", "false");
+  arrAvailableRows.push({ model: "radarrAvailableItem", tmdbId: 777, arrInstance: "" });
+  arrAvailableRows.push({ model: "sonarrAvailableItem", tmdbId: 1399, arrInstance: "" });
+  seedRequest({ id: "r-radarr-off", tmdbId: 777, mediaType: "MOVIE", requestedBy: "u-1", status: "APPROVED" });
+  seedRequest({ id: "r-sonarr-on", tmdbId: 1399, mediaType: "TV", requestedBy: "u-2", status: "APPROVED" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  // Control: Sonarr is enabled, so its row flips exactly as before.
+  assert.equal(requests.get("r-sonarr-on")!.status, "AVAILABLE", "the enabled integration's ARR pass did not run");
+  assert.equal(requests.get("r-sonarr-on")!.notifiedAvailable, true);
+
+  assert.equal(requests.get("r-radarr-off")!.status, "APPROVED", "a disabled Radarr's stale cache flipped the request");
+  assert.equal(requests.get("r-radarr-off")!.notifiedAvailable, false);
+  assert.ok(
+    !casCalls.some((c) => c.ids.includes("r-radarr-off")),
+    "the gated request reached the notifiedAvailable claim",
+  );
+  assert.ok(!notifiedUserIds().includes("u-1"), "the requester was told a title was ready off a disabled integration");
+});
+
 // ── the pendingNotifyAt "download pending" backstop ─────────────────────────
 // It must run AFTER the Radarr/Sonarr refresh: a download that imported since the
 // last tick has left the queue AND is missing from the run-start cache, so an
@@ -3085,7 +3123,10 @@ test("GUARDRAIL 41: every sync arm is gated on the advisory-lock abort, and no c
     "windDownBefore must key on signal?.aborted",
   );
 
-  for (const arm of ["Radarr", "Sonarr", "Plex library", "Jellyfin library"]) {
+  for (const arm of [
+    "Radarr", "Sonarr", "Plex library", "Jellyfin library",
+    "second ARR pass", "download check", "re-push", "de-registered sweep", "revert", "library marking", "pending notify",
+  ]) {
     assert.ok(
       src.includes(`windDownBefore("${arm}")`),
       `the ${arm} arm must be gated on the abort`,
@@ -3103,6 +3144,47 @@ test("GUARDRAIL 41: every sync arm is gated on the advisory-lock abort, and no c
       "a wind-down check inside a transaction could strand a delete without its repopulate",
     );
   }
+});
+
+test("GUARDRAIL 41: every phase after the arms is gated too — a lock lost MID-ARM stops the run before marking and notifying", async () => {
+  // The abort can land while an arm is running (a multi-minute library walk).
+  // That arm finishes with its flags true, so only a check at the next phase
+  // boundary stops the revert, the marking passes and the notify fallback from
+  // running lock-free beside the next run. A dropped lock connection aborts the
+  // signal exactly as the 30-minute timeout does, and needs no real timer.
+  configureBothServers();
+  const base = bothServersRespond([603], [603]);
+  let dropped = false;
+  respond = (url) => {
+    if (!dropped && url.origin === PLEX_ORIGIN) {
+      dropped = true;
+      lockClients.get(2000)?.emit("end");
+    }
+    return base(url);
+  };
+  seedRequest({ id: "r-in-library", tmdbId: 603, mediaType: "MOVIE", requestedBy: "u-1", status: "APPROVED" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.ok(dropped, "precondition: the lock connection was dropped mid-arm");
+  assert.equal(res.status, 200, "a wind-down returns, it never throws");
+  assert.ok(res.headers.get("X-Cron-Degraded"), "a run that stopped early must not be recorded green");
+  assert.equal((await bodyOf(res)).windDown, true);
+  assert.ok(warns.some((w) => w.includes("winding down before the de-registered sweep step")), warns.join(" | "));
+  assert.equal(requests.get("r-in-library")!.status, "APPROVED", "the marking pass ran after the lock was lost");
+  assert.equal(casCalls.length, 0, "a notifiedAvailable claim ran after the lock was lost");
+  assert.deepEqual(orphanSweepDeletes, [], "the de-registered sweeps ran after the lock was lost");
+});
+
+test("GUARDRAIL 41 control: with the lock held the same run marks the request", async () => {
+  configureBothServers();
+  respond = bothServersRespond([603], [603]);
+  seedRequest({ id: "r-in-library", tmdbId: 603, mediaType: "MOVIE", requestedBy: "u-1", status: "APPROVED" });
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.equal(res.headers.get("X-Cron-Degraded"), null);
+  assert.equal(requests.get("r-in-library")!.status, "AVAILABLE");
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

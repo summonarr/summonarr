@@ -3,7 +3,8 @@
 // surfaces. The contracts pinned here:
 //   - garbage input (non-IP, empty, whitespace) → null before ANY DB read;
 //   - private/reserved addresses (RFC1918, loopback, link-local, CGNAT, 0.x,
-//     multicast, IPv6 ::1/::/fe80:/fc../fd.., and IPv4-mapped/embedded IPv6
+//     192.0.0/24, 198.18/15, multicast, IPv6 ::1/::/fe80::/10/fec0::/10/ff00::/8/
+//     fc../fd.., and IPv4-mapped/embedded IPv6
 //     literals classified by their IPv4 payload) short-circuit to a bogon result
 //     locally — no cache read, no token read, no network round-trip. The UI
 //     labels these LAN; leaking them to ipinfo would be both a privacy leak
@@ -167,6 +168,7 @@ test("private/reserved IPv4 short-circuits to a full-shape bogon result with no 
   for (const ip of [
     "10.0.0.5", "127.0.0.1", "169.254.10.9", "172.16.0.1", "172.31.255.254",
     "100.64.0.1", "100.127.255.1", "0.0.0.0", "224.0.0.1", "255.255.255.255",
+    "192.0.0.8", "198.18.0.1", "198.19.255.254",
   ]) {
     const result = await getIpLookup(ip);
     assert.equal(result?.bogon, true, `${ip} must be bogon`);
@@ -177,7 +179,11 @@ test("private/reserved IPv4 short-circuits to a full-shape bogon result with no 
 });
 
 test("IPv6 loopback/unspecified/link-local/ULA short-circuit (case-insensitively); private-range neighbors do not", async () => {
-  for (const ip of ["::1", "::", "fe80::1", "fc00::1", "fd12:3456::1", "FD00::1"]) {
+  for (const ip of [
+    "::1", "::", "fe80::1", "fc00::1", "fd12:3456::1", "FD00::1",
+    // all of fe80::/10, site-local fec0::/10, multicast ff00::/8
+    "fe90::1", "febf::1", "FEBF::1", "fec0::1", "feff::1", "ff02::1", "FF05::1:3",
+  ]) {
     const result = await getIpLookup(ip);
     assert.equal(result?.bogon, true, `${ip} must be bogon`);
   }
@@ -200,10 +206,14 @@ test("IPv6 loopback/unspecified/link-local/ULA short-circuit (case-insensitively
   // Boundary pin: the addresses just OUTSIDE the reserved ranges proceed to
   // the cache path (public as far as the local check is concerned) — including
   // a mapped PUBLIC address, whose payload is what gets classified.
-  for (const ip of ["172.15.0.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8", "::ffff:808:808"]) {
+  const publicNeighbours = [
+    "172.15.0.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8", "::ffff:808:808",
+    "192.0.1.1", "198.17.0.1", "198.20.0.1",
+  ];
+  for (const ip of publicNeighbours) {
     assert.equal(await getIpLookup(ip), null, `${ip} is public → cold miss with no token → null`);
   }
-  assert.deepEqual(cacheReads, ["172.15.0.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8", "::ffff:808:808"]);
+  assert.deepEqual(cacheReads, publicNeighbours);
   assert.equal(fetchCalls.length, 0); // no token configured → never fetches
 });
 

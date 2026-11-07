@@ -140,3 +140,30 @@ test("bulk: a re-requested DECLINED row's comment thread moves to the row create
     /const created = after\.filter\(\(r\) => !beforeIds\.has\(r\.id\)\);\s*for \(const r of created\) \{\s*const staleId = staleDeclinedIdByKey\.get\(keyOf\(r\.tmdbId, r\.mediaType\)\);\s*if \(staleId\) await restoreThread\(tx, r\.id, carriedThreads\.get\(staleId\)\);\s*\}\s*return created;/,
   );
 });
+
+test("bulk: an auto-approval whose push failed is marked pushFailed and goes to ONE admin alert after the loop, never one per row", () => {
+  // The row rolls back to PENDING with its backstop cleared, so without an alert
+  // it sits in the queue unnoticed; one per row would flood every admin channel
+  // on a 50-item "Request all" (the header's rule). The result stays "created".
+  assert.match(CODE, /if \(rb\.count === 1\) rolledBack\.set\(keyOf\(p\.tmdbId, p\.mediaType\), row\.id\);\s*return \{ tmdbId: p\.tmdbId, mediaType: p\.mediaType, result: "created", pushFailed: true \};/);
+  const alerts = CODE.match(/alertAdminsNewRequest\(/g) ?? [];
+  assert.equal(alerts.length, 1, "one alert call site");
+  const loopEnd = CODE.indexOf('scheduleDownloadChecks(downloadChecks, { name: "requests/bulk:90s-download-check" });');
+  const alert = CODE.indexOf("alertAdminsNewRequest(");
+  assert.ok(loopEnd > 0 && alert > loopEnd, "the alert runs once, after the push loop");
+  assert.match(CODE, /const firstRolledBack = prepared\.find\(\(p\) => rolledBack\.has\(keyOf\(p\.tmdbId, p\.mediaType\)\)\);\s*if \(firstRolledBack\) \{\s*alertAdminsNewRequest\(/);
+  assert.doesNotMatch(CODE, /notifyAdminsNewRequest/, "per-channel admin notifiers stay behind the shared alert");
+});
+
+test("bulk: a push with no definite answer is never rolled back — it stays APPROVED like the single route", () => {
+  // A timeout, a dropped connection or a gateway 502/504 AFTER the add was sent
+  // may have landed: the rollback (and its pushFailed mark) is for a definite
+  // refusal, or a failure before the add went out (AddProgress).
+  assert.match(CODE, /const pushProgress: AddProgress = \{ sent: false \};/);
+  assert.match(CODE, /addMovieToRadarr\(p\.tmdbId, p\.arrInstance, undefined, targetUserId, pushProgress\)/);
+  assert.match(CODE, /addSeriesToSonarr\(p\.tmdbId, p\.arrInstance, undefined, targetUserId, pushProgress\)/);
+  const unknown = CODE.indexOf("if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {");
+  const rollback = CODE.indexOf('.updateMany({ where: { id: row.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } })');
+  const elseBranch = CODE.indexOf("} else {", unknown);
+  assert.ok(unknown > 0 && elseBranch > unknown && rollback > elseBranch, "the rollback sits in the definite-failure branch");
+});

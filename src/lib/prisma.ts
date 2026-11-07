@@ -173,21 +173,50 @@ function safeDecryptSettingValue(key: string | undefined, value: string): string
   }
 }
 
-// ─── UserTotp.secret (two-factor authenticator-app secret) ──────────────────
-// Every write of `secret` is sensitive (unlike Setting, where sensitivity depends
-// on the row's key), so the same value-level encryption is valid for bulk writes
-// too — updateMany/createMany are ENCRYPTED rather than forbidden. Covered
-// operations mirror the Account block below; guardrail 7a forbids any caller
-// from pre-encrypting.
-export function encryptTotpSecretInPlace(data: Record<string, unknown> | undefined | null): void {
+// ─── Whole-column secrets: UserTotp.secret and NotificationAgent.secret ──────
+// Every write of these `secret` columns is sensitive (unlike Setting, where
+// sensitivity depends on the row's key), so the same value-level encryption is
+// valid for bulk writes too — updateMany/createMany are ENCRYPTED rather than
+// forbidden. Guardrail 7a forbids any caller from pre-encrypting. One shared
+// implementation; the per-model wrappers below only name the model.
+function encryptSecretColumnInPlace(data: Record<string, unknown> | undefined | null): void {
   if (!data) return;
   const v = data.secret;
   if (typeof v === "string" && v.length > 0) {
     data.secret = encryptToken(v);
   } else if (v && typeof v === "object" && typeof (v as { set?: unknown }).set === "string") {
+    // Prisma's `{ set: "…" }` update form is the same write — never plaintext.
     const set = (v as { set: string }).set;
     if (set.length > 0) (v as { set: string }).set = encryptToken(set);
   }
+}
+
+// Fails CLOSED: an undecryptable secret becomes "" so the rest of the row can
+// still be returned, and the log names the row and how to recover it.
+function decryptSecretColumnInPlace(
+  row: Record<string, unknown> | null | undefined,
+  opts: { idField: string; model: string; scope: string; recovery: string },
+): void {
+  if (!row) return;
+  const v = row.secret;
+  if (typeof v !== "string" || v.length === 0) return;
+  const idValue = row[opts.idField];
+  const label = `${opts.model}.secret (${opts.idField}=${typeof idValue === "string" ? idValue : "?"})`;
+  try {
+    row.secret = decryptToken(v, label);
+  } catch (err) {
+    console.error(
+      `[${opts.scope}] Decrypt failed for ${label} — ${opts.recovery}. Original error:`,
+      err instanceof Error ? err.message : err,
+    );
+    row.secret = "";
+  }
+}
+
+// UserTotp.secret (two-factor authenticator-app secret). Covered operations
+// mirror the Account block below.
+export function encryptTotpSecretInPlace(data: Record<string, unknown> | undefined | null): void {
+  encryptSecretColumnInPlace(data);
 }
 
 function encryptTotpRowsInPlace(data: unknown): void {
@@ -196,37 +225,20 @@ function encryptTotpRowsInPlace(data: unknown): void {
 }
 
 export function decryptTotpSecretInPlace(row: Record<string, unknown> | null | undefined): void {
-  if (!row) return;
-  const v = row.secret;
-  if (typeof v !== "string" || v.length === 0) return;
-  const id = typeof row.userId === "string" ? row.userId : "?";
-  const label = `UserTotp.secret (userId=${id})`;
-  try {
-    row.secret = decryptToken(v, label);
-  } catch (err) {
-    // Wrong TOKEN_ENCRYPTION_KEY (e.g. a backup restored onto another server)
-    // or a corrupt row. Fail CLOSED: an empty secret verifies no code, so the
-    // user signs in with a recovery code or a passkey, or an admin resets 2FA.
-    console.error(
-      `[totp-crypto] Decrypt failed for ${label} — the user must use a recovery code or have an admin reset their two-factor. Original error:`,
-      err instanceof Error ? err.message : err,
-    );
-    row.secret = "";
-  }
+  // Wrong TOKEN_ENCRYPTION_KEY (e.g. a backup restored onto another server) or a
+  // corrupt row. An empty secret verifies no code, so the user signs in with a
+  // recovery code or a passkey, or an admin resets 2FA.
+  decryptSecretColumnInPlace(row, {
+    idField: "userId",
+    model: "UserTotp",
+    scope: "totp-crypto",
+    recovery: "the user must use a recovery code or have an admin reset their two-factor",
+  });
 }
 
-// ─── NotificationAgent.secret (outbound channel credential) ─────────────────
-// Same shape as UserTotp.secret: every write of the column is sensitive, so bulk
-// writes are encrypted rather than refused. Guardrail 7a: no caller pre-encrypts.
+// NotificationAgent.secret (outbound channel credential).
 export function encryptAgentSecretInPlace(data: Record<string, unknown> | undefined | null): void {
-  if (!data) return;
-  const v = data.secret;
-  if (typeof v === "string" && v.length > 0) {
-    data.secret = encryptToken(v);
-  } else if (v && typeof v === "object" && typeof (v as { set?: unknown }).set === "string") {
-    const set = (v as { set: string }).set;
-    if (set.length > 0) (v as { set: string }).set = encryptToken(set);
-  }
+  encryptSecretColumnInPlace(data);
 }
 
 function encryptAgentRowsInPlace(data: unknown): void {
@@ -235,23 +247,15 @@ function encryptAgentRowsInPlace(data: unknown): void {
 }
 
 export function decryptAgentSecretInPlace(row: Record<string, unknown> | null | undefined): void {
-  if (!row) return;
-  const v = row.secret;
-  if (typeof v !== "string" || v.length === 0) return;
-  const id = typeof row.id === "string" ? row.id : "?";
-  const label = `NotificationAgent.secret (id=${id})`;
-  try {
-    row.secret = decryptToken(v, label);
-  } catch (err) {
-    // Wrong TOKEN_ENCRYPTION_KEY (a backup restored onto another server) or a
-    // corrupt row. Fail closed: deliveries go out without the credential and the
-    // destination rejects them, which the agent's lastError surfaces.
-    console.error(
-      `[agent-crypto] Decrypt failed for ${label} — re-enter this channel's secret in Settings → Notifications. Original error:`,
-      err instanceof Error ? err.message : err,
-    );
-    row.secret = "";
-  }
+  // Wrong TOKEN_ENCRYPTION_KEY (a backup restored onto another server) or a
+  // corrupt row. Deliveries go out without the credential and the destination
+  // rejects them, which the agent's lastError surfaces.
+  decryptSecretColumnInPlace(row, {
+    idField: "id",
+    model: "NotificationAgent",
+    scope: "agent-crypto",
+    recovery: "re-enter this channel's secret in Settings → Notifications",
+  });
 }
 
 function createPrismaClient() {
@@ -267,8 +271,16 @@ function createPrismaClient() {
   });
 
   // Transparent at-rest crypto for Setting rows (keyed by `key`), Account rows
-  // (specific OAuth-token columns) and UserTotp.secret (the two-factor
-  // authenticator secret). Reads decrypt, writes encrypt — callers always work in plaintext.
+  // (specific OAuth-token columns), UserTotp.secret (the two-factor
+  // authenticator secret) and NotificationAgent.secret. Reads decrypt, writes
+  // encrypt, and a write's returned row is decrypted too — callers always work
+  // in plaintext.
+  //
+  // Only TOP-LEVEL operations on these models are intercepted. A nested relation
+  // write or read — a nested create of a user's accounts, or an include/select
+  // of a user's accounts or totp relation — bypasses every handler; the
+  // reachability scans in tests/prisma-crypto-extension.test.mts and
+  // tests/mfa-prisma-extension.test.mts fail on one.
   return base.$extends({
     name: "setting-and-account-crypto",
     query: {
@@ -316,7 +328,13 @@ function createPrismaClient() {
           ) {
             data.value = encryptToken(data.value);
           }
-          return query(args);
+          // Hand back plaintext like every other model: encrypt before the
+          // query, decrypt the row it returns.
+          const row = await query(args);
+          if (row && typeof row.value === "string") {
+            row.value = safeDecryptSettingValue(row.key ?? data?.key, row.value);
+          }
+          return row;
         },
         async update({ args, query }) {
           const where = args.where as { key?: string } | undefined;
@@ -333,20 +351,21 @@ function createPrismaClient() {
           const newValue = data && typeof data.value === "string" ? data.value : undefined;
           if (newValue !== undefined && newValue.length > 0) {
             const key = where?.key;
-            if (typeof key === "string") {
-              if (isSensitiveKey(key)) {
-                (data as { value: string }).value = encryptToken(newValue);
-              }
-            } else {
-              // Rare path: where uses something other than `key` (e.g. `id`). Read the row to
-              // discover its key, then encrypt if needed. Best-effort — falls through on miss.
-              const existing = await base.setting.findFirst({ where: args.where });
-              if (existing && isSensitiveKey(existing.key)) {
-                (data as { value: string }).value = encryptToken(newValue);
-              }
+            // `key` is Setting's only unique field, so a unique `where` always
+            // names it. Without it the sensitivity of the row is unknown, and a
+            // guess could store a secret in plaintext — refuse instead.
+            if (typeof key !== "string") {
+              throw new Error("[prisma] setting.update without a string `where.key` is forbidden — name the row by its key so the encryption extension runs");
+            }
+            if (isSensitiveKey(key)) {
+              (data as { value: string }).value = encryptToken(newValue);
             }
           }
-          return query(args);
+          const row = await query(args);
+          if (row && typeof row.value === "string") {
+            row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
+          }
+          return row;
         },
         async upsert({ args, query }) {
           const where = args.where as { key?: string } | undefined;
@@ -368,7 +387,11 @@ function createPrismaClient() {
               (update as { value: string }).value = encryptToken(update.value);
             }
           }
-          return query(args);
+          const row = await query(args);
+          if (row && typeof row.value === "string") {
+            row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
+          }
+          return row;
         },
         async createMany({ args, query }) {
           encryptSettingRowsInPlace(args.data as unknown);
@@ -456,18 +479,26 @@ function createPrismaClient() {
           for (const r of rows) decryptAccountTokensInPlace(r as Record<string, unknown>);
           return rows;
         },
+        // Writes encrypt before the query and decrypt the row they return, so a
+        // caller never sees ciphertext from any operation (as for UserTotp).
         async create({ args, query }) {
           encryptAccountTokensInPlace(args.data as Record<string, unknown> | undefined);
-          return query(args);
+          const row = await query(args);
+          decryptAccountTokensInPlace(row as Record<string, unknown> | null);
+          return row;
         },
         async update({ args, query }) {
           encryptAccountTokensInPlace(args.data as Record<string, unknown> | undefined);
-          return query(args);
+          const row = await query(args);
+          decryptAccountTokensInPlace(row as Record<string, unknown> | null);
+          return row;
         },
         async upsert({ args, query }) {
           encryptAccountTokensInPlace(args.create as Record<string, unknown> | undefined);
           encryptAccountTokensInPlace(args.update as Record<string, unknown> | undefined);
-          return query(args);
+          const row = await query(args);
+          decryptAccountTokensInPlace(row as Record<string, unknown> | null);
+          return row;
         },
         // updateMany/createMany write many rows at once, so they can't be encrypted
         // reliably. They refuse any token column and send callers to create /
@@ -476,7 +507,7 @@ function createPrismaClient() {
         // setting.updateMany above. See guardrail 7a.
         async updateMany({ args, query }) {
           const data = (args as { data?: Record<string, unknown> }).data;
-          if (data && (data.access_token !== undefined || data.refresh_token !== undefined || data.id_token !== undefined)) {
+          if (data && ACCOUNT_TOKEN_FIELDS.some((f) => data[f] !== undefined)) {
             throw new Error(
               "[prisma] account.updateMany with access_token/refresh_token/id_token is forbidden — use account.update or account.upsert so the encryption extension runs",
             );
@@ -491,7 +522,7 @@ function createPrismaClient() {
         // decrypt of the rows they hand back.
         async updateManyAndReturn({ args, query }) {
           const data = (args as { data?: Record<string, unknown> }).data;
-          if (data && (data.access_token !== undefined || data.refresh_token !== undefined || data.id_token !== undefined)) {
+          if (data && ACCOUNT_TOKEN_FIELDS.some((f) => data[f] !== undefined)) {
             throw new Error(
               "[prisma] account.updateManyAndReturn with access_token/refresh_token/id_token is forbidden — use account.update or account.upsert so the encryption extension runs",
             );

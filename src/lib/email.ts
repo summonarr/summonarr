@@ -59,6 +59,20 @@ const EMAIL_KEYS = [
 
 type EmailBackend = "smtp" | "resend";
 
+// The transport settings sendTestEmail may take in place of the stored rows:
+// /api/settings tests the config an admin is about to save BEFORE writing it.
+export const EMAIL_TRANSPORT_KEYS = [
+  "emailBackend",
+  "smtpHost",
+  "smtpPort",
+  "smtpUser",
+  "smtpPassword",
+  "smtpFrom",
+  "resendApiKey",
+  "resendFrom",
+] as const;
+export type EmailTransportOverrides = Partial<Record<(typeof EMAIL_TRANSPORT_KEYS)[number], string>>;
+
 interface EmailConfig {
   backend: EmailBackend;
   smtpHost?: string;
@@ -71,10 +85,17 @@ interface EmailConfig {
   siteUrl?: string;
 }
 
-async function getEmailConfig(opts: { ignoreSendToggle?: boolean } = {}): Promise<EmailConfig | null> {
+async function getEmailConfig(
+  opts: { ignoreSendToggle?: boolean; overrides?: EmailTransportOverrides } = {},
+): Promise<EmailConfig | null> {
   if (!(await isFeatureEnabled("feature.integration.email"))) return null;
   const rows = await prisma.setting.findMany({ where: { key: { in: [...EMAIL_KEYS] } } });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value])) as Record<string, string | undefined>;
+  // Transport keys only, whatever the caller's object carries.
+  for (const key of EMAIL_TRANSPORT_KEYS) {
+    const value = opts.overrides?.[key];
+    if (value !== undefined) map[key] = value;
+  }
   if (!opts.ignoreSendToggle && map.enableUserEmails !== "true") return null;
   const backend: EmailBackend = map.emailBackend === "resend" ? "resend" : "smtp";
   return {
@@ -952,11 +973,12 @@ export async function notifyUserSecurityEventEmail(data: {
 }
 
 // `locale` is the language to write the test email in (the settings route passes
-// the requesting admin's); omitted → the instance default.
-export async function sendTestEmail(to: string, locale?: string | null): Promise<void> {
+// the requesting admin's); omitted → the instance default. `overrides` replaces
+// stored transport settings for this one send (an unsaved config under test).
+export async function sendTestEmail(to: string, locale?: string | null, overrides?: EmailTransportOverrides): Promise<void> {
   // Bypass the send toggle (but not the feature flag) so admins can verify the
   // SMTP/Resend transport before switching notification emails on.
-  const cfg = await getEmailConfig({ ignoreSendToggle: true });
+  const cfg = await getEmailConfig({ ignoreSendToggle: true, overrides });
   if (!cfg) throw new Error("Email integration is disabled");
   if (!isBackendConfigured(cfg)) {
     throw new Error(cfg.backend === "resend" ? "Resend API key not configured" : "SMTP not configured");

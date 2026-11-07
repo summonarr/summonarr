@@ -42,9 +42,8 @@ export const GET = withAdmin(snapshotted(async () => {
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrGate(body.service, body.instance, t);
   if (target instanceof NextResponse) return target;
   const task = body.task;
@@ -53,7 +52,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const isAction = action !== undefined && task === undefined && isBulkAction(action);
   if (!isTask && !isAction) return NextResponse.json({ error: t("apiAdmin.arr.taskBodyInvalid") }, { status: 400 });
   if (!checkRateLimit(`arr-tasks:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   try {
     const result = isTask

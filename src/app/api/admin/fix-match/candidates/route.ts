@@ -1,15 +1,16 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
-import nodePath from "node:path";
 import { prisma } from "@/lib/prisma";
 import { getPlexConfig } from "@/lib/plex-config";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 import { arrFetch } from "@/lib/arr";
 import { configuredArrCfg, enabledArrInstances } from "@/lib/arr-admin";
-import { processSingleton } from "@/lib/process-singleton";
 import { candidateCacheKey, getCachedCandidates, setCachedCandidates } from "@/lib/fix-match-candidate-cache";
+import { assessCandidate, compareCandidates, pickSuggestedGuid, type CandidateMatch } from "@/lib/fix-match-scoring";
+import { cachedArrList, cachedTmdbTitle, normaliseLibraryPath, pathWithin, plexAdminHeaders, rowWithPathFor, tmdbDetailsCacheKey } from "@/lib/fix-match-shared";
 import { libraryPathFor } from "@/lib/library-path-view";
+import { getCache } from "@/lib/tmdb-cache";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
 import { settleLimit } from "@/lib/concurrency";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
@@ -18,7 +19,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
-export type CandidateMatch = "exact" | "strong" | "likely" | "possible" | "wrong" | "unknown";
+export type { CandidateMatch };
 
 export type PlexCandidate = {
   guid:            string;
@@ -72,24 +73,6 @@ export type CandidatesResponse = {
   currentYear:         string | null;
 };
 
-// 0-100 similarity of two titles via normalized Levenshtein edit distance.
-function titleSimilarity(a: string, b: string): number {
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
-  const na = norm(a), nb = norm(b);
-  if (na === nb) return 100;
-  if (!na || !nb) return 0;
-  const m = na.length, n = nb.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, (_, i) =>
-    Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
-  );
-  for (let i = 1; i <= m; i++)
-    for (let j = 1; j <= n; j++)
-      dp[i][j] = na[i - 1] === nb[j - 1]
-        ? dp[i - 1][j - 1]
-        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-  return Math.round((1 - dp[m][n] / Math.max(m, n)) * 100);
-}
-
 type TmdbDetails = {
   id: number;
   title?: string; name?: string;
@@ -119,78 +102,9 @@ async function fetchTmdbDetails(
     timeoutMs: 10_000,
   }).catch(() => null);
   if (!res?.ok) return null;
-  return res.json() as Promise<TmdbDetails>;
-}
-
-// Classifies a Plex match candidate against the target (exact/strong/…/wrong)
-// from provider-id agreement plus a weighted title/year/runtime/genre score.
-function assessCandidate(
-  candidate: { tmdbId: string | null; imdbId: string | null; name: string; year: number | null;
-               tmdbTitle: string | null; tmdbRuntime: number | null; tmdbGenres: string[]; radarrConfirmed: boolean },
-  target: { tmdbId: number; imdbId: string; title: string; year: string;
-            runtime: number | null; genres: string[] },
-): { matchLevel: CandidateMatch; confidence: number; titleSimilarity: number } {
-
-  const ts = titleSimilarity(candidate.tmdbTitle ?? candidate.name, target.title);
-
-  if (
-    candidate.radarrConfirmed ||
-    (candidate.tmdbId && candidate.tmdbId === String(target.tmdbId)) ||
-    (candidate.imdbId && candidate.imdbId === target.imdbId && target.imdbId)
-  ) {
-    return { matchLevel: "exact", confidence: 100, titleSimilarity: ts };
-  }
-
-  if (
-    candidate.imdbId && target.imdbId &&
-    candidate.imdbId !== target.imdbId
-  ) {
-    return { matchLevel: "wrong", confidence: 0, titleSimilarity: ts };
-  }
-  if (
-    candidate.tmdbId && candidate.tmdbId !== String(target.tmdbId) &&
-    candidate.imdbId && target.imdbId && candidate.imdbId !== target.imdbId
-  ) {
-    return { matchLevel: "wrong", confidence: 0, titleSimilarity: ts };
-  }
-
-  let score = 0;
-
-  score += Math.round(ts * 0.4);
-
-  const cYear = candidate.year;
-  const tYear = parseInt(target.year, 10);
-  if (cYear && tYear) {
-    if (cYear === tYear) score += 20;
-    else if (Math.abs(cYear - tYear) === 1) score += 10;
-    else if (Math.abs(cYear - tYear) === 2) score += 5;
-  }
-
-  if (candidate.tmdbRuntime && target.runtime) {
-    const diff = Math.abs(candidate.tmdbRuntime - target.runtime);
-    if (diff <= 2) score += 15;
-    else if (diff <= 5) score += 12;
-    else if (diff <= 10) score += 7;
-    else if (diff <= 20) score += 3;
-  }
-
-  if (candidate.tmdbGenres.length && target.genres.length) {
-    const intersection = candidate.tmdbGenres.filter((g) => target.genres.includes(g)).length;
-    const union = new Set([...candidate.tmdbGenres, ...target.genres]).size;
-    score += Math.round((intersection / union) * 15);
-  }
-
-  if (candidate.tmdbId && candidate.tmdbId !== String(target.tmdbId)) {
-    score = Math.min(score, 40);
-  }
-
-  let matchLevel: CandidateMatch;
-  if (score >= 75)      matchLevel = "strong";
-  else if (score >= 55) matchLevel = "likely";
-  else if (score >= 30) matchLevel = "possible";
-  else                  matchLevel = "unknown";
-
-  return { matchLevel, confidence: score, titleSimilarity: ts };
+  // A 200 that isn't JSON (a proxy page, a cut body) is no answer, not a 500.
+  const body = await res.json().catch(() => null) as unknown;
+  return body !== null && typeof body === "object" ? body as TmdbDetails : null;
 }
 
 type TargetDetails = {
@@ -222,28 +136,28 @@ async function resolveTargetDetails(correctTmdbId: number, mediaType: "MOVIE" | 
   let targetRuntime:     number | null = null;
   let targetGenres:      string[]      = [];
 
-  const cacheKey = `${mediaType === "MOVIE" ? "movie" : "tv"}:${correctTmdbId}:details`;
-  const cacheRow = await prisma.tmdbCache.findUnique({ where: { key: cacheKey }, select: { data: true } });
-  if (cacheRow) {
-    try {
-      const p = JSON.parse(cacheRow.data) as {
-        title?: string; name?: string; releaseYear?: string; imdbId?: string | null;
-        posterPath?: string | null; overview?: string; releaseDate?: string | null;
-        voteAverage?: number;
-      };
-      targetTitle       = p.title ?? p.name ?? "";
-      targetYear        = p.releaseYear?.slice(0, 4) ?? "";
-      targetImdbId      = p.imdbId ?? "";
-      targetPosterPath  = p.posterPath ?? null;
-      targetOverview    = p.overview ?? "";
-      targetReleaseDate = p.releaseDate ?? null;
-      targetVoteAverage = p.voteAverage ?? null;
-    } catch { }
+  // getCache, not a raw read: an expired row is a miss, so a stale title, year
+  // or IMDb id (which drives "exact" and "wrong") never outranks live TMDB.
+  const p = await getCache<Record<string, unknown>>(tmdbDetailsCacheKey(mediaType, correctTmdbId));
+  if (p !== null && typeof p === "object") {
+    const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+    targetTitle       = str(p.title) ?? str(p.name) ?? "";
+    targetYear        = str(p.releaseYear)?.slice(0, 4) ?? "";
+    targetImdbId      = str(p.imdbId) ?? "";
+    targetPosterPath  = str(p.posterPath) ?? null;
+    targetOverview    = str(p.overview) ?? "";
+    targetReleaseDate = str(p.releaseDate) ?? null;
+    targetVoteAverage = typeof p.voteAverage === "number" ? p.voteAverage : null;
   }
 
+  // The details request already carries external_ids (append_to_response), so
+  // a null imdb_id there is TMDB's answer: the separate read below is only for
+  // when that request got no answer at all.
+  let detailsFetched = false;
   if (tAuth) {
     const details = await fetchTmdbDetails(correctTmdbId, mediaType, tAuth);
     if (details) {
+      detailsFetched = true;
       if (!targetTitle)    targetTitle   = details.title ?? details.name ?? "";
       if (!targetYear)     targetYear    = (details.release_date ?? details.first_air_date ?? "").slice(0, 4);
       if (!targetOverview) targetOverview = details.overview ?? "";
@@ -256,7 +170,7 @@ async function resolveTargetDetails(correctTmdbId: number, mediaType: "MOVIE" | 
     }
   }
 
-  if (!targetImdbId && tAuth) {
+  if (!targetImdbId && tAuth && !detailsFetched) {
     const extUrl = new URL(`https://api.themoviedb.org/3/${mediaType === "MOVIE" ? "movie" : "tv"}/${correctTmdbId}/external_ids`);
     for (const [k, v] of Object.entries(tAuth.query)) extUrl.searchParams.set(k, v);
     const extRes = await safeFetchTrusted(extUrl.toString(), {
@@ -265,8 +179,8 @@ async function resolveTargetDetails(correctTmdbId: number, mediaType: "MOVIE" | 
       timeoutMs: 10_000,
     }).catch(() => null);
     if (extRes?.ok) {
-      const ext = await extRes.json() as { imdb_id?: string | null };
-      targetImdbId = ext.imdb_id ?? "";
+      const ext = await extRes.json().catch(() => null) as { imdb_id?: unknown } | null;
+      targetImdbId = typeof ext?.imdb_id === "string" ? ext.imdb_id : "";
     }
   }
 
@@ -274,21 +188,6 @@ async function resolveTargetDetails(correctTmdbId: number, mediaType: "MOVIE" | 
     targetTitle, targetYear, targetImdbId, targetPosterPath, targetOverview,
     targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
   };
-}
-
-// One Sonarr series list per instance, kept for a minute. Sonarr cannot filter
-// by TMDB id, so every picker open used to download the whole table; a bulk run
-// of fixes now reads it once. Display-only (the cross-check is a hint): the POST
-// never reads it.
-const SERIES_LIST_TTL_MS = 60_000;
-const seriesLists = processSingleton("fix-match-candidates:series", () => new Map<string, { at: number; rows: unknown[] }>());
-async function cachedSeriesList<T>(instance: string, load: () => Promise<T[]>): Promise<T[]> {
-  const now = Date.now();
-  const hit = seriesLists.get(instance);
-  if (hit && now - hit.at < SERIES_LIST_TTL_MS) return hit.rows as T[];
-  const rows = await load();
-  seriesLists.set(instance, { at: now, rows });
-  return rows;
 }
 
 // An arr answer's rows, appended one by one: a spread push throws RangeError
@@ -301,6 +200,10 @@ function appendRows<T extends object>(out: T[], rows: unknown): void {
     if (row !== null && typeof row === "object") out.push(row as T);
   }
 }
+
+// An arr entry with no folder can't vouch for a file: test the raw string, not
+// its normalised form.
+const hasArrPath = (path: unknown): path is string => typeof path === "string" && path.trim() !== "";
 
 // Live Radarr/Sonarr cross-check for the folder being re-matched — an additive
 // trust signal for both the Plex picker and the Jellyfin confirmation card.
@@ -337,16 +240,10 @@ async function resolveArrConfirmation(
     // The library path ITSELF, not its parent: a Jellyfin series row's Path is
     // the series folder (Plex's is an episode file), so its parent is the
     // library root, which equals no Sonarr series path. A path at or under the
-    // arr folder covers a movie file, an episode file and a series folder alike.
-    // Fold Windows separators first (as file-info does): without it the
-    // dirname regex strips nothing off a backslash path.
-    const libraryPath = nodePath.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/$/, ""));
+    // arr folder covers a movie file, an episode file and a series folder alike
+    // (pathWithin).
+    const libraryPath = normaliseLibraryPath(filePath);
     const endpoint = mediaType === "MOVIE" ? "movie" : "series";
-
-    const pathMatches = (arrPathRaw: string | undefined): boolean => {
-      const arrPath = nodePath.posix.normalize((arrPathRaw ?? "").replace(/\\/g, "/").replace(/\/$/, ""));
-      return !!arrPath && !!libraryPath && (arrPath === libraryPath || libraryPath.startsWith(arrPath + "/"));
-    };
 
     for (const inst of instances) {
       let cfg;
@@ -362,8 +259,8 @@ async function resolveArrConfirmation(
       // Radarr's movie list honors ?tmdbId= server-side. Sonarr's series list
       // does NOT (its only filter is ?tvdbId=), and on Sonarr v3 SeriesResource
       // carries no TmdbId at all — TV reads the whole table once per instance,
-      // shared by both probes and kept briefly so a bulk run of pickers does not
-      // download it again for every title.
+      // shared by both probes and kept briefly (cachedArrList) so a bulk run of
+      // pickers does not download it again for every title.
       if (mediaType === "MOVIE") {
         const [correctRes, wrongRes] = await Promise.allSettled([
           arrFetch<ArrMovie[]>(cfg, `/api/v3/${endpoint}?tmdbId=${correctTmdbId}`),
@@ -378,7 +275,7 @@ async function resolveArrConfirmation(
         if (wrongRes.status === "fulfilled") appendRows(wrongRows, wrongRes.value);
       } else {
         try {
-          const all = await cachedSeriesList(inst.slug, () => arrFetch<ArrMovie[]>(cfg, `/api/v3/${endpoint}`));
+          const all = await cachedArrList("sonarr", inst.slug, () => arrFetch<unknown>(cfg, `/api/v3/${endpoint}`));
           appendRows(correctRows, all);
           appendRows(wrongRows, all);
         } catch (err) {
@@ -387,17 +284,17 @@ async function resolveArrConfirmation(
       }
     }
 
-    const correctMatch = correctRows.find((m) => m.tmdbId === correctTmdbId);
-    if (correctMatch && nodePath.posix.normalize(correctMatch.path ?? "")) {
+    const correctMatch = correctRows.find((m) => m.tmdbId === correctTmdbId && hasArrPath(m.path));
+    if (correctMatch) {
       // Library membership confirmed. Path agreement is reported separately —
       // gating the confirmation on it would lose the feature entirely on
       // split-mount deployments (the arr and media-server paths legitimately
       // differ there).
       arrConfirmedTmdbId = correctTmdbId;
-      arrPathAgrees = pathMatches(correctMatch.path);
+      arrPathAgrees = pathWithin(correctMatch.path, libraryPath);
     }
     if (arrConfirmedTmdbId === null) {
-      const wrongMatch = wrongRows.find((m) => m.tmdbId === tmdbId && pathMatches(m.path));
+      const wrongMatch = wrongRows.find((m) => m.tmdbId === tmdbId && pathWithin(m.path, libraryPath));
       if (wrongMatch) {
         // The arr library maps THIS folder to the current (wrong) id — surface
         // the disagreement (the "⚠ Radarr/Sonarr has TMDB #X" UI warning).
@@ -409,19 +306,175 @@ async function resolveArrConfirmation(
 
   let arrConfirmedTitle: string | null = null;
   if (arrConfirmedTmdbId !== null && arrConfirmedTmdbId !== correctTmdbId) {
-    const arrCacheKey = `${mediaType === "MOVIE" ? "movie" : "tv"}:${arrConfirmedTmdbId}:details`;
-    const arrCacheRow = await prisma.tmdbCache.findUnique({ where: { key: arrCacheKey }, select: { data: true } });
-    if (arrCacheRow) {
-      try {
-        const p = JSON.parse(arrCacheRow.data) as { title?: string; name?: string };
-        arrConfirmedTitle = p.title ?? p.name ?? null;
-      } catch { }
-    }
+    arrConfirmedTitle = await cachedTmdbTitle(mediaType, arrConfirmedTmdbId);
   } else if (arrConfirmedTmdbId === correctTmdbId) {
     arrConfirmedTitle = targetTitle || null;
   }
 
   return { arrConfirmedTmdbId, arrConfirmedTitle, arrPathAgrees };
+}
+
+type RawResult = {
+  guid: string; name?: string; year?: number; thumb?: string | null; score?: number | null;
+  Guid?: unknown;
+};
+type RawCandidate = Omit<PlexCandidate, "matchLevel" | "confidence" | "titleSimilarity" | "tmdbTitle" | "tmdbOverview" | "tmdbRuntime" | "tmdbGenres" | "tmdbVoteAvg" | "tmdbPosterPath" | "radarrConfirmed" | "suggested">;
+
+const isRawResult = (r: unknown): r is RawResult =>
+  r !== null && typeof r === "object" && typeof (r as { guid?: unknown }).guid === "string";
+
+function providerGuid(r: RawResult, prefix: "imdb://" | "tmdb://"): string | null {
+  if (!Array.isArray(r.Guid)) return null;
+  for (const g of r.Guid as unknown[]) {
+    const id = (g as { id?: unknown } | null)?.id;
+    if (typeof id === "string" && id.startsWith(prefix)) return id.slice(prefix.length);
+  }
+  return null;
+}
+
+function extractProviderIds(r: RawResult): { imdbId: string | null; tmdbId: string | null } {
+  if (Array.isArray(r.Guid) && r.Guid.length > 0) {
+    return { imdbId: providerGuid(r, "imdb://"), tmdbId: providerGuid(r, "tmdb://") };
+  }
+  const imdbMatch = /com\.plexapp\.agents\.imdb:\/\/(tt\d+)/i.exec(r.guid);
+  const tmdbMatch = /com\.plexapp\.agents\.themoviedb:\/\/(\d+)/i.exec(r.guid);
+  return {
+    imdbId: imdbMatch?.[1] ?? null,
+    tmdbId: tmdbMatch?.[1] ?? null,
+  };
+}
+
+// Plex's /matches for the item, five ways (IMDb guid, IMDb agent, TMDB agent,
+// title + year, the arr's id hint), deduped by guid in that order.
+// `firstImdbGuid` is the IMDb-guid search's first hit — the initial suggestion.
+async function searchPlexCandidates(
+  serverUrl: string,
+  ratingKey: string,
+  headers: Record<string, string>,
+  target: { correctTmdbId: number; imdbId: string; title: string; year: string },
+  arrTmdbIdHint: number | null,
+): Promise<{ raw: RawCandidate[]; firstImdbGuid: string | null }> {
+  const plexSearch = async (params: Record<string, string>): Promise<RawResult[]> => {
+    const res = await safeFetchAdminConfigured(
+      `${serverUrl}/library/metadata/${ratingKey}/matches?` + new URLSearchParams(params),
+      { headers, timeoutMs: 30_000 },
+    ).catch(() => null);
+    if (!res?.ok) return [];
+    // A 200 that isn't JSON — a proxy's login page, a cut body — means this
+    // search found nothing, not a 500 for the whole picker.
+    const json = await res.json().catch(() => null) as { MediaContainer?: { SearchResult?: unknown } } | null;
+    const results = json?.MediaContainer?.SearchResult;
+    return Array.isArray(results) ? results.filter(isRawResult) : [];
+  };
+
+  const { correctTmdbId, imdbId, title, year } = target;
+  const [imdbGuidResults, imdbAgentResults, tmdbAgentResults, titleYearResults, arrHintResults] = await Promise.all([
+    imdbId ? plexSearch({ manual: "1", includeGuids: "1", guid: `imdb://${imdbId}` }) : Promise.resolve([]),
+    imdbId ? plexSearch({ manual: "1", includeGuids: "1", q: imdbId, agent: "com.plexapp.agents.imdb", language: "en" }) : Promise.resolve([]),
+    plexSearch({ manual: "1", includeGuids: "1", q: String(correctTmdbId), agent: "com.plexapp.agents.themoviedb", language: "en" }),
+    (() => {
+      const p: Record<string, string> = { manual: "1", includeGuids: "1" };
+      if (title) p.title = title;
+      if (year)  p.year  = year;
+      return plexSearch(p);
+    })(),
+    arrTmdbIdHint && arrTmdbIdHint !== correctTmdbId
+      ? plexSearch({ manual: "1", includeGuids: "1", q: String(arrTmdbIdHint), agent: "com.plexapp.agents.themoviedb", language: "en" })
+      : Promise.resolve([]),
+  ]);
+
+  const candidateMap = new Map<string, RawCandidate>();
+  for (const results of [imdbGuidResults, imdbAgentResults, tmdbAgentResults, titleYearResults, arrHintResults]) {
+    for (const r of results) {
+      if (candidateMap.has(r.guid)) continue;
+      const ids = extractProviderIds(r);
+      candidateMap.set(r.guid, {
+        guid: r.guid, name: r.name ?? "", year: r.year ?? null,
+        thumb: r.thumb ?? null, score: r.score ?? null,
+        imdbId: ids.imdbId, tmdbId: ids.tmdbId,
+      });
+    }
+  }
+  return { raw: Array.from(candidateMap.values()), firstImdbGuid: imdbGuidResults[0]?.guid ?? null };
+}
+
+// TMDB details for every candidate that names another id (bounded, guardrail
+// 31: five searches can return dozens), then the score of each against the
+// target, best first.
+async function enrichCandidates(
+  raw: RawCandidate[],
+  mediaType: "MOVIE" | "TV",
+  correctTmdbId: number,
+  target: TargetDetails,
+  arrConfirmedTmdbId: number | null,
+  arrTmdbIdHint: number | null,
+  tAuth: TmdbAuth | null,
+): Promise<PlexCandidate[]> {
+  const tmdbIdsToFetch = [...new Set(
+    raw.map((c) => c.tmdbId).filter((id): id is string => !!id && id !== String(correctTmdbId)),
+  )];
+
+  const tmdbDetailMap = new Map<string, TmdbDetails>();
+  if (tAuth && tmdbIdsToFetch.length) {
+    const fetches = await settleLimit(tmdbIdsToFetch, 6, async (id) => {
+      const d = await fetchTmdbDetails(Number(id), mediaType, tAuth);
+      return { id, d };
+    });
+    for (const r of fetches) {
+      if (r.status === "fulfilled" && r.value.d) {
+        tmdbDetailMap.set(r.value.id, r.value.d);
+      }
+    }
+  }
+
+  const candidates: PlexCandidate[] = raw.map((c) => {
+    const details = c.tmdbId ? tmdbDetailMap.get(c.tmdbId) : undefined;
+    const isCorrectId = c.tmdbId === String(correctTmdbId);
+
+    const tmdbTitle      = isCorrectId ? target.targetTitle      : (details?.title ?? details?.name ?? null);
+    const tmdbOverview   = isCorrectId ? target.targetOverview   : (details?.overview ?? null);
+    const tmdbRuntime    = isCorrectId
+      ? target.targetRuntime
+      : (details?.runtime ?? details?.episode_run_time?.[0] ?? null);
+    const tmdbGenres     = isCorrectId ? target.targetGenres     : (details?.genres?.map((g) => g.name) ?? []);
+    const tmdbVoteAvg    = isCorrectId ? target.targetVoteAverage : (details?.vote_average ?? null);
+    const tmdbPosterPath = isCorrectId ? target.targetPosterPath  : (details?.poster_path ?? null);
+
+    const resolvedImdbId = c.imdbId
+      ?? details?.external_ids?.imdb_id
+      ?? null;
+
+    const radarrConfirmed =
+      (arrConfirmedTmdbId !== null && c.tmdbId === String(arrConfirmedTmdbId)) ||
+      (arrTmdbIdHint      !== null && c.tmdbId === String(arrTmdbIdHint));
+
+    const { matchLevel, confidence, titleSimilarity: ts } = assessCandidate(
+      { ...c, imdbId: resolvedImdbId, tmdbTitle, tmdbRuntime, tmdbGenres, radarrConfirmed },
+      {
+        tmdbId: correctTmdbId, imdbId: target.targetImdbId, title: target.targetTitle, year: target.targetYear,
+        runtime: target.targetRuntime, genres: target.targetGenres,
+      },
+    );
+
+    return {
+      ...c,
+      imdbId: resolvedImdbId,
+      tmdbTitle,
+      tmdbOverview,
+      tmdbRuntime,
+      tmdbGenres,
+      tmdbVoteAvg,
+      tmdbPosterPath,
+      matchLevel,
+      confidence,
+      titleSimilarity: ts,
+      radarrConfirmed,
+      suggested: false,
+    };
+  });
+
+  candidates.sort(compareCandidates);
+  return candidates;
 }
 
 export const GET = withIssueAdmin(async (request, _ctx, session) => {
@@ -493,10 +546,7 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
     if (!jfItem?.jellyfinItemId) {
       return NextResponse.json({ error: t("apiAdmin.fixMatch.jellyfinItemNotFound") }, { status: 404 });
     }
-    const plexHint =
-      plexRows.find((r) => r.serverInstance === serverInstance && r.filePath)
-      ?? plexRows.find((r) => r.filePath)
-      ?? null;
+    const plexHint = rowWithPathFor(plexRows, serverInstance);
     const target = await resolveTargetDetails(correctTmdbId, mediaType);
     const arr = await resolveArrConfirmation(mediaType, tmdbId, correctTmdbId, jfItem.filePath ?? null, target.targetTitle);
     return NextResponse.json({
@@ -538,10 +588,7 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
   // unchanged — a single-server deployment (every row on "") is byte-identical
   // (guardrail 35), and a multi-server one only gains a path where it used to
   // report none.
-  const jellyfinItem =
-    jellyfinRows.find((r) => r.serverInstance === serverInstance && r.filePath)
-    ?? jellyfinRows.find((r) => r.filePath)
-    ?? null;
+  const jellyfinItem = rowWithPathFor(jellyfinRows, serverInstance);
   if (!item?.plexRatingKey) {
     return NextResponse.json({ error: t("apiAdmin.fixMatch.plexRatingKeyNotFound") }, { status: 404 });
   }
@@ -566,191 +613,25 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
   if (!plexConfig.url || !plexConfig.token) {
     return NextResponse.json({ error: t("apiAdmin.common.plexNotConfigured") }, { status: 500 });
   }
-
   const serverUrl = plexConfig.url.replace(/\/$/, "");
 
-  const plexHeaders = {
-    Accept: "application/json",
-    "X-Plex-Token": plexConfig.token,
-    "X-Plex-Client-Identifier": "summonarr-server",
-    "X-Plex-Product": "Summonarr",
-    "User-Agent": "Summonarr/1.0 (Node.js)",
-  };
-
-  const tAuth = tmdbAuth();
-
-  const {
-    targetTitle, targetYear, targetImdbId, targetPosterPath, targetOverview,
-    targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
-  } = await resolveTargetDetails(correctTmdbId, mediaType);
-
-  const { arrConfirmedTmdbId, arrConfirmedTitle, arrPathAgrees } =
-    await resolveArrConfirmation(mediaType, tmdbId, correctTmdbId, item.filePath ?? null, targetTitle);
-
-  type RawResult = {
-    guid: string; name?: string; year?: number; thumb?: string | null; score?: number | null;
-    Guid?: Array<{ id: string }>;
-  };
-  const candidateMap = new Map<string, Omit<PlexCandidate, "matchLevel" | "confidence" | "titleSimilarity" | "tmdbTitle" | "tmdbOverview" | "tmdbRuntime" | "tmdbGenres" | "tmdbVoteAvg" | "tmdbPosterPath" | "radarrConfirmed" | "suggested">>();
-  let suggestedGuid: string | null = null;
-
-  const extractProviderIds = (r: RawResult): { imdbId: string | null; tmdbId: string | null } => {
-    if (r.Guid?.length) {
-      return {
-        imdbId: r.Guid.find((g) => g.id.startsWith("imdb://"))?.id.replace("imdb://", "") ?? null,
-        tmdbId: r.Guid.find((g) => g.id.startsWith("tmdb://"))?.id.replace("tmdb://", "") ?? null,
-      };
-    }
-    const imdbMatch = /com\.plexapp\.agents\.imdb:\/\/(tt\d+)/i.exec(r.guid);
-    const tmdbMatch = /com\.plexapp\.agents\.themoviedb:\/\/(\d+)/i.exec(r.guid);
-    return {
-      imdbId: imdbMatch?.[1] ?? null,
-      tmdbId: tmdbMatch?.[1] ?? null,
-    };
-  };
-
-  const plexSearch = async (params: Record<string, string>): Promise<RawResult[]> => {
-    const res = await safeFetchAdminConfigured(
-      `${serverUrl}/library/metadata/${safeRatingKey}/matches?` + new URLSearchParams(params),
-      { headers: plexHeaders, timeoutMs: 30_000 },
-    ).catch(() => null);
-    if (!res?.ok) return [];
-    const json = await res.json() as { MediaContainer?: { SearchResult?: RawResult[] } };
-    return json?.MediaContainer?.SearchResult ?? [];
-  };
-
-  const addResults = (results: RawResult[], markFirstAsSuggested = false) => {
-    for (const r of results) {
-      if (!candidateMap.has(r.guid)) {
-        const { imdbId, tmdbId: cTmdbId } = extractProviderIds(r);
-        candidateMap.set(r.guid, {
-          guid: r.guid, name: r.name ?? "", year: r.year ?? null,
-          thumb: r.thumb ?? null, score: r.score ?? null,
-          imdbId, tmdbId: cTmdbId,
-        });
-      }
-    }
-    if (markFirstAsSuggested && results.length > 0 && !suggestedGuid) {
-      suggestedGuid = results[0].guid;
-    }
-  };
-
-  const [imdbGuidResults, imdbAgentResults, tmdbAgentResults, titleYearResults, arrHintResults] = await Promise.all([
-    targetImdbId ? plexSearch({ manual: "1", includeGuids: "1", guid: `imdb://${targetImdbId}` }) : Promise.resolve([]),
-    targetImdbId ? plexSearch({ manual: "1", includeGuids: "1", q: targetImdbId, agent: "com.plexapp.agents.imdb", language: "en" }) : Promise.resolve([]),
-    plexSearch({ manual: "1", includeGuids: "1", q: String(correctTmdbId), agent: "com.plexapp.agents.themoviedb", language: "en" }),
-    (() => {
-      const p: Record<string, string> = { manual: "1", includeGuids: "1" };
-      if (targetTitle) p.title = targetTitle;
-      if (targetYear)  p.year  = targetYear;
-      return plexSearch(p);
-    })(),
-    arrTmdbIdHint && arrTmdbIdHint !== correctTmdbId
-      ? plexSearch({ manual: "1", includeGuids: "1", q: String(arrTmdbIdHint), agent: "com.plexapp.agents.themoviedb", language: "en" })
-      : Promise.resolve([]),
-  ]);
-
-  addResults(imdbGuidResults, true);
-  addResults(imdbAgentResults);
-  addResults(tmdbAgentResults);
-  addResults(titleYearResults);
-  addResults(arrHintResults);
-
-  const rawCandidates = Array.from(candidateMap.values());
-
-  const tmdbIdsToFetch = [...new Set(
-    rawCandidates.map((c) => c.tmdbId).filter((id): id is string => !!id && id !== String(correctTmdbId)),
-  )];
-
-  const tmdbDetailMap = new Map<string, TmdbDetails>();
-  if (tAuth && tmdbIdsToFetch.length) {
-    // Bounded (guardrail 31): five Plex searches can return dozens of
-    // candidates, and each one is a separate TMDB request.
-    const fetches = await settleLimit(tmdbIdsToFetch, 6, async (id) => {
-      const d = await fetchTmdbDetails(Number(id), mediaType, tAuth);
-      return { id, d };
-    });
-    for (const r of fetches) {
-      if (r.status === "fulfilled" && r.value.d) {
-        tmdbDetailMap.set(r.value.id, r.value.d);
-      }
-    }
-  }
-
-  const candidates: PlexCandidate[] = rawCandidates.map((c) => {
-    const details = c.tmdbId ? tmdbDetailMap.get(c.tmdbId) : undefined;
-    const isCorrectId = c.tmdbId === String(correctTmdbId);
-
-    const tmdbTitle      = isCorrectId ? targetTitle      : (details?.title ?? details?.name ?? null);
-    const tmdbOverview   = isCorrectId ? targetOverview   : (details?.overview ?? null);
-    const tmdbRuntime    = isCorrectId
-      ? targetRuntime
-      : (details?.runtime ?? details?.episode_run_time?.[0] ?? null);
-    const tmdbGenres     = isCorrectId ? targetGenres     : (details?.genres?.map((g) => g.name) ?? []);
-    const tmdbVoteAvg    = isCorrectId ? targetVoteAverage : (details?.vote_average ?? null);
-    const tmdbPosterPath = isCorrectId ? targetPosterPath  : (details?.poster_path ?? null);
-
-    const resolvedImdbId = c.imdbId
-      ?? details?.external_ids?.imdb_id
-      ?? null;
-
-    const radarrConfirmed =
-      (arrConfirmedTmdbId !== null && c.tmdbId === String(arrConfirmedTmdbId)) ||
-      (arrTmdbIdHint      !== null && c.tmdbId === String(arrTmdbIdHint));
-
-    const { matchLevel, confidence, titleSimilarity: ts } = assessCandidate(
-      { ...c, imdbId: resolvedImdbId, tmdbTitle, tmdbRuntime, tmdbGenres, radarrConfirmed },
-      { tmdbId: correctTmdbId, imdbId: targetImdbId, title: targetTitle, year: targetYear, runtime: targetRuntime, genres: targetGenres },
-    );
-
-    return {
-      ...c,
-      imdbId: resolvedImdbId,
-      tmdbTitle,
-      tmdbOverview,
-      tmdbRuntime,
-      tmdbGenres,
-      tmdbVoteAvg,
-      tmdbPosterPath,
-      matchLevel,
-      confidence,
-      titleSimilarity: ts,
-      radarrConfirmed,
-      suggested: false,
-    };
-  });
-
-  const levelOrder: Record<CandidateMatch, number> = { exact: 0, strong: 1, likely: 2, possible: 3, unknown: 4, wrong: 5 };
-  candidates.sort((a, b) => {
-    const lo = levelOrder[a.matchLevel] - levelOrder[b.matchLevel];
-    return lo !== 0 ? lo : (b.confidence - a.confidence);
-  });
-
-  const initialSuggested = suggestedGuid ? candidates.find((c) => c.guid === suggestedGuid) : null;
-  const topNonWrong = candidates.find((c) => c.matchLevel !== "wrong");
-  const finalSuggestedGuid =
-    topNonWrong && initialSuggested && levelOrder[topNonWrong.matchLevel] < levelOrder[initialSuggested.matchLevel]
-      ? topNonWrong.guid
-      : (suggestedGuid ?? topNonWrong?.guid ?? null);
-
+  const target = await resolveTargetDetails(correctTmdbId, mediaType);
+  const arr = await resolveArrConfirmation(mediaType, tmdbId, correctTmdbId, item.filePath ?? null, target.targetTitle);
+  const { raw, firstImdbGuid } = await searchPlexCandidates(
+    serverUrl, safeRatingKey, plexAdminHeaders(plexConfig.token),
+    { correctTmdbId, imdbId: target.targetImdbId, title: target.targetTitle, year: target.targetYear },
+    arrTmdbIdHint,
+  );
+  const candidates = await enrichCandidates(raw, mediaType, correctTmdbId, target, arr.arrConfirmedTmdbId, arrTmdbIdHint, tmdbAuth());
+  const suggestedGuid = pickSuggestedGuid(candidates, firstImdbGuid);
   for (const c of candidates) {
-    c.suggested = c.guid === finalSuggestedGuid;
+    c.suggested = c.guid === suggestedGuid;
   }
 
   const responseBody = {
     candidates,
-    targetTitle,
-    targetYear,
-    targetImdbId,
-    targetPosterPath,
-    targetOverview,
-    targetReleaseDate,
-    targetVoteAverage,
-    targetRuntime,
-    targetGenres,
-    arrConfirmedTmdbId,
-    arrConfirmedTitle,
-    arrPathAgrees,
+    ...target,
+    ...arr,
     ratingKey: item.plexRatingKey,
     plexFilePath: item.filePath ?? null,
     jellyfinFilePath: jellyfinItem?.filePath ?? null,

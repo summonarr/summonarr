@@ -9,6 +9,8 @@ import {
   serializeClearedSessionCookies,
 } from "@/lib/session-cookie";
 import { verifyAndRefreshSession } from "@/lib/session-refresh";
+import { verifySessionJwt } from "@/lib/session-jwt";
+import { parseAuthUrl } from "@/lib/auth-url";
 import {
   parseBearerToken,
   hasNativeClientHeader,
@@ -119,11 +121,18 @@ function isPublicPath(pathname: string): boolean {
   );
 }
 
+// An app URL for a redirect: AUTH_URL's origin when it parses as an http(s) URL,
+// else the request's own origin. A blank (`AUTH_URL=` in a compose file) or
+// scheme-less value used to reach `new URL(path, base)` raw and throw, which
+// 500'd every logged-out page request outside production (where boot refuses
+// such a value). auth-url.ts is zero-import, so proxy.ts stays light.
+function appUrl(path: string, req: NextRequest): URL {
+  const origin = parseAuthUrl(process.env.AUTH_URL)?.origin ?? req.nextUrl.origin;
+  return new URL(`${process.env.BASE_PATH ?? ""}${path}`, origin);
+}
+
 function buildLoginRedirect(req: NextRequest): URL {
-  const baseUrl =
-    process.env.AUTH_URL ?? req.nextUrl.origin;
-  const basePath = process.env.BASE_PATH ?? "";
-  const url = new URL(`${basePath}/login`, baseUrl);
+  const url = appUrl("/login", req);
   // Path AND query: a shared `/movies?genre=28` link must land on the filtered
   // page after sign-in, not on bare `/movies`. The login form validates the
   // value with safeInternalPath, which preserves a query it is given.
@@ -131,13 +140,15 @@ function buildLoginRedirect(req: NextRequest): URL {
   return url;
 }
 
-function clearedCookieResponse(redirectTo: URL): Response {
+function loginRedirectResponse(redirectTo: URL, clearCookies: boolean): Response {
   const res = new Response(null, {
     status: 302,
     headers: { Location: redirectTo.toString() },
   });
-  for (const cookie of serializeClearedSessionCookies()) {
-    res.headers.append("Set-Cookie", cookie);
+  if (clearCookies) {
+    for (const cookie of serializeClearedSessionCookies()) {
+      res.headers.append("Set-Cookie", cookie);
+    }
   }
   return res;
 }
@@ -274,7 +285,16 @@ export async function proxy(request: NextRequest) {
       if (pathname.startsWith("/api/")) {
         return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
       }
-      return clearedCookieResponse(buildLoginRedirect(request));
+      // Clear the cookie only when it is junk (forged, expired, malformed, or
+      // bound to the bearer transport). A well-signed cookie that failed the DB
+      // check may be the PRE-rotation copy a request carried while a privilege
+      // change in another tab or prefetch renamed the session: by the time this
+      // answer lands the browser holds the rotated cookie under the same name,
+      // and Max-Age=0 would delete that one, signing the user out. Left alone,
+      // the stale token is refused on every request and overwritten at sign-in.
+      const keepCookie =
+        !bearerToken && sessionToken !== null && (await verifySessionJwt(sessionToken, "cookie")) !== null;
+      return loginRedirectResponse(buildLoginRedirect(request), !keepCookie);
     }
 
     // No User-Agent fingerprint check here any more (guardrail 6h). The client
@@ -355,11 +375,7 @@ export async function proxy(request: NextRequest) {
         }
       }
       if (!allowed) {
-        const baseUrl =
-          process.env.AUTH_URL ??
-          request.nextUrl.origin;
-        const basePath = process.env.BASE_PATH ?? "";
-        return NextResponse.redirect(new URL(`${basePath}/`, baseUrl));
+        return NextResponse.redirect(appUrl("/", request));
       }
     }
   }

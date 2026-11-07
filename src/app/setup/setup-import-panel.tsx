@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
@@ -31,7 +31,9 @@ type ImportResult =
   | null;
 
 // First-run restore panel: validates + chunk-uploads an encrypted backup, then redirects to /login.
-export function SetupImportPanel() {
+// `onBusyChange` tells the shell an upload is running (through the redirect after
+// a successful restore), so it can lock the create/restore switch meanwhile.
+export function SetupImportPanel({ onBusyChange }: { onBusyChange?: (busy: boolean) => void }) {
   const t = useT();
   const locale = useLocale();
   const [file, setFile] = useState<File | null>(null);
@@ -45,6 +47,10 @@ export function SetupImportPanel() {
   // first check finishes, this ref lets the stale check see it is out of date
   // and drop its answer instead of overwriting the newer file's state.
   const pickedFileRef = useRef<File | null>(null);
+  // An unmount mid-upload cancels it (before the final chunk; once that is sent
+  // the server is already restoring and finishes on its own).
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => uploadAbortRef.current?.abort(), []);
 
   async function handleFileChange(f: File | null) {
     pickedFileRef.current = f;
@@ -74,18 +80,29 @@ export function SetupImportPanel() {
       return;
     }
     setImporting(true);
+    onBusyChange?.(true);
     setResult(null);
     setProgress({ uploaded: 0, total: file.size, phase: "upload" });
 
-    const outcome = await uploadInChunks({
-      file,
-      endpoint: withBasePath("/api/setup/import-chunk"),
-      onProgress: setProgress,
-    });
+    const abort = new AbortController();
+    uploadAbortRef.current = abort;
+    let outcome: Awaited<ReturnType<typeof uploadInChunks>>;
+    try {
+      outcome = await uploadInChunks({
+        file,
+        endpoint: withBasePath("/api/setup/import-chunk"),
+        onProgress: setProgress,
+        signal: abort.signal,
+      });
+    } catch (err) {
+      // Thrown before the uploader's own try (e.g. no crypto in this context).
+      outcome = { kind: "error", status: null, error: err instanceof Error ? err.message : t("auth.setup.error.generic") };
+    }
 
     setImporting(false);
 
     if (outcome.kind === "error") {
+      onBusyChange?.(false);
       setResult({ ok: false, error: outcome.error });
       return;
     }
@@ -93,9 +110,12 @@ export function SetupImportPanel() {
     const data = outcome.data as ImportResult & { ok: boolean };
     setResult({ ok: data.ok, summary: data.summary, errors: data.errors, error: data.error, warning: data.warning });
     if (data.ok) {
+      // Stays busy: the restore replaced the database, and the redirect follows.
       setTimeout(() => {
         window.location.href = withBasePath("/login");
       }, 1500);
+    } else {
+      onBusyChange?.(false);
     }
   }
 

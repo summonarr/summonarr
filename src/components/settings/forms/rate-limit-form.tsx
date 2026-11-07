@@ -108,7 +108,9 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           <Input
             id="rl-push-subs"
             type="number"
-            min="0"
+            // The route's range; 0 is refused (there is no "no limit").
+            min="1"
+            max="100"
             value={maxPushSubscriptions}
             onChange={(e) => { setMaxPushSubscriptions(e.target.value); setStatus("idle"); }}
             placeholder="5"

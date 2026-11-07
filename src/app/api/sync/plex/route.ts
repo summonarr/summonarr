@@ -1,19 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections, plexLibraryRatingKeys, type PlexLegacyGuidRef } from "@/lib/plex";
+import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections, type PlexLegacyGuidRef } from "@/lib/plex";
+import { plexLibraryRow } from "@/lib/library-rows";
 import { resolvePlexLegacyGuids, mergeResolvedLegacyItems, buildPlexShowKeyMap } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, replacePlexLibraryForInstances, withCronRunRecording, type CronActor, type PlexLibraryRow } from "@/lib/cron-auth";
+import { getCronActor, cronSkippedResponse, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, replacePlexLibraryForInstances, withCronRunRecording, type CronActor, type PlexLibraryRow } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { fanOutAvailableWinners } from "@/lib/request-notifications";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
+import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
+import { withAdvisoryLock, PLEX_RESYNC_LOCK_ID } from "@/lib/advisory-lock";
 
 export async function POST(request: NextRequest) {
   const t = translatorForRequest(request);
@@ -22,7 +26,22 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
-  return withCronRunRecording("plex-sync", () => syncPlex(request, actor));
+  // Single-flight: a second resync (two admin clicks, a cron call) skips instead
+  // of walking the whole Plex library again beside the first. Table writes were
+  // already serialized by their transaction locks; this bounds the upstream load.
+  return withCronRunRecording("plex-sync", () => withAdvisoryLock(
+    PLEX_RESYNC_LOCK_ID,
+    (signal: AbortSignal) => syncPlex(request, actor, signal),
+    // X-Cron-Skipped keeps a busy answer out of the ledger (no run happened).
+    () => cronSkippedResponse("plex sync already running"),
+  ));
+}
+
+// A resync that lost its lock stops at a phase boundary (guardrail 41). The
+// answer is discarded on a timeout (the lock race already settled); a dropped
+// lock connection returns it.
+function windDownResponse(t: Translator): Response {
+  return NextResponse.json({ error: t("apiAdmin.sync.windDown") }, { status: 503 });
 }
 
 // Resyncs ONE Plex server — the default ("") unless the body names another via
@@ -37,7 +56,7 @@ export async function POST(request: NextRequest) {
 // ONLY when it is the sole configured Plex server. With more than one it leaves
 // the cache alone — rewriting from this server alone would destroy every other
 // Plex server's episode rows until the next orchestrator run.
-async function syncPlex(request: NextRequest, actor: CronActor) {
+async function syncPlex(request: NextRequest, actor: CronActor, signal: AbortSignal): Promise<Response> {
   const t = translatorForRequest(request);
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
@@ -130,10 +149,20 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
     );
   }
 
+  // Guardrail 41: the lock is gone (timed out, or its connection dropped), so a
+  // second resync may already be running. Stop before writing anything; return,
+  // never throw.
+  if (signal.aborted) return windDownResponse(t);
+
+  // A standing configuration, restated on every resync: log it once per count (guardrail 7b).
   if (!ownsEpisodeCache) {
-    console.warn(
+    warnOnChange(
+      "sync/plex:episode-cache-owner",
+      String(plexInstances.length),
       `[sync/plex] ${plexInstances.length} Plex servers configured — leaving the shared TVEpisodeCache to the orchestrator, which rebuilds it from every server.`,
     );
+  } else {
+    forgetWarnOnChange("sync/plex:episode-cache-owner");
   }
   const episodeFilePaths = new Map<string, string>();
   // Fire-and-forget (not awaited): the episode cache is best-effort and must not
@@ -163,19 +192,15 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
     })
     .catch((err) => console.error("[sync/plex] Episode cache failed:", err));
 
-  const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null => {
-    if (s == null) return null;
-    return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
-  };
-
   // `serverInstance` is NOT optional here. Every delete on this path is scoped to
   // `instance`, so omitting it on the insert would make a named-instance resync delete
   // that server's rows and re-insert them under the schema default "" — moving the whole
   // library onto the DEFAULT server. That silently un-restricts a `restricted` server
   // (slug "" is visible to everyone) and drops its server-local ratingKeys into the
   // default's namespace, where a later fix-match would address the wrong server.
-  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, plexRatingKeys: plexLibraryRatingKeys(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, plexRatingKeys: plexLibraryRatingKeys(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+  // The row shape is shared with the orchestrator (library-rows.ts).
+  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => plexLibraryRow(tmdbId, d, "MOVIE", instance));
+  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => plexLibraryRow(tmdbId, d, "TV", instance));
 
   let finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", instance, "sync/plex");
   let finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows,    "TV",    instance, "sync/plex");
@@ -258,20 +283,24 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   // Stamp last-success so the orchestrator's 24h-stale fallback (sync/route.ts
   // pendingAvailableNotify gate) doesn't fire falsely on deployments where the
   // admin runs the per-source resync more recently than the orchestrator.
-  // ONLY for the shape whose success the orchestrator's own stamp means — a FULL
-  // replace of the DEFAULT instance. A named instance's resync says nothing about
-  // the default server the fallback is waiting on (an hourly `{instance:"remote"}`
+  // ONLY for the shape whose success the orchestrator's own stamp means — every
+  // registered Plex server synced clean: a FULL replace of the DEFAULT instance
+  // when it is the ONLY one. A named instance's resync says nothing about the
+  // default server the fallback is waiting on (an hourly `{instance:"remote"}`
   // call would keep the stamp fresh for as long as the default stayed down, so
   // `plexStale` could never fire and a Plex-pinned requester whose title landed
-  // on Jellyfin alone was never notified), and a recentOnly insert-only run is
-  // not a complete picture of the library.
-  if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly) {
+  // on Jellyfin alone was never notified); the default's resync says nothing
+  // about a named server that is down; and a recentOnly insert-only run is not
+  // a complete picture of the library.
+  if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly && plexInstances.length <= 1) {
     await prisma.setting.upsert({
       where: { key: "lastPlexSyncSucceededAt" },
       update: { value: String(Date.now()) },
       create: { key: "lastPlexSyncSucceededAt", value: String(Date.now()) },
     }).catch((err) => console.error("[sync/plex] failed to stamp lastPlexSyncSucceededAt:", err));
   }
+
+  if (signal.aborted) return windDownResponse(t);
 
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },

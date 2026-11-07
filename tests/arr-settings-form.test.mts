@@ -33,7 +33,7 @@ console.warn = () => {};
 console.error = () => {};
 
 // Every outbound fetch fails ⇒ the arr status probe throws ⇒ the connection
-// test fails ⇒ the route rolls back and answers 422.
+// test fails ⇒ the route answers 422 without writing anything.
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   throw new Error(`scripted fetch failure for ${String(input)}`);
 }) as typeof fetch;
@@ -121,7 +121,7 @@ test("f99 (route contract): a failed DEFAULT-variant Radarr test answers 422 wit
   assert.equal(body.ok, false);
   assert.equal(body.radarrError, "Radarr connection failed", "the diagnostic the route computed");
   assert.equal("error" in body, false, "no generic `error` field — a form reading only data.error sees nothing");
-  // Rolled back: nothing persisted.
+  // Tested before the write: nothing persisted.
   assert.equal(settings.has("radarrUrl"), false);
   assert.equal(settings.has("radarrApiKey"), false);
 });

@@ -28,15 +28,16 @@
 //      matched by request id alone (the review's R2: older display-name rows,
 //      and rows naming a Discord placeholder merged into the account).
 //   3. The audit-log table's SESSION_REVOKE and request summaries name the
-//      account for both shapes. The suite renders no React, so the table's
-//      formatSummary is type-stripped out of the .tsx source and run.
+//      account for both shapes. The suite renders no React; the table's
+//      formatSummary lives in the pure src/lib/audit-log-view.ts and is run
+//      from there.
 //
 // No DB, no network: the route runs on the real prisma client with its
 // delegates shadowed and a genuinely signed session JWT (the
 // tests/admin-users-audit-routes.test.mts harness); the purge gets a fake tx.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { createRequire, stripTypeScriptTypes } from "node:module";
+import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 
@@ -572,13 +573,8 @@ test("purge's owned-request scrub reaches every one of 1,201 requests, at most 5
 
 // ── 3. the audit-log table ───────────────────────────────────────────────────
 
-const tableSrc = readFileSync(new URL("../src/components/admin/audit-log-table.tsx", import.meta.url), "utf8");
-const fnStart = tableSrc.indexOf("function formatSummary(");
-assert.ok(fnStart >= 0, "formatSummary is in the table source");
-const fnSrc = stripTypeScriptTypes(tableSrc.slice(fnStart, tableSrc.indexOf("\n}\n", fnStart) + 2));
-type Summary = (action: string, d: Record<string, unknown>, t: (key: string, vars?: Record<string, unknown>) => string) => string | null;
-// The table's own source, type-stripped (the suite renders no .tsx).
-const formatSummary = new Function(`${fnSrc}\nreturn formatSummary;`)() as Summary;
+// The table imports its summaries from this pure module (the suite renders no .tsx).
+const { formatSummary } = await import("../src/lib/audit-log-view.ts");
 const en = JSON.parse(readFileSync(new URL("../src/lib/i18n/messages/en/adminManage.json", import.meta.url), "utf8")) as Record<string, string>;
 const t = (key: string, vars: Record<string, unknown> = {}) => en[key].replace(/\{(\w+)\}/g, (_, n: string) => String(vars[n]));
 
@@ -638,4 +634,13 @@ test("audit table: the user-admin rows name the account by display name, else by
     ["USER_REACTIVATE", { targetUser: "Alice", targetEmail: "a@example.com", role: "USER" }, "Re-enabled Alice (a@example.com)"],
   ];
   for (const [action, d, want] of cases) assert.equal(formatSummary(action, d, t), want, `${action} ${JSON.stringify(d)}`);
+});
+
+test("audit table: a malformed SETTINGS_CHANGE payload yields no summary instead of throwing the page down", () => {
+  // A restored backup or a hand edit can carry `keys` as a string; casting it
+  // to string[] and calling .join threw during render.
+  assert.equal(formatSummary("SETTINGS_CHANGE", { keys: "abc" }, t), null);
+  assert.equal(formatSummary("MAINTENANCE_TOGGLE", { keys: 42 }, t), null);
+  assert.equal(formatSummary("SETTINGS_CHANGE", { keys: ["a", "b"] }, t), "Changed: a, b");
+  assert.equal(formatSummary("SETTINGS_CHANGE", { keys: [] }, t), null);
 });

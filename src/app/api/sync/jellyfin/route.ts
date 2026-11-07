@@ -1,18 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinTmdbIds, getJellyfinTVEpisodes, getJellyfinEpisodesForShow } from "@/lib/jellyfin";
+import { buildSeriesItemIdIndex, getJellyfinTmdbIds, getJellyfinTVEpisodes, getJellyfinEpisodesForShow } from "@/lib/jellyfin";
 import { mapLimit } from "@/lib/concurrency";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { jellyfinLibraryRow } from "@/lib/library-rows";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheForSource, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type JellyfinLibraryRow } from "@/lib/cron-auth";
+import { getCronActor, cronSkippedResponse, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheForSource, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type JellyfinLibraryRow } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { fanOutAvailableWinners } from "@/lib/request-notifications";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
+import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
+import { withAdvisoryLock, JELLYFIN_RESYNC_LOCK_ID } from "@/lib/advisory-lock";
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
 const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -30,7 +34,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
-  return withCronRunRecording("jellyfin-sync", () => syncJellyfin(request, actor));
+  // Single-flight: a second resync (two admin clicks, a cron call) skips instead
+  // of walking the whole Jellyfin library again beside the first. Table writes were
+  // already serialized by their transaction locks; this bounds the upstream load.
+  return withCronRunRecording("jellyfin-sync", () => withAdvisoryLock(
+    JELLYFIN_RESYNC_LOCK_ID,
+    (signal: AbortSignal) => syncJellyfin(request, actor, signal),
+    // X-Cron-Skipped keeps a busy answer out of the ledger (no run happened).
+    () => cronSkippedResponse("jellyfin sync already running"),
+  ));
+}
+
+// A resync that lost its lock stops at a phase boundary (guardrail 41) — see
+// the Plex twin.
+function windDownResponse(t: Translator): Response {
+  return NextResponse.json({ error: t("apiAdmin.sync.windDown") }, { status: 503 });
 }
 
 // Fetches the Jellyfin library (movies + TV), writes JellyfinLibraryItem rows
@@ -49,7 +67,7 @@ export async function POST(request: NextRequest) {
 // `source: "jellyfin"` unscoped and repopulated from this server alone, and even
 // the recentOnly path's tmdbId-scoped delete removes another server's episodes
 // for a show both of them hold.
-async function syncJellyfin(request: NextRequest, actor: CronActor) {
+async function syncJellyfin(request: NextRequest, actor: CronActor, signal: AbortSignal): Promise<Response> {
   const t = translatorForRequest(request);
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
@@ -115,6 +133,11 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
     );
   }
 
+  // Guardrail 41: the lock is gone (timed out, or its connection dropped), so a
+  // second resync may already be running. Stop before writing anything; return,
+  // never throw.
+  if (signal.aborted) return windDownResponse(t);
+
   // Keyed on EVERY item id per series, not just the stored one — a show in two
   // libraries files its episodes under two SeriesIds and the unlisted one's
   // episodes would be dropped on the floor.
@@ -129,10 +152,15 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   // still page-walked every Episode in the library first, then threw the whole
   // result away on any multi-server install.
   const ownsEpisodeCache = jellyfinInstances.length <= 1;
+  // A standing configuration, restated on every resync: log it once per count (guardrail 7b).
   if (!ownsEpisodeCache) {
-    console.warn(
+    warnOnChange(
+      "sync/jellyfin:episode-cache-owner",
+      String(jellyfinInstances.length),
       `[sync/jellyfin] ${jellyfinInstances.length} Jellyfin servers configured — leaving the shared TVEpisodeCache to the orchestrator, which rebuilds it from every server.`,
     );
+  } else {
+    forgetWarnOnChange("sync/jellyfin:episode-cache-owner");
   }
   (ownsEpisodeCache
     ? (episodeRecentOnly && seriesItemIdToTmdbId.size > 0 && seriesItemIdToTmdbId.size <= PER_SERIES_EPISODE_REFRESH_MAX
@@ -196,17 +224,13 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
     })
     .catch((err) => console.error("[sync/jellyfin] Episode cache failed:", err));
 
-  const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null => {
-    if (s == null) return null;
-    return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
-  };
-
   // `serverInstance` is NOT optional here — see the Plex twin. The deletes below are
   // scoped to `instance`, so omitting it made a named-instance resync delete that
   // server's rows and re-insert the whole library under the schema default "",
   // moving it onto the DEFAULT server and un-restricting a `restricted` one.
-  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, jellyfinItemIds: libraryItemIds(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, jellyfinItemIds: libraryItemIds(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+  // The row shape is shared with the orchestrator (library-rows.ts).
+  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => jellyfinLibraryRow(tmdbId, d, "MOVIE", instance));
+  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => jellyfinLibraryRow(tmdbId, d, "TV", instance));
 
   if (recentOnly) {
     // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
@@ -245,16 +269,19 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   // Stamp last-success so the orchestrator's 24h-stale fallback (sync/route.ts
   // pendingAvailableNotify gate) doesn't fire falsely on deployments where the
   // admin runs the per-source resync more recently than the orchestrator.
-  // ONLY for the shape whose success the orchestrator's own stamp means — a FULL
-  // replace of the DEFAULT instance (see the Plex twin for the starvation a
-  // named-instance or recentOnly stamp causes).
-  if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly) {
+  // ONLY for the shape whose success the orchestrator's own stamp means — every
+  // registered Jellyfin server synced clean: a FULL replace of the DEFAULT
+  // instance when it is the ONLY one (see the Plex twin for the starvation a
+  // named-instance, multi-server or recentOnly stamp causes).
+  if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly && jellyfinInstances.length <= 1) {
     await prisma.setting.upsert({
       where: { key: "lastJellyfinSyncSucceededAt" },
       update: { value: String(Date.now()) },
       create: { key: "lastJellyfinSyncSucceededAt", value: String(Date.now()) },
     }).catch((err) => console.error("[sync/jellyfin] failed to stamp lastJellyfinSyncSucceededAt:", err));
   }
+
+  if (signal.aborted) return windDownResponse(t);
 
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },

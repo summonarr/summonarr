@@ -187,7 +187,7 @@
   "settings.arr.minAvail.announced": "已公布",
   "settings.arr.minAvail.inCinemas": "院线上映中",
   "settings.arr.minAvail.released": "已发行",
-  "settings.arr.invalidSlug": "无效的标识“{slug}”——请使用以字母开头的小写字母/数字（不能是“hd”）。",
+  "settings.arr.invalidSlug": "无效的标识“{slug}”——请使用以字母开头的小写字母/数字（不能是“hd”或“external”）。",
   "settings.arr.heading": "{label}——其他实例",
   "settings.arr.intro": "额外的 {label} 实例（例如专用的动漫实例）。当某个实例的规则匹配时，请求会自动路由到该实例；请求也可以显式指定实例。受限实例需要按用户授权（用户 → 实例访问）。",
   "settings.arr.none": "未配置其他 {label} 实例。",

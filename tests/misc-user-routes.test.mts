@@ -512,6 +512,19 @@ test("POST with a PRESENT but non-array `ids` is a 400 and marks nothing — onl
   assert.ok(notifs.every((n) => n.readAt));
 });
 
+test("POST with a body that is not a JSON object is a 400 and marks nothing — an array is not `{ ids }`", async () => {
+  // `["a"]` (a client sending the ids bare) and an unparseable body both used to
+  // read as "no ids key" ⇒ mark ALL read.
+  const me = await mintSession();
+  notifs = [notif({ id: "a", userId: me.userId }), notif({ id: "b", userId: me.userId })];
+  for (const raw of ['["a"]', "{nope", "null"]) {
+    const res = await postNotifs(me.token, undefined, raw);
+    assert.equal(res.status, 400, `body ${raw} must be refused`);
+  }
+  assert.equal(opsOf("notification.updateMany").length, 0, "nothing may be marked read");
+  assert.ok(notifs.every((n) => n.readAt === null));
+});
+
 test("the three notification rate limits answer a TRANSLATED 429 with Retry-After", async () => {
   const withLang = (method: string, lang: string, token: string, query = "") =>
     new NextRequest(`http://localhost:3000/api/notifications${query}`, {

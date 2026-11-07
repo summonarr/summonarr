@@ -264,6 +264,8 @@ for (const c of CASES) {
     assert.deepEqual(row.details, {
       title: "The Matrix", mediaType: "MOVIE", year: "1999", requesterId: c.id, ...named(c),
       before: { status: "PENDING" }, after: { status: "APPROVED" },
+      // Written once the push's outcome is known.
+      arrPushSucceeded: true, rolledBack: false,
     });
     assert.ok(!JSON.stringify(row.details).includes(c.email), "the email is never written");
   });

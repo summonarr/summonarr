@@ -268,6 +268,15 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 shadowPrismaModel(prisma, "auditLog", { create: async (args: unknown) => { rec("auditLog.create", args); return { id: "a1" }; } });
+// OIDC bindings: the role sync reads them to tell an OIDC account (no server
+// role) from a legacy Plex one.
+let oidcUserIds = new Set<string>();
+shadowPrismaModel(prisma, "account", {
+  findFirst: async (args: { where: { userId: string; provider: string } }) =>
+    args.where.provider === "oidc" && oidcUserIds.has(args.where.userId) ? { id: `acct-${args.where.userId}` } : null,
+  findMany: async (args: { where: { provider: string; userId: { in: string[] } } }) =>
+    args.where.provider === "oidc" ? args.where.userId.in.filter((id) => oidcUserIds.has(id)).map((userId) => ({ userId })) : [],
+});
 for (const m of ["mediaRequest", "issue", "deletionVote", "notification", "issueMessage", "hiddenItem", "watchlistItem"]) {
   shadowPrismaModel(prisma, m, {
     findMany: async () => [], findUnique: async () => null, findFirst: async () => null, count: async () => 0,
@@ -424,6 +433,7 @@ beforeEach(async () => {
   inTx = false;
   mergeReadGate = null;
   userUpdateThrows = false;
+  oidcUserIds = new Set();
 });
 
 // ── gating ───────────────────────────────────────────────────────────────────
@@ -908,7 +918,33 @@ test("a FAILED merge does NOT burn the code — the user must be able to retry",
   seedCode(userId);
   const res = await doConfirm(token, { code: "ABCDEF123456" });
   assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, "Could not link accounts.");
   assert.equal(mergeCodes.length, 1, "a transient merge failure must leave the code redeemable");
+  assert.ok(
+    errors.some((e) => e.startsWith("[discord/confirm-merge]") && e.includes("simulated merge failure")),
+    "a failed account merge leaves a trace",
+  );
+});
+
+test("a Discord id already linked to ANOTHER real account is a 409 saying so — the expected refusal is not logged as a failure", async () => {
+  const { token, userId } = await mintSession();
+  appUsers.push({ id: "someone-else", email: "else@example.com", role: "USER", discordId: VALID_SNOWFLAKE, permissions: 0n, deactivatedAt: null });
+  seedCode(userId);
+  const res = await doConfirm(token, { code: "ABCDEF123456" });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error, "This Discord account is already linked to another user.");
+  assert.ok(!errors.some((e) => e.startsWith("[discord/confirm-merge]")));
+});
+
+test("confirm-merge grants roles from the account's own row: a local-password account gets no Plex role", async () => {
+  settings.set("discordPlexRoleId", "777777777777777777");
+  const { token, userId } = await mintSession({ passwordHash: "scrypt:2:stub" });
+  seedCode(userId);
+  assert.equal((await doConfirm(token, { code: "ABCDEF123456" })).status, 200);
+  const puts = fetchCalls.filter((c) => c.method === "PUT").map((c) => c.url.pathname.split("/roles/")[1]);
+  const deletes = fetchCalls.filter((c) => c.method === "DELETE").map((c) => c.url.pathname.split("/roles/")[1]);
+  assert.deepEqual(puts, ["111222333444555666"], "the linked role only");
+  assert.deepEqual(deletes, ["777777777777777777"], "the Plex role is a managed role it doesn't qualify for");
 });
 
 test("the success path consumes the code with deleteMany, not delete", async () => {
@@ -1123,6 +1159,33 @@ test("status is scoped to the caller — it cannot report another user's link", 
 
 // ── admin routes ─────────────────────────────────────────────────────────────
 
+// ── the integration switch covers linking (features.ts) ──────────────────────
+
+test("with feature.integration.discord OFF, generate-link, initiate-merge and confirm-merge refuse before any work; unlink still works", async () => {
+  settings.set("feature.integration.discord", "false");
+  invalidateFeatureFlagCache();
+  const { token, userId } = await mintSession({ discordId: VALID_SNOWFLAKE });
+  seedCode(userId);
+
+  for (const res of [
+    await doGenerate(token),
+    await doInitiate(token, { discordId: VALID_SNOWFLAKE }),
+    await doConfirm(token, { code: "ABCDEF123456" }),
+  ]) {
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).error, "The Discord integration is disabled.");
+  }
+  assert.deepEqual(fetchCalls, [], "nobody is DM'd");
+  assert.equal(opsOf("discordLinkToken.upsert").length, 0, "no link code is minted");
+  assert.equal(opsOf("discordMergeCode.upsert").length, 0, "no merge code is stored");
+  assert.equal(opsOf("$transaction").length, 0, "nothing is merged");
+  assert.equal(mergeCodes.length, 1, "the pending code is not even rate-limit-wiped");
+
+  // A user can always remove a link.
+  assert.equal((await doUnlink(token)).status, 200);
+  assert.equal(appUsers.find((u) => u.id === userId)!.discordId, null);
+});
+
 test("sync-roles is a no-op when nobody is linked", async () => {
   const { token } = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
   const res = await doSyncRoles(token);
@@ -1184,12 +1247,41 @@ test("PIN: sync-roles STRIPS Summonarr-managed roles from a deactivated account"
   assert.ok(fetchCalls.some((c) => c.method === "DELETE"), "managed roles are revoked");
 });
 
-test("a failing Discord role call does not fail the whole sync", async () => {
+test("a failing Discord role call does not fail the whole sync — and is counted as failed, not synced", async () => {
   roleCallsOk = false;
   const { token } = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
   appUsers.push({ id: "l1", email: "l1@example.com", role: "USER", discordId: VALID_SNOWFLAKE, permissions: 0n, deactivatedAt: null });
   const res = await doSyncRoles(token);
   assert.equal(res.status, 200, "settleLimit isolates per-user failures");
+  const body = await res.json();
+  assert.equal(body.synced, 0, "a member Discord refused was not synced");
+  assert.equal(body.failed, 1);
+});
+
+test("sync-roles with the integration OFF syncs nobody and calls nothing", async () => {
+  settings.set("feature.integration.discord", "false");
+  invalidateFeatureFlagCache();
+  const { token } = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
+  appUsers.push({ id: "l1", email: "l1@example.com", role: "USER", discordId: VALID_SNOWFLAKE, permissions: 0n, deactivatedAt: null });
+  const body = await (await doSyncRoles(token)).json();
+  assert.equal(body.synced, 0);
+  assert.equal(body.skipped, 1);
+  assert.deepEqual(fetchCalls, []);
+});
+
+test("sync-roles gives an OIDC account no server role, and a Plex one the Plex role", async () => {
+  settings.set("discordPlexRoleId", "777777777777777777");
+  const { token } = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
+  appUsers.push(
+    { id: "oidc-1", email: "o@example.com", role: "USER", discordId: "200000000000000001", permissions: 0n, deactivatedAt: null, plexUserId: null, jellyfinUserId: null, passwordHash: null },
+    { id: "plex-1", email: "p@example.com", role: "USER", discordId: "200000000000000002", permissions: 0n, deactivatedAt: null, plexUserId: "12345", jellyfinUserId: null, passwordHash: null },
+  );
+  oidcUserIds.add("oidc-1");
+  await doSyncRoles(token);
+  const grants = (member: string) =>
+    fetchCalls.filter((c) => c.method === "PUT" && c.url.pathname.includes(`/members/${member}/`)).map((c) => c.url.pathname.split("/roles/")[1]);
+  assert.deepEqual(grants("200000000000000001"), ["111222333444555666"]);
+  assert.deepEqual(grants("200000000000000002").sort(), ["111222333444555666", "777777777777777777"]);
 });
 
 test("sync-roles is audited with the count", async () => {
@@ -1197,9 +1289,11 @@ test("sync-roles is audited with the count", async () => {
   appUsers.push({ id: "l1", email: "l1@example.com", role: "USER", discordId: VALID_SNOWFLAKE, permissions: 0n, deactivatedAt: null });
   await doSyncRoles(token);
   for (const t of afterTasks.splice(0)) await t();
-  const data = (opsOf("auditLog.create")[0].args as { data: { target: string; details: string } }).data;
+  const data = (opsOf("auditLog.create")[0].args as { data: { target: string; details: string; provider: string | null } }).data;
   assert.equal(data.target, "discord:sync-roles");
   assert.equal(JSON.parse(data.details).syncedCount, 1);
+  assert.equal(JSON.parse(data.details).failedCount, 0);
+  assert.equal(data.provider, "credentials", "the audit row carries the request context (auditContext)");
 });
 
 test("register-commands is 400 without a bot token or client id, and calls nothing", async () => {

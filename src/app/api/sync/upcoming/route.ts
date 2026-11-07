@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUpcomingMoviesForRefresh, getUpcomingTVForRefresh } from "@/lib/tmdb";
-import { cronSkippedResponse, isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
+import { CRON_SYSTEM_ACTOR, cronSkippedResponse, isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { warmCalendarCache, type CalendarWarmResult } from "@/lib/calendar-feed";
@@ -43,16 +43,16 @@ export async function POST(request: NextRequest) {
         voteAverage: m.voteAverage,
         cachedAt: new Date(),
       }));
-      const tvRows = tvItems.map((t) => ({
-        tmdbId: t.id,
+      const tvRows = tvItems.map((show) => ({
+        tmdbId: show.id,
         mediaType: "TV" as const,
-        title: t.title,
-        overview: t.overview,
-        posterPath: t.posterPath,
-        backdropPath: t.backdropPath,
-        releaseDate: t.releaseDate,
-        releaseYear: t.releaseYear ?? "",
-        voteAverage: t.voteAverage,
+        title: show.title,
+        overview: show.overview,
+        posterPath: show.posterPath,
+        backdropPath: show.backdropPath,
+        releaseDate: show.releaseDate,
+        releaseYear: show.releaseYear ?? "",
+        voteAverage: show.voteAverage,
         cachedAt: new Date(),
       }));
       const rows = [...movieRows, ...tvRows];
@@ -92,8 +92,8 @@ export async function POST(request: NextRequest) {
       const errors = [movies, tv].filter((r) => r.status === "rejected").length;
 
       await logAudit({
-        userId: "system",
-        userName: "cron",
+        userId: CRON_SYSTEM_ACTOR.userId,
+        userName: CRON_SYSTEM_ACTOR.userName,
         action: "LIBRARY_SYNC",
         target: "upcoming-cache",
         details: { movies: movieItems.length, tv: tvItems.length, total: rows.length, errors, durationMs },

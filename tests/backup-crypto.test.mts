@@ -105,11 +105,15 @@ test("bad magic bytes → BackupCryptoError before any decryption", async () => 
   );
 });
 
-test("empty password is refused at encrypt time", async () => {
-  await assert.rejects(
-    collect(wrapEncryptStream(streamFrom([new Uint8Array(PLAINTEXT)]), "")),
+test("empty password is refused at encrypt time, synchronously, before the source is read", () => {
+  // Synchronous so a caller's try/catch around the wrapper sees it (db-export
+  // answers it as JSON instead of a 200 whose body then errors).
+  const source = streamFrom([new Uint8Array(PLAINTEXT)]);
+  assert.throws(
+    () => wrapEncryptStream(source, ""),
     (err: unknown) => err instanceof BackupCryptoError && /Password is required/.test(err.message),
   );
+  assert.equal(source.locked, false, "the refused wrapper must not take the source");
 });
 
 test("NFKC: composed and decomposed passphrases derive the same key", async () => {
@@ -164,14 +168,41 @@ test("empty plaintext roundtrips: exactly header+tag (56 bytes) and decrypts to 
   assert.equal(dec.length, 0);
 });
 
-test("empty password is refused at decrypt time too", async () => {
-  // deriveKey runs inside ensureHeader on the decrypt side as well; the refusal
-  // must fire before any PBKDF2/decryption work.
-  await assert.rejects(
-    collect(wrapDecryptStream(streamFrom([new Uint8Array(ENCRYPTED)]), "")),
+test("empty password is refused at decrypt time too, synchronously, before any PBKDF2/decryption work", () => {
+  const source = streamFrom([new Uint8Array(ENCRYPTED)]);
+  assert.throws(
+    () => wrapDecryptStream(source, ""),
     (err: unknown) =>
       err instanceof BackupCryptoError && /Password is required/.test(err.message),
   );
+  assert.equal(source.locked, false, "the refused wrapper must not take the source");
+});
+
+// A source that records whether the wrapper cancelled it.
+function cancellable(chunks: Uint8Array[]): { stream: ReadableStream<Uint8Array>; cancels: () => number } {
+  let i = 0;
+  let cancelCount = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i < chunks.length) controller.enqueue(chunks[i++]);
+      else controller.close();
+    },
+    cancel() {
+      cancelCount++;
+    },
+  });
+  return { stream, cancels: () => cancelCount };
+}
+
+test("a decrypt that fails mid-stream cancels its source (the upload is not left open)", async () => {
+  const corrupted = Buffer.from(ENCRYPTED);
+  corrupted[0] ^= 0xff; // bad magic: fails on the first pull, with more chunks unread
+  const src = cancellable(chunked(corrupted, 8));
+  await assert.rejects(
+    collect(wrapDecryptStream(src.stream, PASSWORD)),
+    (err: unknown) => err instanceof BackupCryptoError && /bad magic/.test(err.message),
+  );
+  assert.equal(src.cancels(), 1, "the failed decrypt must cancel the source it was reading");
 });
 
 test("salt and IV are fresh per encryption (same plaintext+password → different headers)", async () => {

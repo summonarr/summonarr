@@ -15,20 +15,21 @@
 // So these tests read schema.prisma (the enum's actual source of truth) and
 // chip.tsx (the ChipTone union) and assert the maps agree with BOTH directions:
 // no enum member without an entry, and no entry for a member that no longer
-// exists. Same idiom as tests/backup-schema.test.mts and
-// tests/audit-actions.test.mts: read the source, assert the manifest.
+// exists. The label maps hold message KEYS (every surface showing them is
+// translated), so each key must also exist in the English catalog — a missing
+// key renders as the raw key string. Same idiom as tests/backup-schema.test.mts
+// and tests/audit-actions.test.mts: read the source, assert the manifest.
 // No DB, no network, no module graph beyond the pure map module.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const {
   REQUEST_STATUS_TONE,
-  REQUEST_STATUS_LABEL,
   ISSUE_STATUS_TONE,
-  ISSUE_STATUS_LABEL,
-  ISSUE_TYPE_LABELS,
+  ISSUE_STATUS_LABEL_KEY,
+  ISSUE_TYPE_LABEL_KEY,
 } = await import("../src/lib/status-labels.ts");
 
 const schema = readFileSync(join(process.cwd(), "prisma", "schema.prisma"), "utf-8");
@@ -36,6 +37,20 @@ const chipSrc = readFileSync(
   join(process.cwd(), "src", "components", "ui", "design", "chip.tsx"),
   "utf-8",
 );
+
+// The English catalog, every area merged (keys are fully qualified per area).
+const EN_DIR = join(process.cwd(), "src", "lib", "i18n", "messages", "en");
+const EN: Record<string, string> = Object.assign(
+  {},
+  ...readdirSync(EN_DIR)
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => JSON.parse(readFileSync(join(EN_DIR, f), "utf-8")) as Record<string, string>),
+);
+
+// The English text a label key renders as.
+function en(key: string | undefined): string | undefined {
+  return key === undefined ? undefined : EN[key];
+}
 
 // Pull the members of `enum <Name> { … }` out of schema.prisma. Prisma enum
 // bodies are one bare identifier per line, so this stays a simple scan rather
@@ -71,14 +86,14 @@ test("schema/chip extraction found real enum members and tones — a broken rege
   assert.ok(ISSUE_TYPES.length >= 5, `IssueType members: ${ISSUE_TYPES.join(",")}`);
   assert.ok(TONES.length >= 7, `ChipTone members: ${TONES.join(",")}`);
   assert.ok(TONES.includes("neutral") && TONES.includes("accent"));
+  assert.ok(Object.keys(EN).length > 100, "the English catalog was not found");
 });
 
 // ── RequestStatus ────────────────────────────────────────────────────────────
 
 for (const status of ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"]) {
-  test(`RequestStatus ${status} has both a tone and a label`, () => {
+  test(`RequestStatus ${status} has a tone`, () => {
     assert.ok(REQUEST_STATUS_TONE[status], `${status} missing from REQUEST_STATUS_TONE`);
-    assert.ok(REQUEST_STATUS_LABEL[status], `${status} missing from REQUEST_STATUS_LABEL`);
   });
 }
 
@@ -87,26 +102,9 @@ test("every RequestStatus enum member has a tone — a new status can't render a
   assert.deepEqual(missing, [], `add these to REQUEST_STATUS_TONE: ${missing.join(", ")}`);
 });
 
-test("every RequestStatus enum member has a label — a new status can't render as `undefined`", () => {
-  const missing = REQUEST_STATUSES.filter((s) => REQUEST_STATUS_LABEL[s] === undefined);
-  assert.deepEqual(missing, [], `add these to REQUEST_STATUS_LABEL: ${missing.join(", ")}`);
-});
-
 test("REQUEST_STATUS_TONE has no entry for a status the schema dropped", () => {
   const stale = Object.keys(REQUEST_STATUS_TONE).filter((k) => !REQUEST_STATUSES.includes(k));
   assert.deepEqual(stale, [], `remove these from REQUEST_STATUS_TONE: ${stale.join(", ")}`);
-});
-
-test("REQUEST_STATUS_LABEL has no entry for a status the schema dropped", () => {
-  const stale = Object.keys(REQUEST_STATUS_LABEL).filter((k) => !REQUEST_STATUSES.includes(k));
-  assert.deepEqual(stale, [], `remove these from REQUEST_STATUS_LABEL: ${stale.join(", ")}`);
-});
-
-test("the tone and label maps cover exactly the same RequestStatus key set", () => {
-  assert.deepEqual(
-    Object.keys(REQUEST_STATUS_TONE).sort(),
-    Object.keys(REQUEST_STATUS_LABEL).sort(),
-  );
 });
 
 test("every RequestStatus tone is a real ChipTone — not a string that renders unstyled", () => {
@@ -121,8 +119,6 @@ test("AVAILABLE carries its own tone — 'ready to watch' must be distinguishabl
   assert.equal(REQUEST_STATUS_TONE.APPROVED, "approved");
   assert.equal(REQUEST_STATUS_TONE.AVAILABLE, "accent");
   assert.notEqual(REQUEST_STATUS_TONE.AVAILABLE, REQUEST_STATUS_TONE.APPROVED);
-  // …and the labels stay distinct too.
-  assert.notEqual(REQUEST_STATUS_LABEL.AVAILABLE, REQUEST_STATUS_LABEL.APPROVED);
 });
 
 test("DECLINED and PENDING carry distinct, non-success tones", () => {
@@ -134,9 +130,9 @@ test("DECLINED and PENDING carry distinct, non-success tones", () => {
 // ── IssueStatus ──────────────────────────────────────────────────────────────
 
 for (const status of ["OPEN", "IN_PROGRESS", "RESOLVED"]) {
-  test(`IssueStatus ${status} has both a tone and a label`, () => {
+  test(`IssueStatus ${status} has both a tone and a label key`, () => {
     assert.ok(ISSUE_STATUS_TONE[status], `${status} missing from ISSUE_STATUS_TONE`);
-    assert.ok(ISSUE_STATUS_LABEL[status], `${status} missing from ISSUE_STATUS_LABEL`);
+    assert.ok(ISSUE_STATUS_LABEL_KEY[status], `${status} missing from ISSUE_STATUS_LABEL_KEY`);
   });
 }
 
@@ -145,16 +141,21 @@ test("every IssueStatus enum member has a tone", () => {
   assert.deepEqual(missing, [], `add these to ISSUE_STATUS_TONE: ${missing.join(", ")}`);
 });
 
-test("every IssueStatus enum member has a label", () => {
-  const missing = ISSUE_STATUSES.filter((s) => ISSUE_STATUS_LABEL[s] === undefined);
-  assert.deepEqual(missing, [], `add these to ISSUE_STATUS_LABEL: ${missing.join(", ")}`);
+test("every IssueStatus enum member has a label key", () => {
+  const missing = ISSUE_STATUSES.filter((s) => ISSUE_STATUS_LABEL_KEY[s] === undefined);
+  assert.deepEqual(missing, [], `add these to ISSUE_STATUS_LABEL_KEY: ${missing.join(", ")}`);
 });
 
-test("ISSUE_STATUS_TONE / ISSUE_STATUS_LABEL carry no key the schema dropped", () => {
+test("ISSUE_STATUS_TONE / ISSUE_STATUS_LABEL_KEY carry no key the schema dropped", () => {
   const staleTone = Object.keys(ISSUE_STATUS_TONE).filter((k) => !ISSUE_STATUSES.includes(k));
-  const staleLabel = Object.keys(ISSUE_STATUS_LABEL).filter((k) => !ISSUE_STATUSES.includes(k));
+  const staleLabel = Object.keys(ISSUE_STATUS_LABEL_KEY).filter((k) => !ISSUE_STATUSES.includes(k));
   assert.deepEqual(staleTone, []);
   assert.deepEqual(staleLabel, []);
+});
+
+test("every IssueStatus label key exists in the English catalog — a missing one renders as the raw key", () => {
+  const missing = Object.entries(ISSUE_STATUS_LABEL_KEY).filter(([, key]) => en(key) === undefined);
+  assert.deepEqual(missing, [], `add these keys to the message catalog: ${missing.map(([, k]) => k).join(", ")}`);
 });
 
 test("every IssueStatus tone is a real ChipTone", () => {
@@ -172,47 +173,51 @@ test("an OPEN issue reads as attention-needed and a RESOLVED one as success", ()
 });
 
 test("IN_PROGRESS renders with a space, not the raw SCREAMING_SNAKE enum value", () => {
-  assert.equal(ISSUE_STATUS_LABEL.IN_PROGRESS, "In Progress");
-  for (const label of Object.values(ISSUE_STATUS_LABEL)) {
-    assert.ok(!label.includes("_"), `label "${label}" leaks the raw enum spelling`);
+  assert.equal(en(ISSUE_STATUS_LABEL_KEY.IN_PROGRESS), "In Progress");
+  for (const key of Object.values(ISSUE_STATUS_LABEL_KEY)) {
+    assert.ok(!String(en(key)).includes("_"), `label "${en(key)}" leaks the raw enum spelling`);
   }
 });
 
 // ── IssueType ────────────────────────────────────────────────────────────────
 
-test("every IssueType enum member has a display label", () => {
-  const missing = ISSUE_TYPES.filter((t) => ISSUE_TYPE_LABELS[t] === undefined);
-  assert.deepEqual(missing, [], `add these to ISSUE_TYPE_LABELS: ${missing.join(", ")}`);
+test("every IssueType enum member has a label key", () => {
+  const missing = ISSUE_TYPES.filter((t) => ISSUE_TYPE_LABEL_KEY[t] === undefined);
+  assert.deepEqual(missing, [], `add these to ISSUE_TYPE_LABEL_KEY: ${missing.join(", ")}`);
 });
 
-test("ISSUE_TYPE_LABELS carries no key the schema dropped", () => {
-  const stale = Object.keys(ISSUE_TYPE_LABELS).filter((k) => !ISSUE_TYPES.includes(k));
-  assert.deepEqual(stale, [], `remove these from ISSUE_TYPE_LABELS: ${stale.join(", ")}`);
+test("ISSUE_TYPE_LABEL_KEY carries no key the schema dropped", () => {
+  const stale = Object.keys(ISSUE_TYPE_LABEL_KEY).filter((k) => !ISSUE_TYPES.includes(k));
+  assert.deepEqual(stale, [], `remove these from ISSUE_TYPE_LABEL_KEY: ${stale.join(", ")}`);
+});
+
+test("every IssueType label key exists in the English catalog — a missing one renders as the raw key", () => {
+  const missing = Object.entries(ISSUE_TYPE_LABEL_KEY).filter(([, key]) => en(key) === undefined);
+  assert.deepEqual(missing, [], `add these keys to the message catalog: ${missing.map(([, k]) => k).join(", ")}`);
 });
 
 test("BAD_VIDEO keeps the fuller wording that the drifted copies disagreed on", () => {
   // The drift this module was created to end: one copy said "Bad video", the
   // canonical one says "Bad video quality".
-  assert.equal(ISSUE_TYPE_LABELS.BAD_VIDEO, "Bad video quality");
+  assert.equal(en(ISSUE_TYPE_LABEL_KEY.BAD_VIDEO), "Bad video quality");
 });
 
 test("issue-type labels are human-readable — no underscores, no raw enum spellings", () => {
-  for (const [type, label] of Object.entries(ISSUE_TYPE_LABELS)) {
-    assert.ok(!label.includes("_"), `ISSUE_TYPE_LABELS.${type} = "${label}" leaks the enum spelling`);
+  for (const [type, key] of Object.entries(ISSUE_TYPE_LABEL_KEY)) {
+    const label = String(en(key));
+    assert.ok(!label.includes("_"), `ISSUE_TYPE_LABEL_KEY.${type} renders "${label}", which leaks the enum spelling`);
     assert.notEqual(label, type);
     assert.ok(label.length > 0);
   }
 });
 
 test("issue-type labels are distinct — two types must never render identically", () => {
-  const labels = Object.values(ISSUE_TYPE_LABELS);
+  const labels = Object.values(ISSUE_TYPE_LABEL_KEY).map(en);
   assert.equal(new Set(labels).size, labels.length, `duplicate labels: ${labels.join(" | ")}`);
 });
 
-test("request and issue status labels are each internally distinct", () => {
-  const reqLabels = Object.values(REQUEST_STATUS_LABEL);
-  assert.equal(new Set(reqLabels).size, reqLabels.length);
-  const issueLabels = Object.values(ISSUE_STATUS_LABEL);
+test("issue status labels are distinct", () => {
+  const issueLabels = Object.values(ISSUE_STATUS_LABEL_KEY).map(en);
   assert.equal(new Set(issueLabels).size, issueLabels.length);
 });
 
@@ -222,9 +227,9 @@ test("an unknown status key reads back undefined rather than throwing", () => {
   // The maps are Record<string, …>, so call sites index them with a raw DB
   // string. Missing keys must be a soft undefined the caller can `??` over.
   assert.equal(REQUEST_STATUS_TONE.NOT_A_STATUS, undefined);
-  assert.equal(REQUEST_STATUS_LABEL.NOT_A_STATUS, undefined);
   assert.equal(ISSUE_STATUS_TONE.NOT_A_STATUS, undefined);
-  assert.equal(ISSUE_TYPE_LABELS.NOT_A_TYPE, undefined);
+  assert.equal(ISSUE_STATUS_LABEL_KEY.NOT_A_STATUS, undefined);
+  assert.equal(ISSUE_TYPE_LABEL_KEY.NOT_A_TYPE, undefined);
 });
 
 test("the maps are plain objects with no prototype-chain surprises on lookup", () => {
@@ -233,10 +238,9 @@ test("the maps are plain objects with no prototype-chain surprises on lookup", (
   // and that every value it does define is a string, never a function.
   for (const map of [
     REQUEST_STATUS_TONE,
-    REQUEST_STATUS_LABEL,
     ISSUE_STATUS_TONE,
-    ISSUE_STATUS_LABEL,
-    ISSUE_TYPE_LABELS,
+    ISSUE_STATUS_LABEL_KEY,
+    ISSUE_TYPE_LABEL_KEY,
   ]) {
     assert.equal(typeof map.toString, "function"); // inherited, as expected for a literal
     assert.ok(!Object.prototype.hasOwnProperty.call(map, "toString"));

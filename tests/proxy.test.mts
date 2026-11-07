@@ -13,7 +13,8 @@
 //      PRESENCE, not validity, is the CORS-sound skip signal, and auth is
 //      still enforced after the skip);
 //   4. session gating (public paths pass anonymously; protected pages 302 to
-//      /login with callbackUrl + cleared cookies; protected APIs get a
+//      /login with callbackUrl, clearing a missing/junk cookie but never a
+//      well-signed one, which may be a pre-rotation copy; protected APIs get a
 //      machine-readable 401; verifyAndRefreshSession is DB-checked so a
 //      revoked AuthSession row rejects a still-valid JWT — the guardrail-29
 //      "never JWT-only" principle at the proxy layer);
@@ -1210,4 +1211,55 @@ test("a bearer request after a role change passes WITHOUT rotating, and the app'
   assert.ok(sessionRows.has(sessionId), "the native session's row must not be renamed");
   const second = await proxy(req("/api/requests", { headers: asBearer(token) }));
   assertPassedThrough(second, "the app's original token must still pass the proxy");
+});
+
+// ── AUTH_URL that doesn't parse ─────────────────────────────────────────────
+
+test("a blank or scheme-less AUTH_URL never 500s a redirect: the login and admin-denial redirects fall back to the request's origin", async () => {
+  const saved = process.env.AUTH_URL;
+  try {
+    for (const bad of ["", "   ", "summonarr.example.com:3001"]) {
+      process.env.AUTH_URL = bad;
+      const unauth = await proxy(req("/movies"));
+      assert.equal(unauth.status, 302, `AUTH_URL=${JSON.stringify(bad)}`);
+      assert.equal(unauth.headers.get("location"), `${SELF}/login?callbackUrl=%2Fmovies`);
+
+      const { token } = await mintSession({ role: "USER" }); // no MANAGE_* bits
+      const denied = await proxy(req("/admin", { headers: asBearer(token) }));
+      assert.equal(denied.status, 307);
+      assert.equal(denied.headers.get("location"), `${SELF}/`);
+    }
+    // A usable AUTH_URL still wins over the request's own origin.
+    process.env.AUTH_URL = "https://requests.example.com";
+    const viaAuthUrl = await proxy(req("/movies"));
+    assert.equal(viaAuthUrl.headers.get("location"), "https://requests.example.com/login?callbackUrl=%2Fmovies");
+  } finally {
+    process.env.AUTH_URL = saved;
+  }
+});
+
+// ── the login redirect never deletes a cookie it can't prove is junk ────────
+
+test("a page request carrying the PRE-rotation cookie after a privilege change → login redirect WITHOUT clearing the (rotated) cookie", async () => {
+  const { userId, sessionId, token } = await mintSession({ role: "USER", transport: "cookie" });
+  usersById.get(userId)!.role = "ISSUE_ADMIN"; // promoted in another tab
+  // This pass rotates the session (renames the row) and hands back a new cookie.
+  const rotating = await proxy(req("/movies", { headers: asCookie(token) }));
+  assertPassedThrough(rotating);
+  assert.ok(!sessionRows.has(sessionId), "precondition: the session was rotated");
+  assert.ok(setCookies(rotating).some((c) => c.startsWith(`${COOKIE}=`) && !c.includes("Max-Age=0")));
+
+  // A prefetch or second tab that sent the OLD cookie lands after the rotation.
+  const stale = await proxy(req("/movies", { headers: asCookie(token) }));
+  assert.equal(stale.status, 302);
+  assert.equal(stale.headers.get("location"), `${SELF}/login?callbackUrl=%2Fmovies`);
+  assert.deepEqual(
+    setCookies(stale).filter((c) => c.includes("Max-Age=0")),
+    [],
+    "Max-Age=0 here would delete the rotated cookie the browser now holds",
+  );
+
+  // A forged token is still cleared (the junk case the redirect exists for).
+  const forged = await proxy(req("/movies", { headers: asCookie(`${token.slice(0, -4)}AAAA`) }));
+  assert.ok(setCookies(forged).some((c) => c.startsWith(`${COOKIE}=;`) && c.includes("Max-Age=0")));
 });

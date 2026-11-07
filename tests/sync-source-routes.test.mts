@@ -453,6 +453,24 @@ for (const a of ARR) {
     assert.ok(scopes.length > 0, "the healthy instance should still be refreshed");
     assert.deepEqual([...new Set(scopes)], [""], "only the instance whose fetch SUCCEEDED may be cleared");
     assert.ok(!scopes.includes("anime"), "the down instance's cache must survive untouched");
+    // ...but the run is DEGRADED, not green (guardrail 36: a configured server
+    // that failed is red), and says which instance to go look at.
+    assert.equal(res.headers.get("x-cron-degraded"), "anime", "the ledger reads this header to record ok:false");
+    const body = await res.json();
+    assert.deepEqual(body.failedInstances, ["anime"]);
+    assert.equal(typeof body.wanted, "number", "the existing counts stay in the body");
+    assert.equal(JSON.parse(settings.get(`cron:lastRun:${a.name}-sync`) ?? "{}").ok, false);
+  });
+
+  test(`${a.name}: every instance healthy is a plain green 200 — no degraded header`, async () => {
+    configureArr(a.service);
+    configureArr(a.service, "anime");
+    registerArrInstance(a.service, "anime");
+    const res = await call(a.route);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-cron-degraded"), null);
+    assert.equal((await res.json()).failedInstances, undefined);
+    assert.equal(JSON.parse(settings.get(`cron:lastRun:${a.name}-sync`) ?? "{}").ok, true);
   });
 
   test(`${a.name}: a failed DEFAULT-instance fetch abandons the run with 502, not 200`, async () => {
@@ -891,6 +909,9 @@ test("ratings tolerates every TMDB list failing and still reports a result", asy
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.total, 0, "every list caught its own failure and degraded to empty");
+  // Nothing was warmed: that is a red run, not a green one.
+  assert.notEqual(res.headers.get("x-cron-degraded"), null, "an empty TMDB pool must mark the run degraded");
+  assert.equal(JSON.parse(settings.get("cron:lastRun:ratings-sync") ?? "{}").ok, false);
 });
 
 test("ratings pre-warms MDBList through the batch endpoint — one POST per type, ZERO single-item GETs, no OMDB drain", async () => {
@@ -909,6 +930,9 @@ test("ratings pre-warms MDBList through the batch endpoint — one POST per type
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.total, 2);
+  // Control for the degraded pin above: a pool that answered is a green run.
+  assert.equal(res.headers.get("x-cron-degraded"), null);
+  assert.equal(JSON.parse(settings.get("cron:lastRun:ratings-sync") ?? "{}").ok, true);
 
   const mdblistCalls = fetchCalls.filter((u) => u.hostname === "api.mdblist.com");
   assert.deepEqual(

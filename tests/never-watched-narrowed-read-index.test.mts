@@ -37,6 +37,27 @@ test("C005 PlayHistory declares @@index([sourceShowId]) — the narrowed show re
   );
 });
 
+// Leading columns of every @@index a model declares.
+function indexLeads(modelName: string): string[] {
+  const schema = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
+  const model = new RegExp(`^model ${modelName} \\{([\\s\\S]*?)^\\}`, "m").exec(schema);
+  assert.ok(model, `${modelName} model did not parse`);
+  return [...model[1].matchAll(/^\s*@@index\(\[([^\]]*)\]/gm)].map((m) => m[1].split(",")[0].trim().replace(/\(.*\)$/, ""));
+}
+
+test("TVEpisodeCache declares an index led by tmdbId — the narrowed season read names no source", () => {
+  // The PK leads with `source`, and Postgres has no skip scan, so a
+  // `tmdbId IN (…)` read with no source predicate scanned the whole episode table.
+  assert.ok(indexLeads("TVEpisodeCache").includes("tmdbId"), "no TVEpisodeCache index leads with tmdbId");
+});
+
+test("UpstreamWatchEvidence declares an index led by itemKey — the narrowed evidence read names no source or server", () => {
+  // 14d: evidence is never filtered by source or server, so the source-led PK
+  // can't serve the narrowed `itemKey IN (…)` read.
+  assert.ok(indexLeads("UpstreamWatchEvidence").includes("itemKey"), "no UpstreamWatchEvidence index leads with itemKey");
+  assert.ok(indexLeads("PlayHistory").length > 5, "the index parser is not reading real @@index lines");
+});
+
 // ── loader harness (the never-watched-data.test.mts evaluator, trimmed) ─────
 
 const { prisma } = await import("../src/lib/prisma.ts");

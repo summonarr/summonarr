@@ -124,18 +124,17 @@ test("acquired: runs work with a live AbortSignal, then unlocks and disconnects"
   assert.equal(result, 42);
   assert.equal(seenSignals.length, 1);
   assert.equal(seenSignals[0].aborted, false); // no timeout ⇒ never aborted
-  // Exact statement order: connection first, session timeouts, try-lock,
-  // unlock — and the unlock/end pair always closes the run.
+  // Exact statement order: connection first, try-lock, unlock — and the
+  // unlock/end pair always closes the run. No session SETs: this connection
+  // never runs a statement or transaction they could bound.
   assert.equal(calls[0]?.op, "connect");
   assert.deepEqual(queryTexts(), [
-    "SET statement_timeout = '30min'",
-    "SET idle_in_transaction_session_timeout = '30min'",
     "SELECT pg_try_advisory_lock($1::bigint) AS acquired",
     "SELECT pg_advisory_unlock($1::bigint)",
   ]);
   // Both lock statements target the SAME id the caller passed.
   const lockValues = calls.flatMap((c) => (c.op === "query" ? [c.values] : []));
-  assert.deepEqual(lockValues, [undefined, undefined, [WARM_OMDB_LOCK_ID], [WARM_OMDB_LOCK_ID]]);
+  assert.deepEqual(lockValues, [[WARM_OMDB_LOCK_ID], [WARM_OMDB_LOCK_ID]]);
   assert.equal(calls.at(-1)?.op, "end");
   assert.equal(calls.filter((c) => c.op === "end").length, 1);
 });

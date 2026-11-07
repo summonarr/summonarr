@@ -187,7 +187,7 @@ let seq = 0;
 // Bearer transport (returned header): skips UA-fingerprint + refreshed-token Set-Cookie,
 // while the DB-checked auth still runs in full. Claims mirror the row (role +
 // perms "0"), so verifyAndRefreshSession never rotates.
-async function mintSession(role: string): Promise<{ userId: string; header: Record<string, string> }> {
+async function mintSession(role: string, email?: string): Promise<{ userId: string; header: Record<string, string> }> {
   seq++;
   const userId = `actor-${seq}`;
   const sessionId = `actor-sess-${seq}`;
@@ -198,7 +198,8 @@ async function mintSession(role: string): Promise<{ userId: string; header: Reco
   });
   authSessionsById.set(sessionId, { userId });
   const token = await signSessionJwt(
-    { id: userId, role, permissions: "0", provider: "credentials", sessionId, expiresAt: Math.floor(Date.now() / 1000) + 86_400 },
+    // `email` (claim only) is who the email probe sends its test message to.
+    { id: userId, role, permissions: "0", provider: "credentials", sessionId, expiresAt: Math.floor(Date.now() / 1000) + 86_400, ...(email ? { email } : {}) },
     { expiresInSeconds: 7_200 },
   );
   return { userId, header: { authorization: `Bearer ${token}` } };
@@ -530,7 +531,8 @@ test("PATCH: resubmitting an unchanged legacy http:// donation value doesn't blo
   );
   assert.equal(res.status, 200, "an untouched legacy http:// field must not block saving an unrelated field");
   assert.equal(upsertFor("donationZelle").length, 1);
-  assert.equal(upsertFor("donationVenmo")[0]?.create.value, "http://venmo.com/legacy-handle");
+  assert.equal(upsertFor("donationVenmo").length, 0, "the unchanged value is not rewritten");
+  assert.equal(settings.get("donationVenmo"), "http://venmo.com/legacy-handle");
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -538,10 +540,10 @@ test("PATCH: resubmitting an unchanged legacy http:// donation value doesn't blo
 // RFC1918 IP literals ⇒ admin SSRF mode, isIP short-circuit, no DNS.
 // ════════════════════════════════════════════════════════════════════════════
 
-test("PATCH: writing a Radarr URL + key REACHES the connection test; a failure rolls the write back with 422", async () => {
+test("PATCH: writing a Radarr URL + key REACHES the connection test; a failure writes nothing and answers 422", async () => {
   const admin = await mintSession("ADMIN");
   // Default respond() throws ⇒ the Radarr status fetch fails ⇒ testRadarrConnection
-  // throws ⇒ the route records the error, rolls back, and returns 422.
+  // throws ⇒ the route records the error and returns 422 before any write.
   const res = await PATCH(
     patchReq(JSON.stringify({ radarr4kUrl: "http://10.0.0.1:7878", radarr4kApiKey: "k4-plaintext" }), admin.header),
     undefined,
@@ -556,43 +558,39 @@ test("PATCH: writing a Radarr URL + key REACHES the connection test; a failure r
     fetchCalls.some((c) => c.url.hostname === "10.0.0.1" && c.url.pathname === "/api/v3/system/status"),
     "the Radarr status probe must have been issued",
   );
-  // Proof of rollback: both freshly-created keys were deleted; nothing durably persisted.
-  const rolledBack = deleteManyCalls.map((c) => c.where.key).sort();
-  assert.deepEqual(rolledBack, ["radarr4kApiKey", "radarr4kUrl"], "a failed test rolls back the keys it just wrote");
+  // The probe ran BEFORE the write: nothing was written, so nothing needed
+  // rolling back, and approvals/crons never saw the unverified URL and key.
+  assert.equal(upsertCalls.length, 0, "a failed test writes nothing");
+  assert.equal(deleteManyCalls.length, 0);
+  assert.equal(auditAttempts.length, 0, "and audits nothing — the save was refused");
   assert.equal(settings.has("radarr4kApiKey"), false);
   assert.equal(settings.has("radarr4kUrl"), false);
 });
 
 // A tracking switch flipped ON in the same request as a failing connection test
-// writes a "tracked since" stamp in the same transaction; the rollback must put
-// that stamp back too (restore the prior one, or delete it when there was none),
-// or the never-watched window would claim coverage from a flip that was undone.
-// Both PATCHes reuse the same keys: the first rollback releases their cooldown.
-test("PATCH: a connection-test rollback also restores or deletes the tracking stamp written with the switch", async () => {
+// must not move the never-watched window either: the switch and its "tracked
+// since" stamp are written together, after the probe passed, or not at all.
+// Both PATCHes reuse the same keys: a refused save releases their cooldown, so
+// the admin's corrected re-save isn't 429'd.
+test("PATCH: a failing connection test writes neither the switch nor its tracking stamp, and releases the cooldown", async () => {
   const admin = await mintSession("ADMIN");
   const body = JSON.stringify({ sonarr4kUrl: "http://10.0.0.5:8989", sonarr4kApiKey: "k", playHistoryEnabled: "true" });
 
-  // No stamp before: the rollback deletes the one this request wrote.
   settings.set("playHistoryEnabled", "false");
   const first = await PATCH(patchReq(body, admin.header), undefined);
   assert.equal(first.status, 422);
-  assert.equal(upsertFor("playHistoryTrackedSince").length, 1, "precondition: the flip wrote a stamp");
-  assert.equal(settings.has("playHistoryTrackedSince"), false, "a stamp with no prior value is deleted on rollback");
-  assert.ok(deleteManyCalls.some((c) => c.where.key === "playHistoryTrackedSince"));
-  assert.equal(settings.get("playHistoryEnabled"), "false", "the switch itself is restored");
+  assert.equal(upsertCalls.length, 0, "nothing is written when a probe fails");
+  assert.equal(settings.has("playHistoryTrackedSince"), false, "no stamp for a flip that never happened");
+  assert.equal(settings.get("playHistoryEnabled"), "false");
 
-  // A prior stamp: the rollback restores exactly that value.
-  upsertCalls.length = 0;
-  deleteManyCalls.length = 0;
-  settings.set("playHistoryEnabled", "false");
   settings.set("playHistoryTrackedSince", "2020-01-01T00:00:00.000Z");
   const second = await PATCH(patchReq(body, admin.header), undefined);
-  assert.equal(second.status, 422);
-  assert.equal(settings.get("playHistoryTrackedSince"), "2020-01-01T00:00:00.000Z", "the prior stamp is restored, not dropped");
+  assert.equal(second.status, 422, "the immediate retry reaches the probe again — no cooldown left behind");
+  assert.equal(settings.get("playHistoryTrackedSince"), "2020-01-01T00:00:00.000Z", "the prior stamp is untouched");
   assert.equal(settings.get("playHistoryEnabled"), "false");
 });
 
-test("PATCH: a stamp rewritten by a concurrent write during the connection test is NOT rolled back", async () => {
+test("PATCH: a write another request makes while the connection test runs survives a failing test (nothing is rolled back)", async () => {
   const admin = await mintSession("ADMIN");
   settings.set("playHistoryEnabled", "false");
   respond = (url) => {
@@ -605,7 +603,8 @@ test("PATCH: a stamp rewritten by a concurrent write during the connection test 
     undefined,
   );
   assert.equal(res.status, 422);
-  assert.equal(settings.get("playHistoryTrackedSince"), "2099-01-01T00:00:00.000Z", "a superseded stamp must survive the rollback");
+  assert.equal(settings.get("playHistoryTrackedSince"), "2099-01-01T00:00:00.000Z", "the other write must survive");
+  assert.equal(deleteManyCalls.length, 0);
 });
 
 test("PATCH: writing a Sonarr URL + key with a healthy server → 200 with the reported version, values persist", async () => {
@@ -636,6 +635,7 @@ test("PATCH: an empty webhook secret is WRITTEN, not skipped — the admin form'
   // form offers a blank field to remove the secret, the write was skipped, and
   // the UI still said Saved while the OLD secret stayed valid — an operator who
   // believed they had rotated or revoked webhook auth had done neither.
+  settings.set("radarrWebhookSecret", "old-secret");
   const admin = await mintSession("ADMIN");
   const res = await PATCH(patchReq(JSON.stringify({ radarrWebhookSecret: "" }), admin.header), undefined);
   assert.equal(res.status, 200);
@@ -774,21 +774,21 @@ test("machine-session: enabling alongside a non-empty allowlist in the SAME patc
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// PATCH — Jellyfin gets the same post-write probe + rollback as Radarr/Sonarr.
+// PATCH — Jellyfin gets the same pre-write probe as Radarr/Sonarr.
 // "Save & Test" used to persist a mistyped URL durably and only then fail to load
 // libraries — the previous working config was already gone, and the orchestrator,
 // the 5s poller (guardrail 19) and Jellyfin sign-in all read the new row at once.
-// Order matters within this pair: the failure runs first and its rollback releases
-// the jellyfinUrl cooldown, which the success case then reuses. Only jellyfinUrl is
-// posted — jellyfinApiKey was written by the guardrail-7a test above and is still
-// inside its 10s cooldown (the cooldown keys on submitted body keys).
+// Order matters within this pair: the failure runs first and releases the
+// jellyfinUrl cooldown it claimed, which the success case then reuses. Only
+// jellyfinUrl is posted — jellyfinApiKey was written by the guardrail-7a test
+// above and is still inside its 10s cooldown.
 // ════════════════════════════════════════════════════════════════════════════
 
-test("PATCH: a Jellyfin URL that fails the connectivity probe is rolled back to the previous WORKING config (422)", async () => {
+test("PATCH: a Jellyfin URL that fails the connectivity probe is never written — the previous WORKING config stays (422)", async () => {
   settings.set("jellyfinUrl", "http://10.0.0.9:8096");
   settings.set("jellyfinApiKey", "working-key");
   const admin = await mintSession("ADMIN");
-  // Default respond() throws ⇒ getJellyfinMediaFolders throws ⇒ 422 + rollback.
+  // Default respond() throws ⇒ getJellyfinMediaFolders throws ⇒ 422, no write.
   const res = await PATCH(patchReq(JSON.stringify({ jellyfinUrl: "http://10.0.0.3:8096" }), admin.header), undefined);
   assert.equal(res.status, 422, "a failed Jellyfin probe must surface as 422, like Radarr/Sonarr/Plex");
   const body = (await res.json()) as { ok: boolean; jellyfinError?: string };
@@ -799,12 +799,11 @@ test("PATCH: a Jellyfin URL that fails the connectivity probe is rolled back to 
     fetchCalls.some((c) => c.url.hostname === "10.0.0.3" && c.url.pathname === "/Library/MediaFolders"),
     "the Jellyfin MediaFolders probe must have been issued against the freshly-written URL",
   );
-  // Proof of rollback: the pre-existing working URL is what the DB holds again.
-  assert.equal(settings.get("jellyfinUrl"), "http://10.0.0.9:8096", "the previous working URL must be restored");
+  // The probe tested the candidate (new URL, stored key) before any write.
+  assert.equal(settings.get("jellyfinUrl"), "http://10.0.0.9:8096", "the previous working URL stays");
   assert.equal(settings.get("jellyfinApiKey"), "working-key", "the untouched key stays");
-  assert.equal(deleteManyCalls.length, 0, "a pre-existing row is restored, not deleted");
-  const writes = upsertFor("jellyfinUrl").map((u) => u.create.value);
-  assert.deepEqual(writes, ["http://10.0.0.3:8096", "http://10.0.0.9:8096"], "write, then restore");
+  assert.equal(upsertCalls.length, 0, "the failing URL was never written, not even briefly");
+  assert.equal(deleteManyCalls.length, 0);
 });
 
 test("PATCH: a Jellyfin URL that passes the probe persists → 200 + jellyfinTested", async () => {
@@ -1163,4 +1162,237 @@ test("PATCH: many long values at once still fit — values are cut harder, and s
   assert.equal(details.before.omdbApiKey, "[redacted]");
   assert.equal(details.after.omdbApiKey, "[redacted]");
   assert.ok(!raw.includes("omdb-key"), "no secret value in the audit row");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// disableLocalLogin — never without another way in
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH disableLocalLogin: refused (400, no write) with no Plex, Jellyfin or SSO sign-in configured; allowed once one is; switching it back is always allowed", async () => {
+  const { processSingleton } = await import("../src/lib/process-singleton.ts");
+  const cooldowns = processSingleton("settings:lastKeyWriteAt", () => new Map<string, number>());
+  const saved = { issuer: process.env.OIDC_ISSUER, id: process.env.OIDC_CLIENT_ID, secret: process.env.OIDC_CLIENT_SECRET };
+  delete process.env.OIDC_ISSUER;
+  delete process.env.OIDC_CLIENT_ID;
+  delete process.env.OIDC_CLIENT_SECRET;
+  const write = async (value: string) => {
+    cooldowns.delete("disableLocalLogin"); // each case writes the same key
+    const admin = await mintSession("ADMIN");
+    return PATCH(patchReq(JSON.stringify({ disableLocalLogin: value }), admin.header), undefined);
+  };
+  try {
+    const refused = await write("true");
+    assert.equal(refused.status, 400);
+    assert.match((await refused.json()).error, /before disabling local login/);
+    assert.equal(upsertFor("disableLocalLogin").length, 0, "nothing written");
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(auditAttempts.length, 0);
+
+    // Turning local login back ON never needs a provider.
+    assert.equal((await write("false")).status, 200);
+    assert.equal(upsertFor("disableLocalLogin")[0]?.create.value, "false");
+
+    // A configured Jellyfin server (URL + key) is a way in.
+    settings.set("jellyfinUrl", "http://10.0.0.9:8096");
+    settings.set("jellyfinApiKey", "jf-key");
+    assert.equal((await write("true")).status, 200);
+
+    // So is SSO, on its own.
+    settings.clear();
+    process.env.OIDC_ISSUER = "https://idp.example.com";
+    process.env.OIDC_CLIENT_ID = "summonarr";
+    process.env.OIDC_CLIENT_SECRET = "oidc-secret";
+    assert.equal((await write("true")).status, 200);
+  } finally {
+    for (const [k, v] of [["OIDC_ISSUER", saved.issuer], ["OIDC_CLIENT_ID", saved.id], ["OIDC_CLIENT_SECRET", saved.secret]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — a resent value is not a change; a save with nothing to do does nothing
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: Save & Test again right after a save resends the URL — it re-tests and returns the version, with no second write, audit row or 429", async () => {
+  // arr-form's Save & Test always posts the URL. Treated as a change, the
+  // re-test was audited with identical before/after, flushed the arr snapshots
+  // and hit the 10s cooldown the first save had just armed: a 429 instead of a
+  // test result.
+  settings.set("radarrUrl", "http://10.0.0.8:7878");
+  settings.set("radarrApiKey", "stored-radarr-key");
+  respond = (url) => {
+    if (url.hostname === "10.0.0.7" && url.pathname === "/api/v3/system/status") return okJson({ version: "5.9.0", appName: "Radarr" });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const admin = await mintSession("ADMIN");
+  const body = JSON.stringify({ radarrUrl: "http://10.0.0.7:7878", radarrApiKey: MASK });
+  for (const attempt of ["the save", "the immediate re-test"]) {
+    const res = await PATCH(patchReq(body, admin.header), undefined);
+    assert.equal(res.status, 200, `${attempt} is not throttled`);
+    assert.deepEqual(await res.json(), { ok: true, radarrVersion: "5.9.0" }, `${attempt} tests the new URL with the stored key`);
+  }
+  assert.equal(fetchCalls.length, 2, "one probe per press");
+  assert.deepEqual(upsertCalls.map((u) => u.create.value), ["http://10.0.0.7:7878"], "written once — the re-test changed nothing");
+  assert.equal(auditAttempts.length, 1, "and audited once, not again with identical before/after");
+});
+
+test("PATCH: an empty body, an all-masked body and an all-unchanged body answer {ok:true} with no write and no audit row", async () => {
+  settings.set("omdbApiKey", "stored-omdb");
+  settings.set("motdTitle", "Hello");
+  const admin = await mintSession("ADMIN");
+  for (const body of [{}, { omdbApiKey: MASK, smtpPassword: MASK }, { motdTitle: "Hello" }]) {
+    const res = await PATCH(patchReq(JSON.stringify(body), admin.header), undefined);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true }, JSON.stringify(body));
+  }
+  assert.equal(upsertCalls.length, 0);
+  assert.equal(auditAttempts.length, 0, "an empty SETTINGS_CHANGE row (keys: []) used to be written");
+  assert.equal(settings.get("omdbApiKey"), "stored-omdb");
+});
+
+test("PATCH: a blank for a key that can't be cleared is reported in `ignored` (when it would have replaced a stored value) and writes nothing", async () => {
+  // The Discord bot token is masked on GET, so a blank submit can't be told
+  // from an echo; it must never wipe the token — but the answer must not
+  // pretend it was saved either.
+  settings.set("discordBotToken", "live-bot-token");
+  settings.set("smtpPort", "587");
+  const admin = await mintSession("ADMIN");
+  const res = await patchLater({ discordBotToken: "", smtpPort: "", smtpPassword: "", siteTitle: "Blanks" }, admin.header);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, ignored: ["discordBotToken", "smtpPort"] }, "smtpPassword holds nothing, so its blank changed nothing");
+  assert.equal(settings.get("discordBotToken"), "live-bot-token");
+  assert.equal(settings.get("smtpPort"), "587", "email.ts reads a blank port as invalid, so it stays non-clearable");
+  assert.deepEqual(upsertCalls.map((u) => u.where.key), ["siteTitle"]);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — blanks that mean something are written
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: blanking the quota, vote threshold, rate limits, push cap, session lengths or Resend sender is WRITTEN (blank = off / the default)", async () => {
+  // Each used to answer {ok:true} with no write: the form said Saved, a reload
+  // showed the old number, and the old limit stayed in force.
+  const seeded: Record<string, string> = {
+    quotaLimit: "5",
+    deletionVoteThreshold: "3",
+    rateLimitRegister: "9",
+    rateLimitRequests: "30",
+    rateLimitIssues: "12",
+    maxPushSubscriptions: "8",
+    sessionDefaultDuration: "7200",
+    sessionMobileDuration: "86400",
+    sessionMaxDuration: "604800",
+    resendFrom: "Media <media@example.com>",
+  };
+  for (const [k, v] of Object.entries(seeded)) settings.set(k, v);
+  const admin = await mintSession("ADMIN");
+  const res = await patchLater(Object.fromEntries(Object.keys(seeded).map((k) => [k, ""])), admin.header);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  for (const key of Object.keys(seeded)) {
+    assert.equal(upsertFor(key)[0]?.create.value, "", `clearing ${key} must reach the database`);
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — values that were stored unchecked
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: the Plex admin token and account email are written only by Connect Plex — a PATCH of either is refused", async () => {
+  // savePlexAdminToken validates against plex.tv, writes both rows together
+  // and clears PlexTokenCache. Through this route a stale admin email stayed on
+  // the sign-in allow list.
+  settings.set("plexAdminEmail", "owner@example.com");
+  const admin = await mintSession("ADMIN");
+  for (const body of [{ plexAdminToken: "new-plex-token" }, { plexAdminEmail: "someone@example.com" }]) {
+    const res = await PATCH(patchReq(JSON.stringify(body), admin.header), undefined);
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.match((await res.json()).error, /Connect Plex/);
+  }
+  assert.equal(upsertCalls.length, 0);
+  // The masked token and the unchanged email (what a GET echo carries) are fine.
+  const echo = await PATCH(patchReq(JSON.stringify({ plexAdminToken: MASK, plexAdminEmail: "owner@example.com" }), admin.header), undefined);
+  assert.equal(echo.status, 200);
+  assert.equal(upsertCalls.length, 0);
+});
+
+test("PATCH: SMTP port, polling interval, profile ids, quota period, email backend and library lists are validated — a bad value is refused with no write", async () => {
+  const admin = await mintSession("ADMIN");
+  const cases: Array<[Record<string, string>, RegExp]> = [
+    [{ smtpPort: "abc" }, /"smtpPort" must be an integer between 1 and 65535/],
+    [{ smtpPort: "70000" }, /"smtpPort" must be an integer between 1 and 65535/],
+    [{ playHistoryPollingInterval: "1" }, /"playHistoryPollingInterval" must be an integer between 5 and 600/],
+    [{ radarrQualityProfileId: "HD-1080p" }, /"radarrQualityProfileId" must be a positive integer/],
+    [{ sonarr4kQualityProfileId: "0" }, /"sonarr4kQualityProfileId" must be a positive integer/],
+    [{ quotaPeriod: "year" }, /"quotaPeriod" must be one of: day, week, month/],
+    [{ emailBackend: "foo" }, /"emailBackend" must be one of: smtp, resend/],
+    [{ jellyfinLibraries: "abc123&IncludeItemTypes=Person" }, /"jellyfinLibraries" must be a comma-separated list of library ids/],
+    [{ plexLibraries: "1,2/../3" }, /"plexLibraries" must be a comma-separated list of library ids/],
+  ];
+  for (const [body, error] of cases) {
+    const res = await PATCH(patchReq(JSON.stringify(body), admin.header), undefined);
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.match((await res.json()).error, error);
+  }
+  assert.equal(upsertCalls.length, 0, "no bad value may reach the DB");
+
+  const ok = await patchLater({
+    smtpPort: "465",
+    playHistoryPollingInterval: "30",
+    sonarrQualityProfileId: "4",
+    quotaPeriod: "month",
+    jellyfinLibraries: "f137a2dd21bbc1b99aa5c0f6bf02a805, 9d7ad6afe9afa2dab1a2f6e00ad28fa6",
+    plexLibraries: "1,2",
+  }, admin.header);
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.equal(upsertCalls.length, 6, "each valid value is stored");
+});
+
+test("PATCH: a secret that still carries the mask's bullets is refused — only the exact mask means \"keep\"", async () => {
+  // The API-key form held the mask as the field's value, so a key pasted with
+  // the caret at the end was saved as "••••••••<key>".
+  settings.set("omdbApiKey", "stored-omdb-key");
+  const admin = await mintSession("ADMIN");
+  const bad = await PATCH(patchReq(JSON.stringify({ omdbApiKey: `${MASK}abc123` }), admin.header), undefined);
+  assert.equal(bad.status, 400);
+  assert.match((await bad.json()).error, /masked placeholder/);
+  const keep = await PATCH(patchReq(JSON.stringify({ omdbApiKey: MASK }), admin.header), undefined);
+  assert.equal(keep.status, 200);
+  assert.equal(upsertCalls.length, 0);
+  assert.equal(settings.get("omdbApiKey"), "stored-omdb-key");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — the email probe tests the submitted config and caps the upstream text
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: a failing email test answers 422 with the upstream text cut to a few hundred characters, and writes nothing", async () => {
+  // An SMTP reply can be up to 1 MB; it is passed through to the admin as is,
+  // so it is capped. The stored port below makes email.ts throw before any
+  // socket, with the whole value in its message.
+  settings.set("smtpPort", "9".repeat(20_000));
+  const admin = await mintSession("ADMIN", "admin@example.com");
+  const res = await patchLater({ emailBackend: "smtp", smtpHost: "192.0.2.10" }, admin.header);
+  assert.equal(res.status, 422);
+  const body = (await res.json()) as { ok: boolean; smtpError: string };
+  assert.equal(body.ok, false);
+  assert.match(body.smtpError, /^Invalid SMTP port: 9+… \[20019 chars\]$/);
+  assert.ok(body.smtpError.length < 600, `smtpError is ${body.smtpError.length} chars`);
+  assert.equal(upsertCalls.length, 0, "the email settings are not written when the test fails");
+  assert.equal(auditAttempts.length, 0);
+});
+
+test("PATCH: the email test runs against the SUBMITTED settings, not the stored ones", async () => {
+  // Both hosts are refused by email.ts's SMTP host policy (link-local) before
+  // any socket; the error names the host that was tested.
+  settings.set("smtpHost", "169.254.1.1");
+  settings.set("smtpPort", "587");
+  const admin = await mintSession("ADMIN", "admin@example.com");
+  const res = await patchLater({ emailBackend: "smtp", smtpHost: "169.254.169.254" }, admin.header);
+  assert.equal(res.status, 422);
+  assert.match(((await res.json()) as { smtpError: string }).smtpError, /169\.254\.169\.254/, "the submitted host was tested");
+  assert.equal(settings.get("smtpHost"), "169.254.1.1", "the stored host is untouched");
+  assert.equal(upsertCalls.length, 0);
 });

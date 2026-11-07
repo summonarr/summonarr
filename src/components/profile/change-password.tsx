@@ -8,6 +8,7 @@ import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type RequestOptionsJSON } from "@/lib/client/webauthn";
 import { useT } from "@/components/i18n/i18n-provider";
+import { MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
 
 // What the page knows about the account's two-factor setup when it rendered.
 export interface ChangePasswordSecondFactor {
@@ -180,8 +181,8 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
           autoComplete="new-password"
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
-          placeholder={t("profile.password.minLength", { count: 12 })}
-          minLength={12}
+          placeholder={t("profile.password.minLength", { count: MIN_PASSWORD_LENGTH })}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
       </div>
@@ -196,7 +197,7 @@ export function ChangePassword({ hasPassword, secondFactor }: ChangePasswordProp
           autoComplete="new-password"
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
-          minLength={12}
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
       </div>

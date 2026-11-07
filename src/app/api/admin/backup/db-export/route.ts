@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { logAudit, auditContext } from "@/lib/audit";
+import { logAuditReturningId, auditContext } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { wrapEncryptStream, BackupCryptoError } from "@/lib/backup-crypto";
 import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
@@ -8,10 +8,37 @@ import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { localizeBackupMessage } from "@/lib/backup-messages";
+import { backupPasswordOrResponse } from "@/lib/backup-routes";
+import { processSingleton } from "@/lib/process-singleton";
 
 export const dynamic = "force-dynamic";
 
 const CHUNK_SIZE = 1000;
+
+// One export at a time, process-wide (guardrail 27a). Each export holds a
+// REPEATABLE READ snapshot, and one of the pool's five connections, for as long
+// as its client takes to download (the producer is paced by the reader), so a
+// double-clicked Download or two slow pulls took most of the pool. The slot is
+// freed when the stream ends, fails or times out, and at once when the client
+// cancels.
+const exportSlot = processSingleton("db-export:slot", () => ({ owner: null as symbol | null }));
+
+function claimExportSlot(): (() => void) | null {
+  if (exportSlot.owner) return null;
+  const token = Symbol("db-export");
+  exportSlot.owner = token;
+  return () => {
+    if (exportSlot.owner === token) exportSlot.owner = null;
+  };
+}
+
+// A response nobody starts reading would hold the slot for the whole export
+// timeout. Next runs GET for a HEAD request and never reads or cancels its body,
+// so cut such a producer off well before that. A real download starts reading
+// at once.
+const FIRST_READ_TIMEOUT_MS = 60 * 1000;
+
+type ExportOutcome = { status: "completed" | "aborted" | "failed"; rows: number };
 
 function escapeSQL(value: unknown): string {
   if (value === null || value === undefined) return "NULL";
@@ -56,9 +83,12 @@ function escapeSQL(value: unknown): string {
 }
 
 // Streams the whole database as a re-runnable SQL dump (enum types + paginated
-// INSERTs) inside one REPEATABLE READ snapshot.
+// INSERTs) inside one REPEATABLE READ snapshot. `onCancel` runs synchronously
+// when the reader cancels; `onSettled` once the producer has finished, however
+// it finished.
 function buildSqlStream(
   exportedBy: string,
+  hooks: { onCancel: () => void; onSettled: (outcome: ExportOutcome) => Promise<void> },
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
 
@@ -74,7 +104,17 @@ function buildSqlStream(
   // the row loop until the consumer reads. The REPEATABLE READ snapshot is then
   // held for the length of the download (as pg_dump does), which is what the
   // 20-minute transaction/export timeout already bounds.
-  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  let cancelled = false;
+  let neverRead = false;
+  // `cancel` runs when the reader cancels (Streams spec; Node 21+), synchronously
+  // with it, so the export slot frees at once. The TS lib doesn't declare it yet.
+  const transformer: Transformer<Uint8Array, Uint8Array> & { cancel: (reason: unknown) => void } = {
+    cancel() {
+      cancelled = true;
+      hooks.onCancel();
+    },
+  };
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>(transformer);
   const writer = writable.getWriter();
 
   void (async () => {
@@ -88,10 +128,18 @@ function buildSqlStream(
       () => void writer.abort(new Error("Backup export timed out")).catch(() => {}),
       EXPORT_TIMEOUT_MS,
     ).unref();
+    const firstRead = setTimeout(() => {
+      neverRead = true;
+      void writer.abort(new Error("Backup export was never read")).catch(() => {});
+    }, FIRST_READ_TIMEOUT_MS).unref();
+    let exportedRows = 0;
+    let status: ExportOutcome["status"] = "failed";
     try {
       const write = (s: string) => writer.write(encoder.encode(s));
 
       await write("-- Summonarr Full Database Backup\n");
+      // The reader has started (this write waited for it).
+      clearTimeout(firstRead);
       // Schema-Fingerprint is parsed by the importer and matched against the
       // live server's fingerprint. Mismatch refuses the restore before any
       // mutation. Format must stay parseable by the importer's regex.
@@ -254,6 +302,7 @@ function buildSqlStream(
                 // aborting the entire restore.
                 await write(`INSERT INTO "public"."${table}" (${colList}) VALUES (${values}) ON CONFLICT DO NOTHING;\n`);
                 totalRows++;
+                exportedRows++;
               }
 
               if (rows.length < CHUNK_SIZE) break;
@@ -272,19 +321,25 @@ function buildSqlStream(
       );
 
       await writer.close();
+      status = "completed";
     } catch (err) {
+      if (cancelled || neverRead) {
+        status = "aborted";
+      } else {
+        console.error("[db-export] export failed:", err);
+      }
       // Abort the stream with the error so the download fails loudly
       // instead of ending early and looking like a complete (but truncated) file.
       await writer.abort(err).catch(() => {});
     } finally {
       clearTimeout(timeout);
+      clearTimeout(firstRead);
+      await hooks.onSettled({ status, rows: exportedRows });
     }
   })();
 
   return readable;
 }
-
-const MIN_BACKUP_PASSWORD_LEN = 12;
 
 export const GET = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -296,40 +351,53 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   if (!checkRateLimit(`admin-db-export:${session.user.id}`, 5, 60 * 60 * 1000)) {
     return NextResponse.json({ error: t("apiAdmin.backup.tooManyExports") }, { status: 429 });
   }
-  const password = process.env.BACKUP_DB_PASSWORD ?? "";
-  if (password.length === 0) {
-    return NextResponse.json(
-      { error: t("apiAdmin.backup.notConfigured") },
-      { status: 503 },
-    );
+  const pw = backupPasswordOrResponse(t, "admin");
+  if (pw instanceof NextResponse) return pw;
+  const { password } = pw;
+
+  const release = claimExportSlot();
+  if (!release) {
+    return NextResponse.json({ error: t("apiAdmin.backup.exportInProgress") }, { status: 409 });
   }
-  if (password.length < MIN_BACKUP_PASSWORD_LEN) {
-    return NextResponse.json(
-      { error: t("apiAdmin.backup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
-      { status: 503 },
-    );
-  }
+
+  // Written BEFORE the stream, so an export the client abandons at once is still
+  // on record, then finalized with how it ended (the audit-log export's shape).
+  // A failed audit write must not 500 the export (guardrail 26): it is swallowed,
+  // and the row is then simply not finalized.
+  const details = { format: "sql", tables: BACKUP_TABLES.length, encrypted: true };
+  const auditId = logAuditReturningId({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "BACKUP_EXPORT",
+    target: "backup:full-db",
+    details: { ...details, status: "started" },
+    ...auditContext(req, session),
+  });
+
+  const onSettled = async ({ status, rows }: ExportOutcome) => {
+    release();
+    const id = await auditId;
+    if (!id) return;
+    try {
+      await prisma.auditLog.update({
+        where: { id },
+        data: { details: JSON.stringify({ ...details, status, totalRows: rows }) },
+      });
+    } catch (err) {
+      console.error("[db-export] failed to finalize audit row:", err);
+    }
+  };
 
   let body: ReadableStream<Uint8Array>;
   try {
-    body = wrapEncryptStream(buildSqlStream(session.user.id), password);
+    body = wrapEncryptStream(buildSqlStream(session.user.id, { onCancel: release, onSettled }), password);
   } catch (err) {
+    release();
     if (err instanceof BackupCryptoError) {
       return NextResponse.json({ error: localizeBackupMessage(err.message, t) }, { status: err.status });
     }
     throw err;
   }
-
-  // The backup stream is already built; a failed audit write must not 500 a
-  // successful export (GR26). logAudit swallows write failures internally.
-  void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email,
-    action: "BACKUP_EXPORT",
-    target: "backup:full-db",
-    details: { format: "sql", tables: BACKUP_TABLES.length, encrypted: true },
-    ...auditContext(req, session),
-  });
 
   const date = new Date().toISOString().slice(0, 10);
   const filename = `summonarr-full-backup-${date}.sql.enc`;

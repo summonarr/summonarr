@@ -263,7 +263,18 @@ export default async function ProfilePage() {
             title={t("profile.close.title")}
             description={t("profile.close.description")}
           >
-            <DeleteAccount requiresPassword={hasPassword} />
+            <DeleteAccount
+              requiresPassword={hasPassword}
+              secondFactor={
+                mfaState
+                  ? {
+                      enabled: mfaState.enabled,
+                      hasPasskeys: mfaState.passkeys.length > 0,
+                      webauthnAvailable: webAuthnConfigFromEnv() !== null,
+                    }
+                  : undefined
+              }
+            />
           </ProfileCard>
         </div>
 

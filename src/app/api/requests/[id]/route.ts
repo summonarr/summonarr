@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { withAuth, withPermission } from "@/lib/api-auth";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage, arrErrorMessageForClient } from "@/lib/arr";
-import { addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
+import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage, arrErrorMessageForClient, arrWriteOutcomeUnknown } from "@/lib/arr";
+import { addSeriesToSonarr, listQualityProfiles, type AddProgress } from "@/lib/arr";
 import { MissingInstanceError, NothingMissingError, SeriesNotOnInstanceError, findSeriesIdOnInstance, searchMissing } from "@/lib/arr-missing-data";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -58,7 +58,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   const existing = await prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
   if (!existing) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
-  if (search) {
+  // Strictly `true`: the body type is a compile-time cast (readJsonCapped), and a
+  // truthy non-boolean such as "false" must not trigger an arr search or re-push.
+  if (search === true) {
     if (existing.status !== "APPROVED" && existing.status !== "AVAILABLE") {
       return NextResponse.json(
         { error: t("apiUser.requests.searchInvalidStatus") },
@@ -136,7 +138,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     return NextResponse.json({ ...existing, adminNote: searchedNote, arrError });
   }
 
-  if (retry) {
+  if (retry === true) {
     if (existing.status !== "APPROVED") {
       return NextResponse.json(
         { error: t("apiUser.requests.retryInvalidStatus") },
@@ -337,9 +339,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   // An admin acting on their OWN request shouldn't get a self-notification ("your
   // request was approved/declined/available") — they just performed the action.
   const selfAction = existing.requestedBy === session.user.id;
-  if (status === "APPROVED" && existing.status !== "APPROVED") {
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, ...requester, before: { status: existing.status }, after: { status }, ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}) }, ...auditContext(req, session) });
-  } else if (status === "DECLINED" && existing.status !== "DECLINED") {
+  // REQUEST_APPROVE is written below, once the push's outcome is known.
+  if (status === "DECLINED" && existing.status !== "DECLINED") {
     void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DECLINE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, ...requester, adminNote: updated.adminNote, before: { status: existing.status }, after: { status } }, ...auditContext(req, session) });
   }
 
@@ -351,36 +352,71 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     const effectiveProfileId = qualityProfileId ?? updated.qualityProfileId ?? undefined;
     let arrError: string | null = null;
     let arrPushSucceeded = false;
+    let arrPushOutcomeUnknown = false;
     let pushedTvdbId: number | null = null;
     let rolledBack = false;
+    const pushProgress: AddProgress = { sent: false };
     try {
       if (updated.mediaType === "MOVIE") {
-        await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
+        await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy, pushProgress);
       } else {
-        pushedTvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
+        pushedTvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy, pushProgress);
       }
       arrPushSucceeded = true;
     } catch (err) {
-      console.error("[arr] Failed to push request:", arrErrorMessage(err));
+      // The kind of failure goes to the admin either way (`arrError`).
       arrError = arrErrorMessageForClient(err, t);
-      // Roll status back to PENDING so the request isn't stuck APPROVED with no
-      // ARR backing — admin sees the failure in the response (`arrError`) and
-      // can retry. Matches the Discord interactions auto-approve rollback shape.
-      // updateMany (not update): a concurrently moved row no-ops instead of
-      // throwing, and `count` tells us whether the rollback actually landed so
-      // the response body below can reflect it.
-      const rb = await prisma.mediaRequest.updateMany({
-        where: { id, status: "APPROVED" },
-        data: { status: "PENDING", pendingNotifyAt: null },
-      }).catch((rbErr) => {
-        console.error("[requests] rollback to PENDING failed:", rbErr);
-        return { count: 0 };
-      });
-      rolledBack = rb.count === 1;
-      // Correct the optimistic APPROVED SSE emitted before the push — without this,
-      // clients show the request stuck APPROVED when it's actually back to PENDING.
-      emitSSE({ type: "request:updated", requestId: id, status: "PENDING", userId: existing.requestedBy });
+      // Unknown only once the add itself was sent: a failure before it (a lookup,
+      // a dark arr refusing the connection) added nothing.
+      if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {
+        // No definite answer (a timeout, a dropped connection, a gateway 502/504):
+        // the arr may have added the title and be downloading it. The approval
+        // stands — rolled back, the queue would offer to decline a title already on
+        // its way. An add that never landed is re-pushed by the sync (an APPROVED
+        // title the arr doesn't hold), or by Re-push now.
+        console.error("[arr] Push outcome unknown, left APPROVED:", arrErrorMessage(err));
+        arrPushOutcomeUnknown = true;
+      } else {
+        console.error("[arr] Failed to push request:", arrErrorMessage(err));
+        // Roll status back to PENDING so the request isn't stuck APPROVED with no
+        // ARR backing — admin sees the failure in the response (`arrError`) and
+        // can retry. Matches the Discord interactions auto-approve rollback shape.
+        // updateMany (not update): a concurrently moved row no-ops instead of
+        // throwing, and `count` tells us whether the rollback actually landed so
+        // the response body below can reflect it.
+        const rb = await prisma.mediaRequest.updateMany({
+          where: { id, status: "APPROVED" },
+          data: { status: "PENDING", pendingNotifyAt: null },
+        }).catch((rbErr) => {
+          console.error("[requests] rollback to PENDING failed:", rbErr);
+          return { count: 0 };
+        });
+        rolledBack = rb.count === 1;
+        // Correct the optimistic APPROVED SSE emitted before the push — without this,
+        // clients show the request stuck APPROVED when it's actually back to PENDING.
+        emitSSE({ type: "request:updated", requestId: id, status: "PENDING", userId: existing.requestedBy });
+      }
     }
+
+    // Audited once the push's outcome is known: the approval was a real decision
+    // either way (approvedAt is kept on a rollback), but the trail must also say
+    // whether the request reached Radarr/Sonarr or went back to PENDING — the
+    // Discord approve records the same (`arrFailed`). Post-commit, so the
+    // swallowing variant (guardrail 26).
+    void logAudit({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email,
+      action: "REQUEST_APPROVE",
+      target: `request:${id}`,
+      details: {
+        title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, ...requester,
+        before: { status: existing.status }, after: { status },
+        ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}),
+        arrPushSucceeded, rolledBack,
+        ...(arrPushOutcomeUnknown ? { arrPushOutcomeUnknown } : {}),
+      },
+      ...auditContext(req, session),
+    });
 
     // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
     // by this point, so a P2025 (row deleted mid-push) or transient DB error must not trip
@@ -390,20 +426,22 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       await prisma.mediaRequest.updateMany({ where: { id }, data: { tvdbId: pushedTvdbId } });
     }
 
-    // Only notify if ARR push actually succeeded — otherwise the user gets a
+    // Only notify while the approval stands — the push landed, or its outcome is
+    // unknown and the row stays APPROVED. A definite failure would make it a
     // misleading "Approved!" ping for a request that's actually back to PENDING.
     // Skip when the admin approved their own request (selfAction).
-    if (arrPushSucceeded && !selfAction) {
+    const approvalStands = arrPushSucceeded || arrPushOutcomeUnknown;
+    if (approvalStands && !selfAction) {
       notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
     }
 
     // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
-    // orchestrator's next sweep. Scheduled only on the push-succeeded path, like
-    // the POST auto-approve and batch routes: the rollback above already cleared
-    // pendingNotifyAt, so a job queued for that row would only burn a bounded
-    // delayed-job slot — and, should the admin re-approve inside the 90s window,
-    // it would fire alongside the re-approve's own job for the same row.
-    if (arrPushSucceeded) {
+    // orchestrator's next sweep. Scheduled only while the row keeps its armed
+    // pendingNotifyAt, like the POST auto-approve and batch routes: the rollback
+    // above already cleared it, so a job queued for that row would only burn a
+    // bounded delayed-job slot — and, should the admin re-approve inside the 90s
+    // window, it would fire alongside the re-approve's own job for the same row.
+    if (approvalStands) {
       scheduleDownloadCheck({
         requestId: id,
         tmdbId: updated.tmdbId,
@@ -418,11 +456,13 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     // (APPROVED + armed pendingNotifyAt for a row that is PENDING again). A
     // bearer/native client has no SSE stream to correct it, so the body must
     // reflect the rolled-back state — same contract the POST auto-approve path
-    // pins ("the response must reflect the rolled-back state").
+    // pins ("the response must reflect the rolled-back state"). Additive:
+    // `arrPushOutcomeUnknown` marks an APPROVED row whose push got no answer.
     return NextResponse.json({
       ...updated,
       ...(rolledBack ? { status: "PENDING", pendingNotifyAt: null } : {}),
       arrError,
+      ...(arrPushOutcomeUnknown ? { arrPushOutcomeUnknown: true } : {}),
     });
   }
 

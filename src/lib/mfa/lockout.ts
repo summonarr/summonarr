@@ -103,8 +103,10 @@ export type GuardedVerdict =
 export interface GuardContext {
   webauthnChallenge?: string;
   webauthnConfig: WebAuthnConfig | null;
-  // Where the guess happened, for the lockout audit row.
-  context: "sign-in" | "enrollment";
+  // Where the guess happened, for the lockout audit row: a sign-in, an
+  // enrollment change, or a step-up guarding a password change or the account's
+  // own deactivation.
+  context: "sign-in" | "enrollment" | "password-change" | "account-delete";
   ipAddress?: string | null;
   userAgent?: string | null;
 }

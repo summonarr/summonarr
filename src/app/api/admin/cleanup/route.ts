@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { isFeatureEnabled } from "@/lib/features";
 import { loadArrLibraryIndex } from "@/lib/library-cleanup-arr";
-import { CLEANUP_FEATURE_KEY, computeCleanupReport } from "@/lib/library-cleanup-data";
+import { computeCleanupReport } from "@/lib/library-cleanup-data";
+import { cleanupDisabledResponse } from "@/lib/library-cleanup-gate";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
 
@@ -21,9 +21,8 @@ const LOADS_PER_MIN = 30;
 // delete targets, plus a fixed set of DB aggregates. Nothing is written.
 export const GET = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  if (!(await isFeatureEnabled(CLEANUP_FEATURE_KEY))) {
-    return NextResponse.json({ error: t("apiAdmin.cleanup.disabled") }, { status: 404 });
-  }
+  const off = await cleanupDisabledResponse(t);
+  if (off) return off;
   if (!checkRateLimit(`cleanup:${session.user.id}`, LOADS_PER_MIN, 60_000)) {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsShortly") }, { status: 429 });
   }

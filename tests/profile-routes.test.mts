@@ -120,6 +120,7 @@ const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { hashPassword, verifyPassword } = await import("../src/lib/password-hash.ts");
 const { normalizeEmail } = await import("../src/lib/email-normalize.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
+const { USER_ROLE_LOCK_SQL } = await import("../src/lib/account-lifecycle.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const {
   buildVerifyIdentifier,
@@ -295,12 +296,22 @@ const txObj = {
   discordLinkToken: discordLinkTokenModel,
   discordMergeCode: discordMergeCodeModel,
   mediaServerUser: mediaServerUserModel,
-  $executeRawUnsafe: async () => 0,
-  $executeRaw: async () => 1,
+  // The advisory locks the deactivate tx takes, in order; `onTxLock` lands a
+  // concurrent write while this request "waits" for one.
+  $executeRawUnsafe: async (sql: string) => {
+    txLocks.push(sql);
+    onTxLock?.(sql);
+    return 0;
+  },
+  // The last-admin CAS (deactivateUserInTx): rows affected.
+  $executeRaw: async () => txCasRows,
 };
 // Runs at the top of a CALLBACK-form tx, before its first read — lets a test land
 // a concurrent write "inside" the verifyPassword window.
 let beforeTxCallback: (() => void) | null = null;
+const txLocks: string[] = [];
+let onTxLock: ((sql: string) => void) | null = null;
+let txCasRows = 1;
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   txCalls++;
   if (!Array.isArray(arg) && beforeTxCallback) beforeTxCallback();
@@ -442,6 +453,9 @@ function passwordUpdateData(): Record<string, unknown> {
 beforeEach(() => {
   ops.length = 0;
   txCalls = 0;
+  txLocks.length = 0;
+  onTxLock = null;
+  txCasRows = 1;
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
@@ -821,6 +835,19 @@ test("self-delete racing an admin removal writes NO self-delete audit row when t
     0,
     "a self-delete that changed nothing must not be audited as one",
   );
+});
+
+test("self-delete takes lock 42 BEFORE its role re-read, so a promotion committing meanwhile still meets the last-admin check", async () => {
+  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  // The promotion holds lock 42 while it commits; this request reads only after.
+  onTxLock = (sql) => { if (sql === USER_ROLE_LOCK_SQL) usersById.get(userId)!.role = "ADMIN"; };
+  txCasRows = 0; // no other active admin
+  const res = await deleteProfile(token);
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "You are the last admin. Promote another user to admin before deleting your account." });
+  assert.equal(txLocks[0], USER_ROLE_LOCK_SQL, "the lock is the transaction's first statement");
+  assert.equal(opsOf("user.update").length, 0, "the last admin is not disabled");
+  assert.equal(opsOf("authSession.deleteMany").length, 0);
 });
 
 test("a self-delete that DID disable the row still writes its USER_DEACTIVATE audit", async () => {

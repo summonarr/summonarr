@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { hashPassword } from "@/lib/password-hash";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
 import { checkRateLimit, getClientIpKey, parseRateLimit } from "@/lib/rate-limit";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { sanitizeOptional } from "@/lib/sanitize";
@@ -11,6 +12,15 @@ import { readJsonCapped } from "@/lib/body-size";
 import { parseBearerToken, hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { logAudit, auditContext } from "@/lib/audit";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
+import { lockSetupInTx } from "@/lib/setup-lock";
+
+// A fixed, DB-free per-IP bound taken before the first Setting read: this is an
+// unauthenticated surface, so the limiter must bound anonymous DB load too (the
+// setup-status / machine-session / quickconnect pattern). Wider than any sane
+// configured register limit; the setting-driven bucket below stays the real cap.
+const PRE_LIMIT = 30;
+const PRE_WINDOW_MS = 15 * 60 * 1000;
 
 // In-process flag: the DB advisory lock below is the real guard; this just turns away an obvious double-submit early.
 let registrationInFlight = false;
@@ -44,6 +54,10 @@ export async function POST(req: NextRequest) {
     if (allowed.size === 0 || !originOk) {
       return NextResponse.json({ error: t("apiAuth.common.forbidden") }, { status: 403 });
     }
+  }
+
+  if (!checkRateLimit(`register-pre:${getClientIpKey(req.headers)}`, PRE_LIMIT, PRE_WINDOW_MS)) {
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLater") }, { status: 429 });
   }
 
   const { enabled } = await getMaintenanceStatus();
@@ -107,7 +121,7 @@ export async function POST(req: NextRequest) {
   }
   const sanitizedName = sanitizeOptional(name);
 
-  if (password.length < 12) {
+  if (password.length < MIN_PASSWORD_LENGTH) {
     return NextResponse.json({ error: t("apiAuth.register.passwordTooShort") }, { status: 400 });
   }
 
@@ -137,8 +151,9 @@ export async function POST(req: NextRequest) {
   try {
     const passwordHash = await hashPassword(password);
     user = await prisma.$transaction(async (tx) => {
-      // Advisory lock 43 ensures only one concurrent initial-registration transaction can succeed
-      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
+      // Advisory lock 43 (setup-lock.ts) ensures only one concurrent initial-registration
+      // transaction can succeed, and serializes it with the first-run restore.
+      await lockSetupInTx(tx);
       const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
       if (setupCompleted) throw new Error("CLOSED");
       const userCount = await tx.user.count();
@@ -176,7 +191,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: t("apiAuth.register.closed") }, { status: 403 });
     }
 
-    if (msg.includes("Unique constraint")) {
+    // A racing first registration that slipped past the lock's checks lands on
+    // the unique email / setup key. Read the code, never the message text, and
+    // never `instanceof` (guardrail 23b).
+    if (isPrismaErrorCode(err, "P2002")) {
       return NextResponse.json({ error: t("apiAuth.register.closed") }, { status: 403 });
     }
     throw err;

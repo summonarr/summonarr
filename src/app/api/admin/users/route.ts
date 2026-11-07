@@ -4,7 +4,8 @@ import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma";
-import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { hashPassword } from "@/lib/password-hash";
+import { MAX_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
 import { normalizeEmail } from "@/lib/email-normalize";
 import { isReservedEmailDomain } from "@/lib/reserved-email";
 import { sanitizeOptional } from "@/lib/sanitize";
@@ -219,10 +220,10 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   if (!password || typeof password !== "string") {
     return NextResponse.json({ error: t("apiAdmin.users.passwordRequired") }, { status: 400 });
   }
-  // 12, the same floor as first-admin registration and the profile password
+  // The same floor as first-admin registration and the profile password
   // change — an admin-created account (the only post-setup path to a local one,
   // ADMIN role included) must not be weaker than what the user could set alone.
-  if (password.length < 12) {
+  if (password.length < MIN_PASSWORD_LENGTH) {
     return NextResponse.json({ error: t("apiAdmin.users.passwordTooShort") }, { status: 400 });
   }
   if (password.length > MAX_PASSWORD_LENGTH) {

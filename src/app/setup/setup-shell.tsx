@@ -23,16 +23,14 @@ const CARD_PADDING = 28;
 export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
   const t = useT();
   const [tab, setTab] = useState<Tab>("create");
+  // A running upload or account creation locks the switch: changing tabs
+  // unmounted the panel mid-restore, losing its progress and result.
+  const [busy, setBusy] = useState(false);
 
   if (!importAvailable) {
     return (
       <div style={{ ...CARD_STYLE, padding: CARD_PADDING }}>
-        <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
-          <span className="text-indigo-400 text-xs font-medium">
-            {t("auth.setup.firstUserAdmin")}
-          </span>
-        </div>
-        <SetupForm />
+        <CreateAdminPanel />
       </div>
     );
   }
@@ -44,39 +42,49 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
           ids/aria-controls/aria-labelledby and arrow-key roving focus to be
           complete and announced "tab, selected" with no associated panel. */}
       <div role="group" aria-label={t("auth.setup.mode")} className="grid grid-cols-2 border-b border-zinc-800">
-        <TabButton active={tab === "create"} onClick={() => setTab("create")}>
+        <TabButton active={tab === "create"} disabled={busy && tab !== "create"} onClick={() => setTab("create")}>
           <UserPlus className="w-3.5 h-3.5" />
           {t("auth.setup.tab.create")}
         </TabButton>
-        <TabButton active={tab === "restore"} onClick={() => setTab("restore")}>
+        <TabButton active={tab === "restore"} disabled={busy && tab !== "restore"} onClick={() => setTab("restore")}>
           <Upload className="w-3.5 h-3.5" />
           {t("auth.setup.tab.restore")}
         </TabButton>
       </div>
       <div style={{ padding: CARD_PADDING }}>
         {tab === "create" ? (
-          <>
-            <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
-              <span className="text-indigo-400 text-xs font-medium">
-                {t("auth.setup.firstUserAdmin")}
-              </span>
-            </div>
-            <SetupForm />
-          </>
+          <CreateAdminPanel onBusyChange={setBusy} />
         ) : (
-          <SetupImportPanel />
+          <SetupImportPanel onBusyChange={setBusy} />
         )}
       </div>
     </div>
   );
 }
 
+// The first-user-is-admin note and the account form, the same with or without tabs.
+function CreateAdminPanel({ onBusyChange }: { onBusyChange?: (busy: boolean) => void }) {
+  const t = useT();
+  return (
+    <>
+      <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
+        <span className="text-indigo-400 text-xs font-medium">
+          {t("auth.setup.firstUserAdmin")}
+        </span>
+      </div>
+      <SetupForm onBusyChange={onBusyChange} />
+    </>
+  );
+}
+
 function TabButton({
   active,
+  disabled,
   onClick,
   children,
 }: {
   active: boolean;
+  disabled?: boolean;
   onClick: () => void;
   children: React.ReactNode;
 }) {
@@ -84,8 +92,9 @@ function TabButton({
     <button
       type="button"
       aria-pressed={active}
+      disabled={disabled}
       onClick={onClick}
-      className={`ds-hover-tint flex items-center justify-center gap-1.5 py-3 text-xs font-medium transition-colors ${
+      className={`ds-hover-tint flex items-center justify-center gap-1.5 py-3 text-xs font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none ${
         active
           ? "text-[var(--ds-fg)] bg-zinc-900"
           : "text-zinc-400 bg-zinc-950 hover:text-zinc-200"

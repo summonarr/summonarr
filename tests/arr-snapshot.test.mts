@@ -166,8 +166,10 @@ test("a Radarr/Sonarr connection key or integration switch is arr config; other 
 test("config writes drop every snapshot: a cached read never runs its route's own instance checks", () => {
   const settings = src("src/app/api/settings/route.ts");
   assert.match(settings, /const arrConfigChanged = changedKeys\.some\(isArrConfigKey\);\s*if \(arrConfigChanged\) clearArrSnapshots\(\);/);
-  assert.match(settings, /if \(neverWatchedInputChanged\) invalidateNeverWatchedReport\(\);\s*if \(arrConfigChanged\) clearArrSnapshots\(\);/, "the rollback path drops them too");
-  assert.equal((settings.match(/clearArrSnapshots\(\)/g) ?? []).length, 2, "the write path and the rollback path");
+  // The connection tests run before the write, so there is no rollback to undo:
+  // one drop, after the commit.
+  assert.equal((settings.match(/clearArrSnapshots\(\)/g) ?? []).length, 1, "the write path only");
+  assert.ok(settings.indexOf("clearArrSnapshots()") > settings.indexOf("await prisma.$transaction("), "after the commit");
   const instances = src("src/app/api/admin/arr-instances/route.ts");
   assert.match(instances, /clearArrSnapshots\(\);\s*void logAudit\(/);
 });

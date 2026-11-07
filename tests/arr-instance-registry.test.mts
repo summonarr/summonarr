@@ -16,7 +16,9 @@ import {
   getArrInstancesWithConfigured,
   getSyncableArrInstances,
   isInstanceConfigured,
+  readArrInstanceRegistryForSave,
 } from "../src/lib/arr-instance-registry.ts";
+import { resetLogDedup } from "../src/lib/log-dedup.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
 
 // The registry JSON value keyed by Setting key, plus the set of connection keys
@@ -194,4 +196,48 @@ test("getArrInstancesWithConfigured hands back both views of ONE two-query read 
   assert.deepEqual([...configured].sort(), ["", "kids"]);
   assert.equal(findUniqueKeys().length, 1, "one registry read");
   assert.equal(findManyKeyLists().length, 1, "one batched probe");
+});
+
+test("a stored \"external\" entry (its keys are the default instance's) is dropped, with ONE warning per change, not per read", async () => {
+  reset();
+  resetLogDedup();
+  const warns: string[] = [];
+  const realWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
+  try {
+    registryValues.set("arrRadarrInstances", JSON.stringify([{ slug: "external", name: "Ext" }, { slug: "anime", name: "Anime" }]));
+    assert.deepEqual((await getArrInstances("radarr")).map((i) => i.slug), ["", "anime"]);
+    await getArrInstances("radarr");
+    assert.equal(warns.length, 1, "an unchanged registry warns once (guardrail 7b)");
+    assert.match(warns[0], /\[arr\] instance registry arrRadarrInstances has entries with an invalid or reserved slug \("external"\)/);
+
+    registryValues.set("arrRadarrInstances", JSON.stringify([{ slug: "anime", name: "Anime" }]));
+    await getArrInstances("radarr");
+    registryValues.set("arrRadarrInstances", JSON.stringify([{ slug: "external", name: "Ext" }]));
+    await getArrInstances("radarr");
+    assert.equal(warns.length, 2, "cleared and back again logs again");
+  } finally {
+    console.warn = realWarn;
+    resetLogDedup();
+  }
+});
+
+test("readArrInstanceRegistryForSave takes the service's save lock, THEN reads the registry through the transaction client", async () => {
+  reset();
+  registryValues.set("arrSonarrInstances", JSON.stringify([{ slug: "anime", name: "Anime" }, { slug: "hd" }]));
+  const calls: string[] = [];
+  const tx = {
+    $executeRaw: async (q: { sql: string }) => { calls.push(`lock ${q.sql}`); return 0; },
+    setting: {
+      findUnique: async (args: { where: { key: string } }) => {
+        calls.push(`read ${args.where.key}`);
+        const v = registryValues.get(args.where.key);
+        return v === undefined ? null : { key: args.where.key, value: v };
+      },
+    },
+  };
+  const list = await readArrInstanceRegistryForSave(tx as unknown as Parameters<typeof readArrInstanceRegistryForSave>[0], "sonarr");
+  assert.deepEqual(calls, ["lock SELECT pg_advisory_xact_lock(2101, 2)", "read arrSonarrInstances"]);
+  assert.deepEqual(list.map((i) => i.slug), ["anime"], "the same normalizer as every other read");
+  assert.equal(queries.length, 0, "nothing read through the top-level client");
 });

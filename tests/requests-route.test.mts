@@ -51,9 +51,9 @@
 // store records after() tasks (tests/maintenance.test.mts idiom, extended);
 // $transaction is a recording stub with tx-tagged ops (tests/
 // discord-merge.test.mts idiom); dns.lookup is stubbed and globalThis.fetch is
-// a recording thrower — every test asserts its wire budget (the only test that
-// EXPECTS a fetch is the quality-profile 502 path, where the throw IS the
-// scripted outage).
+// a recording thrower — every test asserts its wire budget (a fetch is EXPECTED
+// only on the quality-profile 502 path, where the throw IS the scripted outage,
+// and in the auto-approve push-outcome tests, which script the arr via scriptArr).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -286,7 +286,12 @@ let createImpls: Array<(args: { data: Record<string, unknown> }) => Record<strin
 let requestCounts: number[] = []; // shifted per mediaRequest.count call
 let existingRow: Record<string, unknown> | null = null; // the caller's own prior request
 let greenlitRow: { status: string; cleanedUpAt?: Date | null } | null = null; // any APPROVED/AVAILABLE peer
-let earlierPendingRow: { id: string } | null = null; // an earlier pending peer (notify dedupe)
+let earlierPendingRow: { id: string } | null = null; // a pending peer (notify dedupe)
+// Scripted answers for successive PENDING-peer reads (shifted per read); empty ⇒
+// earlierPendingRow. Lets a P2034 retry see a peer its first attempt did not.
+let pendingPeerAnswers: Array<{ id: string } | null> = [];
+let updateManyImpl: (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => Promise<{ count: number }> =
+  async () => ({ count: 1 });
 let listRows: Array<Record<string, unknown>> = [];
 let statusGroups: Array<{ status: string; _count: { status: number } }> = [];
 const mediaRequestModel = {
@@ -301,7 +306,9 @@ const mediaRequestModel = {
       const wanted = (w.status as { in: string[] }).in;
       return greenlitRow && wanted.includes(greenlitRow.status) ? greenlitRow : null;
     }
-    if (w.id && typeof w.id === "object" && "not" in (w.id as object)) return earlierPendingRow;
+    // The pending peer: read inside the create tx for a pending request, after the
+    // commit (with the earlier-than ordering) for a rolled-back auto-approve.
+    if (w.status === "PENDING") return pendingPeerAnswers.length > 0 ? pendingPeerAnswers.shift()! : earlierPendingRow;
     return null;
   },
   count: async (args: unknown) => {
@@ -317,9 +324,9 @@ const mediaRequestModel = {
     rec("mediaRequest.deleteMany", args);
     return { count: staleDeleteCount };
   },
-  updateMany: async (args: unknown) => {
+  updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
     rec("mediaRequest.updateMany", args);
-    return { count: 1 };
+    return updateManyImpl(args);
   },
   update: async (args: unknown) => {
     rec("mediaRequest.update", args);
@@ -371,8 +378,12 @@ shadowPrismaModel(prisma, "tmdbMediaCore", {
 // getMovieDetails serves the row with zero fetches and zero rewrites.
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const detailsRows = new Map<string, CacheRow>();
+const detailsReads: string[] = [];
 shadowPrismaModel(prisma, "tmdbCache", {
-  findUnique: async (args: { where: { key: string } }) => detailsRows.get(args.where.key) ?? null,
+  findUnique: async (args: { where: { key: string } }) => {
+    detailsReads.push(args.where.key);
+    return detailsRows.get(args.where.key) ?? null;
+  },
   upsert: async (args: { where: { key: string } }) => args,
   deleteMany: async () => ({ count: 0 }),
   delete: async (args: { where: { key: string } }) => args,
@@ -462,15 +473,24 @@ shadowPrismaModel(prisma, "pushSubscription", {
 // PROPAGATES the callback's rejection — the abort semantics the route's outer
 // catch depends on. Array form covers any batched shape.
 const txObj = { mediaRequest: mediaRequestModel, requestComment: requestCommentModel };
+// Serializable aborts at COMMIT for this many transactions (Postgres SSI often
+// reports the read/write cycle there, after the callback has run to the end).
+let commitFailures = 0;
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   txCalls++;
   if (Array.isArray(arg)) return Promise.all(arg);
   txDepth++;
+  let result: unknown;
   try {
-    return await (arg as (tx: typeof txObj) => Promise<unknown>)(txObj);
+    result = await (arg as (tx: typeof txObj) => Promise<unknown>)(txObj);
   } finally {
     txDepth--;
   }
+  if (commitFailures > 0) {
+    commitFailures--;
+    throw prismaKnownError("P2034");
+  }
+  return result;
 });
 
 // Routes under test (imported AFTER every stub is in place).
@@ -555,10 +575,14 @@ beforeEach(() => {
   staleDeleteCount = 1;
   greenlitRow = null;
   earlierPendingRow = null;
+  pendingPeerAnswers = [];
+  commitFailures = 0;
+  updateManyImpl = async () => ({ count: 1 });
   listRows = [];
   statusGroups = [];
   metaRow = { title: "The Matrix", posterPath: "/matrix.jpg", releaseYear: "1999" };
   detailsRows.clear();
+  detailsReads.length = 0;
   blacklistRows = [];
   plexHas = false;
   jellyfinHas = false;
@@ -1044,6 +1068,151 @@ test("auto-approve creates APPROVED with the 90s pendingNotifyAt backstop; a fai
   assert.equal(afterTasks.length, 1, "a rolled-back auto-approve must alert admins like any other PENDING request");
 });
 
+// A configured default Radarr/Sonarr whose lookups, root folders, profiles and
+// tags answer, so the add itself is the only scripted outcome.
+function scriptArr(add: (url: URL) => Response | Promise<Response>): void {
+  settings.set("radarrUrl", "http://radarr.example.com:7878");
+  settings.set("radarrApiKey", "radarr-key");
+  settings.set("sonarrUrl", "http://sonarr.example.com:8989");
+  settings.set("sonarrApiKey", "sonarr-key");
+  const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
+  fetchImpl = (url) => {
+    const p = url.pathname;
+    if (p.endsWith("/movie/lookup")) return json([{ tmdbId: 603, title: "The Matrix", year: 1999, images: [], titleSlug: "the-matrix", status: "released" }]);
+    if (p.endsWith("/series/lookup")) return json([{ tmdbId: 1399, tvdbId: 4242, title: "Game of Thrones", year: 2011, images: [], titleSlug: "got", seasons: [], firstAired: "2011-04-17" }]);
+    if (p.endsWith("/rootfolder")) return json([{ path: "/media" }]);
+    if (p.endsWith("/qualityprofile")) return json([{ id: 1, name: "HD" }]);
+    if (p.endsWith("/tag")) return json([{ id: 7, label: "x" }]);
+    if (p.endsWith("/api/v3/movie") || p.endsWith("/api/v3/series")) return add(url);
+    throw new Error(`unexpected fetch ${url.href}`);
+  };
+}
+
+async function withDownloadCheckSpy<T>(fn: () => Promise<T>): Promise<{ result: T; queued: number }> {
+  const { DOWNLOAD_CHECK_DELAY_MS } = await import("../src/lib/download-check.ts");
+  const orig = globalThis.setTimeout;
+  const delays: number[] = [];
+  globalThis.setTimeout = ((cb: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+    delays.push(ms ?? 0);
+    return (orig as unknown as (...a: unknown[]) => ReturnType<typeof setTimeout>)(cb, ms, ...rest);
+  }) as unknown as typeof setTimeout;
+  try {
+    const result = await fn();
+    return { result, queued: delays.filter((d) => d === DOWNLOAD_CHECK_DELAY_MS).length };
+  } finally {
+    globalThis.setTimeout = orig;
+  }
+}
+
+for (const [label, answer] of [
+  ["a gateway 504", () => new Response("gateway timeout", { status: 504 })],
+  ["a timeout", () => { throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" }); }],
+] as Array<[string, () => Response]>) {
+  test(`an auto-approve push with no definite answer (${label}) stays APPROVED: no rollback, no admin alert, the download check still queued`, async () => {
+    // Radarr may have added the title before the answer was lost. Rolled back to
+    // PENDING, admins would review a request for a title already downloading; the
+    // sync re-pushes an APPROVED title the arr doesn't hold instead.
+    scriptArr(answer);
+    const { userId, token } = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE) });
+    const { result: res, queued } = await withDownloadCheckSpy(() => post(token, requestBody(userId)));
+    assert.equal(res.status, 201);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.status, "APPROVED");
+    assert.ok(body.pendingNotifyAt, "the 90s backstop stays armed");
+    assert.ok(fetchCalls.some((u) => u.pathname.endsWith("/api/v3/movie")), "fixture sanity: the add was sent");
+    assert.equal(opsOf("mediaRequest.updateMany").length, 0, "no rollback write");
+    assert.equal(afterTasks.length, 0, "nothing for admins to review");
+    assert.deepEqual(sseEvents.map((e) => e.type), ["request:new"], "no corrective PENDING update");
+    assert.equal(queued, 1, "the download check consumes the armed backstop");
+    assert.ok(errors.some((e) => e.includes("[arr] Auto-approve push outcome unknown")));
+  });
+}
+
+test("a Sonarr add with no definite answer stays APPROVED too (the series add marks itself sent)", async () => {
+  scriptArr(() => new Response("gateway timeout", { status: 504 }));
+  const { userId, token } = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE) });
+  const res = await post(token, requestBody(userId, { tmdbId: 1399, mediaType: "TV" }));
+  assert.equal(res.status, 201);
+  assert.equal(((await res.json()) as Record<string, unknown>).status, "APPROVED");
+  assert.ok(fetchCalls.some((u) => u.pathname.endsWith("/api/v3/series")), "fixture sanity: the add was sent");
+  assert.equal(opsOf("mediaRequest.updateMany").length, 0, "no rollback, and no tvdbId to stamp");
+  assert.equal(afterTasks.length, 0);
+});
+
+test("a dark arr that refuses the connection before the add is sent still rolls back: nothing was added", async () => {
+  // A network failure reads as an unknown outcome only once the add itself went
+  // out; here the lookup never connected.
+  scriptArr(() => new Response(null, { status: 201 }));
+  const scripted = fetchImpl;
+  fetchImpl = (url) => {
+    if (url.pathname.endsWith("/movie/lookup")) throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    return scripted(url);
+  };
+  const { userId, token } = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE) });
+  const res = await post(token, requestBody(userId));
+  assert.equal(res.status, 201);
+  assert.equal(((await res.json()) as Record<string, unknown>).status, "PENDING");
+  assert.ok(!fetchCalls.some((u) => u.pathname.endsWith("/api/v3/movie")), "fixture sanity: no add was sent");
+  assert.equal(opsOf("mediaRequest.updateMany").length, 1, "rolled back");
+  assert.equal(afterTasks.length, 1);
+});
+
+test("an auto-approve push the arr definitely refused still rolls back to PENDING and alerts admins", async () => {
+  scriptArr(() => new Response(JSON.stringify([{ errorMessage: "Invalid Path" }]), { status: 400 }));
+  const { userId, token } = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE) });
+  const res = await post(token, requestBody(userId));
+  assert.equal(res.status, 201);
+  assert.equal(((await res.json()) as Record<string, unknown>).status, "PENDING");
+  assert.equal(opsOf("mediaRequest.updateMany").length, 1);
+  assert.equal(afterTasks.length, 1);
+});
+
+test("a failed rollback write never turns a committed auto-approve into a 500: logged, answered 201 with the row as it stands", async () => {
+  updateManyImpl = async () => { throw new Error("P2024 pool timeout"); };
+  const { userId, token } = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE) });
+  const res = await post(token, requestBody(userId)); // unconfigured default Radarr ⇒ a definite failure
+  assert.equal(res.status, 201);
+  const body = (await res.json()) as Record<string, unknown>;
+  assert.equal(body.status, "APPROVED", "the rollback never landed — the row is still APPROVED");
+  assert.ok(errors.some((e) => e.includes("[requests] rollback to PENDING failed")));
+  assert.deepEqual(sseEvents.map((e) => e.type), ["request:new"], "no corrective PENDING update for a row that did not move");
+  assert.equal(afterTasks.length, 0, "a row that is not PENDING is not announced as one");
+});
+
+test("a failed earlier-pending read on the rollback path alerts the admins anyway, never a 500", async () => {
+  const { userId, token } = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE) });
+  const orig = mediaRequestModel.findFirst;
+  mediaRequestModel.findFirst = async (args: { where: Record<string, unknown> }) => {
+    if (args.where?.id && typeof args.where.id === "object") throw new Error("P2024 pool timeout");
+    return orig(args);
+  };
+  try {
+    const res = await post(token, requestBody(userId));
+    assert.equal(res.status, 201);
+    assert.equal(((await res.json()) as Record<string, unknown>).status, "PENDING");
+  } finally {
+    mediaRequestModel.findFirst = orig;
+  }
+  assert.ok(errors.some((e) => e.includes("[requests] earlier-pending check failed")));
+  assert.equal(afterTasks.length, 1, "a duplicate alert is cheaper than a lost one");
+});
+
+test("a failed tvdbId stamp after Sonarr accepted the series is logged: still 201 APPROVED, the download check still queued", async () => {
+  scriptArr(() => new Response(JSON.stringify({ id: 1, tvdbId: 4242 }), { status: 201, headers: { "content-type": "application/json" } }));
+  updateManyImpl = async (args) => {
+    if ("tvdbId" in args.data) throw new Error("P2024 pool timeout");
+    return { count: 1 };
+  };
+  const { userId, token } = await mintSession({ permissions: String(Permission.REQUEST | Permission.AUTO_APPROVE) });
+  const { result: res, queued } = await withDownloadCheckSpy(() =>
+    post(token, requestBody(userId, { tmdbId: 1399, mediaType: "TV" })));
+  assert.equal(res.status, 201);
+  assert.equal(((await res.json()) as Record<string, unknown>).status, "APPROVED");
+  assert.ok(opsOf("mediaRequest.updateMany").some((o) => "tvdbId" in (o.args as { data: Record<string, unknown> }).data), "fixture sanity: the stamp was tried");
+  assert.ok(errors.some((e) => e.includes("[requests] tvdbId stamp failed")));
+  assert.equal(queued, 1, "the download check is still queued");
+});
+
 test("a greenlit peer is mirrored: APPROVED copies the status, AVAILABLE also stamps availableAt — and admins are never re-alerted", async () => {
   greenlitRow = { status: "APPROVED" };
   const a = await mintSession();
@@ -1146,11 +1315,43 @@ test("the pending branch: first pending request emits SSE, clears the caller's c
   // An EARLIER pending peer for the same (tmdbId, mediaType, instance) means
   // this duplicate must not re-alert the admins.
   afterTasks.length = 0;
+  ops.length = 0;
   earlierPendingRow = { id: "req-earlier" };
   const b = await mintSession();
   const second = await post(b.token, requestBody(b.userId));
   assert.equal(second.status, 201);
   assert.equal(afterTasks.length, 0, "only the earliest pending request alerts admins");
+  // Decided inside the Serializable create tx, before the insert — never by a
+  // post-commit read two interleaved requests could both miss each other in.
+  const peerReads = opsOf("mediaRequest.findFirst").filter((o) => (o.args as { where: Record<string, unknown> }).where.status === "PENDING");
+  assert.equal(peerReads.length, 1, "one pending-peer read");
+  assert.equal(peerReads[0].inTx, true, "the pending-peer read runs inside the create tx");
+  assert.deepEqual((peerReads[0].args as { where: unknown }).where, { tmdbId: 603, mediaType: "MOVIE", arrInstance: "", status: "PENDING" });
+  const order = ops.filter((o) => o.inTx).map((o) => o.op);
+  assert.ok(order.indexOf("mediaRequest.findFirst") < order.indexOf("mediaRequest.create"), "the peer read precedes the insert");
+});
+
+test("a pending request whose first attempt aborts (P2034) and whose retry sees the committed peer does not alert the admins", async () => {
+  // Two users request one title at once: each tx reads "no PENDING peer" and
+  // inserts one. Postgres aborts one of the pair at commit; its retry sees the
+  // other's row. The aborted attempt ran to the end and had decided to alert.
+  pendingPeerAnswers = [null, { id: "req-concurrent" }];
+  commitFailures = 1;
+  const a = await mintSession();
+  const res = await post(a.token, requestBody(a.userId));
+  assert.equal(res.status, 201);
+  assert.equal(txCalls, 2, "the whole tx re-ran");
+  assert.equal(opsOf("mediaRequest.create").length, 2, "the aborted insert plus the one that committed");
+  assert.equal(afterTasks.length, 0, "the peer that committed first is the one that alerts");
+
+  // The other way round: attempt 1 saw a peer, the retry finds none (the peer
+  // was withdrawn) — the committed attempt's own answer decides.
+  afterTasks.length = 0;
+  pendingPeerAnswers = [{ id: "req-withdrawn" }, null];
+  commitFailures = 1;
+  const b = await mintSession();
+  assert.equal((await post(b.token, requestBody(b.userId))).status, 201);
+  assert.equal(afterTasks.length, 1);
 });
 
 // ── content gates ───────────────────────────────────────────────────────────
@@ -1173,6 +1374,25 @@ test("the parental content-rating cap blocks a capped user when the cached certi
   assert.deepEqual(await res.json(), { error: "This title's rating exceeds your account's limit" });
   assert.equal(fetchCalls.length, 0, "the certification is read from the details cache, not the wire");
   assert.equal(opsOf("mediaRequest.create").length, 0);
+});
+
+test("auto-routing and the rating cap share ONE details read: the cap still refuses, and an allowed request still routes", async () => {
+  seedAnimeInstance();
+  seedMovieDetails(603, { genreList: [{ id: 16, name: "Animation" }], originalLanguage: "ja", certification: "R" });
+  const capped = await mintSession({ instanceGrants: { anime: { request: true } }, maxContentRating: "PG-13" });
+  const refused = await post(capped.token, requestBody(capped.userId));
+  assert.equal(refused.status, 403);
+  assert.deepEqual(await refused.json(), { error: "This title's rating exceeds your account's limit" });
+  assert.equal(detailsReads.filter((k) => k === "movie:603:details").length, 1, "routing and the cap read the details once");
+
+  detailsReads.length = 0;
+  seedMovieDetails(603, { genreList: [{ id: 16, name: "Animation" }], originalLanguage: "ja", certification: "PG" });
+  const allowed = await mintSession({ instanceGrants: { anime: { request: true } }, maxContentRating: "PG-13" });
+  const routed = await post(allowed.token, requestBody(allowed.userId));
+  assert.equal(routed.status, 201);
+  assert.equal(createdData().arrInstance, "anime");
+  assert.equal(detailsReads.filter((k) => k === "movie:603:details").length, 1);
+  assert.equal(fetchCalls.length, 0);
 });
 
 // ── language of the refusal text (apiUser.* catalog) ────────────────────────

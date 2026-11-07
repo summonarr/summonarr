@@ -36,3 +36,16 @@ test("boot wires the check and exits on it in production", () => {
   assert.match(after, /tokenEncryptionKey: process\.env\.TOKEN_ENCRYPTION_KEY/);
   assert.match(after, /if \(reuse\) \{[\s\S]*?process\.exit\(1\)/);
 });
+
+test("a missing NEXTAUTH_SECRET is reported once, by the length check, which still exits in production", () => {
+  const src = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
+  const required = src.match(/const required: string\[\] = \[([^\]]*)\];/);
+  assert.ok(required, "the presence list");
+  assert.doesNotMatch(required[1], /NEXTAUTH_SECRET/, "the length check below already covers a missing value");
+  assert.match(required[1], /"DATABASE_URL"/);
+  assert.match(
+    src,
+    /if \(!process\.env\.NEXTAUTH_SECRET \|\| process\.env\.NEXTAUTH_SECRET\.trim\(\)\.length < 32\) \{[\s\S]*?if \(process\.env\.NODE_ENV === "production"\) process\.exit\(1\);/,
+  );
+});
+

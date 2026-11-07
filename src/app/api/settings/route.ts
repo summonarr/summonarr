@@ -4,12 +4,13 @@ import { withAdmin } from "@/lib/api-auth";
 import { invalidateSessionDurationsCache } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { testRadarrConnection, testSonarrConnection } from "@/lib/arr";
-import { pingPlexToken } from "@/lib/plex";
 import { getJellyfinMediaFolders } from "@/lib/jellyfin";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { sendTestEmail } from "@/lib/email";
+import { EMAIL_TRANSPORT_KEYS, sendTestEmail, type EmailTransportOverrides } from "@/lib/email";
+import { AUDIT_PII_RETENTION_MAX_DAYS, AUDIT_PII_RETENTION_MIN_DAYS } from "@/lib/audit";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { localeForRequest } from "@/lib/i18n/server-locale";
-import { invalidatePublicKeyCache } from "@/app/api/interactions/route";
+import { invalidatePublicKeyCache } from "@/lib/discord-interactions/signature";
 import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
 import { putDiscordCommands, recordDiscordSchemaHash } from "@/lib/discord-register";
@@ -30,6 +31,8 @@ import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 import { clearArrSnapshots, isArrConfigKey } from "@/lib/arr-snapshot";
 import { MDBLIST_PLAN_SETTING_KEY, isMdblistPlanSetting } from "@/lib/mdblist-plan";
 import { invalidateMdblistPlanCache } from "@/lib/mdblist";
+import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { isOidcConfigured } from "@/lib/oidc";
 
 // The settings this route writes that the never-watched report reads (guardrail
 // 14d): a tracking switch (and its stamp) moves a server's coverage, retention
@@ -247,9 +250,22 @@ const SETTINGS_SCHEMA = [
 
 type AllowedKey = (typeof SETTINGS_SCHEMA)[number][0];
 const ALLOWED_KEYS = SETTINGS_SCHEMA.map(([k]) => k) as unknown as readonly AllowedKey[];
+const ALLOWED_KEY_SET: ReadonlySet<string> = new Set<string>(ALLOWED_KEYS);
+const isAllowedKey = (key: string): key is AllowedKey => ALLOWED_KEY_SET.has(key);
 const SENSITIVE_KEYS = new Set<string>(
   SETTINGS_SCHEMA.filter(([, sensitive]) => sensitive).map(([k]) => k)
 );
+
+// GET sends this instead of a stored secret, and PATCH reads it back as "keep
+// the saved value". Shared with the client forms (secret-mask.ts).
+const MASKED_VALUE = SECRET_MASK_SENTINEL;
+
+// Readable here (the settings page shows the connected account), never written:
+// Connect Plex (/api/settings/plex, plex-admin-connect.ts) validates the token
+// against plex.tv, writes the token and its account email together and clears
+// PlexTokenCache. A PATCH did none of that, so a stale email stayed on the
+// sign-in allow list.
+const PLEX_CONNECT_ONLY_KEYS: ReadonlySet<string> = new Set(["plexAdminToken", "plexAdminEmail"]);
 
 // Defense-in-depth boot check: bail loud if the writable-schema sensitive set
 // drifts from SETTINGS_SENSITIVE_KEYS_SET (which the Prisma extension uses to
@@ -267,7 +283,7 @@ const SENSITIVE_KEYS = new Set<string>(
   // by push.ts, never admin-typed) is fine: GET never returns it and PATCH never
   // writes it. The hole this guards is a key the route DOES expose as plaintext.
   for (const k of SETTINGS_SENSITIVE_KEYS_SET) {
-    if ((ALLOWED_KEYS as readonly string[]).includes(k) && !SENSITIVE_KEYS.has(k)) {
+    if (ALLOWED_KEY_SET.has(k) && !SENSITIVE_KEYS.has(k)) {
       throw new Error(
         `[settings] '${k}' is in SETTINGS_SENSITIVE_KEYS but not marked sensitive in SETTINGS_SCHEMA — GET would return it in cleartext`,
       );
@@ -386,14 +402,243 @@ const NUMERIC_BOUNDS: Partial<Record<AllowedKey, readonly [min: number, max: num
   sessionDefaultDuration: [60, MAX_SESSION_SECONDS],
   sessionMobileDuration: [60, MAX_SESSION_SECONDS],
   sessionMaxDuration: [60, MAX_SESSION_SECONDS],
+  // email.ts throws "Invalid SMTP port" for anything else, on every send.
+  smtpPort: [1, 65_535],
+  // Recorded only (the live cadence is PLAY_HISTORY_SYNC_INTERVAL); the form's
+  // own min/max.
+  playHistoryPollingInterval: [5, 600],
 };
 
-// The connectivity-test messages are recorded in English (the rollback audit row
-// stores testResults verbatim — audit details are data, never translated) and
-// translated only on the way out. An upstream-supplied message (an SMTP error's
-// own text) has no entry and passes through unchanged.
+// Radarr/Sonarr profile ids are positive integers. arr.ts reads anything else
+// as "unset", so a typo silently dropped the profile from every add.
+// Language profiles are Sonarr v3 only.
+const POSITIVE_INT_KEYS: ReadonlySet<string> = new Set([
+  "radarrQualityProfileId",
+  "radarr4kQualityProfileId",
+  "sonarrQualityProfileId",
+  "sonarr4kQualityProfileId",
+  "sonarrLanguageProfileId",
+  "sonarr4kLanguageProfileId",
+]);
+
+// Closed sets. Their readers fall back quietly on anything else (quota.ts reads
+// it as a week, email.ts as SMTP), so a typo was Saved and never applied.
+const ENUM_VALUES: Partial<Record<AllowedKey, readonly string[]>> = {
+  quotaPeriod: ["day", "week", "month"],
+  emailBackend: ["smtp", "resend"],
+};
+
+// Library selections: comma-separated Plex section keys / Jellyfin item ids.
+// The ids go into upstream query strings, so only id characters are stored.
+const LIBRARY_LIST_KEYS: ReadonlySet<string> = new Set(["plexLibraries", "jellyfinLibraries"]);
+const LIBRARY_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+const MAX_LENGTHS: Partial<Record<AllowedKey, number>> = { motdBody: 5000 };
+const DEFAULT_MAX_LENGTH = 2000;
+
+const USER_FACING_KEYS: ReadonlySet<string> = new Set(["motdTitle", "motdBody", "siteTitle", "maintenanceMessage"]);
+
+// Donation keys accept either a plain handle (e.g. "@alice") or a link. A link
+// must be https:// (checked in the PATCH loop), which also rules out dangerous
+// schemes like javascript: or data: in the <a href> the donate page renders.
+// donationAmazon has no handle form, so it must always be an https:// link.
+const DONATION_URL_KEYS: ReadonlySet<string> = new Set([
+  "donationPaypal",
+  "donationVenmo",
+  "donationZelle",
+  "donationAmazon",
+  "donationPatreon",
+  "donationBuyMeACoffee",
+]);
+
+const SECRET_KEY_SUFFIXES = ["ApiKey", "Secret", "Token"] as const;
+const isSecretShapedKey = (k: string) => SECRET_KEY_SUFFIXES.some((suffix) => k.endsWith(suffix));
+
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+
+// Keys that may be written empty to clear them. Most keys skip empty writes so
+// the client can echo back unchanged/masked values without wiping them; the IP
+// allowlist must be clearable to lift the restriction, the relay key to turn
+// relay auth off, the recommended build to retract the update prompt, and the
+// relay URL to restore the publisher-default relay (push.ts falls back to
+// DEFAULT_APNS_RELAY_URL when the stored value is empty).
+const CLEARABLE_KEYS: ReadonlySet<string> = new Set([
+  "machineSessionAllowedIps",
+  "apnsRelayKey",
+  "recommendedIosBuild",
+  "apnsRelayUrl",
+  // Third-party API keys: the Integrations forms offer a Remove action, and a
+  // blank value that is silently dropped would report Saved while the old key
+  // keeps working (ApiKeySettingForm). Readers treat "" as unset.
+  "ipinfoToken",
+  "omdbApiKey",
+  "mdblistApiKey",
+  // Removing either switches per-user Trakt connections off (the cron and
+  // the profile card need both); the id alone also drives the public Trakt
+  // lists. Readers treat "" as unset.
+  "traktClientId",
+  "traktClientSecret",
+  // Webhook secrets must be clearable or the admin form silently lies: it
+  // offers a blank field to remove the secret, the write is skipped as an
+  // empty value, and the UI still reports Saved while the OLD secret stays
+  // valid. An operator who believed they had rotated or removed webhook auth
+  // had done neither. Clearing one makes that instance secretless, and the
+  // handlers reject a webhook when every instance secret is empty (401), so
+  // the end state is "this webhook is off", not "this webhook is open".
+  "webhookSecret",
+  "radarrWebhookSecret",
+  "sonarrWebhookSecret",
+  "radarr4kWebhookSecret",
+  "sonarr4kWebhookSecret",
+  // Optional per-instance add-payload fields: clearing one means "stop
+  // sending the field" (back to the arr service's own default) — without
+  // clearability, once set they could never be unset from the form.
+  "radarrMinimumAvailability",
+  "radarr4kMinimumAvailability",
+  "sonarrLanguageProfileId",
+  "sonarr4kLanguageProfileId",
+  // Blank = the "Open in Radarr/Sonarr" links use the connection URL again
+  // (arrBrowserBase skips an empty value).
+  "radarrExternalUrl",
+  "radarr4kExternalUrl",
+  "sonarrExternalUrl",
+  "sonarr4kExternalUrl",
+  // Blank = fall back to the 90-day default in getAuditPiiRetentionDays,
+  // exactly what the form's helper text promises.
+  "auditPiiRetentionDays",
+  // Blank = the WATCH_GRADE_DEFAULTS value, as the Watch Grades form says.
+  "watchGradeGraceDays",
+  "watchGradeWindowDays",
+  "watchGradeTvPercent",
+  "watchGradeOtherViewers",
+  "watchGradeBandA",
+  "watchGradeBandB",
+  "watchGradeBandC",
+  "watchGradeBandD",
+  "watchGradeMinRequests",
+  // Optional Discord routing. Blanking the notify channel is the documented
+  // way back to DMs ("Leave blank to send DMs"), and a role/invite id can
+  // otherwise only be replaced, never removed.
+  "discordAdminRequestChannelId",
+  "discordWelcomeChannelId",
+  "discordNotifyChannelId",
+  "discordInviteUrl",
+  "discordLinkedRoleId",
+  "discordPlexRoleId",
+  "discordJellyfinRoleId",
+  "discordAdminRoleId",
+  "discordIssueAdminRoleId",
+  "discordAutoApproveRoles",
+  // Core Discord app ids. A blank guild id is the documented switch from
+  // guild-scoped to GLOBAL command registration (the registration below reads
+  // "" as null); a blank client id / public key turns the bot off (registration
+  // skips, /api/interactions answers 503). Without clearability the form
+  // reported "Saved" while the old id stayed live and could never be removed.
+  // discordBotToken is NOT here, like smtpPassword below: masked on GET.
+  "discordGuildId",
+  "discordClientId",
+  "discordPublicKey",
+  // Blank = fall back to window.location.origin / AUTH_URL, which every
+  // reader already does with `||`. Otherwise a wrong public URL (an old
+  // domain feeding the Plex forwardUrl and email links) could only be
+  // replaced, never removed, while the form still said "Saved".
+  "siteUrl",
+  // Blank = the default "Summonarr" (the form's own placeholder); the sidebar,
+  // login and setup pages all read it with `|| "Summonarr"` and the layout's
+  // generateMetadata skips a falsy title. Same bug as siteUrl: emptying the
+  // field said Saved while the old custom name stayed.
+  "siteTitle",
+  // /api/config publishes these to every visitor, so removing a payment
+  // handle (a Zelle phone/email is personal data) has to actually remove it.
+  "donationPaypal",
+  "donationVenmo",
+  "donationZelle",
+  "donationAmazon",
+  "donationPatreon",
+  "donationBuyMeACoffee",
+  // "Leave blank to use the username as the sender" (email.ts: smtpFrom ||
+  // smtpUser), and a stale smtpUser forces AUTH on a relay that wants none.
+  // smtpPassword is deliberately NOT here: it is masked on GET, so a blank
+  // submit is indistinguishable from an echo and must never wipe the secret.
+  // smtpPort isn't either: email.ts reads "" as an invalid port.
+  "smtpFrom",
+  "smtpUser",
+  // Blank = send Resend mail from smtpFrom (email.ts resolveFromAddress).
+  "resendFrom",
+  // Empty = "sync every library", which is what each picker promises when no
+  // box is ticked; every sync consumer already reads an empty value that way.
+  "jellyfinLibraries",
+  "plexLibraries",
+  // bad-matches.ts treats an empty prefix as "no prefix", so writing empty is
+  // the correct end state for removing a wrong one.
+  "plexMoviePathStripPrefix",
+  "plexTvPathStripPrefix",
+  "jellyfinMoviePathStripPrefix",
+  "jellyfinTvPathStripPrefix",
+  // Optional user-facing copy: blank restores the built-in maintenance text
+  // and drops the MOTD title/body.
+  "maintenanceMessage",
+  "motdTitle",
+  "motdBody",
+  // Blank = off, what "Set to 0 to disable" promises: parseQuotaLimit and the
+  // vote routes' parseInt read "" as 0.
+  "quotaLimit",
+  "deletionVoteThreshold",
+  // Blank = the built-in default each form shows as its placeholder:
+  // parseRateLimit and getSessionDurations fall back on "". These forms start
+  // blank on a fresh install, so blank must stay a valid answer.
+  "rateLimitRegister",
+  "rateLimitRequests",
+  "rateLimitIssues",
+  "maxPushSubscriptions",
+  "sessionDefaultDuration",
+  "sessionMobileDuration",
+  "sessionMaxDuration",
+]);
+
+// Connection tests, run against the config a PATCH is about to save (submitted
+// values over the stored rows) BEFORE anything is written: approvals, crons
+// and webhooks never see an unverified URL or key, and a failure leaves nothing
+// to roll back. A probe runs when either half of its pair is submitted,
+// changed or not — re-pressing "Save & Test" re-tests. The messages stay in
+// English for TEST_RESULT_MESSAGE_KEYS; the result keys are what the forms
+// (arr-form, jellyfin-sync-form) and the iOS app read.
+interface ConnectionProbe {
+  urlKey: AllowedKey;
+  keyKey: AllowedKey;
+  okKey: string;
+  errorKey: string;
+  message: string;
+  run: (url: string, apiKey: string) => Promise<string | true>;
+}
+
+const CONNECTION_PROBES: readonly ConnectionProbe[] = [
+  { urlKey: "radarrUrl", keyKey: "radarrApiKey", okKey: "radarrVersion", errorKey: "radarrError", message: "Radarr connection failed", run: testRadarrConnection },
+  { urlKey: "sonarrUrl", keyKey: "sonarrApiKey", okKey: "sonarrVersion", errorKey: "sonarrError", message: "Sonarr connection failed", run: testSonarrConnection },
+  { urlKey: "radarr4kUrl", keyKey: "radarr4kApiKey", okKey: "radarr4kVersion", errorKey: "radarr4kError", message: "Radarr 4K connection failed", run: testRadarrConnection },
+  { urlKey: "sonarr4kUrl", keyKey: "sonarr4kApiKey", okKey: "sonarr4kVersion", errorKey: "sonarr4kError", message: "Sonarr 4K connection failed", run: testSonarrConnection },
+  // The Jellyfin URL feeds the hourly orchestrator, the 5s play-history poller
+  // (guardrail 19's sole Jellyfin history writer) and Jellyfin sign-in.
+  // getJellyfinMediaFolders routes through safeFetchAdminConfigured (5a).
+  {
+    urlKey: "jellyfinUrl", keyKey: "jellyfinApiKey", okKey: "jellyfinTested", errorKey: "jellyfinError", message: "Jellyfin connection failed",
+    run: async (url, apiKey) => { await getJellyfinMediaFolders(url, apiKey); return true; },
+  },
+];
+
+// Saving any of these sends the requesting admin a test email.
+const EMAIL_PROBE_TRIGGERS = ["smtpHost", "smtpPassword", "resendApiKey", "emailBackend"] as const;
+// An SMTP reply can be up to 1 MB and is passed through to the admin as is.
+const SMTP_ERROR_MAX = 500;
+
+// A value a client sent on purpose: not empty, not the echoed mask.
+const isRealValue = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value !== MASKED_VALUE;
+
+// The connectivity-test messages are kept in English and translated only on the
+// way out. An upstream-supplied message (an SMTP error's own text) has no entry
+// and passes through unchanged.
 const TEST_RESULT_MESSAGE_KEYS: Record<string, string> = {
-  "Plex token is invalid or could not be reached": "apiAdmin.settings.test.plexToken",
   "Radarr connection failed": "apiAdmin.settings.test.radarr",
   "Sonarr connection failed": "apiAdmin.settings.test.sonarr",
   "Radarr 4K connection failed": "apiAdmin.settings.test.radarr4k",
@@ -449,7 +694,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 
   const settings = Object.fromEntries(
     rows.map((r) => {
-      if (SENSITIVE_KEYS.has(r.key)) return [r.key, r.value ? "••••••••" : ""];
+      if (SENSITIVE_KEYS.has(r.key)) return [r.key, r.value ? MASKED_VALUE : ""];
       if (URL_KEYS.has(r.key) && r.value) return [r.key, stripUrlUserinfo(r.value)];
       return [r.key, r.value];
     })
@@ -468,76 +713,44 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const now = Date.now();
-  for (const key of Object.keys(body)) {
-    if (COOLDOWN_EXEMPT.has(key)) continue;
-    const last = lastKeyWriteAt.get(key);
-    if (last !== undefined && now - last < KEY_COOLDOWN_MS) {
-      const retryAfterMs = KEY_COOLDOWN_MS - (now - last);
-      return NextResponse.json(
-        { error: t("apiAdmin.settings.cooldown", { key, seconds: Math.ceil(retryAfterMs / 1000) }), retryAfterMs },
-        { status: 429 }
-      );
-    }
+  // The connection probes this body asks for: a real value for either half of a
+  // pair. Their stored halves are read with the submitted keys, so each probe
+  // can test the candidate config.
+  const probes = CONNECTION_PROBES.filter((p) => isRealValue(body[p.urlKey]) || isRealValue(body[p.keyKey]));
+  const emailProbe = EMAIL_PROBE_TRIGGERS.some((k) => isRealValue(body[k]));
+
+  // The stored value of every key this PATCH names (sensitive ones come back
+  // decrypted from the Prisma extension and are only ever compared, never
+  // echoed). Resending a stored value is not a change: past the type and length
+  // checks it is not validated, written, audited or cooldown-checked. Forms
+  // resend whole sections, and treating those as edits audited untouched keys,
+  // flushed caches and 429'd the next save on a key nobody changed.
+  const readKeys = new Set(Object.keys(body).filter(isAllowedKey));
+  for (const p of probes) {
+    readKeys.add(p.urlKey);
+    readKeys.add(p.keyKey);
   }
-
-  const MASKED_VALUE = "••••••••";
-  const MAX_LENGTHS: Partial<Record<AllowedKey, number>> = { motdBody: 5000 };
-  const DEFAULT_MAX_LENGTH = 2000;
-
-  const USER_FACING_KEYS = new Set(["motdTitle", "motdBody", "siteTitle", "maintenanceMessage"]);
-
-  // Donation keys accept either a plain handle (e.g. "@alice") or a link. A link
-  // must be https:// (checked in the loop below), which also rules out dangerous
-  // schemes like javascript: or data: in the <a href> the donate page renders.
-  // donationAmazon has no handle form, so it must always be an https:// link.
-  const DONATION_URL_KEYS = new Set<string>([
-    "donationPaypal",
-    "donationVenmo",
-    "donationZelle",
-    "donationAmazon",
-    "donationPatreon",
-    "donationBuyMeACoffee",
-  ]);
-
-  // The Donations form resubmits all six fields together on every save, not
-  // just the one the admin is editing. A field can hold a pre-existing
-  // http(s)-agnostic value saved before the https-only rule below existed —
-  // without this exemption, that one untouched legacy field would 400 EVERY
-  // future save on the whole tab (including edits to unrelated fields), with
-  // no indication in the UI of which field is blocking it. Only a genuinely
-  // new/changed value is held to the rule; resubmitting the unchanged stored
-  // value is a no-op. This doesn't weaken /donate's own safeUrl() render-time
-  // guard (the actual XSS boundary), which still drops anything non-https
-  // regardless of what's stored.
-  const submittedDonationKeys = Object.keys(body).filter((k) => DONATION_URL_KEYS.has(k));
-  const currentDonationValues = new Map(
-    submittedDonationKeys.length > 0
-      ? (await prisma.setting.findMany({ where: { key: { in: submittedDonationKeys } } })).map((r) => [r.key, r.value])
+  const stored = new Map<string, string>(
+    readKeys.size > 0
+      ? (await prisma.setting.findMany({ where: { key: { in: [...readKeys] } } })).map((r) => [r.key, r.value])
       : [],
   );
 
-  const SECRET_KEY_SUFFIXES = ["ApiKey", "Secret", "Token"] as const;
-  const isSecretShapedKey = (k: string) =>
-    SECRET_KEY_SUFFIXES.some((suffix) => k.endsWith(suffix));
-
-  const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
-
   for (const [key, value] of Object.entries(body)) {
-    if (!(ALLOWED_KEYS as readonly string[]).includes(key)) continue;
+    if (!isAllowedKey(key)) continue;
 
-    // Reject a type/length violation here instead of letting the `entries` filter
-    // below silently drop the key: a dropped key never reaches the upsert loop,
-    // never lands in `changedKeys` or the audit row, yet the route still answered
-    // 200 {ok:true} — an over-cap MOTD or a scripted boolean `maintenanceEnabled`
-    // looked "Saved" in the UI while nothing was written anywhere.
+    // Reject a type/length violation here instead of letting the `submitted`
+    // filter below silently drop the key: a dropped key never reaches the
+    // upsert loop, never lands in `changedKeys` or the audit row, yet the route
+    // still answered 200 {ok:true} — an over-cap MOTD or a scripted boolean
+    // `maintenanceEnabled` looked "Saved" in the UI while nothing was written.
     if (typeof value !== "string") {
       return NextResponse.json(
         { error: t("apiAdmin.settings.mustBeString", { key }) },
         { status: 400 },
       );
     }
-    const maxLen = MAX_LENGTHS[key as AllowedKey] ?? DEFAULT_MAX_LENGTH;
+    const maxLen = MAX_LENGTHS[key] ?? DEFAULT_MAX_LENGTH;
     if (value.length > maxLen) {
       return NextResponse.json(
         { error: t("apiAdmin.settings.tooLong", { key, max: maxLen }) },
@@ -546,6 +759,24 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
 
     if (value === MASKED_VALUE || value.length === 0) continue;
+    // Only a new value is held to the rules below. A form resubmits every field
+    // of its section, and a field saved before a rule existed (an http://
+    // donation link, say) would otherwise 400 every later save of the whole
+    // section, with nothing in the UI saying which field blocks it. An
+    // unchanged value is never written, so nothing it could break is touched.
+    if (value === stored.get(key)) continue;
+
+    if (PLEX_CONNECT_ONLY_KEYS.has(key)) {
+      return NextResponse.json({ error: t("apiAdmin.settings.plexConnectOnly", { key }) }, { status: 400 });
+    }
+
+    // A secret that still contains the mask's bullets is the mask with a key
+    // pasted after it (the form's field held the placeholder as its value).
+    // Only the exact mask means "keep"; anything else would be stored as the
+    // credential and only fail later, upstream.
+    if (SENSITIVE_KEYS.has(key) && value.includes(MASKED_VALUE[0])) {
+      return NextResponse.json({ error: t("apiAdmin.settings.maskedPlaceholder", { key }) }, { status: 400 });
+    }
 
     if (URL_KEYS.has(key)) {
       // Shared with /api/admin/media-instances so the default-instance keys and
@@ -557,7 +788,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
-    if (DONATION_URL_KEYS.has(key) && value !== currentDonationValues.get(key)) {
+    if (DONATION_URL_KEYS.has(key)) {
       // donationAmazon must always be a full URL; the others may be a plain handle
       // (e.g. "@alice"). Apply scheme guard when value looks URL-shaped (contains "://").
       const looksLikeUrl = value.includes("://");
@@ -568,7 +799,8 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         // silently rendered as dead text — the admin got a success toast for a
         // link that could never work. Reject at write time instead. (Tightening
         // this side rather than loosening the page: a donation link is exactly
-        // where an http downgrade matters.)
+        // where an http downgrade matters.) /donate's safeUrl() stays the actual
+        // XSS boundary.
         try {
           const parsed = new URL(value);
           if (parsed.protocol !== "https:") {
@@ -664,7 +896,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
 
     // Bounded integers — see NUMERIC_BOUNDS. A 400 here replaces the old
     // silent session-duration rewrite and the readers' silent fallbacks.
-    const bounds = NUMERIC_BOUNDS[key as AllowedKey];
+    const bounds = NUMERIC_BOUNDS[key];
     if (bounds) {
       const n = /^\d+$/.test(value) ? parseInt(value, 10) : NaN;
       if (!Number.isInteger(n) || n < bounds[0] || n > bounds[1]) {
@@ -672,6 +904,23 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           { error: t("apiAdmin.settings.intRange", { key, min: bounds[0], max: bounds[1] }) },
           { status: 400 },
         );
+      }
+    }
+
+    const allowedValues = ENUM_VALUES[key];
+    if (allowedValues && !allowedValues.includes(value)) {
+      return NextResponse.json(
+        { error: t("apiAdmin.settings.oneOf", { key, values: allowedValues.join(", ") }) },
+        { status: 400 },
+      );
+    }
+
+    // The ids are interpolated into upstream query strings (ParentId=…).
+    // Readers split on "," and drop blanks, so blank items are tolerated.
+    if (LIBRARY_LIST_KEYS.has(key)) {
+      const ids = value.split(",").map((id) => id.trim()).filter(Boolean);
+      if (!ids.every((id) => LIBRARY_ID_RE.test(id))) {
+        return NextResponse.json({ error: t("apiAdmin.settings.libraryIds", { key }) }, { status: 400 });
       }
     }
 
@@ -695,8 +944,8 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
-    // Sonarr language-profile ids are positive integers (Sonarr v3 concept).
-    if (key === "sonarrLanguageProfileId" || key === "sonarr4kLanguageProfileId") {
+    // Radarr/Sonarr quality- and language-profile ids — see POSITIVE_INT_KEYS.
+    if (POSITIVE_INT_KEYS.has(key)) {
       const n = parseInt(value, 10);
       if (!/^\d+$/.test(value) || !Number.isInteger(n) || n < 1) {
         return NextResponse.json(
@@ -709,10 +958,10 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // Audit PII retention window. Lower bound matters: a tiny value (or "0")
     // would scrub identity off every fresh audit row, quietly destroying the
     // log's forensic value — same typo-proofing rationale as the rateLimit
-    // floor above. Bounds mirror the read-side clamp in getAuditPiiRetentionDays.
+    // floor above. The bounds are the read-side clamp's own constants.
     if (key === "auditPiiRetentionDays") {
       const n = parseInt(value, 10);
-      if (!/^\d+$/.test(value) || !Number.isInteger(n) || n < 7 || n > 3650) {
+      if (!/^\d+$/.test(value) || !Number.isInteger(n) || n < AUDIT_PII_RETENTION_MIN_DAYS || n > AUDIT_PII_RETENTION_MAX_DAYS) {
         return NextResponse.json(
           { error: t("apiAdmin.settings.daysRange", { key }) },
           { status: 400 },
@@ -803,6 +1052,26 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
   }
 
+  // Switching local login OFF refuses every password sign-in, registration and
+  // two-factor completion. With no other way in, the instance is locked to the
+  // sessions that already exist, and once the admin's ends, recovery is a
+  // database edit. So turning it on needs at least one external sign-in that
+  // works — the same predicates the login page uses to show those tabs.
+  // Turning it off ("false") is always allowed, and so is resending a stored
+  // "true" (nothing is written).
+  if (body.disableLocalLogin === "true" && stored.get("disableLocalLogin") !== "true") {
+    const [plexInstances, jellyfinInstances] = await Promise.all([
+      getSyncableMediaInstances("plex"),
+      getSyncableMediaInstances("jellyfin"),
+    ]);
+    if (!isOidcConfigured() && plexInstances.length === 0 && jellyfinInstances.length === 0) {
+      return NextResponse.json(
+        { error: t("apiAdmin.settings.disableLocalLoginNeedsProvider") },
+        { status: 400 },
+      );
+    }
+  }
+
   // Watch-grade rules that span fields (window vs grace, cutoffs in descending
   // order). The per-key bounds above can't see them, and a broken combination
   // doesn't fail loudly: a window inside the grace period scores nothing, and
@@ -814,154 +1083,118 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (conflict) return NextResponse.json({ error: conflict }, { status: 400 });
   }
 
-  // Keys that may be written empty to clear them. Most keys skip empty writes so
-  // the client can echo back unchanged/masked values without wiping them; the IP
-  // allowlist must be clearable to lift the restriction, the relay key to turn
-  // relay auth off, the recommended build to retract the update prompt, and the
-  // relay URL to restore the publisher-default relay (push.ts falls back to
-  // DEFAULT_APNS_RELAY_URL when the stored value is empty).
-  const CLEARABLE_KEYS = new Set<string>([
-    "machineSessionAllowedIps",
-    "apnsRelayKey",
-    "recommendedIosBuild",
-    "apnsRelayUrl",
-    // Third-party API keys: the Integrations forms offer a Remove action, and a
-    // blank value that is silently dropped would report Saved while the old key
-    // keeps working (ApiKeySettingForm). Readers treat "" as unset.
-    "ipinfoToken",
-    "omdbApiKey",
-    "mdblistApiKey",
-    // Removing either switches per-user Trakt connections off (the cron and
-    // the profile card need both); the id alone also drives the public Trakt
-    // lists. Readers treat "" as unset.
-    "traktClientId",
-    "traktClientSecret",
-    // Webhook secrets must be clearable or the admin form silently lies: it
-    // offers a blank field to remove the secret, the write is skipped as an
-    // empty value, and the UI still reports Saved while the OLD secret stays
-    // valid. An operator who believed they had rotated or removed webhook auth
-    // had done neither. Clearing one makes that instance secretless, and the
-    // handlers reject a webhook when every instance secret is empty (401), so
-    // the end state is "this webhook is off", not "this webhook is open".
-    "webhookSecret",
-    "radarrWebhookSecret",
-    "sonarrWebhookSecret",
-    "radarr4kWebhookSecret",
-    "sonarr4kWebhookSecret",
-    // Optional per-instance add-payload fields: clearing one means "stop
-    // sending the field" (back to the arr service's own default) — without
-    // clearability, once set they could never be unset from the form.
-    "radarrMinimumAvailability",
-    "radarr4kMinimumAvailability",
-    "sonarrLanguageProfileId",
-    "sonarr4kLanguageProfileId",
-    // Blank = the "Open in Radarr/Sonarr" links use the connection URL again
-    // (arrBrowserBase skips an empty value).
-    "radarrExternalUrl",
-    "radarr4kExternalUrl",
-    "sonarrExternalUrl",
-    "sonarr4kExternalUrl",
-    // Blank = fall back to the 90-day default in getAuditPiiRetentionDays,
-    // exactly what the form's helper text promises.
-    "auditPiiRetentionDays",
-    // Blank = the WATCH_GRADE_DEFAULTS value, as the Watch Grades form says.
-    "watchGradeGraceDays",
-    "watchGradeWindowDays",
-    "watchGradeTvPercent",
-    "watchGradeOtherViewers",
-    "watchGradeBandA",
-    "watchGradeBandB",
-    "watchGradeBandC",
-    "watchGradeBandD",
-    "watchGradeMinRequests",
-    // Optional Discord routing. Blanking the notify channel is the documented
-    // way back to DMs ("Leave blank to send DMs"), and a role/invite id can
-    // otherwise only be replaced, never removed.
-    "discordAdminRequestChannelId",
-    "discordWelcomeChannelId",
-    "discordNotifyChannelId",
-    "discordInviteUrl",
-    "discordLinkedRoleId",
-    "discordPlexRoleId",
-    "discordJellyfinRoleId",
-    "discordAdminRoleId",
-    "discordIssueAdminRoleId",
-    "discordAutoApproveRoles",
-    // Core Discord app ids. A blank guild id is the documented switch from
-    // guild-scoped to GLOBAL command registration (the registration below reads
-    // "" as null); a blank client id / public key turns the bot off (registration
-    // skips, /api/interactions answers 503). Without clearability the form
-    // reported "Saved" while the old id stayed live and could never be removed.
-    "discordGuildId",
-    "discordClientId",
-    "discordPublicKey",
-    // Blank = fall back to window.location.origin / AUTH_URL, which every
-    // reader already does with `||`. Otherwise a wrong public URL (an old
-    // domain feeding the Plex forwardUrl and email links) could only be
-    // replaced, never removed, while the form still said "Saved".
-    "siteUrl",
-    // Blank = the default "Summonarr" (the form's own placeholder); the sidebar,
-    // login and setup pages all read it with `|| "Summonarr"` and the layout's
-    // generateMetadata skips a falsy title. Same bug as siteUrl: emptying the
-    // field said Saved while the old custom name stayed.
-    "siteTitle",
-    // /api/config publishes these to every visitor, so removing a payment
-    // handle (a Zelle phone/email is personal data) has to actually remove it.
-    "donationPaypal",
-    "donationVenmo",
-    "donationZelle",
-    "donationAmazon",
-    "donationPatreon",
-    "donationBuyMeACoffee",
-    // "Leave blank to use the username as the sender" (email.ts: smtpFrom ||
-    // smtpUser), and a stale smtpUser forces AUTH on a relay that wants none.
-    // smtpPassword is deliberately NOT here: it is masked on GET, so a blank
-    // submit is indistinguishable from an echo and must never wipe the secret.
-    "smtpFrom",
-    "smtpUser",
-    // Empty = "sync every library", which is what each picker promises when no
-    // box is ticked; every sync consumer already reads an empty value that way.
-    "jellyfinLibraries",
-    "plexLibraries",
-    // bad-matches.ts treats an empty prefix as "no prefix", so writing empty is
-    // the correct end state for removing a wrong one.
-    "plexMoviePathStripPrefix",
-    "plexTvPathStripPrefix",
-    "jellyfinMoviePathStripPrefix",
-    "jellyfinTvPathStripPrefix",
-    // Optional user-facing copy: blank restores the built-in maintenance text
-    // and drops the MOTD title/body.
-    "maintenanceMessage",
-    "motdTitle",
-    "motdBody",
-  ]);
+  // What the client asked for: allowlisted, not the echoed mask, and empty only
+  // for a key that can be cleared. A blank for any other key can't be stored,
+  // so it is reported back in `ignored` when it would have replaced a stored
+  // value — "Saved" was the only answer before, while the old value stayed.
+  const submitted = new Map<AllowedKey, string>();
+  const ignored: string[] = [];
+  for (const [k, v] of Object.entries(body)) {
+    if (!isAllowedKey(k) || typeof v !== "string" || v === MASKED_VALUE) continue;
+    if (v.length === 0 && !CLEARABLE_KEYS.has(k)) {
+      if (stored.get(k)) ignored.push(k);
+      continue;
+    }
+    submitted.set(k, USER_FACING_KEYS.has(k) ? sanitizeText(v) : v);
+  }
 
-  const entries = Object.entries(body)
-    .filter(([k, v]) => {
-      if (!(ALLOWED_KEYS as readonly string[]).includes(k)) return false;
-      // Skip entries that are still the masked placeholder — client didn't change the value
-      if (v === MASKED_VALUE) return false;
-      const max = MAX_LENGTHS[k as AllowedKey] ?? DEFAULT_MAX_LENGTH;
-      if (typeof v !== "string" || v.length > max) return false;
-      if (v.length === 0) return CLEARABLE_KEYS.has(k);
-      return true;
-    })
-    .map(([k, v]) => [k, USER_FACING_KEYS.has(k) ? sanitizeText(v) : v] as [string, string]);
-
+  // Only a real change is written. A missing row and an empty one read the
+  // same everywhere, so clearing a key that holds nothing is no change either.
+  const entries = [...submitted].filter(([k, v]) => (stored.get(k) ?? "") !== v);
   const changedKeys = entries.map(([k]) => k);
-  const oldRows = await prisma.setting.findMany({ where: { key: { in: changedKeys } } });
-  const oldValues: Record<string, string> = Object.fromEntries(oldRows.map((r) => [r.key, SENSITIVE_KEYS.has(r.key) ? "[redacted]" : r.value]));
+
+  // Per-key cooldown, for keys this request changes. A cooldown-exempt switch
+  // and a resent unchanged value never wait.
+  const now = Date.now();
+  for (const key of changedKeys) {
+    if (COOLDOWN_EXEMPT.has(key)) continue;
+    const last = lastKeyWriteAt.get(key);
+    if (last !== undefined && now - last < KEY_COOLDOWN_MS) {
+      const retryAfterMs = KEY_COOLDOWN_MS - (now - last);
+      return NextResponse.json(
+        { error: t("apiAdmin.settings.cooldown", { key, seconds: Math.ceil(retryAfterMs / 1000) }), retryAfterMs },
+        { status: 429 }
+      );
+    }
+  }
+
+  const extra = ignored.length > 0 ? { ignored } : {};
+  if (entries.length === 0 && probes.length === 0 && !emailProbe) {
+    return NextResponse.json({ ok: true, ...extra });
+  }
+
+  // Claim the cooldown before the probes (which can take up to ~30s), so a
+  // second save of the same key can't start while this one is in flight. It is
+  // released when nothing gets written.
+  const claimedAt = now;
+  const claimed = changedKeys.filter((k) => !COOLDOWN_EXEMPT.has(k));
+  for (const key of claimed) lastKeyWriteAt.set(key, claimedAt);
+  const releaseCooldown = () => {
+    for (const key of claimed) {
+      if (lastKeyWriteAt.get(key) === claimedAt) lastKeyWriteAt.delete(key);
+    }
+  };
+
+  // Test the candidate config before anything is written — see CONNECTION_PROBES.
+  const testResults: Record<string, unknown> = {};
+  const candidate = (key: AllowedKey) => submitted.get(key) || stored.get(key);
+  // Each run resolves to whether it passed; they run side by side.
+  const probeRuns: Promise<boolean>[] = [];
+  for (const p of probes) {
+    const url = candidate(p.urlKey);
+    const apiKey = candidate(p.keyKey);
+    if (!url || !apiKey) continue;
+    probeRuns.push(
+      p.run(url, apiKey).then(
+        (ok) => { testResults[p.okKey] = ok; return true; },
+        () => { testResults[p.errorKey] = p.message; return false; },
+      ),
+    );
+  }
+  const adminEmail = session.user.email;
+  if (emailProbe && adminEmail) {
+    const overrides: EmailTransportOverrides = {};
+    for (const k of EMAIL_TRANSPORT_KEYS) {
+      const v = submitted.get(k);
+      if (v !== undefined) overrides[k] = v;
+    }
+    probeRuns.push(
+      // Written in the requesting admin's language (they are the recipient).
+      sendTestEmail(adminEmail, localeForRequest(req), overrides).then(
+        () => { testResults.smtpTested = true; return true; },
+        (err: unknown) => {
+          testResults.smtpError = err instanceof Error
+            ? capAuditValue(err.message, SMTP_ERROR_MAX)
+            : "Email test failed. Check your email settings.";
+          return false;
+        },
+      ),
+    );
+  }
+  const testFailed = (await Promise.all(probeRuns)).includes(false);
+
+  if (testFailed) {
+    releaseCooldown();
+    return NextResponse.json({ ok: false, ...localizeTestResults(testResults, t), ...extra }, { status: 422 });
+  }
+  if (entries.length === 0) {
+    releaseCooldown();
+    return NextResponse.json({ ok: true, ...localizeTestResults(testResults, t), ...extra });
+  }
+
+  const oldValues: Record<string, string> = {};
+  for (const key of changedKeys) {
+    const prior = stored.get(key);
+    if (prior !== undefined) oldValues[key] = SENSITIVE_KEYS.has(key) ? "[redacted]" : prior;
+  }
   const newValues: Record<string, string> = Object.fromEntries(entries.map(([k, v]) => [k, SENSITIVE_KEYS.has(k) ? "[redacted]" : v]));
 
   const auditIp = getClientIp(req.headers as Headers);
   const auditUa = req.headers.get("user-agent")?.slice(0, 512) ?? null;
-  // Tracking stamps are computed up front so a connectivity-test rollback can
-  // restore them too (they are written in the same transaction as the flip).
-  const stampEntries = [...trackingStampsFor(entries, new Map(oldRows.map((r) => [r.key, r.value])), new Date())];
-  const oldStampRows = stampEntries.length
-    ? await prisma.setting.findMany({ where: { key: { in: stampEntries.map(([k]) => k) } } })
-    : [];
-  const preWriteStamps = new Map(oldStampRows.map((r) => [r.key, r.value]));
+  // A play while a tracking switch was off was never recorded, so the
+  // never-watched verdict trusts recording only from the moment a switch last
+  // came back on (guardrail 14d). Stamped in the same transaction as the flip.
+  const stampEntries = trackingStampsFor(entries, stored, new Date());
   try {
     await prisma.$transaction(async (tx) => {
       // Sequential, not Promise.all: an interactive tx runs on one pinned
@@ -977,9 +1210,6 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           create: { key, value },
         });
       }
-      // A play while a tracking switch was off was never recorded, so the
-      // never-watched verdict trusts recording only from the moment a switch last
-      // came back on (guardrail 14d). Stamped in the same transaction as the flip.
       for (const [key, value] of stampEntries) {
         await tx.setting.upsert({ where: { key }, update: { value }, create: { key, value } });
       }
@@ -997,6 +1227,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       });
     });
   } catch (err) {
+    releaseCooldown();
     console.error("[audit] Settings transaction failed:", err);
     return NextResponse.json({ error: t("apiAdmin.settings.auditFailed") }, { status: 500 });
   }
@@ -1014,243 +1245,25 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // read lands on exactly the interaction used to verify the change.
   invalidateApnsRelayCache();
   // The MDBList plan is memoized for 30s too (mdblist.ts); a new plan applies now.
-  const mdblistPlanChanged = changedKeys.includes(MDBLIST_PLAN_SETTING_KEY);
-  if (mdblistPlanChanged) invalidateMdblistPlanCache();
-
-  const writeTs = Date.now();
-  for (const [key] of entries) {
-    if (COOLDOWN_EXEMPT.has(key)) continue;
-    lastKeyWriteAt.set(key, writeTs);
-  }
-
+  if (changedKeys.includes(MDBLIST_PLAN_SETTING_KEY)) invalidateMdblistPlanCache();
   if (changedKeys.some((k) => k === "sessionDefaultDuration" || k === "sessionMobileDuration" || k === "sessionMaxDuration")) {
     invalidateSessionDurationsCache();
   }
+  if (changedKeys.some((k) => k === "discordBotToken" || k === "discordClientId" || k === "discordGuildId" || k === "discordPublicKey")) {
+    invalidatePublicKeyCache();
+  }
 
+  // Re-register the slash commands only once the write is DURABLE (the task
+  // re-reads the DB), and only on a real CHANGE to the registration inputs:
+  // the Discord form posts every field on every save, and a presence gate fired
+  // this bulk-overwrite PUT on a Channels/Roles-tab save that touched neither.
+  // `updated` holds changed values only. discordPublicKey does not affect
+  // command registration and is left out.
   const updated = Object.fromEntries(entries);
-  const testResults: Record<string, unknown> = {};
-  let testFailed = false;
-  // Pre-write snapshot: the rollback restores from it, and the Discord
-  // re-registration gate diffs against it.
-  const preWriteByKey = new Map(oldRows.map((r) => [r.key, r.value]));
-
-  if (updated.plexAdminToken) {
-    const tokenRow = await prisma.setting.findUnique({ where: { key: "plexAdminToken" } });
-    if (tokenRow?.value) {
-      const valid = await pingPlexToken(tokenRow.value).catch(() => false);
-      if (!valid) {
-        testResults.plexError = "Plex token is invalid or could not be reached";
-        testFailed = true;
-      } else {
-        testResults.plexTested = true;
-      }
-    }
-  }
-
-  if (updated.radarrUrl || updated.radarrApiKey) {
-    const rows = await prisma.setting.findMany({
-      where: { key: { in: ["radarrUrl", "radarrApiKey"] } },
-    });
-    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (map.radarrUrl && map.radarrApiKey) {
-      try {
-        testResults.radarrVersion = await testRadarrConnection(map.radarrUrl, map.radarrApiKey);
-      } catch {
-        testResults.radarrError = "Radarr connection failed";
-        testFailed = true;
-      }
-    }
-  }
-
-  if (updated.sonarrUrl || updated.sonarrApiKey) {
-    const rows = await prisma.setting.findMany({
-      where: { key: { in: ["sonarrUrl", "sonarrApiKey"] } },
-    });
-    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (map.sonarrUrl && map.sonarrApiKey) {
-      try {
-        testResults.sonarrVersion = await testSonarrConnection(map.sonarrUrl, map.sonarrApiKey);
-      } catch {
-        testResults.sonarrError = "Sonarr connection failed";
-        testFailed = true;
-      }
-    }
-  }
-
-  if (updated.radarr4kUrl || updated.radarr4kApiKey) {
-    const rows = await prisma.setting.findMany({ where: { key: { in: ["radarr4kUrl", "radarr4kApiKey"] } } });
-    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (map.radarr4kUrl && map.radarr4kApiKey) {
-      try {
-        testResults.radarr4kVersion = await testRadarrConnection(map.radarr4kUrl, map.radarr4kApiKey);
-      } catch {
-        testResults.radarr4kError = "Radarr 4K connection failed";
-        testFailed = true;
-      }
-    }
-  }
-
-  if (updated.sonarr4kUrl || updated.sonarr4kApiKey) {
-    const rows = await prisma.setting.findMany({ where: { key: { in: ["sonarr4kUrl", "sonarr4kApiKey"] } } });
-    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (map.sonarr4kUrl && map.sonarr4kApiKey) {
-      try {
-        testResults.sonarr4kVersion = await testSonarrConnection(map.sonarr4kUrl, map.sonarr4kApiKey);
-      } catch {
-        testResults.sonarr4kError = "Sonarr 4K connection failed";
-        testFailed = true;
-      }
-    }
-  }
-
-  // Jellyfin gets the same post-write probe + rollback as Radarr/Sonarr/Plex.
-  // Without it the Jellyfin form's "Save & Test" persisted a mistyped URL/key
-  // durably and only THEN discovered it could not load libraries — the previous
-  // working config was already gone, and the hourly orchestrator, the 5s
-  // play-history poller (guardrail 19's sole Jellyfin history writer) and
-  // Jellyfin sign-in all read that row via getConfiguredJellyfinUrl immediately.
-  // getJellyfinMediaFolders routes through safeFetchAdminConfigured (guardrail 5a).
-  if (updated.jellyfinUrl || updated.jellyfinApiKey) {
-    const rows = await prisma.setting.findMany({ where: { key: { in: ["jellyfinUrl", "jellyfinApiKey"] } } });
-    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    if (map.jellyfinUrl && map.jellyfinApiKey) {
-      try {
-        await getJellyfinMediaFolders(map.jellyfinUrl, map.jellyfinApiKey);
-        testResults.jellyfinTested = true;
-      } catch {
-        testResults.jellyfinError = "Jellyfin connection failed";
-        testFailed = true;
-      }
-    }
-  }
-
-  if (updated.discordBotToken || updated.discordClientId || updated.discordGuildId || updated.discordPublicKey) {
-    invalidatePublicKeyCache();
-  }
-
-  if (updated.smtpHost || updated.smtpPassword || updated.resendApiKey || updated.emailBackend) {
-    const adminEmail = session.user.email;
-    if (adminEmail) {
-      try {
-        // Written in the requesting admin's language (they are the recipient).
-        await sendTestEmail(adminEmail, localeForRequest(req));
-        testResults.smtpTested = true;
-      } catch (err) {
-        testResults.smtpError = err instanceof Error ? err.message : "Email test failed. Check your email settings.";
-        testFailed = true;
-      }
-    }
-  }
-
-  // Roll back the DB write when any connectivity test failed — otherwise the
-  // settings panel shows "save failed" 422 to the admin while the bad values
-  // remain durably persisted on disk. Restore the pre-write values for keys
-  // that existed before, delete keys we created.
-  if (testFailed) {
-    // Restore only the keys still holding the value THIS request wrote. The
-    // tests above run for up to ~30s (arrFetch's timeout, longer for SMTP) while
-    // the per-key cooldown is 10s, so a second PATCH can commit and answer 200
-    // inside that window — restoring the pre-write snapshot unconditionally
-    // would silently revert a durable write its caller was told had succeeded.
-    const currentByKey = new Map(
-      (await prisma.setting.findMany({ where: { key: { in: changedKeys } } })).map((r) => [r.key, r.value]),
-    );
-    const restorable: string[] = [];
-    const superseded: string[] = [];
-    for (const [key, value] of entries) {
-      (currentByKey.get(key) === value ? restorable : superseded).push(key);
-    }
-    // Tracking stamps this request wrote ride along with their switch: restored
-    // only while the stamp is still the one written here.
-    const stampRows = new Map(
-      (await prisma.setting.findMany({ where: { key: { in: stampEntries.map(([k]) => k) } } })).map((r) => [r.key, r.value]),
-    );
-    const restorableStamps = stampEntries.filter(([k, v]) => stampRows.get(k) === v).map(([k]) => k);
-    if (superseded.length > 0) {
-      console.warn(
-        `[settings] rollback skipped — modified by a concurrent write: ${superseded.join(", ")}`,
-      );
-    }
-    try {
-      await prisma.$transaction(async (tx) => {
-        for (const key of restorableStamps) {
-          const prior = preWriteStamps.get(key);
-          if (prior === undefined) await tx.setting.deleteMany({ where: { key } });
-          else await tx.setting.upsert({ where: { key }, update: { value: prior }, create: { key, value: prior } });
-        }
-        for (const key of restorable) {
-          const prior = preWriteByKey.get(key);
-          if (prior === undefined) {
-            await tx.setting.deleteMany({ where: { key } });
-          } else {
-            // upsert (not update): if the row was concurrently deleted between
-            // the oldRows read and now, update() throws RecordNotFound and the
-            // outer catch swallows it — leaving the bad value durably persisted
-            // while the admin sees a 422 implying rollback. upsert is idempotent.
-            await tx.setting.upsert({
-              where: { key },
-              update: { value: prior },
-              create: { key, value: prior },
-            });
-          }
-        }
-        await tx.auditLog.create({
-          data: {
-            userId: session.user.id,
-            userName: sanitizeText(session.user.name ?? session.user.email ?? "unknown"),
-            action: "SETTINGS_CHANGE",
-            target: "settings:rollback",
-            details: JSON.stringify({ keys: changedKeys, reason: "connectivity test failed", testResults }),
-            ipAddress: auditIp,
-            userAgent: auditUa,
-            provider: session.user.provider ?? null,
-          },
-        });
-      });
-    } catch (err) {
-      console.error("[settings] rollback after test failure failed:", err);
-      // Best-effort: surface the test failure even when rollback didn't apply
-      // cleanly. The admin sees the 422 either way and can re-save manually.
-    }
-    // Release the cooldown these keys armed before the test ran. Their values
-    // were just rolled back, so nothing durable changed — but the stamp survived
-    // and 429'd the admin's corrected re-save for the next 10s, which is exactly
-    // when they are most likely to retry. A superseded key's stamp belongs to
-    // the write that overtook this one, so it stays.
-    for (const key of restorable) lastKeyWriteAt.delete(key);
-    // The rollback rewrote Setting rows — drop the flag memo again.
-    invalidateFeatureFlagCache();
-    invalidateApnsRelayCache();
-    if (mdblistPlanChanged) invalidateMdblistPlanCache();
-    if (neverWatchedInputChanged) invalidateNeverWatchedReport();
-    if (arrConfigChanged) clearArrSnapshots();
-    // Same for the Discord public key and the session-duration TTLs: both memos were
-    // dropped BEFORE the connectivity tests ran, so anything that repopulated them
-    // during the test window (a Discord interaction, a sign-in) cached the value this
-    // rollback just reverted. cachedPublicKey in /api/interactions has no TTL at all,
-    // so that divergence would survive until process restart and every Ed25519
-    // signature check would fail against a key the DB no longer holds.
-    invalidatePublicKeyCache();
-    invalidateSessionDurationsCache();
-  }
-
-  // Re-register the slash commands only once the write is DURABLE. This used to fire
-  // (unawaited) before the connectivity tests, and the rollback restores Setting rows
-  // only — it has no compensating Discord call, so a failed SMTP test left commands
-  // installed on a guild the persisted config no longer references. The task also
-  // re-reads the DB, so its findMany could land either side of the rollback tx and the
-  // same request could produce two different remote states.
-  //
-  // Gate on a real CHANGE to the registration inputs, not on presence. The Discord
-  // form posts every field on every save and discordClientId/discordGuildId are
-  // plaintext (never masked), so a presence gate fired this bulk-overwrite PUT on
-  // a Channels/Roles-tab save that touched neither. The bot token is masked, so it
-  // is only present when it changed; the two ids compare against the pre-write
-  // rows. discordPublicKey does not affect command registration and is left out.
   const discordRegistrationChanged = (["discordBotToken", "discordClientId", "discordGuildId"] as const).some(
-    (k) => k in updated && updated[k] !== preWriteByKey.get(k),
+    (k) => k in updated && updated[k] !== stored.get(k),
   );
-  if (!testFailed && discordRegistrationChanged) {
+  if (discordRegistrationChanged) {
     void (async () => {
       try {
         const rows = await prisma.setting.findMany({
@@ -1283,8 +1296,5 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     })();
   }
 
-  return NextResponse.json(
-    { ok: !testFailed, ...localizeTestResults(testResults, t) },
-    testFailed ? { status: 422 } : undefined,
-  );
+  return NextResponse.json({ ok: true, ...localizeTestResults(testResults, t), ...extra });
 });

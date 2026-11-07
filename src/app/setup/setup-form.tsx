@@ -7,20 +7,25 @@ import { Label } from "@/components/ui/label";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
 import { useT } from "@/components/i18n/i18n-provider";
-
-// Mirrors the server's floor in /api/auth/register (`password.length < 12`) and
-// the profile change-password form. The old minLength 8 + "Min. 8 characters"
-// hint let a 9–11 character password pass the browser check and bounce off the
-// server with "at least 12".
-const MIN_PASSWORD_LENGTH = 12;
+// The server's floor in /api/auth/register and the profile change-password form.
+// The old minLength 8 + "Min. 8 characters" hint let a 9–11 character password
+// pass the browser check and bounce off the server with "at least 12".
+import { MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
 
 // First-run admin account form; registers then auto-signs in. There is no
 // self-registration variant — /register redirects to /setup or /login.
-export function SetupForm() {
+// `onBusyChange` mirrors the submit state so the shell can lock the
+// create/restore switch while the account is being created.
+export function SetupForm({ onBusyChange }: { onBusyChange?: (busy: boolean) => void }) {
   const t = useT();
   const [form, setForm] = useState({ name: "", email: "", password: "", confirm: "" });
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoadingState] = useState(false);
+
+  function setLoading(value: boolean) {
+    setLoadingState(value);
+    onBusyChange?.(value);
+  }
 
   function set(field: string, value: string) {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -37,6 +42,13 @@ export function SetupForm() {
 
     setLoading(true);
 
+    // Once the account exists, every way forward is the sign-in page: setup is
+    // closed, so resubmitting this form could only be refused.
+    let registered = false;
+    const toLogin = () => {
+      window.location.href = withBasePath("/login?created=1");
+    };
+
     try {
       const res = await fetch(withBasePath("/api/auth/register"), {
         method: "POST",
@@ -44,12 +56,16 @@ export function SetupForm() {
         body: JSON.stringify({ name: form.name, email: form.email, password: form.password }),
       });
 
-      const data = await res.json();
       if (!res.ok) {
-        setError(rateLimitMessage(res, t) ?? data.error ?? t("auth.setup.error.registrationFailed"));
+        // The rate-limit message reads only the status and headers, and a proxy's
+        // error page (HTML 413/429/502) is not JSON, so neither depends on the body.
+        const limited = rateLimitMessage(res, t);
+        const data = (await res.json().catch(() => ({}))) as { error?: unknown };
+        setError(limited ?? (typeof data.error === "string" ? data.error : t("auth.setup.error.registrationFailed")));
         setLoading(false);
         return;
       }
+      registered = true;
 
       const result = await fetch(withBasePath("/api/auth/sign-in/credentials"), {
         method: "POST",
@@ -62,8 +78,8 @@ export function SetupForm() {
       });
 
       if (!result.ok) {
-        setError(t("auth.setup.error.createdSignIn"));
-        window.location.href = withBasePath("/login");
+        // The login page says the account was created.
+        toLogin();
         return;
       }
 
@@ -72,6 +88,10 @@ export function SetupForm() {
       // and a second click re-POSTed /api/auth/register.
       window.location.href = withBasePath("/");
     } catch {
+      if (registered) {
+        toLogin();
+        return;
+      }
       setError(t("auth.setup.error.generic"));
       setLoading(false);
     }

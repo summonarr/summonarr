@@ -16,7 +16,9 @@ import {
   getMediaInstances,
   getSyncableMediaInstances,
   buildMediaInstanceRegistryWrite,
+  readMediaInstanceRegistryForSave,
 } from "../src/lib/media-instance-registry.ts";
+import { MEDIA_INSTANCE_NAME_MAX_LEN } from "../src/lib/media-instances.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
 
 const registryValues = new Map<string, string>();
@@ -195,4 +197,39 @@ test("buildMediaInstanceRegistryWrite persists restricted and never stores the d
     { slug: "attic", name: "Attic", restricted: true },
     { slug: "open", name: "Open", restricted: false },
   ]);
+});
+
+test("buildMediaInstanceRegistryWrite drops the default, invalid, non-string and duplicate slugs and bounds the name with the shared cap", () => {
+  const long = "n".repeat(MEDIA_INSTANCE_NAME_MAX_LEN + 20);
+  const { value } = buildMediaInstanceRegistryWrite("plex", [
+    { slug: "", name: "Default", restricted: false },
+    { slug: "Bad Slug", name: "Bad", restricted: false },
+    { slug: 7, name: "Seven", restricted: false } as unknown as { slug: string; name: string; restricted: boolean },
+    { slug: "remote", name: long, restricted: false },
+    { slug: "remote", name: "Again", restricted: true },
+  ]);
+  const stored = JSON.parse(value) as Array<{ slug: string; name: string; restricted: boolean }>;
+  assert.deepEqual(stored.map((e) => e.slug), ["remote"], "first occurrence wins; nothing invalid is stored");
+  assert.equal(stored[0].name.length, MEDIA_INSTANCE_NAME_MAX_LEN);
+  assert.equal(stored[0].restricted, false);
+  assert.equal(MEDIA_INSTANCE_NAME_MAX_LEN, 100, "the route's refusal message and the read-side cap are this one value");
+});
+
+test("readMediaInstanceRegistryForSave takes the service's save lock, THEN reads the registry through the transaction client", async () => {
+  reset();
+  registryValues.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }, { slug: "" }]));
+  const calls: string[] = [];
+  const tx = {
+    $executeRaw: async (q: { sql: string }) => { calls.push(`lock ${q.sql}`); return 0; },
+    setting: {
+      findUnique: async (args: { where: { key: string } }) => {
+        calls.push(`read ${args.where.key}`);
+        const v = registryValues.get(args.where.key);
+        return v === undefined ? null : { key: args.where.key, value: v };
+      },
+    },
+  };
+  const list = await readMediaInstanceRegistryForSave(tx as unknown as Parameters<typeof readMediaInstanceRegistryForSave>[0], "jellyfin");
+  assert.deepEqual(calls, ["lock SELECT pg_advisory_xact_lock(2101, 4)", "read jellyfinInstances"]);
+  assert.deepEqual(list.map((i) => i.slug), ["remote"], "named entries only, through the same normalizer");
 });

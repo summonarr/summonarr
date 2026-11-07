@@ -66,10 +66,15 @@ export function MasterDbFillButton({
             // HTML, and a bare .json() would throw past the per-target guard
             // into the outer catch, losing the other server's result too.
             const data = (await res.json().catch(() => null)) as
-              | { scanned?: { movies: number; tv: number }; error?: string }
+              | { scanned?: { movies: number; tv: number }; error?: string; skipped?: boolean }
               | null;
             if (!res.ok || data?.error) {
               return { ok: false, text: `${name} ${data?.error ?? t("adminManage.library.btn.failedStatus", { status: res.status })}` };
+            }
+            // 200 { skipped: true }: a resync of this server is already running,
+            // so its library is being filled — not a failure, and no counts.
+            if (data?.skipped) {
+              return { ok: true, text: `${name} ${t("adminManage.library.btn.alreadyRunning")}` };
             }
             const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
             return { ok: true, text: `${name} ${t("adminManage.library.btn.items", { count, formatted: count.toLocaleString(locale) })}` };

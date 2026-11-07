@@ -187,7 +187,7 @@
   "settings.arr.minAvail.announced": "Annoncé",
   "settings.arr.minAvail.inCinemas": "Au cinéma",
   "settings.arr.minAvail.released": "Sorti",
-  "settings.arr.invalidSlug": "Slug « {slug} » invalide — utilisez des lettres minuscules et des chiffres, en commençant par une lettre (pas « hd »).",
+  "settings.arr.invalidSlug": "Slug « {slug} » invalide — utilisez des lettres minuscules et des chiffres, en commençant par une lettre (pas « hd » ni « external »).",
   "settings.arr.heading": "{label} — instances supplémentaires",
   "settings.arr.intro": "Instances {label} supplémentaires (par ex. une instance dédiée aux animés). Les demandes y sont acheminées automatiquement lorsque la règle d'une instance correspond ; une demande peut aussi en cibler une explicitement. Les instances restreintes nécessitent une autorisation par utilisateur (Utilisateurs → Accès aux instances).",
   "settings.arr.none": "Aucune instance {label} supplémentaire configurée.",

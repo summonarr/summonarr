@@ -24,11 +24,17 @@
 //     scope and NEVER thrown to the caller — approve/decline routes must not
 //     500 because Discord hiccuped. The admin fan-out isolates per-recipient
 //     failures.
-//   - ROLE SYNC: assignDiscordRolesOnLink maps provider (synthetic
-//     @jellyfin.local email) and app role to the configured role ids. It grants
-//     (PUT) the roles the user should have and revokes (DELETE) every other role
-//     Summonarr manages. revokeDiscordRolesOnUnlink removes all managed roles.
-//     Both skip invalid snowflakes (a snowflake is Discord's numeric id format).
+//   - ROLE SYNC: assignDiscordRolesOnLink maps how the account signs in (the
+//     Plex or Jellyfin subject, the synthetic @jellyfin.local email; a local or
+//     OIDC account earns no server role) and its app role to the configured role
+//     ids. It grants (PUT) the roles the user should have and revokes (DELETE)
+//     every other role Summonarr manages. revokeDiscordRolesOnUnlink removes all
+//     managed roles. Both skip invalid snowflakes (a snowflake is Discord's
+//     numeric id format) and report "ok" / "skipped" / "failed".
+//   - PRIVACY: an issue message, an issue resolution and a decline note are
+//     private to their thread; a post in the shared channel pings without them.
+//   - RATE LIMITS: a 429 is retried after Discord's own wait, a bounded number
+//     of times, and never thrown to the caller.
 //
 // No DB or network: prisma.setting/prisma.user are shadowed in-memory
 // (tests/_helpers.mts), globalThis.fetch is scripted, and dns/promises.lookup
@@ -94,6 +100,10 @@ const {
   notifyUsersRequestsApproved,
   notifyAdminsRequestComment,
   notifyUserRequestComment,
+  notifyUserIssueMessage,
+  notifyUserIssueResolved,
+  notifyUserRequestDeclined,
+  notifyUsersRequestsDeclined,
 } = await import("../src/lib/discord-notify.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -150,6 +160,18 @@ const CHANNEL = "444444444444444444"; // discordNotifyChannelId
 const ADMIN_CHANNEL = "445544554455445544"; // discordAdminRequestChannelId
 const DID = "111111111111111111"; // a linked user's Discord id
 
+// The role-sync input (DiscordRoleAccount): a Plex account by default.
+type RoleAccount = Parameters<typeof assignDiscordRolesOnLink>[1];
+const account = (over: Partial<RoleAccount> = {}): RoleAccount => ({
+  email: "alice@example.com",
+  role: "USER",
+  plexUserId: "plex-1",
+  jellyfinUserId: null,
+  hasLocalCredentials: false,
+  hasOidcAccount: false,
+  ...over,
+});
+
 // A fully-notifiable linked user; individual tests flip fields off.
 const linkedUser = (overrides: UserRow = {}): UserRow => ({
   discordId: DID,
@@ -190,7 +212,7 @@ test("feature flag off: every entry point returns before any fetch or user read,
   await notifyUserRequestApproved("u1", "Dune", "MOVIE");
   await notifyAdminsNewRequestDiscord({ requestId: "r1", title: "Dune", mediaType: "MOVIE", requestedBy: "alice", note: null, posterPath: null });
   await notifyAdminsNewIssueDiscord({ issueId: "i1", title: "Dune", mediaType: "MOVIE", issueType: "OTHER", reportedBy: "alice", note: null, posterPath: null });
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  await assignDiscordRolesOnLink(DID, account());
   await notifyAdminsIssueMessage("Dune", "alice", "hello");
   await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }]);
 
@@ -485,6 +507,9 @@ test("admin fan-out selects by MANAGE_ISSUES (role preset or explicit bit) and e
     assert.equal(s.url, `${API}/channels/${CHANNEL}/messages`);
     const embed = (s.body?.embeds as Array<Record<string, unknown>>)[0];
     assert.ok(String(embed.title).startsWith("💬 User Reply on Issue — Dune"), "default heading is the user-reply variant");
+    // Every linked user reads the shared channel; the issue thread is private.
+    assert.ok(!JSON.stringify(s.body).includes("the audio is wrong"), "the message body never reaches the shared channel");
+    assert.match(String(embed.description), /Open the issue in Summonarr/);
   }
 });
 
@@ -553,10 +578,11 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   const byMethod = (m: string) =>
     sent.filter((s) => s.method === m).map((s) => s.url.split("/roles/")[1]).sort();
 
-  // Plex account (real email), plain USER → linked + plex granted; the jellyfin,
-  // admin and issue-admin roles are managed-but-not-desired, so they are revoked.
+  // Plex account (Plex subject id), plain USER → linked + plex granted; the
+  // jellyfin, admin and issue-admin roles are managed-but-not-desired, so they
+  // are revoked.
   setSettings(roleCfg);
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  assert.equal(await assignDiscordRolesOnLink(DID, account()), "ok");
   assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000003"]);
   assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
   assert.deepEqual(
@@ -574,7 +600,7 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   // Jellyfin account (synthetic @jellyfin.local email), ISSUE_ADMIN →
   // linked + jellyfin + issue-admin roles.
   sent.length = 0;
-  await assignDiscordRolesOnLink(DID, "bob@jellyfin.local", "ISSUE_ADMIN");
+  await assignDiscordRolesOnLink(DID, account({ email: "jellyfin-bob@jellyfin.local", plexUserId: null, jellyfinUserId: "jf-bob", role: "ISSUE_ADMIN" }));
   assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000004", "900000000000000006"]);
   // The plex role is revoked on a Plex→Jellyfin switch, and the full-admin role
   // is revoked for an ISSUE_ADMIN — both previously accumulated silently.
@@ -584,11 +610,46 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   sent.length = 0;
   setSettings({ ...roleCfg, discordPlexRoleId: "plex-members" });
   invalidateFeatureFlagCache();
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  await assignDiscordRolesOnLink(DID, account());
   // The non-snowflake plex id is filtered out of BOTH sets — it is never granted
   // and never revoked, so a malformed config value can't produce a Discord call.
   assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
   assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
+});
+
+test("the server role follows how the account signs in: none for a local or OIDC account, Plex only for Plex", async () => {
+  const guild = "900000000000000001";
+  setSettings({
+    discordBotToken: BOT,
+    discordGuildId: guild,
+    discordLinkedRoleId: "900000000000000002",
+    discordPlexRoleId: "900000000000000003",
+    discordJellyfinRoleId: "900000000000000004",
+  });
+  const byMethod = (m: string) =>
+    sent.filter((s) => s.method === m).map((s) => s.url.split("/roles/")[1]).sort();
+
+  // A local-password account with a real email signs in through neither
+  // server: the linked role only, and BOTH server roles are revoked. It used to
+  // get the Plex role for not having a @jellyfin.local address.
+  await assignDiscordRolesOnLink(DID, account({ plexUserId: null, hasLocalCredentials: true }));
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
+  assert.deepEqual(byMethod("DELETE"), ["900000000000000003", "900000000000000004"]);
+
+  // An OIDC account: the same.
+  sent.length = 0;
+  await assignDiscordRolesOnLink(DID, account({ plexUserId: null, hasOidcAccount: true }));
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
+
+  // A Jellyfin subject id earns the Jellyfin role even with a real email.
+  sent.length = 0;
+  await assignDiscordRolesOnLink(DID, account({ plexUserId: null, jellyfinUserId: "jf-1" }));
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000004"]);
+
+  // A legacy Plex row (no subject id yet, no password, no OIDC) still reads as Plex.
+  sent.length = 0;
+  await assignDiscordRolesOnLink(DID, account({ plexUserId: null }));
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000003"]);
 });
 
 test("unlink revokes every managed role — and only the managed ones", async () => {
@@ -642,7 +703,7 @@ test("unlink revokes every managed role — and only the managed ones", async ()
 test("role assignment: no guild config or invalid member id → zero fetches; a failed PUT only logs", async () => {
   // Bot token but no guild → nothing to do.
   setSettings({ discordBotToken: BOT, discordLinkedRoleId: "900000000000000002" });
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  assert.equal(await assignDiscordRolesOnLink(DID, account()), "skipped");
   assert.equal(sent.length, 0);
 
   // Guild configured but the (external-input) Discord user id is not a snowflake.
@@ -652,12 +713,12 @@ test("role assignment: no guild config or invalid member id → zero fetches; a 
     discordLinkedRoleId: "900000000000000002",
   });
   invalidateFeatureFlagCache();
-  await assignDiscordRolesOnLink("not-a-snowflake", "alice@example.com", "USER");
+  await assignDiscordRolesOnLink("not-a-snowflake", account());
   assert.equal(sent.length, 0);
 
-  // A Discord-side failure is logged per role, never thrown.
+  // A Discord-side failure is logged per role, never thrown — and reported.
   respond = () => new Response("Missing Permissions", { status: 403 });
-  await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  assert.equal(await assignDiscordRolesOnLink(DID, account()), "failed");
   assert.equal(sent.length, 1);
   assert.ok(errors.some((e) => e.includes("[discord-notify] Failed to assign role") && e.includes("403")));
 });
@@ -751,4 +812,111 @@ test("a manager's reply in the SHARED channel pings the requester without the co
   await notifyUserRequestComment("u1", "Dune", "Admin", "the private reply");
   const dm = sent.find((r) => r.url.endsWith("/messages"));
   assert.ok(dm && JSON.stringify(dm.body).includes("the private reply"), "a DM is private, so it carries the text");
+});
+
+// ── private text stays out of the shared channel (guardrail 14e's rule) ─────
+
+test("an issue reply in the SHARED channel pings the reporter without the message; a DM carries it", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+
+  await notifyUserIssueMessage("u1", "Dune", "Admin", "your private reply");
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, `${API}/channels/${CHANNEL}/messages`);
+  assert.equal(sent[0].body?.content, `<@${DID}>`, "the reporter is still pinged");
+  assert.ok(!JSON.stringify(sent[0].body).includes("your private reply"), "no message text in a channel every linked user reads");
+
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT }); // no channel ⇒ DM
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserIssueMessage("u1", "Dune", "Admin", "your private reply");
+  const dm = sent.find((r) => r.url.endsWith("/messages"));
+  assert.ok(dm && JSON.stringify(dm.body).includes("your private reply"), "a DM is private, so it carries the text");
+});
+
+test("an issue resolution and a decline note stay out of the shared channel; a DM carries them", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+
+  await notifyUserIssueResolved("u1", "Dune", "MOVIE", "re-encoded the private file");
+  await notifyUserRequestDeclined("u1", "Dune", "MOVIE", "a private note");
+  userFindManyRows = [{ id: "u1", discordId: DID }];
+  await notifyUsersRequestsDeclined([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }], "a private batch note");
+
+  assert.equal(sent.length, 3);
+  for (const post of sent) {
+    assert.equal(post.url, `${API}/channels/${CHANNEL}/messages`);
+    const text = JSON.stringify(post.body);
+    assert.ok(!text.includes("private"), `private text in the shared channel: ${text}`);
+    assert.match(String((post.body?.embeds as Array<Record<string, unknown>>)[0].description), /Open the (issue|request) in Summonarr/);
+  }
+
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT });
+  respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+  await notifyUserIssueResolved("u1", "Dune", "MOVIE", "re-encoded the private file");
+  await notifyUserRequestDeclined("u1", "Dune", "MOVIE", "a private note");
+  const dms = sent.filter((r) => r.url.endsWith("/messages")).map((r) => JSON.stringify(r.body));
+  assert.ok(dms.some((d) => d.includes("re-encoded the private file")));
+  assert.ok(dms.some((d) => d.includes("a private note")));
+});
+
+// ── Discord rate limits ──────────────────────────────────────────────────────
+
+test("a 429 is retried after Discord's retry_after, then sent; the caller never sees it", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+  let calls = 0;
+  respond = () => (++calls === 1
+    ? new Response(JSON.stringify({ message: "You are being rate limited.", retry_after: 0.02, global: false }), { status: 429, headers: { "content-type": "application/json" } })
+    : okJson({}));
+
+  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+
+  assert.equal(sent.length, 2, "the same post, sent again once Discord's wait passed");
+  assert.deepEqual(sent[0].body, sent[1].body);
+  assert.deepEqual(errors, [], "a retried 429 that then lands is not a failure");
+});
+
+test("the Retry-After header is honoured too, and retries are bounded: a channel that keeps answering 429 is logged, not thrown", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+  respond = () => new Response("slow down", { status: 429, headers: { "retry-after": "0.01" } });
+
+  await notifyUserRequestApproved("u1", "Dune", "MOVIE"); // must resolve
+
+  assert.equal(sent.length, 4, "one send plus three retries, then the 429 is the answer");
+  assert.ok(errors.some((e) => e.includes("[discord-notify] Failed to send notification:") && e.includes("429")));
+});
+
+test("a 429 asking for a wait past the budget is not retried", { timeout: 10_000 }, async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+  respond = () => new Response(JSON.stringify({ retry_after: 600 }), { status: 429, headers: { "content-type": "application/json" } });
+
+  const started = Date.now();
+  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  assert.equal(sent.length, 1, "ten minutes is not worth holding a notification for");
+  assert.ok(Date.now() - started < 5_000);
+  assert.ok(errors.some((e) => e.includes("429")));
+});
+
+test("a bucket that reports nothing left holds the next post on that channel until it resets", async () => {
+  setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+  userFindUniqueRow = linkedUser();
+  const at: number[] = [];
+  respond = () => {
+    at.push(Date.now());
+    return new Response("{}", {
+      status: 200,
+      headers: { "content-type": "application/json", "x-ratelimit-remaining": at.length === 1 ? "0" : "4", "x-ratelimit-reset-after": "0.15" },
+    });
+  };
+
+  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+
+  assert.equal(at.length, 2);
+  assert.ok(at[1] - at[0] >= 120, `the second post waited for the bucket (${at[1] - at[0]}ms)`);
 });

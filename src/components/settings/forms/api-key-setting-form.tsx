@@ -9,11 +9,7 @@ import { CheckCircle, XCircle, Loader2, Trash2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
-
-// The placeholder /api/settings sends instead of a stored secret, and ignores
-// when it comes back in a PATCH (route.ts `MASKED_VALUE` — keep the two equal).
-// An untouched field still holds it, so Test there checks the saved key.
-const MASKED_VALUE = "••••••••";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 
 export function ApiKeySettingForm({
   initialApiKey,
@@ -23,6 +19,7 @@ export function ApiKeySettingForm({
   inputId,
   help,
 }: {
+  // The settings page passes the mask when a key is saved, "" when none is.
   initialApiKey: string;
   settingKey: string;
   // The /api/settings/test-ratings service to check the saved key against. Omit
@@ -35,13 +32,17 @@ export function ApiKeySettingForm({
 }) {
   const t = useT();
   const router = useRouter();
-  const [apiKey, setApiKey] = useState(initialApiKey);
-  // The value the server currently holds (as far as this form knows). The test
-  // endpoint checks the SAVED key, not what's typed in the box — so testing an
-  // edited, unsaved key would check the OLD one and could show "Connected" next
-  // to a mistyped new key. So when the field has unsaved changes, Test saves
-  // first and then tests (the same "Save & Test" approach as arr-form.tsx).
-  const [savedKey, setSavedKey] = useState(initialApiKey);
+  // The field starts EMPTY even when a key is saved: the mask is only its
+  // placeholder. As the field's value, a key pasted with the caret after it was
+  // saved as "••••••••<key>". An empty field with a saved key means "keep it",
+  // and Test then checks the saved key.
+  const [apiKey, setApiKey] = useState("");
+  // The value this form last saved ("" until it saves one). The test endpoint
+  // checks the SAVED key, not what's typed in the box — so testing an edited,
+  // unsaved key would check the OLD one and could show "Connected" next to a
+  // mistyped new key. So when the field has unsaved changes, Test saves first
+  // and then tests (the same "Save & Test" approach as arr-form.tsx).
+  const [savedKey, setSavedKey] = useState("");
   // Whether a key is SAVED on the server right now. The prop is set once at
   // page load and never refreshes, so after Remove it would still describe a
   // deleted key; this is updated after every successful PATCH instead (same
@@ -52,9 +53,9 @@ export function ApiKeySettingForm({
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "ok" | "error">("idle");
   const [testMessage, setTestMessage] = useState("");
 
-  // The server ignores the placeholder value and an empty one only matters as
-  // an explicit Remove, so neither counts as a change to save.
-  const dirty = apiKey !== savedKey && apiKey.length > 0 && apiKey !== MASKED_VALUE;
+  // An empty field only matters as an explicit Remove, and the server ignores
+  // the bare mask, so neither counts as a change to save.
+  const dirty = apiKey !== savedKey && apiKey.length > 0 && apiKey !== SECRET_MASK_SENTINEL;
 
   // PATCHes one value for this setting. "" deletes the stored key (the route
   // treats ipinfoToken / omdbApiKey / mdblistApiKey as clearable), anything
@@ -146,9 +147,12 @@ export function ApiKeySettingForm({
           <Input
             id={inputId}
             type="password"
+            autoComplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
             value={apiKey}
             onChange={(e) => { setApiKey(e.target.value); setStatus("idle"); setTestStatus("idle"); }}
-            placeholder="••••••••"
+            placeholder={keyIsSet ? SECRET_MASK_SENTINEL : undefined}
             className="bg-zinc-800 border-zinc-700 font-mono"
           />
           {keyIsSet && (
@@ -165,6 +169,11 @@ export function ApiKeySettingForm({
             </Button>
           )}
         </div>
+        {/* The placeholder alone doesn't say whether a blank field means
+            "nothing saved" or "saved, write-only" (arr-instances-manager's hint). */}
+        {keyIsSet && !apiKey && (
+          <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
+        )}
         <p className="text-xs text-zinc-500">
           {help}
         </p>

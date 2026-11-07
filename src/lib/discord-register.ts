@@ -203,27 +203,33 @@ export async function putDiscordCommands(botToken: string, clientId: string, gui
   return cleared.ok ? res : cleared;
 }
 
-// Hash the schema AND its registration scope: a guild↔global switch changes the
-// target endpoint, so it must re-register even when the command array is
-// identical.
-export function discordSchemaHash(guildId: string | null): string {
+// Hash the schema AND its registration target: the bot application and the
+// guild↔global scope both change the endpoint (discordCommandsUrl), so either
+// must re-register even when the command array is identical. Without the
+// application id, moving to another bot left the old app's hash matching and
+// the boot sync never registered the new one.
+export function discordSchemaHash(clientId: string, guildId: string | null): string {
   return createHash("sha256")
     .update(JSON.stringify(REGISTERED_DISCORD_COMMANDS))
+    .update(`client:${clientId}`)
     .update(guildId ? `guild:${guildId}` : "global")
     .digest("hex");
 }
 
-// Record the schema+scope hash after a successful registration so the boot sync
+// Record the schema+target hash after a successful registration so the boot sync
 // treats it as current. Called by the admin button, the settings save and the
 // boot path; a failure here only costs one redundant (idempotent)
-// re-registration next boot.
-export async function recordDiscordSchemaHash(guildId: string | null): Promise<void> {
-  const value = discordSchemaHash(guildId);
+// re-registration next boot. `clientId` is the application just registered;
+// a caller that doesn't pass it gets the stored discordClientId.
+export async function recordDiscordSchemaHash(guildId: string | null, clientId?: string): Promise<void> {
   // try/catch (not a trailing .catch): must swallow a SYNCHRONOUS throw too —
   // this is a best-effort bookkeeping write whose failure only costs one
   // redundant, idempotent re-registration on the next boot, and it must never
   // propagate into its caller (the register button / settings save).
   try {
+    const appId = clientId ?? (await prisma.setting.findUnique({ where: { key: "discordClientId" } }))?.value;
+    if (!appId) return;
+    const value = discordSchemaHash(appId, guildId);
     await prisma.setting.upsert({ where: { key: DISCORD_SCHEMA_HASH_KEY }, update: { value }, create: { key: DISCORD_SCHEMA_HASH_KEY, value } });
   } catch (err) {
     console.warn("[discord] failed to persist command schema hash:", err instanceof Error ? err.message : err);
@@ -254,7 +260,7 @@ export async function syncDiscordCommandsIfChanged(): Promise<void> {
   if (!cfg.discordBotToken || !cfg.discordClientId) return; // Discord not configured
 
   const guildId = cfg.discordGuildId?.trim() || null;
-  if (cfg[DISCORD_SCHEMA_HASH_KEY] === discordSchemaHash(guildId)) return; // already current
+  if (cfg[DISCORD_SCHEMA_HASH_KEY] === discordSchemaHash(cfg.discordClientId, guildId)) return; // already current
 
   const res = await putDiscordCommands(cfg.discordBotToken, cfg.discordClientId, guildId);
   if (!res.ok) {
@@ -263,5 +269,5 @@ export async function syncDiscordCommandsIfChanged(): Promise<void> {
     console.warn(`[discord] boot command sync failed (${res.status}): ${text.slice(0, 200)}`);
     return;
   }
-  await recordDiscordSchemaHash(guildId);
+  await recordDiscordSchemaHash(guildId, cfg.discordClientId);
 }

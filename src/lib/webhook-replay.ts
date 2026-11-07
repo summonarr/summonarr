@@ -17,14 +17,25 @@ function digest(source: string, secret: string, body: string): string {
   return h.digest("hex");
 }
 
+// Real Sonarr/Radarr payloads nest a handful of levels. JSON.parse is iterative,
+// so a 1 MB body can parse ~500k levels deep, and the recursion below then
+// overflowed the stack — a RangeError, i.e. a 500 instead of a 400.
+const MAX_CANONICAL_DEPTH = 64;
+
 // Recursively sort object keys so structurally-identical JSON payloads with different key orderings
-// produce the same digest. Arrays preserve order. Primitives pass through.
-function canonicalize(value: unknown): unknown {
+// produce the same digest. Arrays preserve order. Primitives pass through. Past
+// MAX_CANONICAL_DEPTH it throws an Error named "WebhookPayloadTooDeep", which the
+// webhook routes answer with a 400; the output (and so every digest) of a payload
+// within the cap is unchanged.
+function canonicalize(value: unknown, depth = 0): unknown {
   if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(canonicalize);
+  if (depth >= MAX_CANONICAL_DEPTH) {
+    throw Object.assign(new Error(`webhook payload nested deeper than ${MAX_CANONICAL_DEPTH} levels`), { name: "WebhookPayloadTooDeep" });
+  }
+  if (Array.isArray(value)) return value.map((v) => canonicalize(v, depth + 1));
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-    out[key] = canonicalize((value as Record<string, unknown>)[key]);
+    out[key] = canonicalize((value as Record<string, unknown>)[key], depth + 1);
   }
   return out;
 }

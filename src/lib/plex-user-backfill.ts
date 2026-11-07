@@ -41,6 +41,13 @@ import { isPrismaErrorCode } from "@/lib/prisma-errors";
 // its email rewritten to deleted-<id>@deleted.invalid, which matches the
 // Plex-only candidate shape exactly; this same filter excludes it.
 
+// The run marker. Written here when a run completes; READ only by the boot
+// caller (instrumentation.ts), which skips the backfill once it exists — this
+// helper stays re-runnable. One constant for both sides: renaming it on one side
+// alone would rerun the email-match backfill on every boot. The stored string
+// must not change, or existing installs lose their marker.
+export const PLEX_USER_BACKFILL_RAN_AT_KEY = "plexUserIdBackfillRanAt";
+
 export async function runPlexUserBackfillIfNeeded(): Promise<void> {
   try {
     const candidates = await prisma.user.findMany({
@@ -195,8 +202,8 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
     }
 
     await prisma.setting.upsert({
-      where: { key: "plexUserIdBackfillRanAt" },
-      create: { key: "plexUserIdBackfillRanAt", value: new Date().toISOString() },
+      where: { key: PLEX_USER_BACKFILL_RAN_AT_KEY },
+      create: { key: PLEX_USER_BACKFILL_RAN_AT_KEY, value: new Date().toISOString() },
       update: { value: new Date().toISOString() },
     });
 

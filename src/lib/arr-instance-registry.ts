@@ -13,7 +13,9 @@
 // Impure (reads Setting) — the pure key derivation + routing predicate live in
 // arr-instances.ts and are re-used here.
 
+import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
+import { warnOnChange, forgetWarnOnChange } from "./log-dedup";
 import {
   type ArrInstanceConfig,
   type ArrService,
@@ -28,6 +30,22 @@ const REGISTRY_KEY: Record<ArrService, string> = {
   radarr: "arrRadarrInstances",
   sonarr: "arrSonarrInstances",
 };
+
+// Serializes saves of one service's registry (the admin arr-instances POST).
+// A transaction-scoped advisory lock rather than a row lock because the row may
+// not exist yet: two first-ever saves would otherwise both read "no instances"
+// and the second would overwrite the first's entry, orphaning its Setting rows.
+// Literal ids — pg_advisory_xact_lock has no (int, bigint) overload, so a bound
+// parameter would not resolve. The media registry uses 2101/3 and 2101/4.
+const REGISTRY_SAVE_LOCK: Record<ArrService, Prisma.Sql> = {
+  radarr: Prisma.sql`SELECT pg_advisory_xact_lock(2101, 1)`,
+  sonarr: Prisma.sql`SELECT pg_advisory_xact_lock(2101, 2)`,
+};
+
+// The interactive-tx client of the EXTENDED prisma (the generated
+// Prisma.TransactionClient is not assignable to it — see account-lifecycle.ts).
+type TxClient = Omit<typeof prisma, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+type RegistryTx = Pick<TxClient, "$executeRaw" | "setting">;
 
 // The synthesized default instance — always present, open to any requester,
 // honors the shared-library availability check, never auto-routed.
@@ -92,11 +110,10 @@ function normalizeEntry(raw: unknown): ArrInstanceConfig | null {
   };
 }
 
-async function readRegistryJson(service: ArrService): Promise<ArrInstanceConfig[]> {
-  const row = await prisma.setting.findUnique({ where: { key: REGISTRY_KEY[service] } });
-  if (!row?.value) return [];
+function parseRegistryValue(service: ArrService, value: string | null | undefined): ArrInstanceConfig[] {
+  if (!value) return [];
   try {
-    const parsed = JSON.parse(row.value);
+    const parsed = JSON.parse(value);
     if (!Array.isArray(parsed)) {
       // Warn rather than silently coerce: an empty list here invisibly disables
       // every named instance (webhook secret discrimination 401s, auto-routing
@@ -106,18 +123,50 @@ async function readRegistryJson(service: ArrService): Promise<ArrInstanceConfig[
     }
     const out: ArrInstanceConfig[] = [];
     const seen = new Set<string>([DEFAULT_ARR_INSTANCE]);
+    const dropped: string[] = [];
     for (const entry of parsed) {
       const norm = normalizeEntry(entry);
       if (norm && !seen.has(norm.slug)) {
         out.push(norm);
         seen.add(norm.slug);
+      } else if (!norm) {
+        const slug = entry && typeof entry === "object" ? (entry as { slug?: unknown }).slug : undefined;
+        // A NAMED-looking slug the current rules refuse (e.g. "external", whose
+        // Url key is the default instance's ExternalUrl). It stops working
+        // silently otherwise; once per change, not per read (guardrail 7b).
+        if (typeof slug === "string" && slug !== DEFAULT_ARR_INSTANCE && slug !== FOURK_ARR_INSTANCE) dropped.push(slug);
       }
+    }
+    const warnKey = `arr-registry-dropped:${service}`;
+    if (dropped.length > 0) {
+      const list = dropped.map((d) => JSON.stringify(d.slice(0, 40))).join(", ");
+      warnOnChange(warnKey, list, `[arr] instance registry ${REGISTRY_KEY[service]} has entries with an invalid or reserved slug (${list}); they are ignored — remove them and re-add the instance under another slug`);
+    } else {
+      forgetWarnOnChange(warnKey);
     }
     return out;
   } catch {
     console.warn(`[arr] instance registry ${REGISTRY_KEY[service]} is corrupted (unparseable JSON); treating as no named instances`);
     return [];
   }
+}
+
+async function readRegistryJson(service: ArrService): Promise<ArrInstanceConfig[]> {
+  const row = await prisma.setting.findUnique({ where: { key: REGISTRY_KEY[service] } });
+  return parseRegistryValue(service, row?.value);
+}
+
+// The registry as a SAVE must see it: inside the caller's transaction, after
+// the per-service save lock, so the diff a save computes ("which named slugs did
+// this list drop") is against the list no other save can change before this
+// one commits. Read before the lock, a save that landed in between (an instance
+// added in another tab) was overwritten without ever being "removed", so its
+// Setting rows — the encrypted API key included — were never cleaned up.
+// Named entries only (the built-ins are synthesized, never stored).
+export async function readArrInstanceRegistryForSave(tx: RegistryTx, service: ArrService): Promise<ArrInstanceConfig[]> {
+  await tx.$executeRaw(REGISTRY_SAVE_LOCK[service]);
+  const row = await tx.setting.findUnique({ where: { key: REGISTRY_KEY[service] } });
+  return parseRegistryValue(service, row?.value);
 }
 
 // The slugs (of `slugs`) whose connection is configured — url + apiKey BOTH

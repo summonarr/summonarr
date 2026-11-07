@@ -1,27 +1,11 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit, auditContext, getAuditPiiRetentionDays } from "@/lib/audit";
+import { logAudit, auditContext, getAuditPiiRetentionDays, REDACTED_USER_NAME } from "@/lib/audit";
 import { scrubTargetPiiFromAudit } from "@/lib/audit-scrub";
 import { checkRateLimit } from "@/lib/rate-limit";
-import type { AuditAction, Prisma } from "@/generated/prisma";
-import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
-import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { buildAuditLogWhere } from "@/lib/audit-log-filter";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-
-const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
-
-// Coarse group filter — derived from the shared ACTION_GROUP so the schema enum
-// is the single source of truth. Adding a new enum value with a group assignment
-// in audit-actions.ts automatically populates the right bucket here.
-const GROUP_ACTIONS: Record<AuditGroup, AuditAction[]> = {
-  auth: [],
-  admin: [],
-  system: [],
-};
-for (const action of AUDIT_ACTIONS) {
-  GROUP_ACTIONS[ACTION_GROUP[action]].push(action);
-}
 
 export const GET = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -31,74 +15,18 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const url = req.nextUrl;
   const pageSize = Math.min(50, Math.max(1, parseInt(url.searchParams.get("pageSize") ?? "50", 10) || 50));
   const cursor = url.searchParams.get("cursor") ?? undefined;
-  const action = url.searchParams.get("action") as AuditAction | null;
-  const groupParam = url.searchParams.get("group");
-  const group: "auth" | "admin" | "system" | null =
-    groupParam === "auth" || groupParam === "admin" || groupParam === "system"
-      ? groupParam
-      : null;
-  const dateFrom = url.searchParams.get("dateFrom");
-  const dateTo = url.searchParams.get("dateTo");
-  const user = url.searchParams.get("user");
-  const target = url.searchParams.get("target");
-  const hideCron = url.searchParams.get("hideCron") === "1";
 
-  const where: Prisma.AuditLogWhereInput = {};
-
-  // Action is more specific than group — action wins if both are present
-  if (action && VALID_ACTIONS.includes(action)) {
-    where.action = action;
-  } else if (group) {
-    where.action = { in: GROUP_ACTIONS[group] };
+  // The filter the page and the export build too (audit-log-filter.ts). An
+  // invalid date is a 400 here and on the export, and the page drops it
+  // before rendering, so "Load more" never pages an unfiltered list.
+  const filter = buildAuditLogWhere(url.searchParams);
+  if (filter.error) {
+    const msg = filter.error === "invalidDateFrom"
+      ? t("apiAdmin.auditLog.invalidDateFrom")
+      : t("apiAdmin.auditLog.invalidDateTo");
+    return NextResponse.json({ error: msg }, { status: 400 });
   }
-
-  if (dateFrom || dateTo) {
-    where.createdAt = {};
-    // An invalid date is a 400, as on the export twin: the table forwards the
-    // same filter state to both, so silently dropping it here returned
-    // UNFILTERED rows for "Load more" while "Export" of the identical view erred.
-    if (dateFrom) {
-      const d = new Date(dateFrom);
-      if (isNaN(d.getTime())) {
-        return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateFrom") }, { status: 400 });
-      }
-      where.createdAt.gte = d;
-    }
-    if (dateTo) {
-      const end = new Date(dateTo);
-      if (isNaN(end.getTime())) {
-        return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateTo") }, { status: 400 });
-      }
-      // Advance by one UTC day to make the range inclusive of the requested end
-      // date. UTC, because a date-only string parses to UTC midnight: local-time
-      // setDate lands 23/25 h later across a DST change in a non-UTC TZ.
-      end.setUTCDate(end.getUTCDate() + 1);
-      where.createdAt.lt = end;
-    }
-  }
-
-  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
-  // metacharacters and bound the length (search-box DoS, matches /api/votes).
-  if (user) {
-    where.userName = { contains: sanitizeContainsSearch(user), mode: "insensitive" };
-  }
-
-  if (target) {
-    where.target = { contains: sanitizeContainsSearch(target), mode: "insensitive" };
-  }
-
-  if (hideCron) {
-    // "Hide cron" means hide the SYSTEM principal, not hide every row without a
-    // user. `{ not: "system" }` compiles to `"userId" <> 'system'`, and in SQL
-    // NULL <> 'system' is NULL, not TRUE — so Postgres drops every NULL-userId row
-    // too. Three writers produce those, and the one that matters is
-    // /api/auth/machine-session, which mints an ADMIN-impersonating JWT from
-    // CRON_SECRET and is deliberately attributed to the machine rather than to the
-    // assumed admin. That row is the only record the mint happened, and ticking a
-    // filter labelled "Showing only real users" silently removed it — including
-    // from the CSV/JSON export.
-    where.AND = [{ OR: [{ userId: null }, { userId: { not: "system" } }] }];
-  }
+  const { where } = filter;
 
   const logs = await prisma.auditLog.findMany({
     where,
@@ -133,10 +61,10 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
       OR: [
         { ipAddress: { not: null } },
         { userAgent: { not: null } },
-        { userName: { not: "[redacted]" } },
+        { userName: { not: REDACTED_USER_NAME } },
       ],
     },
-    data: { ipAddress: null, userAgent: null, userName: "[redacted]" },
+    data: { ipAddress: null, userAgent: null, userName: REDACTED_USER_NAME },
   });
 
   const detailsResult = await prisma.auditLog.updateMany({

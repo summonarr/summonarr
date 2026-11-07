@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { processSingleton } from "@/lib/process-singleton";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
 
 // Central registry for admin-toggleable feature flags.
 //
@@ -30,7 +31,9 @@ export interface FeatureDefinition {
   note?: string;
 }
 
-export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
+// `satisfies`, not an annotation: the annotation widened every key to `string`,
+// so FeatureKey was `string` and a mistyped key compiled and read as disabled.
+export const FEATURE_DEFINITIONS = [
   // ── User-facing pages ──────────────────────────────────────────────────
   {
     key: "feature.page.top",
@@ -288,7 +291,7 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     category: "admin",
     defaultEnabled: false,
   },
-] as const;
+] as const satisfies readonly FeatureDefinition[];
 
 export const FEATURE_KEYS = FEATURE_DEFINITIONS.map((f) => f.key);
 
@@ -319,6 +322,8 @@ const flagState = processSingleton("features:flagCache", () => ({
   gen: 0,
 }));
 
+const STALE_FLAGS_WARN_KEY = "features:stale-flags";
+
 export function invalidateFeatureFlagCache(): void {
   flagState.gen++;
   flagState.cache = null;
@@ -348,7 +353,23 @@ export async function getFeatureFlags(cfg?: Record<string, string>): Promise<Fea
   const gen = flagState.gen;
   const inflight = (async () => {
     try {
-      const rows = await prisma.setting.findMany({ where: { key: { in: [...FEATURE_KEYS] } } });
+      let rows;
+      try {
+        rows = await prisma.setting.findMany({ where: { key: { in: [...FEATURE_KEYS] } } });
+      } catch (err) {
+        // Every concurrent caller shares this one read, so one transient failure
+        // (a pool timeout) would fail every page render at once. Serve the last
+        // successful read instead, its expiry untouched so the next call retries.
+        // Only a read the admin has not invalidated since: invalidate clears the
+        // cache, so a toggle is never undone. Never the registered defaults —
+        // they could re-enable a page or integration an admin turned off.
+        const lastGood = flagState.cache;
+        if (!lastGood) throw err;
+        const detail = err instanceof Error ? err.message : String(err);
+        warnOnChange(STALE_FLAGS_WARN_KEY, detail, `[features] flag read failed, serving the last successful read: ${detail}`);
+        return lastGood.flags;
+      }
+      forgetWarnOnChange(STALE_FLAGS_WARN_KEY);
       const flags = computeFlags(Object.fromEntries(rows.map((r) => [r.key, r.value])));
       // Only cache if no invalidation happened while this read was in flight.
       if (gen === flagState.gen) flagState.cache = { flags, expiresAt: Date.now() + FLAG_CACHE_TTL_MS };
@@ -366,7 +387,7 @@ export async function getFeatureFlags(cfg?: Record<string, string>): Promise<Fea
  * Server-side check for a single feature. Uses getFeatureFlags internally, so
  * callers that already have a flag map should read it directly.
  */
-export async function isFeatureEnabled(key: FeatureKey | string): Promise<boolean> {
+export async function isFeatureEnabled(key: FeatureKey): Promise<boolean> {
   const flags = await getFeatureFlags();
   return flags[key] ?? false;
 }
@@ -378,7 +399,7 @@ export async function isFeatureEnabled(key: FeatureKey | string): Promise<boolea
  *
  *   await requireFeature("feature.page.upcoming");
  */
-export async function requireFeature(key: FeatureKey | string): Promise<void> {
+export async function requireFeature(key: FeatureKey): Promise<void> {
   const enabled = await isFeatureEnabled(key);
   if (!enabled) notFound();
 }

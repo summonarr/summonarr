@@ -261,6 +261,27 @@ test("every WRITE handler either encrypts or explicitly refuses the bypass", () 
   }
 });
 
+test("every single-row WRITE handler hands back plaintext — it decrypts the row its query returns", () => {
+  // create/update/upsert return the written row. UserTotp and NotificationAgent
+  // always decrypted it while Setting and Account returned the stored enc:v1
+  // value, so the same call shape gave a caller plaintext or ciphertext
+  // depending on the model. The encrypt must still come BEFORE the query.
+  for (const model of ["setting", "account"] as const) {
+    for (const op of SINGLE_WRITE_OPS) {
+      const body = handlerBody(model, op);
+      const queryAt = body.indexOf("await query(args)");
+      const decryptAt = body.indexOf(DECRYPT_HELPER[model], queryAt);
+      assert.ok(
+        queryAt >= 0 && decryptAt > queryAt,
+        `${model}.${op} returns the written row without decrypting it — the caller gets raw ciphertext.\n  ` +
+          body.replace(/\s+/g, " ").slice(0, 200),
+      );
+      const encryptAt = body.search(ENCRYPT_HELPER[model]);
+      assert.ok(encryptAt >= 0 && encryptAt < queryAt, `${model}.${op} must encrypt BEFORE the query runs`);
+    }
+  }
+});
+
 test("both models are covered identically — divergence is how one of them grows a hole", () => {
   assert.deepEqual(
     [...HANDLED.setting].sort(),
@@ -307,6 +328,42 @@ test("nothing calls an operation that bypasses the crypto extension", () => {
       "with its protected columns still encrypted; `.groupBy()`/`.aggregate()` can project them. Handle the " +
       "operation in src/lib/prisma.ts first, or use the deleteMany/findMany equivalents that are covered.",
   );
+
+  // Query extensions intercept TOP-LEVEL operations only. A nested relation
+  // write under a user query (`accounts: { create: … }`) stores the tokens in
+  // plaintext, and a nested include/select of the relation hands them back as
+  // ciphertext. The relation FILTERS (some/none/every) read no column and stay
+  // allowed. Requiring the `:` after the operator keeps prose in comments out.
+  const nested = /\baccounts:\s*(?:true\b|\{\s*(?:create|createMany|connectOrCreate|upsert|update|updateMany|set|select|include|omit|where|orderBy|take|skip|cursor|distinct)\s*:)/g;
+  const nestedOffenders: string[] = [];
+  let filters = 0;
+  for (const f of files) {
+    const src = readFileSync(f, "utf8");
+    for (const m of src.matchAll(nested)) nestedOffenders.push(`${f.slice(REPO.length)}: ${m[0]}`);
+    filters += [...src.matchAll(/\baccounts:\s*\{\s*(?:some|none|every)\s*:/g)].length;
+  }
+  assert.ok(filters >= 4, `only ${filters} accounts relation filters found — the nested scan is not reading real code`);
+  assert.deepEqual(
+    nestedOffenders,
+    [],
+    "a nested accounts write or include/select bypasses the crypto extension: a nested write stores the OAuth " +
+      "tokens in plaintext, a nested read returns ciphertext. Use a top-level prisma.account call instead.",
+  );
+});
+
+test("the nested-accounts scan catches the shapes it exists for, and passes the relation filters", () => {
+  const nested = /\baccounts:\s*(?:true\b|\{\s*(?:create|createMany|connectOrCreate|upsert|update|updateMany|set|select|include|omit|where|orderBy|take|skip|cursor|distinct)\s*:)/;
+  for (const bad of [
+    "data: { accounts: { create: { provider: 'plex', access_token: t } } }",
+    "include: { accounts: true }",
+    "select: { accounts: { select: { access_token: true } } }",
+    "data: {\n  accounts: {\n    upsert: { where, create, update },\n  },\n}",
+  ]) assert.match(bad, nested, bad);
+  for (const ok of [
+    "where: { accounts: { some: { provider: 'plex' } } }",
+    "where: { accounts: { none: { provider: 'oidc' } } }",
+    "// a nested `accounts: { create }` under user.create bypasses the hook",
+  ]) assert.doesNotMatch(ok, nested, ok);
 });
 
 // ── behaviour: the bypass guards fire, and fire early ──────────────────────
@@ -528,6 +585,15 @@ test("setting.upsert with update.value:{ set } on a sensitive key is stored as e
   assert.ok(values.some((v) => typeof v === "string" && v.startsWith("enc:v1:")), `no ciphertext bound: ${JSON.stringify(values)}`);
   assert.ok(!values.includes("UPDATE-PLAINTEXT"), "the { set } plaintext reached the driver");
   assert.ok(!values.includes("CREATE-PLAINTEXT"), "the create plaintext reached the driver");
+});
+
+test("setting.update writing a value without naming the row by key is refused before a query", async () => {
+  // Without the key the extension can't tell whether the value is a secret; the
+  // old best-effort path could fall through and store it unencrypted.
+  const started = Date.now();
+  const err = await thrown(() => prisma.setting.update({ where: { updatedAt: new Date() } as never, data: { value: "PLAINTEXT" } }));
+  assert.match(err?.message ?? "", /without a string `where.key` is forbidden/);
+  assert.ok(Date.now() - started < 50, "the refusal must come before any query");
 });
 
 test("setting.update / upsert with any value operator other than { set: string } are refused before a query", async () => {

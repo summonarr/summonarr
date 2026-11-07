@@ -9,6 +9,7 @@ import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
 
 const BATCH = 5;
 
@@ -121,12 +122,24 @@ export async function POST(request: NextRequest) {
     async (signal) => {
       const startTime = Date.now();
 
+      // A list that throws still degrades to empty (the warm runs on what
+      // answered), but it is recorded: a TMDB outage used to answer 200
+      // {total: 0} with no log and a green run. The list helpers also absorb a
+      // failed PAGE and return what answered, so an all-empty pool is read as
+      // failed too — every one of these lists is non-empty on a healthy TMDB.
+      const failedLists: string[] = [];
+      const list = (name: string, get: () => Promise<TmdbMedia[]>) =>
+        get().catch((err) => {
+          failedLists.push(name);
+          console.warn(`[sync/ratings] TMDB ${name} list failed:`, err instanceof Error ? err.message : err);
+          return [] as TmdbMedia[];
+        });
       const [trending, popularMovies, popularTV, topMovies, topTV] = await Promise.all([
-        getTrending().catch(() => [] as TmdbMedia[]),
-        getPopularMovies().catch(() => [] as TmdbMedia[]),
-        getPopularTV().catch(() => [] as TmdbMedia[]),
-        getTopRatedMovies().catch(() => [] as TmdbMedia[]),
-        getTopRatedTV().catch(() => [] as TmdbMedia[]),
+        list("trending", getTrending),
+        list("popular-movies", getPopularMovies),
+        list("popular-tv", getPopularTV),
+        list("top-movies", getTopRatedMovies),
+        list("top-tv", getTopRatedTV),
       ]);
 
       const seen = new Set<string>();
@@ -173,7 +186,19 @@ export async function POST(request: NextRequest) {
       const { warmed, skipped, quotaExhausted } = await warmBatch(all, signal);
       const durationMs = Date.now() - startTime;
 
-      return NextResponse.json({ total: all.length, warmed, skipped, quotaExhausted, durationMs });
+      // Still 200 (a warm with no deletes; a partial pool is still worth
+      // warming), but degraded so withCronRunRecording records the run red.
+      const degraded = failedLists.length > 0 ? failedLists.join(",") : all.length === 0 ? "tmdb-lists-empty" : null;
+      if (degraded !== null) {
+        // The same outage restates itself every run: log it once (guardrail 7b).
+        warnOnChange("sync/ratings:tmdb-lists", degraded, `[sync/ratings] warmed a degraded TMDB pool (${degraded}); ${all.length} title(s)`);
+      } else {
+        forgetWarnOnChange("sync/ratings:tmdb-lists");
+      }
+      return NextResponse.json(
+        { total: all.length, warmed, skipped, quotaExhausted, durationMs },
+        degraded !== null ? { headers: { "X-Cron-Degraded": degraded } } : undefined,
+      );
     },
     // A busy lock is not a run: X-Cron-Skipped keeps it out of the ledger.
     () => cronSkippedResponse(),

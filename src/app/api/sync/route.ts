@@ -1,33 +1,32 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import {
-  getRadarrWantedTmdbIds,
-  getSonarrWantedTmdbIds,
   addMovieToRadarr,
   addSeriesToSonarr,
 } from "@/lib/arr";
-import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, plexLibraryRatingKeys, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "@/lib/plex";
+import { refreshArrCache } from "@/lib/arr-cache-refresh";
+import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "@/lib/plex";
 import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
-import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinMediaFolders, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
+import { buildSeriesItemIdIndex, getJellyfinMediaFolders, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { runDownloadCheck } from "@/lib/download-check";
 import { logAudit } from "@/lib/audit";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, cronSkippedResponse, patchPlexShowFilePaths, replaceEpisodeCacheForSource, replacePlexLibraryForInstances, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type PlexLibraryRow, type JellyfinLibraryRow } from "@/lib/cron-auth";
+import { getCronActor, cronSkippedResponse, patchPlexShowFilePaths, replaceEpisodeCacheForSource, replacePlexLibraryForInstances, replaceJellyfinLibraryForInstances, withCronRunRecording, type CronActor, type PlexLibraryRow, type JellyfinLibraryRow } from "@/lib/cron-auth";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { fanOutAvailableWinners } from "@/lib/request-notifications";
-import { getArrInstances, getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { getArrInstances } from "@/lib/arr-instance-registry";
 import { DEFAULT_ARR_INSTANCE, FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
-import { settleLimit } from "@/lib/concurrency";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
+import { plexLibraryRow, jellyfinLibraryRow } from "@/lib/library-rows";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
 import { plexHoldNeedsCounts, plexHoldReason } from "@/lib/plex-sync-guard";
 import { jellyfinHoldNeedsCounts, jellyfinHoldReason } from "@/lib/jellyfin-sync-guard";
@@ -144,15 +143,6 @@ export async function POST(request: NextRequest) {
   ));
 }
 
-// Strips angle brackets and null bytes, caps length. Shared between the
-// orchestrator and the per-source /api/sync/{plex,jellyfin} routes so the
-// PlexLibraryItem / JellyfinLibraryItem content is identical regardless of
-// which path most recently wrote the row.
-const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null => {
-  if (s == null) return null;
-  return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
-};
-
 async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: AbortSignal): Promise<NextResponse> {
   // withAdvisoryLock aborts at DEFAULT_WORK_TIMEOUT_MS (30 min) and RELEASES the
   // lock; it cannot cancel this function (guardrail 41). Left unobserved, a run
@@ -161,7 +151,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   // delete-and-replace passes over the same tables (guardrail 13). Real runs
   // have exceeded 10 minutes, so the margin is not comfortable.
   //
-  // Checked ONLY at arm boundaries, never inside one. Prisma 7's
+  // Checked ONLY at arm and phase boundaries, never inside one. Prisma 7's
   // $transaction(fn, opts) takes no AbortSignal, so a mid-transaction bail is not
   // expressible — and stopping between a scoped deleteMany and its repopulate
   // would be far worse than running long.
@@ -169,14 +159,18 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   // Skipping an arm needs no new downstream handling: its *SyncSucceeded flag
   // simply stays false, which is exactly the state a failed fetch produces and
   // exactly what already gates the revert, re-push and stale-fallback paths.
+  // The later PHASES (backstop, re-push, sweeps, revert, marking, notify) are
+  // checked too: an abort that lands mid-arm leaves that arm's flags true, and
+  // every phase after the arms writes shared state the next run — holding the
+  // freed lock — is writing too. On abort the run returns there (never throws).
   let abortLogged = false;
   const windDownBefore = (arm: string): boolean => {
     if (!signal?.aborted) return false;
     if (!abortLogged) {
       abortLogged = true;
       console.warn(
-        `[sync] advisory lock timed out — winding down at the ${arm} arm; ` +
-          "the remaining arms are skipped and this run's partial state stands",
+        `[sync] advisory lock lost (timed out or its connection dropped) — winding down before the ${arm} step; ` +
+          "the remaining steps are skipped and this run's partial state stands",
       );
     }
     return true;
@@ -197,6 +191,29 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   let marked = 0;
   let reverted = 0;
   let repushed = 0;
+  // The answer for a run that stopped at a phase boundary (see windDownBefore).
+  // Degraded, so withCronRunRecording records it red.
+  const windDownResponse = (): NextResponse => NextResponse.json(
+    {
+      checked: { approved: approved.length, available: available.length },
+      marked,
+      reverted,
+      repushed,
+      windDown: true,
+      error: t("apiAdmin.sync.windDown"),
+    },
+    { headers: { "X-Cron-Degraded": "wind-down" } },
+  );
+  // Read BEFORE the first ARR pass: a disabled integration's cache is never
+  // cleared (the refresh just stops), so its last-synced rows must not mark
+  // anything available — the second pass and the revert are gated the same way.
+  const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+    isFeatureEnabled("feature.integration.radarr"),
+    isFeatureEnabled("feature.integration.sonarr"),
+  ]);
+
   // `arrInstance` rides along: the outbound `request.available` event names the
   // instance (guardrail 32), and this pass is the normal route to AVAILABLE for a
   // 4K/named request — the arr knows about the file before the library scan does.
@@ -222,8 +239,12 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   // Collapse the per-request update loop into two updateMany calls — one CAS for the
   // unnotified candidates (which produces the arrNotify list), one bulk catch-up for the
   // already-notified rows. Snapshot pre-state so we can attribute the CAS winners.
+  // The sets themselves stay populated whatever the flags say: the overdue
+  // backstop below reads them, and runDownloadCheck is not flag-gated.
   const nowAvailableApproved = approved.filter((r) =>
-    r.mediaType === "MOVIE" ? availableMovieSet.has(vkey(r.tmdbId, r.arrInstance)) : availableTvSet.has(vkey(r.tmdbId, r.arrInstance)),
+    r.mediaType === "MOVIE"
+      ? radarrEnabled && availableMovieSet.has(vkey(r.tmdbId, r.arrInstance))
+      : sonarrEnabled && availableTvSet.has(vkey(r.tmdbId, r.arrInstance)),
   );
   if (nowAvailableApproved.length > 0) {
     // ARR-available means "downloaded in Radarr/Sonarr", which is not the same as
@@ -298,13 +319,6 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
 
   void fanOutAvailableWinners(arrNotify, "sync");
 
-  const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
-    isFeatureEnabled("feature.integration.plex"),
-    isFeatureEnabled("feature.integration.jellyfin"),
-    isFeatureEnabled("feature.integration.radarr"),
-    isFeatureEnabled("feature.integration.sonarr"),
-  ]);
-
   // Refresh Radarr/Sonarr caches BEFORE the AVAILABLE→APPROVED revert below. The revert reads
   // radarr/sonarr {Available,Wanted}Item — if those tables are stale from a prior failed run,
   // a fresh tick that also fails would mass-demote everything. We only consult the cache for
@@ -323,52 +337,29 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   let radarrFailedSlugs: string[] = [];
   if (radarrEnabled && !windDownBefore("Radarr")) {
     try {
-      // Fan out over every configured Radarr instance (default first, plus the legacy
-      // 4K and any named instances). getRadarrWantedTmdbIds returns empty sets when an
-      // instance is unconfigured and null on a real fetch failure. Bound the fan-out (guardrail 31).
-      const instances = await getSyncableArrInstances("radarr");
-      const settled = await settleLimit(instances, CONCURRENCY_LIMIT, async (inst) => ({
-        slug: inst.slug,
-        result: await getRadarrWantedTmdbIds(inst.slug),
-      }));
-      const fetched = settled.map((s, i) =>
-        s.status === "fulfilled" ? s.value : { slug: instances[i].slug, result: null },
-      );
-      radarrFailedSlugs = fetched.filter((f) => f.result === null).map((f) => f.slug);
-      // The default instance ("") is authoritative: if its fetch failed, skip the whole
-      // cache update (matches the legacy "HD fetch failed ⇒ skip everything" gate) so a
-      // transient default outage can't mass-demote AVAILABLE requests below.
-      const defaultFailed = fetched.some((f) => f.slug === DEFAULT_ARR_INSTANCE && f.result === null);
-      if (defaultFailed) {
+      // Every configured Radarr instance (default first, plus the legacy 4K and
+      // any named instances), bounded (guardrail 31). The default is
+      // authoritative: if its fetch failed the whole cache update is skipped, so
+      // a transient default outage can't mass-demote AVAILABLE requests below.
+      // Only instances whose fetch succeeded are scoped-cleared and rewritten
+      // (guardrail 13), under advisory lock 1001,1 (shared with the webhook).
+      const refresh = await refreshArrCache("radarr");
+      radarrFailedSlugs = refresh.failedSlugs;
+      if (refresh.outcome === "default-failed") {
         console.warn("[sync] skipping Radarr cache update — ARR fetch failed");
+      } else if (refresh.outcome === "write-failed") {
+        console.error("[sync] Radarr wanted sync failed:", refresh.error);
       } else {
-        // Only instances whose fetch succeeded get their rows scoped-cleared + rewritten;
-        // a null result leaves THAT instance's existing rows intact (guardrail 13) so one instance's
-        // fetch failure never empties another's cache.
-        const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, result: f.result }] : []));
-        // Advisory lock 1001,1 coordinates with the Radarr webhook handler. Each instance's
-        // rows are cleared + rewritten independently (scoped by arrInstance).
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
-          for (const { slug, result } of writable) {
-            const wantedRows    = Array.from(result.wanted).map((tmdbId) => ({ tmdbId, arrInstance: slug }));
-            const availableRows = Array.from(result.available).map((tmdbId) => ({ tmdbId, arrInstance: slug }));
-            await tx.radarrWantedItem.deleteMany({ where: { arrInstance: slug } });
-            if (wantedRows.length > 0) await batchCreateMany(tx.radarrWantedItem, wantedRows);
-            await tx.radarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
-            if (availableRows.length > 0) await batchCreateMany(tx.radarrAvailableItem, availableRows);
-          }
-        }, { timeout: BATCH_TX_TIMEOUT });
-        radarrWanted = writable.reduce((sum, { result }) => sum + result.wanted.size, 0);
+        radarrWanted = refresh.wanted;
         radarrSyncSucceeded = true;
         // The slugs whose cache THIS run actually refreshed. Crucially, an
-        // enabled-but-UNCONFIGURED integration yields writable=[] here while
+        // enabled-but-UNCONFIGURED integration yields no synced slugs here while
         // radarrSyncSucceeded is still true (the no-op "sync" didn't fail) —
         // the flag keeps meaning "step didn't blow up" for run reporting, and
         // this set is what the revert/re-push passes below key on so an empty
         // cache from an unconfigured instance is never read as authoritative
         // absence (the mass AVAILABLE→APPROVED demotion case).
-        radarrSyncedSlugs = new Set(writable.map((w) => w.slug));
+        radarrSyncedSlugs = new Set(refresh.syncedSlugs);
       }
     } catch (err) {
       console.error("[sync] Radarr wanted sync failed:", err);
@@ -388,51 +379,37 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   let sonarrFailedSlugs: string[] = [];
   if (sonarrEnabled && !windDownBefore("Sonarr")) {
     try {
-      // Fan out over every configured Sonarr instance; same contract as the Radarr block.
-      const instances = await getSyncableArrInstances("sonarr");
-      sonarrConfiguredSlugs = new Set(instances.map((i) => i.slug));
-      const settled = await settleLimit(instances, CONCURRENCY_LIMIT, async (inst) => ({
-        slug: inst.slug,
-        result: await getSonarrWantedTmdbIds(inst.slug),
-      }));
-      const fetched = settled.map((s, i) =>
-        s.status === "fulfilled" ? s.value : { slug: instances[i].slug, result: null },
-      );
-      sonarrFailedSlugs = fetched.filter((f) => f.result === null).map((f) => f.slug);
-      const defaultFailed = fetched.some((f) => f.slug === DEFAULT_ARR_INSTANCE && f.result === null);
-      if (defaultFailed) {
+      // Every configured Sonarr instance; same contract as the Radarr arm
+      // (advisory lock 1001,2, shared with the Sonarr webhook).
+      const refresh = await refreshArrCache("sonarr");
+      sonarrConfiguredSlugs = new Set(refresh.configuredSlugs);
+      sonarrFailedSlugs = refresh.failedSlugs;
+      if (refresh.outcome === "default-failed") {
         console.warn("[sync] skipping Sonarr cache update — ARR fetch failed");
+      } else if (refresh.outcome === "write-failed") {
+        console.error("[sync] Sonarr wanted sync failed:", refresh.error);
       } else {
-        const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, result: f.result }] : []));
-        // Advisory lock 1001,2 coordinates with the Sonarr webhook handler; per-instance
-        // scoped clears so one instance's fetch failure never empties another's cache.
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-          for (const { slug, result } of writable) {
-            const wantedRows    = Array.from(result.wanted).map((tmdbId) => ({ tmdbId, arrInstance: slug }));
-            const availableRows = Array.from(result.available).map((tmdbId) => ({ tmdbId, arrInstance: slug }));
-            await tx.sonarrWantedItem.deleteMany({ where: { arrInstance: slug } });
-            if (wantedRows.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedRows);
-            await tx.sonarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
-            if (availableRows.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableRows);
-          }
-        }, { timeout: BATCH_TX_TIMEOUT });
-        sonarrWanted = writable.reduce((sum, { result }) => sum + result.wanted.size, 0);
+        sonarrWanted = refresh.wanted;
         sonarrSyncSucceeded = true;
         // Same contract as radarrSyncedSlugs — see the comment there.
-        sonarrSyncedSlugs = new Set(writable.map((w) => w.slug));
+        sonarrSyncedSlugs = new Set(refresh.syncedSlugs);
       }
     } catch (err) {
       console.error("[sync] Sonarr wanted sync failed:", err);
     }
   }
 
+  if (windDownBefore("second ARR pass")) return windDownResponse();
+
   // Second AVAILABLE-marking pass over the FRESHLY refreshed Radarr/Sonarr caches. The first
   // pass (above) read the cache as it stood at run start; a request that became available in
   // Radarr/Sonarr since the prior tick would otherwise wait a full SYNC_INTERVAL to be marked.
   // Only the rows still APPROVED after the first pass are reconsidered, and only against a
   // cache the current run successfully rewrote.
-  const stillApprovedForMark = approved.filter((r) => !arrNotify.find((n) => n.id === r.id));
+  // A Set, not arrNotify.find per row: this and the overdue filter below each ask
+  // it once per APPROVED request.
+  const arrNotifiedIds = new Set(arrNotify.map((n) => n.id));
+  const stillApprovedForMark = approved.filter((r) => !arrNotifiedIds.has(r.id));
   // Hoisted for the overdue backstop below: a file on disk in the FRESH cache means
   // the download finished, whether or not this pass flipped the row.
   let freshMovieSet = new Set<string>();
@@ -484,6 +461,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
     }
   }
 
+  if (windDownBefore("download check")) return windDownResponse();
+
   // The pendingNotifyAt BACKSTOP ("did the approval actually start downloading?").
   // It runs AFTER the Radarr/Sonarr refresh and the second marking pass, never
   // before: "not in the download queue" is only "never started" when the title is
@@ -499,7 +478,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   const now = new Date();
   const overdue = approved.filter((r) => {
     if (!r.pendingNotifyAt || r.pendingNotifyAt > now) return false;
-    if (arrNotify.some((n) => n.id === r.id)) return false;
+    if (arrNotifiedIds.has(r.id)) return false;
     const key = vkey(r.tmdbId, r.arrInstance);
     return r.mediaType === "MOVIE"
       ? !availableMovieSet.has(key) && !freshMovieSet.has(key)
@@ -522,6 +501,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       console.error("[sync] pendingNotifyAt check failed for", req.id, err);
     }
   });
+
+  if (windDownBefore("re-push")) return windDownResponse();
 
   // Re-push APPROVED requests that never made it into Radarr/Sonarr. The approve-time push
   // can fail when the title has no Radarr/TheTVDB metadata yet (common for not-yet-released
@@ -845,8 +826,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
           // the same small integer ratingKey is legitimate, not conflation.
           const rowsByInstance = await Promise.all(
             writable.map(async ({ slug, movieIds, tvIds }) => {
-              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, plexRatingKeys: plexLibraryRatingKeys(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, plexRatingKeys: plexLibraryRatingKeys(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => plexLibraryRow(tmdbId, d, "MOVIE", slug));
+              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => plexLibraryRow(tmdbId, d, "TV", slug));
               const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug, "sync");
               const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug, "sync");
               return {
@@ -1065,8 +1046,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
           // instance's existing rows are left intact, never wiped).
           await replaceJellyfinLibraryForInstances(
             writable.map(({ slug, movieIds, tvIds }) => {
-              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, jellyfinItemId: d.itemId, jellyfinItemIds: libraryItemIds(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, jellyfinItemId: d.itemId, jellyfinItemIds: libraryItemIds(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => jellyfinLibraryRow(tmdbId, d, "MOVIE", slug));
+              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => jellyfinLibraryRow(tmdbId, d, "TV", slug));
               return { slug, rows: (movieRows as JellyfinLibraryRow[]).concat(tvRows) };
             }),
           );
@@ -1138,6 +1119,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       console.error("[sync] Unexpected top-level sync rejection:", result.reason);
     }
   }
+
+  if (windDownBefore("de-registered sweep")) return windDownResponse();
 
   // Sweep library rows belonging to servers that are no longer REGISTERED.
   //
@@ -1219,6 +1202,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   } catch (err) {
     console.error("[sync] De-registered *arr sweep failed:", err);
   }
+
+  if (windDownBefore("revert")) return windDownResponse();
 
   // Demote AVAILABLE requests that have dropped out of *both* the *arr caches and the
   // Plex/Jellyfin library caches. Consulting the library caches here — not just *arr — is
@@ -1440,6 +1425,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
     for (const r of toRevert) revertedIds.add(r.id);
   }
 
+  if (windDownBefore("library marking")) return windDownResponse();
+
   // Snapshot taken once after both library writes complete; both marking passes share this exact set.
   // Changes made by the Plex pass are NOT visible to the Jellyfin pass — intentional by design.
   //
@@ -1638,6 +1625,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   if (jfMovieIds.size > 0 || jfTvIds.size > 0) {
     jellyfinMarked = await markLibraryRequests(jfMovieIds, jfTvIds, "jellyfin");
   }
+
+  if (windDownBefore("pending notify")) return windDownResponse();
 
   // Re-query LIVE rather than filter the run-start `available` snapshot: a
   // request the marking passes flipped AVAILABLE **this run** via the

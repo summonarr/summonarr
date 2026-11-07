@@ -4,9 +4,7 @@ import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { CLAIMABLE_GRAB_ISSUE } from "@/lib/issue-grab";
-import { autoResolveIssueForGrab } from "@/lib/issue-auto-resolve";
-import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
-import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
+import { notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -14,19 +12,10 @@ import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { checkBodySize } from "@/lib/body-size";
-import { checkRateLimit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
 import { arrErrorMessage, arrFetch, getArrCfg, isMovieDownloadedInRadarr } from "@/lib/arr";
-import { getArrInstances } from "@/lib/arr-instance-registry";
-import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { forwardArrHealthEvent } from "@/lib/arr-health-notify";
-
-function safeCompare(a: string, b: string): boolean {
-  const ha = createHash("sha256").update(a).digest();
-  const hb = createHash("sha256").update(b).digest();
-  return timingSafeEqual(ha, hb);
-}
+import { claimCompletedGrabs, handleArrWebhook, type ArrWebhookContext } from "@/lib/arr-webhook";
+import { lockArrCacheInTx } from "@/lib/arr-cache-refresh";
 
 interface RadarrWebhookPayload {
   eventType: string;
@@ -72,129 +61,22 @@ async function radarrDeleteState(
   }
 }
 
+// Guardrail 2: the presented token is compared as SHA-256 digests with
+// timingSafeEqual. Defined here, not in the shared module, so the route audit
+// sees this route perform it.
+function safeCompare(a: string, b: string): boolean {
+  const ha = createHash("sha256").update(a).digest();
+  const hb = createHash("sha256").update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
+
 export async function POST(req: NextRequest) {
-  const tooLarge = checkBodySize(req, 1_048_576);
-  if (tooLarge) return tooLarge;
+  // Auth, instance, body caps, Test/Health and the replay digest (rolled back
+  // only when the handler throws) are shared with the Sonarr twin (arr-webhook.ts).
+  return handleArrWebhook<RadarrWebhookPayload>(req, "radarr", safeCompare, handleRadarrEvent);
+}
 
-  const clientIp = getClientIp(req.headers);
-  // 600/min (~10/s): a legitimate season-pack import fires one Download event
-  // per episode, and 120/min rejected the tail of a large burst. Still bounds
-  // the pre-auth cost (two Setting reads + a hash compare) per IP.
-  if (!checkRateLimit(`webhook:radarr:${ipBucketKey(clientIp)}`, 600, 60_000)) {
-    return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
-  }
-
-  // Every configured instance carries its own webhook secret (Setting key
-  // radarr<Slug>WebhookSecret). The legacy shared `webhookSecret` remains the
-  // DEFAULT instance's ("") secret when it has no per-instance secret of its own.
-  const instances = await getArrInstances("radarr");
-  const [secretRows, legacyRow] = await Promise.all([
-    prisma.setting.findMany({
-      where: { key: { in: instances.map((i) => arrSettingKey("radarr", i.slug, "WebhookSecret")) } },
-    }),
-    prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
-  ]);
-  const secretByKey = new Map(secretRows.map((r) => [r.key, r.value ?? ""]));
-  const instanceSecrets = instances.map((inst) => {
-    const own = secretByKey.get(arrSettingKey("radarr", inst.slug, "WebhookSecret")) || "";
-    const secret = own || (inst.slug === DEFAULT_ARR_INSTANCE ? legacyRow?.value || "" : "");
-    return { slug: inst.slug, secret };
-  });
-
-  if (instanceSecrets.every((i) => i.secret.length === 0)) {
-    console.warn("[webhook/radarr] secret not configured");
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const authHeader = req.headers.get("authorization") ?? "";
-  // ?token= fallback is load-bearing: Radarr webhook UI has no Authorization header field
-  const queryToken = req.nextUrl.searchParams.get("token");
-  const token = authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7)
-    : queryToken;
-  // Secret-as-discriminator: each instance is configured with its own webhook
-  // secret, so the secret that matches tells us which instance fired. Compare the
-  // presented token against EVERY instance secret with no early return (no timing
-  // oracle). Guardrail 2: keep ?token= + the timing-safe compare; no HMAC.
-  let matchedSlug: string | null = null;
-  let secret = "";
-  for (const inst of instanceSecrets) {
-    const isMatch = token != null && inst.secret.length > 0 && safeCompare(token, inst.secret);
-    if (!isMatch) continue;
-    // Equal-secret collision (misconfig): the DEFAULT instance ("") wins; otherwise
-    // the first configured instance in registry order wins (getArrInstances lists
-    // the default first, so keeping the first match already yields that ordering).
-    if (matchedSlug === null || inst.slug === DEFAULT_ARR_INSTANCE) {
-      matchedSlug = inst.slug;
-      secret = inst.secret;
-    }
-  }
-  if (!token || matchedSlug === null) {
-    console.warn("[webhook/radarr] 401 unauthorized");
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  const arrInstance = matchedSlug;
-
-  const rawBytes = new Uint8Array(await req.arrayBuffer());
-  if (rawBytes.length > 1_048_576) {
-    console.warn(`[webhook/radarr] 413 payload too large bytes=${rawBytes.length}`);
-    return NextResponse.json({ error: "Payload too large" }, { status: 413 });
-  }
-  const rawBody = new TextDecoder().decode(rawBytes);
-
-  let payload: RadarrWebhookPayload;
-  try {
-    const parsed = JSON.parse(rawBody);
-    // JSON.parse("null") / primitives / arrays are valid JSON but not a payload
-    // object; guard so the eventType dereference below can't throw a 500.
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-    }
-    payload = parsed;
-  } catch (err) {
-    console.warn("[webhook/radarr] 400 invalid JSON:", err);
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
-  // Test events have a fixed payload shape — admins clicking "Test" twice within
-  // the 24h replay TTL would otherwise see the second click 409. Skip the digest
-  // check and short-circuit before recording.
-  if (payload.eventType === "Test") {
-    return NextResponse.json({ ok: true, message: "Radarr webhook connected" });
-  }
-
-  // Health / HealthRestored are the same shape: a fixed per-issue payload
-  // (level/message/type/wikiUrl — nothing per delivery). An indexer flapping
-  // twice inside the 24h replay TTL would otherwise see its second identical
-  // POST answered 409, and Radarr then records Summonarr's notification as
-  // failing and raises its own health warning. Acknowledge before the digest,
-  // like Test; the only thing done with one is forwarding it to the admin's
-  // notification channels (arr.health / arr.health_restored), which keeps its
-  // own short dedupe window instead (arr-health-notify.ts). Every OTHER
-  // unhandled eventType stays replay-recorded (the Grab pin in
-  // tests/webhook-routes.test.mts): those payloads carry per-delivery fields,
-  // so a byte-identical repeat IS a replay.
-  if (payload.eventType === "Health" || payload.eventType === "HealthRestored") {
-    const forwarded = forwardArrHealthEvent({
-      service: "radarr",
-      instance: arrInstance,
-      instanceName: arrInstance === DEFAULT_ARR_INSTANCE ? null : instances.find((i) => i.slug === arrInstance)?.name ?? arrInstance,
-      eventType: payload.eventType,
-      payload,
-    });
-    return NextResponse.json({ ok: true, health: true, forwarded });
-  }
-
-  // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
-  if (!await checkAndRecordWebhookJson("radarr", secret, payload)) {
-    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
-  }
-
-  // Track whether the synchronous body completed; if it throws we roll back the
-  // replay digest so Radarr's source-side retry can re-deliver.
-  let syncCompleted = false;
-  try {
-
+async function handleRadarrEvent({ payload, arrInstance, instances }: ArrWebhookContext<RadarrWebhookPayload>): Promise<NextResponse> {
   // Radarr fires ManualInteractionRequired when a grabbed release can't be imported
   // automatically (mismatch, sample, etc.) and is parked in the queue. There's nothing to
   // mark available — alert admins (best-effort) so they can resolve it in Radarr's queue.
@@ -248,7 +130,6 @@ export async function POST(req: NextRequest) {
           .catch((err) => console.warn("[webhook/radarr] manual-interaction marker prune failed:", err));
       });
     }
-    syncCompleted = true;
     return NextResponse.json({ ok: true, manualInteraction: true });
   }
 
@@ -278,7 +159,6 @@ export async function POST(req: NextRequest) {
     // already underway; evicting availability would just flicker the badge.
     const isUpgrade = fileDelete && payload.deleteReason === "upgrade";
     if (!isTmdbIdInRange(delTmdbId as number) || isUpgrade) {
-      syncCompleted = true;
       return NextResponse.json({ ok: true, evicted: false });
     }
     const delId = delTmdbId as number;
@@ -287,11 +167,10 @@ export async function POST(req: NextRequest) {
       if (state !== null) {
         console.warn("[webhook/radarr] %s for tmdbId=%s not confirmed by Radarr; cache left to the next sync.", fileDelete ? "MovieFileDelete" : "MovieDelete", sanitizeForLog(delId));
       }
-      syncCompleted = true;
       return NextResponse.json({ ok: true, evicted: false, reason: state === null ? "unverified" : "not_deleted" });
     }
     await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
+      await lockArrCacheInTx(tx, "radarr");
       if (state === "absent") {
         await tx.radarrWantedItem.deleteMany({ where: { tmdbId: delId, arrInstance } });
       }
@@ -301,19 +180,17 @@ export async function POST(req: NextRequest) {
         await tx.radarrWantedItem.createMany({ data: [{ tmdbId: delId, arrInstance }], skipDuplicates: true });
       }
     }, { timeout: 30_000 });
-    syncCompleted = true;
     return NextResponse.json({ ok: true, evicted: true });
   }
 
   if (payload.eventType !== "Download" || !payload.movie?.tmdbId) {
-    syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true });
   }
 
   const { tmdbId } = payload.movie;
   if (!isTmdbIdInRange(tmdbId)) {
     console.warn("[webhook/radarr] 400 invalid tmdbId");
-    syncCompleted = true;  // Bad payload from Radarr; retry won't help.
+    // Bad payload from Radarr: a retry won't help, so the digest stays recorded.
     return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
   }
 
@@ -333,14 +210,13 @@ export async function POST(req: NextRequest) {
   const downloaded = await isMovieDownloadedInRadarr(tmdbId, arrInstance);
   if (downloaded === false) {
     console.warn("[webhook/radarr] Download event for tmdbId=%s not confirmed downloaded in Radarr; skipping status flip.", sanitizeForLog(tmdbId));
-    syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
   }
 
   // Advisory lock 1001,1 prevents a concurrent Radarr sync from overwriting the wanted table mid-transaction
   let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
   await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
+    await lockArrCacheInTx(tx, "radarr");
     // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
     // One UPDATE covers both a fresh approval (availableAt null) and a re-push of
     // an already-available title — the two used to differ only in a
@@ -411,74 +287,12 @@ export async function POST(req: NextRequest) {
   // arrInstance-scoped: one instance's Download must not claim (and notify off)
   // a grab that was fired at a sibling instance. A RESOLVED issue's grab is never
   // claimed: a replacement that found nothing would otherwise be announced by an
-  // unrelated import months later (CLAIMABLE_GRAB_ISSUE).
-  //
-  // notifiedAt is the outbound-emit claim and is NEVER reset: ntfy/Gotify/
-  // NotificationAgent fire once per grab. Web push may still fail after that; a
-  // Setting `grabPushRetry:<id>` lets the next Download retry the push without
-  // re-opening the emit (unclaiming notifiedAt used to re-fire the agents).
+  // unrelated import months later (CLAIMABLE_GRAB_ISSUE). The claim itself (and
+  // its push retry) is shared with the Sonarr twin.
   const candidateGrabs = await prisma.issueGrab.findMany({
     where: { tmdbId, mediaType: "MOVIE", arrInstance, issue: CLAIMABLE_GRAB_ISSUE },
   });
-  if (candidateGrabs.length > 0) {
-    const now = new Date();
-    await Promise.all(
-      candidateGrabs.map(async (grab) => {
-        const retryKey = `grabPushRetry:${grab.id}`;
-        if (grab.notifiedAt !== null) {
-          // Already emitted. Consume the push-retry marker (CAS): a 0 count
-          // means no pending retry, or another delivery already took it.
-          const taken = await prisma.setting.deleteMany({ where: { key: { in: [retryKey] } } });
-          if (taken.count === 0) return;
-        } else {
-          // CAS: ensure only one concurrent webhook fires the notification for this grab
-          const claimed = await prisma.issueGrab.updateMany({
-            where: { id: grab.id, notifiedAt: null },
-            data: { notifiedAt: now },
-          });
-          if (claimed.count === 0) return;
+  await claimCompletedGrabs(candidateGrabs, "radarr");
 
-          emitNotificationEvent({
-            event: "arr.grab_completed",
-            media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
-            request: { instance: grab.arrInstance },
-          });
-          // First claim only: the replacement landed, so close the issue (when enabled).
-          void autoResolveIssueForGrab(grab, now);
-        }
-
-        const outcome = await notifyAdminGrabCompletedPush({
-          userId: grab.triggeredById,
-          title: grab.title,
-          tmdbId: grab.tmdbId,
-          mediaType: grab.mediaType,
-          scope: grab.scope,
-          seasonNumber: grab.seasonNumber,
-          episodeNumber: grab.episodeNumber,
-          issueId: grab.issueId,
-        });
-        // "failed" → keep notifiedAt (emit stays claimed) and record a push-only
-        // retry. "skipped-no-subs" / "skipped-no-keys" → leave notifiedAt set
-        // (retrying won't help: the admin has no push subscription or keys set
-        // up), but log so an operator can wire up an email/Discord backstop.
-        if (outcome === "failed") {
-          await prisma.setting.createMany({
-            data: [{ key: retryKey, value: now.toISOString() }],
-            skipDuplicates: true,
-          });
-          console.warn("[webhook/radarr] grab notification failed, will retry push");
-        } else if (outcome === "skipped-no-subs" || outcome === "skipped-no-keys") {
-          console.warn(`[webhook/radarr] grab push skipped (${outcome}) for user=${grab.triggeredById} issue=${grab.issueId}`);
-        }
-      })
-    );
-  }
-
-  syncCompleted = true;
   return NextResponse.json({ ok: true, marked: updated.count });
-  } finally {
-    if (!syncCompleted) {
-      await clearWebhookReplayDigestJson("radarr", secret, payload);
-    }
-  }
 }

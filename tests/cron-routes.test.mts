@@ -561,6 +561,42 @@ test("scrub-audit-pii: the scrub is cutoff-bounded and redacts all three PII col
   }
 });
 
+test("scrub-audit-pii: the userName pass writes and skips on the viewer's REDACTED_USER_NAME, not a private literal", async () => {
+  // The admin viewer renders a row as "redacted" by comparing with this
+  // constant; a scrub writing its own copy would drift from it, and re-touch
+  // every old row on each run once the two disagreed.
+  const { REDACTED_USER_NAME } = await import("../src/lib/audit.ts");
+  const seen: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
+  shadowPrismaModel(prisma, "auditLog", {
+    ...counter("auditLog"),
+    updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+      seen.push(args);
+      return { count: 0 };
+    },
+  });
+  try {
+    await scrub.POST(authed(scrub));
+    const pii = seen.find((u) => "userName" in u.data);
+    assert.ok(pii, "the PII column pass is missing");
+    assert.equal(pii.data.userName, REDACTED_USER_NAME);
+    assert.deepEqual(
+      (pii.where.OR as Array<Record<string, unknown>>).find((o) => "userName" in o),
+      { userName: { not: REDACTED_USER_NAME } },
+    );
+  } finally {
+    shadowPrismaModel(prisma, "auditLog", counter("auditLog"));
+  }
+  // The values match today, so the run above can't tell the constant from a
+  // copy of it: both scrub paths must name the constant, never the literal.
+  const { readFileSync } = await import("node:fs");
+  for (const file of ["src/app/api/cron/scrub-audit-pii/route.ts", "src/app/api/admin/audit-log/route.ts"]) {
+    const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    assert.doesNotMatch(src, /["'`]\[redacted\]["'`]/, `${file} carries its own "[redacted]" literal`);
+    assert.match(src, /userName: \{ not: REDACTED_USER_NAME \}/, `${file} must skip rows already redacted by the constant`);
+    assert.match(src, /userName: REDACTED_USER_NAME \}/, `${file} must write the constant`);
+  }
+});
+
 test("scrub-audit-pii: it UPDATES rather than deletes — the audit trail survives redaction", async () => {
   await scrub.POST(authed(scrub));
   assert.equal(opsOf("auditLog.deleteMany").length, 0, "the PII scrub must never delete audit rows");

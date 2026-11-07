@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit, getAuditPiiRetentionDays } from "@/lib/audit";
+import { logAudit, getAuditPiiRetentionDays, REDACTED_USER_NAME } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { scrubTargetPiiFromAudit } from "@/lib/audit-scrub";
 
@@ -26,10 +26,10 @@ export async function POST(request: NextRequest) {
           OR: [
             { ipAddress: { not: null } },
             { userAgent: { not: null } },
-            { userName: { not: "[redacted]" } },
+            { userName: { not: REDACTED_USER_NAME } },
           ],
         },
-        data: { ipAddress: null, userAgent: null, userName: "[redacted]" },
+        data: { ipAddress: null, userAgent: null, userName: REDACTED_USER_NAME },
       });
 
       const detailsResult = await prisma.auditLog.updateMany({

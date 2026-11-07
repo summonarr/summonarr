@@ -187,7 +187,7 @@
   "settings.arr.minAvail.announced": "Angekündigt",
   "settings.arr.minAvail.inCinemas": "Im Kino",
   "settings.arr.minAvail.released": "Veröffentlicht",
-  "settings.arr.invalidSlug": "Ungültiger Slug „{slug}“ – verwenden Sie Kleinbuchstaben/Ziffern, beginnend mit einem Buchstaben (nicht „hd“).",
+  "settings.arr.invalidSlug": "Ungültiger Slug „{slug}“ – verwenden Sie Kleinbuchstaben/Ziffern, beginnend mit einem Buchstaben (nicht „hd“ oder „external“).",
   "settings.arr.heading": "{label} – weitere Instanzen",
   "settings.arr.intro": "Weitere {label}-Instanzen (z. B. eine eigene Anime-Instanz). Anfragen werden automatisch hierhin geleitet, wenn die Regel einer Instanz zutrifft; eine Anfrage kann auch gezielt eine Instanz ansteuern. Eingeschränkte Instanzen erfordern eine Freigabe pro Benutzer (Benutzer → Instanzzugriff).",
   "settings.arr.none": "Keine weiteren {label}-Instanzen konfiguriert.",

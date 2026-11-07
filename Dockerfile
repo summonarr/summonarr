@@ -153,11 +153,12 @@ WORKDIR /app
 # postgresql17-client (~4 MB: pg_dump, psql, pg_restore) is for the entrypoint's
 # opt-in pre-upgrade dump (SUMMONARR_PRE_UPGRADE_DUMP_DIR); the Postgres sidecar
 # is 17, and pg_dump must not be older than the server.
+# tini (~70 KB) is PID 1 — see ENTRYPOINT below.
 # Remove npm and npx — the entrypoint uses node directly; no npm needed at runtime.
 # This eliminates the entire class of npm-bundled CVEs (picomatch, brace-expansion, etc).
 RUN apk upgrade --no-cache && \
     apk add --no-cache 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0' 'zlib>=1.3.2-r1' \
-        postgresql17-client && \
+        postgresql17-client tini && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 ENV NODE_ENV=production
@@ -171,45 +172,52 @@ ENV BASE_PATH=$BASE_PATH
 # RSS will still exceed this (code, stack, native libs add ~50-80 MB on top).
 ENV NODE_OPTIONS=--max-old-space-size=1024
 
-# Non-root user, data dir, and cache dir in one layer
+# Non-root runtime user. The app tree below is copied root-owned (world-readable)
+# so the running server cannot rewrite its own code or the entrypoint; only the
+# data and cache dirs, made after the last COPY, are writable by it.
 RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs && \
-    mkdir -p /data /app/.next/cache && \
-    chown nextjs:nodejs /data /app/.next/cache
+    adduser --system --uid 1001 nextjs
 
 # Standalone output — bundles its own minimal node_modules (next, react, etc.)
 # Prisma 7 generates the client into src/generated/prisma (traced as source), so @prisma/* is
 # not in the standalone's node_modules and does not need to come from prod deps.
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
 
 # Prisma schema + config for the `db push` the entrypoint runs at startup
 # (this project has no migrations directory — guardrail 3).
-COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
-COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 
 # License compliance: Next.js standalone tracing strips LICENSE/NOTICE files
 # from node_modules, so the project license (AGPL-3.0) and the third-party
 # notices (MIT/BSD/ISC/Apache attribution + the LGPL libvips relink notice
 # and full LGPL/GPL text) must be carried into the image explicitly.
-COPY --from=builder --chown=nextjs:nodejs /app/LICENSE ./LICENSE
-COPY --from=builder --chown=nextjs:nodejs /app/THIRD_PARTY_LICENSES.txt ./THIRD_PARTY_LICENSES.txt
+COPY --from=builder /app/LICENSE ./LICENSE
+COPY --from=builder /app/THIRD_PARTY_LICENSES.txt ./THIRD_PARTY_LICENSES.txt
 
 # Operator scripts invoked via `docker compose exec` (no runtime imports).
 # Standalone-traced — only what's listed here ships. `pg` ships in node_modules
 # already (migrate-deps stage), so these scripts have what they need.
-COPY --from=builder --chown=nextjs:nodejs /app/scripts/reset-password.mjs ./scripts/reset-password.mjs
-COPY --from=builder --chown=nextjs:nodejs /app/scripts/create-user.mjs ./scripts/create-user.mjs
+COPY --from=builder /app/scripts/reset-password.mjs ./scripts/reset-password.mjs
+COPY --from=builder /app/scripts/create-user.mjs ./scripts/create-user.mjs
 
 # Merge prisma CLI deps on top of the standalone's node_modules.
 # COPY into an existing directory adds files without removing what's already there,
 # so the standalone's next, react, etc. are preserved.
-COPY --from=migrate-deps --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --from=migrate-deps /app/node_modules ./node_modules
 
 # Entrypoint script
-COPY --chown=nextjs:nodejs docker-entrypoint.sh ./docker-entrypoint.sh
-RUN chmod +x ./docker-entrypoint.sh
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
+
+# The only paths the runtime user writes: /data (restore scratch, opt-in dumps)
+# and Next's image cache. Made AFTER the last COPY so no copy can reset them.
+# Root-owned node_modules also means `db push` can't re-download a missing
+# schema engine — the binary must stay in the image (migrate-deps, CLAUDE.md).
+RUN chmod +x ./docker-entrypoint.sh && \
+    mkdir -p /data /app/.next/cache && \
+    chown -R nextjs:nodejs /data /app/.next/cache
 
 USER nextjs
 
@@ -217,9 +225,20 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# Container health probe — hits the in-app /api/health endpoint. Wide start-period
-# covers cold-start (Next standalone boot + the entrypoint's `prisma db push`).
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+# Container health probe — hits the in-app /api/health endpoint. The start period
+# covers the whole boot: the database wait (up to 60s), the opt-in pre-upgrade
+# dump, the pre-push scripts and `prisma db push` before node even starts. A
+# failed probe inside it doesn't count, and the first passing one ends it, so a
+# wide window costs nothing; --start-interval probes every 5s meanwhile (Docker
+# 25+; older engines ignore it). Keep it equal to both compose files'
+# start_period (tests/entrypoint.test.mts). A large dump can still outrun it —
+# under Swarm or an autoheal sidecar, raise it further.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --start-interval=5s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+(process.env.BASE_PATH||'')+'/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["./docker-entrypoint.sh"]
+# tini as PID 1: the kernel ignores any signal PID 1 has no handler for, so with
+# the shell script as PID 1 a `docker stop` during boot was ignored until the
+# grace period ran out and the container was SIGKILLed mid-step. tini forwards
+# the signal to the script (whose boot-phase trap ends boot at the next step)
+# and reaps orphaned children.
+ENTRYPOINT ["/sbin/tini", "--", "./docker-entrypoint.sh"]

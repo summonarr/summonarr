@@ -31,9 +31,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   // The preview pre-ticks every file it lists, so the cap is the delete's: a
   // long daily show after a naming-scheme change lists thousands.
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, TITLE_FILE_IDS_BODY_BYTES);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, TITLE_FILE_IDS_BODY_BYTES);
+  if (body instanceof NextResponse) return body;
   const target = await arrTitleGate(body.service, body.instance, body.id, t);
   if (target instanceof NextResponse) return target;
   const fileIds = parseIdArray(body.fileIds, MAX_TITLE_FILE_IDS);

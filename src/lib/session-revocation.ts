@@ -19,6 +19,14 @@ import { processSingleton } from "./process-singleton";
 // never consumed on read — a cached token may be replayed several times before
 // the DB rejects it, so the force-check must persist; FIFO eviction reclaims
 // space once the revoked session is long gone.
+//
+// A USER mark is bounded in time as well: it forces only tokens whose last DB
+// check (dbCheckedAt) is at or before the mark. The mark lands after the DB write
+// it guards (guardrail 27), so every token re-signed from a pre-write read is
+// still forced, on every presentation; the token the next slow path re-signs
+// carries a later dbCheckedAt and takes the fast path again. Without that bound
+// a user whose role was edited (and who stays active) paid the full DB check on
+// every request for the life of the process.
 
 const FORCE_REVOKE_MAX = 1024;
 
@@ -39,11 +47,22 @@ function addBounded(set: Set<string>, key: string): void {
 // Sets), so "takes effect on the very next request" held for withAuth API
 // routes only, and a revoked session kept rendering pages for up to the
 // dbCheckedAt window (10s with admin-area access / 60s otherwise).
-const forceRevalidateUserIds = processSingleton("session-revocation:users", () => new Set<string>());
+// userId → when it was marked (epoch seconds, the same clock as dbCheckedAt).
+// A new key so a hot reload never reads the old Set shape under the old key.
+const forceRevalidateUserIds = processSingleton("session-revocation:userMarks", () => new Map<string, number>());
 const forceRevokeSessions = processSingleton("session-revocation:sessions", () => new Set<string>());
 
 export function markUserForceRevalidate(userId: string): void {
-  addBounded(forceRevalidateUserIds, userId);
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (forceRevalidateUserIds.has(userId)) {
+    // A re-mark moves the bound to now and the entry to the newest FIFO slot,
+    // so eviction always takes the oldest mark.
+    forceRevalidateUserIds.delete(userId);
+  } else if (forceRevalidateUserIds.size >= FORCE_REVOKE_MAX) {
+    const first = forceRevalidateUserIds.keys().next().value;
+    if (first !== undefined) forceRevalidateUserIds.delete(first);
+  }
+  forceRevalidateUserIds.set(userId, nowSec);
 }
 
 export function markSessionForceRevoked(sessionId: string): void {
@@ -51,8 +70,15 @@ export function markSessionForceRevoked(sessionId: string): void {
 }
 
 // Consulted by verifyAndRefreshSession before honoring the dbCheckedAt fast path.
-export function shouldForceDbCheck(userId: string, sessionId: string): boolean {
-  return forceRevokeSessions.has(sessionId) || forceRevalidateUserIds.has(userId);
+// `dbCheckedAt` is the token's last DB check; a user mark forces it only when
+// that check is not later than the mark (`<=`: both are whole seconds, and a
+// check in the mark's own second may have read the row before the write).
+// Without a dbCheckedAt a user mark always forces.
+export function shouldForceDbCheck(userId: string, sessionId: string, dbCheckedAt?: number): boolean {
+  if (forceRevokeSessions.has(sessionId)) return true;
+  const markedAt = forceRevalidateUserIds.get(userId);
+  if (markedAt === undefined) return false;
+  return typeof dbCheckedAt !== "number" || dbCheckedAt <= markedAt;
 }
 
 // A restore deletes every AuthSession and stamps sessionsRevokedAt, but a

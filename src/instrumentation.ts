@@ -23,7 +23,9 @@ export async function register() {
       process.exit(1);
     }
 
-    const required: string[] = ["NEXTAUTH_SECRET", "DATABASE_URL"];
+    // NEXTAUTH_SECRET is not listed: the length check below already reports a
+    // missing value, with the same production-only exit.
+    const required: string[] = ["DATABASE_URL"];
     const missing = required.filter((key) => !process.env[key]);
 
     if (missing.length > 0) {
@@ -182,23 +184,13 @@ export async function register() {
       }
     }
 
-    // TRUSTED_PROXY_HOPS is clamped to 5 in rate-limit.ts (MAX_TRUSTED_HOPS). A
-    // value above 3 is unusual and means the client-IP derivation trusts that many
-    // X-Forwarded-For entries — too generous a value lets a client spoof its IP.
-    // Warn only; the clamp in rate-limit.ts is the hard backstop (do NOT edit it).
-    {
-      const hopsRaw = process.env.TRUSTED_PROXY_HOPS;
-      if (hopsRaw) {
-        const hops = parseInt(hopsRaw, 10);
-        if (Number.isFinite(hops) && hops > 3) {
-          console.warn(
-            `[startup] TRUSTED_PROXY_HOPS=${hops} is unusually high (>3). Each hop is an X-Forwarded-For entry ` +
-              "trusted for client-IP derivation; an over-generous value lets clients spoof their IP. " +
-              "It is clamped to 5 at runtime — set it to the actual number of trusted proxies in front of the app."
-          );
-        }
-      }
-    }
+    // TRUSTED_PROXY_HOPS: a typo silently becomes 1 hop and an oversized value is
+    // clamped (parseTrustedHops in rate-limit.ts, the hard backstop); a value
+    // above 3 is unusual. The rule lives in trustedProxyHopsWarning; this is only
+    // the wiring. Warn only.
+    const { trustedProxyHopsWarning } = await import("@/lib/rate-limit");
+    const hopsWarning = trustedProxyHopsWarning(process.env.TRUSTED_PROXY_HOPS);
+    if (hopsWarning) console.warn(hopsWarning);
 
     // OIDC is all-or-nothing: a partial config (issuer set, but client id/secret
     // missing) silently disables the provider. Warn loudly rather than exit — this
@@ -257,7 +249,9 @@ export async function register() {
     }
 
     try {
-      const { prewarmPublicKeyCache } = await import("@/app/api/interactions/route");
+      // The lib, not the interactions route: boot needs only the key cache
+      // (process-wide, so this warms the copy the route reads — guardrail 27a).
+      const { prewarmPublicKeyCache } = await import("@/lib/discord-interactions/signature");
       await prewarmPublicKeyCache();
     } catch (err) {
       // Don't let a DB blip at boot crash startup — the Discord public-key cache
@@ -339,11 +333,12 @@ export async function register() {
     // documented and tested as re-runnable, and its own test states the
     // once-guarantee belongs in instrumentation.ts. It already stamps
     // plexUserIdBackfillRanAt when it completes — that marker was written and
-    // then never read by anything, which is what left the window open.
+    // then never read by anything, which is what left the window open. Both
+    // sides use the one exported key, so a rename can't split them.
     import("@/lib/plex-user-backfill")
-      .then(async ({ runPlexUserBackfillIfNeeded }) => {
+      .then(async ({ runPlexUserBackfillIfNeeded, PLEX_USER_BACKFILL_RAN_AT_KEY }) => {
         const { prisma } = await import("@/lib/prisma");
-        const ranAt = await prisma.setting.findUnique({ where: { key: "plexUserIdBackfillRanAt" } });
+        const ranAt = await prisma.setting.findUnique({ where: { key: PLEX_USER_BACKFILL_RAN_AT_KEY } });
         if (ranAt?.value) return;
         await runPlexUserBackfillIfNeeded();
       })

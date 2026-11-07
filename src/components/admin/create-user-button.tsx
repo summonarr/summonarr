@@ -10,6 +10,7 @@ import { Dialog, DialogBackdrop, DialogPopup, DialogPortal, DialogTitle } from "
 import { Loader2, Check, UserPlus, AlertTriangle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
+import { MIN_PASSWORD_LENGTH } from "@/lib/password-policy";
 
 // Admin "Create user" — the only in-app path to a local username/password account
 // (public registration closes after the first user). Posts to POST /api/admin/users
@@ -27,7 +28,7 @@ export function CreateUserButton() {
   const [created, setCreated] = useState<string | null>(null);
 
   // 12 mirrors POST /api/admin/users (and register + profile/password).
-  const canSubmit = email.trim().length > 0 && password.length >= 12 && !loading;
+  const canSubmit = email.trim().length > 0 && password.length >= MIN_PASSWORD_LENGTH && !loading;
 
   function resetForm() {
     setName("");
@@ -141,7 +142,7 @@ export function CreateUserButton() {
                   id="cu-password"
                   type="password"
                   autoComplete="new-password"
-                  minLength={12}
+                  minLength={MIN_PASSWORD_LENGTH}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••••••"

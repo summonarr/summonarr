@@ -516,7 +516,7 @@ async function getJellyfinItemsByType(
             // EnableImages=false + ImageTypeLimit=0: nothing here consumes
             // ImageTags/ImageBlurHashes, and Jellyfin enriches them by default
             // (enableImages defaults true) — they were the bulk of >10 MB pages.
-            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
+            `${base}/Items?ParentId=${encodeURIComponent(parentId)}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
             apiKey,
             processItems,
           )
@@ -664,7 +664,7 @@ export async function getJellyfinTVEpisodes(
   if (libraryIds?.size) {
     for (const parentId of Array.from(libraryIds)) {
       await fetchJellyfinPagesSequential(
-        `${base}/Items?ParentId=${parentId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
+        `${base}/Items?ParentId=${encodeURIComponent(parentId)}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
         apiKey,
         processEpisodes,
       );

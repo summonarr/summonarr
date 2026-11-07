@@ -342,21 +342,37 @@ export function notifyRequestStatusChange(
   // (see account-lifecycle.ts), so the row keeps a live notification email,
   // Discord link and push subscriptions — without this gate an admin approving
   // or declining a removed user's leftover request would still ping them. One
-  // lookup covers all four channels; the batch "now available" path has its own
-  // chokepoint in claimAvailableNotificationWinners.
+  // lookup covers all four channels, and it carries the email leg's address and
+  // opt-ins so that leg needs no second read; the batch "now available" path has
+  // its own chokepoint in claimAvailableNotificationWinners.
   void prisma.user
-    .findUnique({ where: { id: requestedBy }, select: { deactivatedAt: true } })
+    .findUnique({
+      where: { id: requestedBy },
+      select: { deactivatedAt: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
+    })
     .then((u) => {
       if (u?.deactivatedAt) return;
-      dispatchRequestStatusChange(status, request);
+      // Returned, so a rejected email send lands in the .catch below too.
+      return dispatchRequestStatusChange(status, request, u);
     })
     .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
 }
 
+type StatusChangeRecipient = {
+  email: string;
+  notificationEmail: string | null;
+  emailOnApproved: boolean;
+  emailOnDeclined: boolean;
+  locale: string | null;
+};
+
+// Resolves when the email leg (the only one awaited here) has settled; every
+// other channel is fire-and-forget with its own .catch.
 function dispatchRequestStatusChange(
   status: "APPROVED" | "AVAILABLE" | "DECLINED",
   request: RequestInfo,
-): void {
+  recipient: StatusChangeRecipient | null,
+): Promise<void> | undefined {
   const { requestedBy, title, mediaType, posterPath, tmdbId } = request;
 
   // The manual admin "mark available" is a claimed winner like any other
@@ -380,27 +396,23 @@ function dispatchRequestStatusChange(
     text: status === "DECLINED" ? (request.adminNote ?? null) : null,
   });
 
+  const to = recipient && resolveUserNotificationEmail(recipient);
+
   if (status === "APPROVED") {
     writeInAppNotification(requestedBy, "REQUEST_APPROVED", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestApproved(requestedBy, title, mediaType, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true, locale: true } })
-      .then((u) => {
-        const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType, posterPath, tmdbId, locale: u.locale });
-      })
-      .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    if (to && recipient.emailOnApproved) {
+      return notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType, posterPath, tmdbId, locale: recipient.locale });
+    }
+    return;
   }
 
-  if (status === "DECLINED") {
-    writeInAppNotification(requestedBy, "REQUEST_DECLINED", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true, locale: true } })
-      .then((u) => {
-        const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, tmdbId, adminNote: request.adminNote, posterPath, locale: u.locale });
-      })
-      .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+  // DECLINED
+  writeInAppNotification(requestedBy, "REQUEST_DECLINED", { title, mediaType, tmdbId, posterPath });
+  notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+  notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+  if (to && recipient.emailOnDeclined) {
+    return notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, tmdbId, adminNote: request.adminNote, posterPath, locale: recipient.locale });
   }
 }

@@ -33,6 +33,12 @@ export const WATCH_SYNC_LOCK_ID = 2081;
 // Notification inbox retention (purge-notifications cron). Same reasoning: a
 // parallel-branch-safe id, not the next free one.
 export const PURGE_NOTIFICATIONS_LOCK_ID = 2091;
+// The per-source library resyncs (/api/sync/plex, /api/sync/jellyfin): one run
+// per source at a time. Not the orchestrator's 2000 — that would make the hourly
+// sync skip whenever an admin resync is running. Same reasoning as above for
+// the ids: parallel-branch-safe, not the next free one.
+export const PLEX_RESYNC_LOCK_ID = 2111;
+export const JELLYFIN_RESYNC_LOCK_ID = 2112;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -110,11 +116,12 @@ export async function withAdvisoryLock<T, U = T>(
   client.on("end", () => onConnectionLost(new Error("connection ended")));
   await client.connect();
   try {
-    // Bound any single statement (and any transaction left idle) so a wedged query
-    // can't keep the advisory lock held forever.
-    await client.query("SET statement_timeout = '30min'");
-    await client.query("SET idle_in_transaction_session_timeout = '30min'");
-
+    // No session timeouts here: this connection only runs the non-blocking
+    // try-lock and the unlock and never opens a transaction, so
+    // statement_timeout / idle_in_transaction_session_timeout would bound
+    // nothing. The hold is bounded by the timeoutMs race below plus the unlock
+    // in the finally — and by the session dying, which frees the lock.
+    //
     // pg_try_advisory_lock is non-blocking — returns false immediately if another session holds the lock
     const res = await client.query<{ acquired: boolean }>(
       "SELECT pg_try_advisory_lock($1::bigint) AS acquired",

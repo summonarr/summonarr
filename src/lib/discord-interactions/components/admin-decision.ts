@@ -3,12 +3,11 @@ import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
 import { localizedTitleFor } from "@/lib/tmdb-localize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { scheduleDownloadCheck } from "@/lib/download-check";
 import { logAudit } from "@/lib/audit";
 import { effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
 import { emitSSE } from "@/lib/sse-emitter";
-import { DISCORD_API, DISCORD_HOSTS, TMDB_POSTER_BASE, editOriginal } from "../reply";
+import { TMDB_POSTER_BASE, editOriginal, ephemeralFollowup, handledEmbed } from "../reply";
 import type { ComponentContext } from "../types";
 
 // `admin_approve:<requestId>` / `admin_decline:<requestId>` — the buttons on the
@@ -35,13 +34,7 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
     ? effectivePermissions(adminUser.role, adminUser.permissions)
     : 0n;
   if (!adminUser || !hasPermission(adminPerms, Permission.MANAGE_REQUESTS)) {
-    await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
-      allowedHosts: DISCORD_HOSTS,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: t("notify.bot.admin.noPermission"), flags: 64 }),
-      timeoutMs: 15_000,
-    });
+    await ephemeralFollowup(appId, token, t("notify.bot.admin.noPermission"));
     return;
   }
   const maintRow = await prisma.setting.findUnique({ where: { key: "maintenanceEnabled" } });
@@ -49,24 +42,12 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
     // ADMIN bit, not the role string — maintenance.ts's web bypass keys off the
     // bit, and a bit-only granular admin shouldn't be blocked here either.
     if (!hasPermission(adminPerms, Permission.ADMIN)) {
-      await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
-        allowedHosts: DISCORD_HOSTS,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: t("notify.bot.admin.maintenance"), flags: 64 }),
-        timeoutMs: 15_000,
-      });
+      await ephemeralFollowup(appId, token, t("notify.bot.admin.maintenance"));
       return;
     }
   }
   if (!checkRateLimit(`discord-admin-action:${adminUser.id}`, 30, 60 * 1000)) {
-    await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
-      allowedHosts: DISCORD_HOSTS,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: t("notify.bot.admin.tooMany"), flags: 64 }),
-      timeoutMs: 15_000,
-    });
+    await ephemeralFollowup(appId, token, t("notify.bot.admin.tooMany"));
     return;
   }
 
@@ -88,12 +69,7 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
   // line into `content` on a slow arr push — an omitted field would leave it
   // standing above the finished embed.
   if (!request || request.status !== "PENDING") {
-    const embed: Record<string, unknown> = {
-      color: 0x71767B,
-      title: channelTitle ?? channelT("notify.bot.admin.requestFallback"),
-      description: channelT("notify.bot.admin.handled"),
-      timestamp: new Date().toISOString(),
-    };
+    const embed = handledEmbed(channelT, channelTitle ?? channelT("notify.bot.admin.requestFallback"));
     await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
     return;
   }
@@ -113,13 +89,7 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
       data: { status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) },
     });
     if (claimed.count === 0) {
-      const embed: Record<string, unknown> = {
-        color: 0x71767B,
-        title: localizedTitle,
-        description: channelT("notify.bot.admin.handled"),
-        timestamp: new Date().toISOString(),
-      };
-      await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
+      await editOriginal(appId, token, { content: "", embeds: [handledEmbed(channelT, localizedTitle)], components: [] });
       return;
     }
     let arrFailed = false;
@@ -201,13 +171,7 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
       data: { status: "DECLINED", approvedAt: null },
     });
     if (claimed.count === 0) {
-      const embed: Record<string, unknown> = {
-        color: 0x71767B,
-        title: localizedTitle,
-        description: channelT("notify.bot.admin.handled"),
-        timestamp: new Date().toISOString(),
-      };
-      await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
+      await editOriginal(appId, token, { content: "", embeds: [handledEmbed(channelT, localizedTitle)], components: [] });
       return;
     }
     void logAudit({

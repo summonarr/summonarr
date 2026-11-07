@@ -660,6 +660,7 @@
   "adminManage.library.btn.failedStatus": "failed ({status})",
   "adminManage.library.btn.items_one": "{formatted} item",
   "adminManage.library.btn.items_other": "{formatted} items",
+  "adminManage.library.btn.alreadyRunning": "already syncing — try again when it finishes",
   "adminManage.library.btn.networkError": "network error",
   "adminManage.library.btn.syncFailed": "Sync failed",
   "adminManage.library.btn.rescanConfirm": "Re-scan all libraries?",

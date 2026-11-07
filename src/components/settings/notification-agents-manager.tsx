@@ -446,7 +446,11 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
               <Input
                 id="agent-secret"
                 type="password"
-                autoComplete="off"
+                // "off" is ignored on password fields; new-password is what keeps
+                // a browser from filling the Summonarr login into a channel token.
+                autoComplete="new-password"
+                data-1p-ignore
+                data-lpignore="true"
                 value={draft.secret}
                 disabled={draft.clearSecret}
                 onChange={(e) => patchDraft({ secret: e.target.value })}

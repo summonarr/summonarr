@@ -367,6 +367,35 @@ test("both foothold helpers delete exactly the user's pending notification-email
   assert.ok(!buildVerifyIdentifier("u-10", "a@example.com").startsWith(verifyIdentifierPrefixFor("u-1")));
 });
 
+test("the two foothold helpers clear the SAME tables with the same filters, and the transaction form runs them one at a time", async () => {
+  type Seen = { model: string; args: unknown; startedWhileBusy: boolean };
+  const seen: Seen[] = [];
+  let inFlight = 0;
+  const client = Object.fromEntries(
+    ["pushSubscription", "discordLinkToken", "discordMergeCode", "verificationToken"].map((model) => [
+      model,
+      {
+        deleteMany: async (args: unknown) => {
+          seen.push({ model, args, startedWhileBusy: inFlight > 0 });
+          inFlight++;
+          await new Promise((r) => setImmediate(r));
+          inFlight--;
+          return { count: 0 };
+        },
+      },
+    ]),
+  ) as unknown as Parameters<typeof footholdDeletes>[0];
+
+  await Promise.all(footholdDeletes(client, "u-same"));
+  const batch = seen.splice(0).map(({ model, args }) => ({ model, args }));
+  await clearSessionFootholdsInTx(client, "u-same");
+  const inTx = seen.splice(0);
+  assert.deepEqual(inTx.map(({ model, args }) => ({ model, args })), batch, "one list: a table added to one form is in the other");
+  assert.equal(batch.length, 4);
+  // Guardrail 23c: a transaction is one connection; never two queries in flight on it.
+  assert.ok(inTx.every((s) => !s.startedWhileBusy), "each tx delete starts only after the previous one resolved");
+});
+
 test("sign out everywhere (includeCurrent) deletes the pending notification-email verification INSIDE its transaction", async () => {
   const s = await mintSession({ ageMs: 0 }); // fresh SSO session passes the step-up
   const res = await revokeAll(s, { includeCurrent: true });

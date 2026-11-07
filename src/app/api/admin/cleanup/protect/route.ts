@@ -4,11 +4,9 @@ import { prisma } from "@/lib/prisma";
 import { readJsonCapped } from "@/lib/body-size";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
-import { isFeatureEnabled } from "@/lib/features";
-import { CLEANUP_FEATURE_KEY } from "@/lib/library-cleanup-data";
+import { cleanupDisabledResponse } from "@/lib/library-cleanup-gate";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 
 // Per-title "never a cleanup candidate" pins (ADMIN).
@@ -16,15 +14,9 @@ import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 //   DELETE → unprotect ?tmdbId=&mediaType=  (query params — DELETE bodies are
 //            stripped by some proxies, same as the blacklist route)
 
-async function disabled(t: Translator): Promise<NextResponse | null> {
-  return (await isFeatureEnabled(CLEANUP_FEATURE_KEY))
-    ? null
-    : NextResponse.json({ error: t("apiAdmin.cleanup.disabled") }, { status: 404 });
-}
-
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const off = await disabled(t);
+  const off = await cleanupDisabledResponse(t);
   if (off) return off;
   const parsed = await readJsonCapped<{ tmdbId?: unknown; mediaType?: unknown; title?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -65,7 +57,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const off = await disabled(t);
+  const off = await cleanupDisabledResponse(t);
   if (off) return off;
   const sp = req.nextUrl.searchParams;
   const tmdbId = Number(sp.get("tmdbId"));

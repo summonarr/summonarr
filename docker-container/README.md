@@ -127,7 +127,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | `NEXTAUTH_SECRET`      | **≥ 32 chars**                             | Signs JWT session tokens. `openssl rand -base64 32`. To rotate it without signing everyone out, see `NEXTAUTH_SECRET_PREVIOUS` under [Rotating `NEXTAUTH_SECRET`](#rotating-nextauth_secret).                     |
 | `AUTH_URL`             | Absolute URL incl. scheme                  | Public URL of the app. Pins the app's own base URL (used for redirects, the OIDC callback, trusted-origin/CSRF checks, and cookie-`Secure` detection) and blocks Host-header injection behind a proxy. Use `https://…` in production so session cookies get the `Secure` + `__Host-` treatment. |
 | `CRON_SECRET`          | **≥ 32 chars**                             | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment.                                                                        |
-| `POSTGRES_PASSWORD`    | any; `openssl rand -base64 32` recommended | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically.                                                                     |
+| `POSTGRES_PASSWORD`    | any; `openssl rand -base64 32` recommended | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically. Can instead be a file mount — see [Move secrets to file mounts](#move-secrets-to-file-mounts). |
 | `TOKEN_ENCRYPTION_KEY` | **exactly 64 hex chars** (32 bytes)        | AES-256-GCM key for encrypting Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts at rest. `openssl rand -hex 32`.                       |
 | `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`. Forwarded client-IP headers (`X-Forwarded-For` / `X-Real-IP`) are read **only** when this is exactly `"true"`. With `true`, publish the app port to the proxy only (`"127.0.0.1:3001:3000"`) and have the proxy overwrite `X-Forwarded-For` — see [Reach the app only through the reverse proxy](#reach-the-app-only-through-the-reverse-proxy-trust_proxytrue); the app logs this reminder at every boot. |
 | `SUMMONARR_ALLOW_LOCAL_ONLY` | `"true"` to enable; default off      | **Required whenever `TRUST_PROXY` is not `"true"`** — production refuses to boot in local-only mode without it. Local-only mode is gated solely by the client-supplied, spoofable `Host` header, so it is safe only on a genuinely private host (LAN-only, loopback-bound, or firewalled). Set it to acknowledge that your network provides the access control. It cannot unlock a public `AUTH_URL`. |
@@ -191,7 +191,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | Variable                       | Constraints                      | Purpose                                                                                                                                                         |
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
-| `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
+| `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). Capped at `5`; a value that isn't a whole number from 1 to 5 falls back (a typo to `1`), and the boot log says which value is used. |
 | `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.38.0` (no `v` — the published tags are bare semver).                                                                                                   |
 | `SUMMONARR_PRE_UPGRADE_DUMP_DIR` | writable dir in the container; default unset (off) | Take a `pg_dump` here before a schema-changing upgrade. Mount a volume at it. See [Pre-upgrade safety dump](#pre-upgrade-safety-dump-opt-in). `SUMMONARR_PRE_UPGRADE_DUMP_KEEP` (default `3`) and `SUMMONARR_PRE_UPGRADE_DUMP_TIMEOUT` (seconds, default `900`) tune it. |
 | `SUMMONARR_ACCEPT_DATA_LOSS`   | `true` to enable; default unset  | Apply schema changes with `--accept-data-loss`. Applies on **every** boot while set (a warning is logged each time) — unset it after the boot that needs it. |
@@ -200,6 +200,8 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
 | `SSE_MAX_LISTENERS`            | integer; default `500`           | Concurrent real-time (SSE) connection cap; also raises the emitter listener limit so the two stay in lockstep. Raise for large/heavily multi-tabbed deployments. |
 | `/run/secrets/cron_secret`     | file mount                       | If mounted (Docker/Swarm secret), the entrypoint reads `CRON_SECRET` from the file so it doesn't appear in `docker inspect`. Takes precedence over the env var. |
+| `/run/secrets/postgres_password` | file mount                     | If mounted, the entrypoint (and the `scripts/*.mjs` operator scripts) read `POSTGRES_PASSWORD` from the file. Takes precedence over the env var. See [Move secrets to file mounts](#move-secrets-to-file-mounts). |
+| `SUMMONARR_DB_WAIT_SECONDS`    | integer; default `60`            | How long boot waits for the bundled Postgres to answer before carrying on (`db push` then reports the failure). Covers a host reboot, where Docker restarts both containers together and compose's `depends_on` doesn't apply. |
 
 ## Sub-path deployment (`BASE_PATH`)
 
@@ -237,7 +239,7 @@ The internal cron loop and the container health probe read `BASE_PATH` from the 
 
 ## Internal cron schedule
 
-The container runs its own cron loop (see `docker-entrypoint.sh`). It POSTs to each sync endpoint with `Authorization: Bearer $CRON_SECRET` over `http://localhost:3000`, so the secret never leaves the container.
+The container runs its own cron loops (see `docker-entrypoint.sh`). They POST to each sync endpoint with `Authorization: Bearer $CRON_SECRET` over `http://localhost:3000`, so the secret never leaves the container. The long jobs (library sync, warm-ups, purges) run one after another; watch sync, the Radarr/Sonarr monitor and the admin Radarr/Sonarr page refresh run in a second loop, so a long sync can't hold them back. Play history is polled by its own long-lived process every `PLAY_HISTORY_SYNC_INTERVAL`. The `Cron started.` line at boot lists the interval each job actually uses, and a value that isn't a whole number of seconds is logged with the default it falls back to.
 
 Jobs that run on startup to warm caches:
 
@@ -253,10 +255,18 @@ Jobs staggered after startup to avoid a thundering herd:
 | Ratings sync           | +180s                 |
 | MDBList warmer         | +240s                 |
 | OMDB warmer            | +300s                 |
+| Admin Radarr/Sonarr page refresh | +300s       |
 | TRaSH-Guides sync      | +360s                 |
 | Plex watchlist sync    | +420s                 |
+| For You recommendations | +480s                |
+| Trakt sync             | +540s                 |
 | Auth-session purge     | +600s                 |
+| Radarr/Sonarr monitor  | +660s                 |
+| Library pre-warm       | +720s                 |
+| Watch sync             | +780s                 |
+| Notification purge     | +840s                 |
 | Audit-log PII scrubber | +900s                 |
+| Media servers' watch records | +1020s          |
 
 After the initial staggered fire, each job repeats on its own interval from [Schedule tuning](#schedule-tuning-optional).
 
@@ -397,8 +407,32 @@ The relay has no database. In memory it keeps short-lived rate-limit counters an
 `docker-compose.yml` passes secrets via the `.env` file, which is visible to `docker inspect <container>` and `docker compose config`. To reduce exposure:
 
 - Restrict the env file: `chmod 600 .env`, and keep it out of version control.
-- Mount high-value secrets as files where supported — the entrypoint already reads `CRON_SECRET` from `/run/secrets/cron_secret` (Docker/Swarm secret); prefer that over the env var, and extend the same pattern to other secrets your orchestrator supports.
+- Mount high-value secrets as files where supported — the entrypoint reads `CRON_SECRET` from `/run/secrets/cron_secret` and `POSTGRES_PASSWORD` from `/run/secrets/postgres_password` (Docker/Swarm secrets); prefer those over the env vars, and extend the same pattern to other secrets your orchestrator supports. The Postgres container takes the same file as `POSTGRES_PASSWORD_FILE`, so one secret serves both:
+
+  ```yaml
+  services:
+    postgres:
+      environment:
+        POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password   # replaces POSTGRES_PASSWORD
+      secrets: [postgres_password]
+    summonarr:
+      secrets: [postgres_password]   # and remove POSTGRES_PASSWORD from .env
+  secrets:
+    postgres_password:
+      file: ./secrets/postgres_password   # chmod 600; one line, the password
+  ```
+
+  The operator scripts (`scripts/reset-password.mjs` and the rest) read the same file, so the recovery commands below work unchanged.
 - Avoid running `docker inspect` / `docker compose config` in shared or CI logs where the output is retained.
+
+### HSTS for subdomains (`includeSubDomains`, `preload`)
+
+Over HTTPS the app sends `Strict-Transport-Security: max-age=31536000` — this host only, for a year. It does **not** add `includeSubDomains` or `preload`: on a deployment at your apex or parent domain (`https://example.com/request`) those would force HTTPS on every sibling subdomain for a year, and `preload` declares consent to the browsers' preload list. That is your decision, not the app's. To opt in, **replace** the header at the reverse proxy (browsers read only the first one, so don't add a second). In nginx:
+
+```nginx
+proxy_hide_header Strict-Transport-Security;
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+```
 
 ## Connecting external services
 
@@ -483,7 +517,7 @@ docker compose exec -T postgres psql -U summonarr -d summonarr < summonarr.sql
 
 ## Health, observability, troubleshooting
 
-- **Health endpoint** — `GET /api/health` returns a lightweight JSON payload. It's the Docker `healthcheck` target (30s interval, 60s start period). Under a sub-path deployment the probe targets `${BASE_PATH}/api/health` (the image bakes `BASE_PATH` into both the probe and the cron loop), so prefix the path when probing manually:
+- **Health endpoint** — `GET /api/health` returns a lightweight JSON payload. It's the Docker `healthcheck` target. Its start period is 5 minutes, because the database wait, an opt-in pre-upgrade dump and `prisma db push` all run before the server starts; the first passing probe ends it early. If you run the pre-upgrade dump on a large database under Swarm or an autoheal sidecar (anything that restarts an *unhealthy* container), raise `start_period` further. Under a sub-path deployment the probe targets `${BASE_PATH}/api/health` (the image bakes `BASE_PATH` into both the probe and the cron loop), so prefix the path when probing manually:
   ```bash
   docker compose exec summonarr wget -qO- "http://localhost:3000${BASE_PATH}/api/health"
   ```
@@ -600,7 +634,7 @@ The recovery script reads either four `PG*` environment variables **or** a `DATA
 | `PGHOST=postgres` | DNS name of the Postgres service inside the docker network | This is what the app entrypoint also points at; `localhost` from inside the app container is **not** Postgres. |
 | `PGUSER=summonarr` | Database user the app uses | Created automatically by the Postgres container's init from `POSTGRES_USER`. |
 | `PGDATABASE=summonarr` | Database name the app uses | Same — from `POSTGRES_DB`. |
-| `PGPASSWORD="$POSTGRES_PASSWORD"` (resolved by `sh -c` inside the container) | The password the Postgres container booted with | `POSTGRES_PASSWORD` is in the container's env (from `env_file: .env` in your compose), so we resolve it **inside** the container via `sh -c` rather than leaking it on the host. |
+| `PGPASSWORD="$POSTGRES_PASSWORD"` (resolved by `sh -c` inside the container) | The password the Postgres container booted with | `POSTGRES_PASSWORD` is in the container's env (from `env_file: .env` in your compose), so we resolve it **inside** the container via `sh -c` rather than leaking it on the host. With the password in `/run/secrets/postgres_password` instead, this resolves to empty and the script reads the file itself. |
 
 If you've changed `POSTGRES_USER` or `POSTGRES_DB` in your `.env` away from the defaults (`summonarr` / `summonarr`), substitute the values you used.
 

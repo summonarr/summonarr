@@ -37,6 +37,11 @@ export function isValidMediaInstanceSlug(slug: string): boolean {
   return NAMED_SLUG_RE.test(slug);
 }
 
+// A display name's bound: the save route refuses a longer one, and the registry
+// normalizer truncates to it on read (rows written before the route's check).
+// One constant, so raising the route's limit can't be undone by the registry.
+export const MEDIA_INSTANCE_NAME_MAX_LEN = 100;
+
 // A short, human-readable label for a per-instance result/log line —
 // "jellyfin" for the default instance (unchanged for a single-server
 // deployment), "jellyfin:remote" for a named one. Used anywhere a

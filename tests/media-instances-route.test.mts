@@ -132,6 +132,9 @@ const authSessionsById = new Map<string, { userId: string }>();
 // Fails the NEXT setting.upsert whose key matches — used to prove the
 // transaction rolls back rather than half-applying (guardrail 23).
 let failUpsertKey: string | null = null;
+// Runs once when the next registry save lock is taken — a test's stand-in for a
+// save that committed while this one waited on the lock.
+let onLock: (() => void) | null = null;
 
 function makeClient(txId: number | null) {
   const record = (model: string, op: string, where: Where, data?: unknown) => {
@@ -163,6 +166,16 @@ function makeClient(txId: number | null) {
   });
 
   return {
+    // The registry save lock (readMediaInstanceRegistryForSave). Journaled with
+    // its SQL so the tests can pin that the registry read follows it in the
+    // same transaction; `onLock` lets a test commit a "concurrent" save at the
+    // moment this one holds the lock.
+    $executeRaw: async (query: { sql?: string } | TemplateStringsArray) => {
+      const sql = "sql" in query && typeof query.sql === "string" ? query.sql : String(query);
+      record("$executeRaw", "lock", { sql });
+      onLock?.();
+      return 0;
+    },
     setting: {
       findMany: async (args?: { where?: { key?: { in?: string[] } } }) => {
         const only = args?.where?.key?.in;
@@ -170,6 +183,7 @@ function makeClient(txId: number | null) {
         return only ? rows.filter((r) => only.includes(r.key)) : rows;
       },
       findUnique: async (args: { where: { key: string } }) => {
+        record("setting", "findUnique", args.where);
         const value = settings.get(args.where.key);
         return value === undefined ? null : { key: args.where.key, value };
       },
@@ -356,6 +370,7 @@ beforeEach(() => {
   upstreamEvidence = [];
   watchSyncPairs = [];
   failUpsertKey = null;
+  onLock = null;
   respond = (url) => { throw new Error(`unexpected fetch ${url}`); };
 });
 
@@ -958,4 +973,148 @@ test("Plex connection test: token + reachable server → ok; an invalid token fa
     "a bad token keeps its own distinct message",
   );
   assert.deepEqual(fetchUrls.filter((u) => u.includes("10.0.0.5")), [], "no point probing the server with a token plex.tv rejected");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Secrets are type-checked and bounded before the transaction opens
+// ════════════════════════════════════════════════════════════════════════════
+
+test("a non-string or over-long adminToken / apiKey is 400 before the transaction opens", async () => {
+  // Each reached tx.setting.upsert as-is and failed inside the transaction — a
+  // 500 instead of a 400.
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["plex", { adminToken: 123 }],
+    ["plex", { adminToken: null }],
+    ["plex", { adminToken: { set: "x" } }],
+    ["plex", { adminToken: "t".repeat(4097) }],
+    ["jellyfin", { apiKey: {} }],
+    ["jellyfin", { apiKey: [] }],
+  ];
+  for (const [service, fields] of cases) {
+    ops.length = 0;
+    const res = await POST(postReq({ service, instances: [{ slug: "remote", name: "Remote", ...fields }] }, admin.header), undefined);
+    assert.equal(res.status, 400, `${service} ${JSON.stringify(fields).slice(0, 60)} must be refused`);
+    assert.match(((await res.json()) as { error: string }).error, /for "remote" must be text of at most 4096 characters/);
+  }
+  assert.equal(txOptions.length, 0, "no transaction opened");
+  assert.equal(opsFor("setting", "upsert").length, 0);
+  assert.equal(settings.get("plexRemoteAdminToken"), "remote-token");
+
+  const ok = await POST(postReq({ service: "plex", instances: [{ slug: "remote", name: "Remote", adminToken: "t".repeat(4096) }, { slug: "keep", name: "Keep" }] }, admin.header), undefined);
+  assert.equal(ok.status, 200, "exactly the cap is accepted");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Concurrent saves: the removal diff is computed under the save lock
+// ════════════════════════════════════════════════════════════════════════════
+
+test("the registry read that decides removals runs in the transaction, after the save lock and before the registry write", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  assert.equal((await POST(postReq(removeAll, admin.header), undefined)).status, 200);
+
+  const lockAt = ops.findIndex((o) => o.model === "$executeRaw");
+  const readAt = ops.findIndex((o) => o.model === "setting" && o.op === "findUnique" && (o.where as { key: string }).key === "plexInstances");
+  const writeAt = ops.findIndex((o) => o.model === "setting" && o.op === "upsert" && (o.where as { key: string }).key === "plexInstances");
+  assert.ok(lockAt >= 0 && readAt > lockAt && writeAt > readAt, "lock → registry read → registry write");
+  assert.match(String((ops[lockAt].where as { sql: string }).sql), /pg_advisory_xact_lock\(2101, 3\)/, "Plex's own save lock");
+  const txId = ops[writeAt].txId;
+  assert.ok(txId !== null);
+  assert.equal(ops[lockAt].txId, txId, "the lock is taken inside the save's transaction");
+  assert.equal(ops[readAt].txId, txId, "the registry is read through the transaction client, not the top-level one");
+});
+
+test("a server another save added while this one waited for the lock is removed WITH its rows, not orphaned", async () => {
+  // Read before the transaction, the diff never saw "west": the registry write
+  // dropped it and its token, library rows and sessions stayed forever.
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  onLock = () => {
+    onLock = null;
+    settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }, { slug: "keep", name: "Keep" }, { slug: "west", name: "West" }]));
+    settings.set("plexWestAdminToken", "west-token");
+    plexLibrary.push({ tmdbId: 9, mediaType: "MOVIE", serverInstance: "west" });
+  };
+  assert.equal((await POST(postReq(removeAll, admin.header), undefined)).status, 200);
+  assert.equal(settings.get("plexWestAdminToken"), undefined, "no orphaned token");
+  assert.deepEqual(libSlugs(plexLibrary), ["", "keep"], "west's library rows go with it");
+  assert.deepEqual(JSON.parse(settings.get("plexInstances") ?? "[]").map((e: { slug: string }) => e.slug), ["keep"]);
+});
+
+test("\"keep the saved token\" for a server another save just removed is a 409, not a tokenless re-add", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  onLock = () => {
+    onLock = null;
+    settings.set("plexInstances", JSON.stringify([{ slug: "keep", name: "Keep" }]));
+    settings.delete("plexRemoteAdminToken");
+  };
+  const res = await POST(
+    postReq({ service: "plex", instances: [{ slug: "remote", name: "Remote", adminToken: MASK }, { slug: "keep", name: "Keep" }] }, admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 409);
+  assert.equal(opsFor("setting", "upsert").length, 0, "nothing written");
+  assert.deepEqual(JSON.parse(settings.get("plexInstances") ?? "[]").map((e: { slug: string }) => e.slug), ["keep"]);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// baseVersion: a list edited from a stale load is refused, never applied
+// ════════════════════════════════════════════════════════════════════════════
+
+type Versions = { versions: Record<"plex" | "jellyfin", string> };
+
+test("GET hands out a version per service that tracks the NAMED servers only", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  const v1 = ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions;
+  assert.equal(typeof v1.plex, "string");
+  assert.equal(typeof v1.jellyfin, "string");
+
+  // The default server has its own form; an edit there must not refuse the
+  // named-server manager's next save.
+  settings.set("plexServerUrl", "http://10.0.0.2:32400");
+  assert.equal(((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions.plex, v1.plex);
+
+  settings.set("plexRemoteLibraries", "1,2,3");
+  const v2 = ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions;
+  assert.notEqual(v2.plex, v1.plex, "a named server's field is part of the version");
+  assert.equal(v2.jellyfin, v1.jellyfin);
+});
+
+test("a stale baseVersion is 409 with ZERO writes and nothing removed; the current one saves and returns the next version", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  const stale = ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions.plex;
+  settings.set("plexRemoteServerUrl", "http://10.0.0.9:32400"); // edited in another tab
+
+  ops.length = 0;
+  const res = await POST(postReq({ ...removeAll, baseVersion: stale }, admin.header), undefined);
+  assert.equal(res.status, 409);
+  assert.match(((await res.json()) as { error: string }).error, /changed elsewhere/);
+  assert.equal(opsFor("setting", "upsert").length, 0, "nothing written");
+  assert.equal(opsFor("setting", "deleteMany").length, 0);
+  assert.equal(opsFor("plexLibraryItem", "deleteMany").length, 0, "nothing removed");
+  assert.deepEqual(libSlugs(plexLibrary), ["", "keep", "remote", "remote"]);
+  await flush();
+  assert.deepEqual(auditRows, [], "a refused save is not audited as a change");
+
+  const current = ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions.plex;
+  const ok = await POST(postReq({ ...removeAll, baseVersion: current }, admin.header), undefined);
+  assert.equal(ok.status, 200);
+  const saved = (await ok.json()) as { version: string };
+  assert.deepEqual(libSlugs(plexLibrary), ["", "keep"], "the current version proceeds with the removal");
+  assert.equal(saved.version, ((await (await GET(getReq(admin.header), undefined)).json()) as Versions).versions.plex, "the POST's version is what GET now reports");
+});
+
+test("baseVersion must be a string when sent", async () => {
+  const admin = await mintSession("ADMIN");
+  seedPlexRemote();
+  for (const baseVersion of [1, null, {}]) {
+    const res = await POST(postReq({ ...removeAll, baseVersion }, admin.header), undefined);
+    assert.equal(res.status, 400);
+  }
+  assert.equal(txOptions.length, 0);
 });

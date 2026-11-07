@@ -10,6 +10,7 @@ import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus, LoadStatus } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
+import { MINIMUM_AVAILABILITY_OPTIONS, type ArrOptions } from "../arr-options";
 
 interface ArrFormProps {
   service: "radarr" | "sonarr";
@@ -28,20 +29,6 @@ interface ArrFormProps {
   // "4k" points the form at the optional second 4K instance (the radarr4k*/sonarr4k* settings).
   variant?: "hd" | "4k";
 }
-
-interface ArrOptions {
-  rootFolders: { path: string }[];
-  qualityProfiles: { id: number; name: string }[];
-  // Only sent back by Sonarr v3; missing for Sonarr v4 and for Radarr.
-  languageProfiles?: { id: number; name: string }[];
-}
-
-// Radarr's closed enum for when a movie counts as "available" to search.
-const MINIMUM_AVAILABILITY_OPTIONS = [
-  { value: "announced", labelKey: "settings.form.arr.minAvail.announced" },
-  { value: "inCinemas", labelKey: "settings.form.arr.minAvail.inCinemas" },
-  { value: "released", labelKey: "settings.form.arr.minAvail.released" },
-] as const;
 
 export function ArrForm({
   service,
@@ -123,8 +110,11 @@ export function ArrForm({
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        // An emptied external URL is sent as "" — the route clears it and the
-        // links fall back to the connection URL.
+        // The URL is sent even when unchanged: it is what asks the route to
+        // test the connection, and the route neither writes nor cooldowns a
+        // value equal to the stored one, so pressing Save & Test again just
+        // re-tests. An emptied external URL is sent as "" — the route clears
+        // it and the links fall back to the connection URL.
         body: JSON.stringify({
           [urlKey]: url,
           [keyKey]: apiKey,
@@ -201,6 +191,9 @@ export function ArrForm({
             <Input
               id={`${idPrefix}-key`}
               type="password"
+              autoComplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setStatus("idle"); }}
               placeholder="••••••••••••••••••••••••••••••••"

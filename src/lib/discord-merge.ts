@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma";
+import { Prisma, type RequestStatus } from "@/generated/prisma";
 import { revokeDiscordRolesOnUnlink } from "@/lib/discord-notify";
+import { DISCORD_SYNTHETIC_EMAIL_SUFFIX } from "@/lib/user-source";
 import { logAudit } from "@/lib/audit";
 import { notifyAccountSecurityEvent } from "@/lib/account-security-notify";
 
@@ -38,6 +40,23 @@ export class DiscordCodeAlreadyUsedError extends Error {
   }
 }
 
+// Thrown inside the merge transaction, before any write, when the Discord id
+// already belongs to another REAL account (not a @discord.local shadow). The
+// expected refusal, told apart from an infrastructure failure so callers can
+// say so; the throw rolls the claim back with the rest (guardrail 23).
+export class DiscordAlreadyLinkedError extends Error {
+  constructor() {
+    super("This Discord account is already linked to another user.");
+    this.name = "DiscordAlreadyLinkedError";
+  }
+}
+
+// An admin already said yes to it: APPROVED, or AVAILABLE and not a cleanup
+// removal (guardrail 14b — a stamped row records a deliberate delete).
+function isGreenlit(r: { status: RequestStatus; cleanedUpAt: Date | null }): boolean {
+  return r.status === "APPROVED" || (r.status === "AVAILABLE" && r.cleanedUpAt === null);
+}
+
 // Links a Discord account to a web user, migrating a bot-created shadow account's
 // requests/issues/votes onto the web user (deduping conflicts) before deleting it.
 export async function mergeDiscordIntoWebAccount(
@@ -62,8 +81,8 @@ export async function mergeDiscordIntoWebAccount(
 
     // A non-synthetic email means the Discord account is a real web user, not a
     // bot-created shadow — refuse the merge before any read of the web row or write.
-    if (existing && existing.id !== webUserId && !existing.email.endsWith("@discord.local")) {
-      throw new Error("This Discord account is already linked to another user.");
+    if (existing && existing.id !== webUserId && !existing.email.endsWith(DISCORD_SYNTHETIC_EMAIL_SUFFIX)) {
+      throw new DiscordAlreadyLinkedError();
     }
 
     // The web user's CURRENT link, read inside the tx: a re-link (generate-link
@@ -71,34 +90,65 @@ export async function mergeDiscordIntoWebAccount(
     // below, and the superseded Discord member would otherwise keep every role
     // Summonarr granted it — nothing else ever revisits a replaced id (sync-roles
     // iterates current links only). Revoked after commit, guardrail 27.
-    const webRow = await tx.user.findUnique({ where: { id: webUserId }, select: { discordId: true } });
-    const previousDiscordId = webRow?.discordId ?? null;
+    //
+    // FOR UPDATE: the advisory lock above is per DISCORD id, and a user can hold
+    // a /link token and a merge code at once, so two links of DIFFERENT Discord
+    // accounts to this user could both read "not linked" and the loser's roles
+    // would never be revoked. The row lock makes the second wait, then read the
+    // first one's discordId as the link it supersedes.
+    const webRows = await tx.$queryRaw<Array<{ discordId: string | null }>>(
+      Prisma.sql`SELECT "discordId" FROM "User" WHERE "id" = ${webUserId} FOR UPDATE`,
+    );
+    const previousDiscordId = webRows[0]?.discordId ?? null;
 
     if (existing && existing.id !== webUserId) {
 
       const webRequests = await tx.mediaRequest.findMany({
         where: { requestedBy: webUserId },
-        select: { tmdbId: true, mediaType: true, arrInstance: true },
+        select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, status: true, cleanedUpAt: true },
       });
       // Key on arrInstance too — the MediaRequest unique is (tmdbId, mediaType, requestedBy,
       // arrInstance), so requests for the same title on different instances (default vs
       // 4K/named) are DISTINCT rows. Keying only on tmdbId:mediaType treated them as
       // duplicates and deleted the non-default variant.
-      const webKeys = new Set(webRequests.map((r) => `${r.tmdbId}:${r.mediaType}:${r.arrInstance}`));
+      const webByKey = new Map(webRequests.map((r) => [`${r.tmdbId}:${r.mediaType}:${r.arrInstance}`, r]));
 
       const discordRequests = await tx.mediaRequest.findMany({
         where: { requestedBy: existing.id },
-        select: { id: true, tmdbId: true, mediaType: true, arrInstance: true },
+        select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, status: true, cleanedUpAt: true },
       });
 
-      const conflictIds = discordRequests
-        .filter((r) => webKeys.has(`${r.tmdbId}:${r.mediaType}:${r.arrInstance}`))
-        .map((r) => r.id);
-      if (conflictIds.length > 0) {
-        await tx.mediaRequest.deleteMany({ where: { id: { in: conflictIds } } });
+      // One of each colliding pair goes. The web copy wins, unless only the
+      // shadow copy was greenlit: an APPROVED/AVAILABLE Discord request must not
+      // be thrown away for the same user's PENDING or DECLINED web request.
+      const conflicts: { loserId: string; survivorId: string; shadowLost: boolean }[] = [];
+      for (const r of discordRequests) {
+        const web = webByKey.get(`${r.tmdbId}:${r.mediaType}:${r.arrInstance}`);
+        if (web === undefined) continue;
+        const shadowWins = isGreenlit(r) && (web.status === "PENDING" || web.status === "DECLINED");
+        conflicts.push(shadowWins
+          ? { loserId: web.id, survivorId: r.id, shadowLost: false }
+          : { loserId: r.id, survivorId: web.id, shadowLost: true });
+      }
+      if (conflicts.length > 0) {
+        // RequestComment cascades with its request, so the losing copy's thread
+        // (an admin's notes to the requester) would vanish with it. Move it onto
+        // the surviving request first — the same comments, kept as they are and
+        // announced to no one, as request-comment-carry.ts does for a replaced
+        // request. One statement at a time (guardrail 23c).
+        for (const c of conflicts) {
+          await tx.requestComment.updateMany({
+            where: { requestId: c.loserId },
+            data: { requestId: c.survivorId },
+          });
+        }
+        // Before the move below: a surviving shadow row takes the web user's id,
+        // and the unique (tmdbId, mediaType, requestedBy, arrInstance) needs the
+        // losing web row gone first.
+        await tx.mediaRequest.deleteMany({ where: { id: { in: conflicts.map((c) => c.loserId) } } });
       }
 
-      const toMigrate = discordRequests.length - conflictIds.length;
+      const toMigrate = discordRequests.length - conflicts.filter((c) => c.shadowLost).length;
       if (toMigrate > 0) {
         await tx.mediaRequest.updateMany({
           where: { requestedBy: existing.id },

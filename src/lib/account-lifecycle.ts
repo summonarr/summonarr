@@ -5,6 +5,7 @@ import { verifyIdentifierPrefixFor } from "./notification-email-verify";
 import { deleteAllMfaInTx } from "./mfa/mfa-store";
 import { scrubTargetPiiFromAudit, scrubLegacySessionRevokePii, scrubOwnedRequestPii, scrubRequesterPii } from "./audit-scrub";
 import { REDACTED_USER_NAME } from "./audit";
+import { Permission } from "./permissions";
 import { Prisma } from "@/generated/prisma";
 
 // The encryption extension in ./prisma changes the client's type, so the
@@ -30,18 +31,62 @@ export class NotDeactivatedError extends Error {}
 // first, unlocked read).
 export class TargetBecameAdminError extends Error {}
 
+// Raised when the target's row is gone by the time the transaction re-reads it
+// (a shadow account hard-deleted by a Discord merge, say). Routes answer 404.
+export class TargetGoneError extends Error {}
+
+// Advisory lock 42: the lock every path that changes who is an active ADMIN, or
+// acts on an account depending on whether it is one, takes FIRST in its
+// transaction (role change, deactivate, reactivate, purge, session revoke, 2FA
+// reset, Jellyfin offboarding). One statement, spelled once: a typo at any one
+// site would silently drop it out of the serialization. Tests match the text.
+export const USER_ROLE_LOCK_SQL = "SELECT pg_advisory_xact_lock(42)";
+
+export async function lockUserRolesInTx(tx: { $executeRawUnsafe: (q: string) => Promise<unknown> }): Promise<void> {
+  await tx.$executeRawUnsafe(USER_ROLE_LOCK_SQL);
+}
+
+// An admin target is one with role ADMIN OR the ADMIN superbit. The users PATCH
+// keeps the two in lockstep, but these gates guard what a MANAGE_USERS delegate
+// may do to an account, so they must not depend on that invariant holding for
+// legacy or hand-edited rows.
+export function isAdminTarget(row: { role: string; permissions?: bigint | null } | null | undefined): boolean {
+  if (!row) return false;
+  if (row.role === "ADMIN") return true;
+  return typeof row.permissions === "bigint" && (row.permissions & Permission.ADMIN) !== 0n;
+}
+
+export interface LockedTarget {
+  role: string;
+  permissions: bigint | null;
+  deactivatedAt: Date | null;
+}
+
 type LockTx = {
   $executeRawUnsafe: (q: string) => Promise<unknown>;
-  user: { findUnique: (a: { where: { id: string }; select: { role: true } }) => Promise<{ role: string } | null> };
+  user: {
+    findUnique: (a: {
+      where: { id: string };
+      select: { role: true; permissions: true; deactivatedAt: true };
+    }) => Promise<LockedTarget | null>;
+  };
 };
 
-// Re-resolve the target's role INSIDE the transaction, under the same advisory
-// lock 42 the role-change / deactivate routes take, and refuse a non-ADMIN caller
-// when it is an ADMIN now. Call it first in the tx that performs the action.
+// Takes lock 42, re-reads the target INSIDE the transaction, and refuses a
+// non-ADMIN caller when it is an admin target now. Returns the fresh row, or null
+// when it is gone. Call it first in the tx that performs the action.
+export async function lockTargetInTx(tx: LockTx, id: string, callerIsAdmin: boolean): Promise<LockedTarget | null> {
+  await lockUserRolesInTx(tx);
+  const fresh = await tx.user.findUnique({
+    where: { id },
+    select: { role: true, permissions: true, deactivatedAt: true },
+  });
+  if (isAdminTarget(fresh) && !callerIsAdmin) throw new TargetBecameAdminError();
+  return fresh;
+}
+
 export async function assertTargetNotAdminInTx(tx: LockTx, id: string, callerIsAdmin: boolean): Promise<void> {
-  await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-  const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
-  if (fresh?.role === "ADMIN" && !callerIsAdmin) throw new TargetBecameAdminError();
+  await lockTargetInTx(tx, id, callerIsAdmin);
 }
 
 // The tombstone address a purge rewrites `email` to. RFC-2606 reserved `.invalid`
@@ -103,7 +148,7 @@ export async function deactivateUserInTx(
     // administration. Advisory lock 42 + an atomic count of non-deactivated
     // admins guards against concurrent deletes/demotions (mirrors the role-change
     // CAS). A 0-row result throws to roll the whole thing back.
-    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+    await lockUserRolesInTx(tx);
     const rows = await tx.$executeRaw`
       UPDATE "User" SET "deactivatedAt" = ${now}
       WHERE id = ${id} AND "deactivatedAt" IS NULL
@@ -143,13 +188,16 @@ export async function reactivateUser(
   // The calendar feed URL is cleared too: it is a bearer credential handed out
   // before the account was disabled, and re-enabling must not silently revive a
   // link that may have leaked in the meantime. The user can generate a new one.
+  //
+  // The tombstone is bound as a value from purgedEmailFor, so this guard can't
+  // drift from the address the purge writes.
   const rows = await db.$executeRaw`
     UPDATE "User" SET "deactivatedAt" = NULL,
       "calendarTokenHash" = NULL, "calendarTokenCreatedAt" = NULL
     WHERE id = ${id}
       AND "purgedAt" IS NULL
       AND "deactivatedAt" IS NOT NULL
-      AND email <> 'deleted-' || id || '@deleted.invalid'
+      AND email <> ${purgedEmailFor(id)}
   `;
   return rows === 1;
 }
@@ -160,7 +208,8 @@ export async function reactivateUser(
 // re-disables any that were already re-enabled into a zombie. Matches on the
 // tombstone email, which only a purge can have written.
 //
-// Idempotent, and best-effort: never throws, never blocks boot.
+// Idempotent, and best-effort: never throws, never blocks boot. The match is
+// set-based, so it spells purgedEmailFor's pattern in SQL; keep the two in step.
 export async function markLegacyPurgedAccounts(): Promise<void> {
   try {
     const healed = await prisma.$executeRaw`
@@ -295,8 +344,8 @@ export async function purgeUserDataInTx(
     where: { id, deactivatedAt: { not: null } },
     data: {
       name: "Deleted user",
-      // isPurgedRow checks for this exact address, and the raw SQL in
-      // reactivateUser / markLegacyPurgedAccounts spells the same pattern by
+      // isPurgedRow and reactivateUser check for this exact address, and the
+      // set-based SQL in markLegacyPurgedAccounts spells the same pattern by
       // hand. Keep them in step, or a scrubbed row stops being recognisable.
       email: purgedEmailFor(id),
       image: null,

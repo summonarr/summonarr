@@ -460,9 +460,8 @@ export const POST = withAdmin(async (req, { params }: RouteContext, session) => 
     return NextResponse.json({ error: t("apiUser.issues.replaceFile.resolved") }, { status: 409 });
   }
 
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 64 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 64 * 1024);
+  if (body instanceof NextResponse) return body;
   const then = parseReplaceFollowUp(body.then);
   const fileIds = parseIdArray(body.fileIds, MAX_FILES);
   const background = body.async;

@@ -61,6 +61,48 @@ test("marks are never consumed on read — replayed tokens keep hitting the DB",
   }
 });
 
+test("a user mark forces only tokens last DB-checked at or before it", () => {
+  // The mark lands after the DB write it guards (guardrail 27), so a token whose
+  // dbCheckedAt is not later than the mark may carry pre-write privileges and is
+  // forced, on every read. A token re-signed after it is not — otherwise a user
+  // whose role was edited paid the slow path on every request for good.
+  const realNow = Date.now;
+  const markedAt = 1_800_000_000;
+  try {
+    Date.now = () => markedAt * 1000 + 400;
+    markUserForceRevalidate("u_bounded");
+    for (let i = 0; i < 3; i++) {
+      assert.equal(shouldForceDbCheck("u_bounded", "sess_bounded", markedAt - 30), true);
+    }
+    assert.equal(shouldForceDbCheck("u_bounded", "sess_bounded", markedAt), true, "same second: may predate the write");
+    assert.equal(shouldForceDbCheck("u_bounded", "sess_bounded", markedAt + 1), false);
+    assert.equal(shouldForceDbCheck("u_bounded", "sess_bounded"), true, "no dbCheckedAt: always forced");
+
+    // A later mark moves the bound forward.
+    Date.now = () => (markedAt + 10) * 1000;
+    markUserForceRevalidate("u_bounded");
+    assert.equal(shouldForceDbCheck("u_bounded", "sess_bounded", markedAt + 1), true);
+    assert.equal(shouldForceDbCheck("u_bounded", "sess_bounded", markedAt + 11), false);
+
+    // A session mark still forces regardless of dbCheckedAt.
+    markSessionForceRevoked("sess_bounded_revoked");
+    assert.equal(shouldForceDbCheck("u_unmarked_bounded", "sess_bounded_revoked", markedAt + 999), true);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("re-marking a user moves it to the newest slot, so FIFO eviction takes the oldest mark", () => {
+  markUserForceRevalidate("evict_d:remarked");
+  for (let i = 0; i < CAP - 1; i++) markUserForceRevalidate(`evict_d:${i}`);
+  markUserForceRevalidate("evict_d:remarked"); // full, but re-marking evicts nothing
+  assert.equal(shouldForceDbCheck("evict_d:0", "sess_any"), true);
+  markUserForceRevalidate("evict_d:new"); // over capacity → evicts evict_d:0, the oldest
+  assert.equal(shouldForceDbCheck("evict_d:0", "sess_any"), false);
+  assert.equal(shouldForceDbCheck("evict_d:remarked", "sess_any"), true);
+  assert.equal(shouldForceDbCheck("evict_d:new", "sess_any"), true);
+});
+
 test("session and user marks are independent namespaces for the same string", () => {
   // Marking a value as a *session* must not make it match as a *user* — a
   // colliding id (or an attacker-chosen one) must not widen a single-device

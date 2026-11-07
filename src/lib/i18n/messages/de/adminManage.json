@@ -660,6 +660,7 @@
   "adminManage.library.btn.failedStatus": "fehlgeschlagen ({status})",
   "adminManage.library.btn.items_one": "{formatted} Eintrag",
   "adminManage.library.btn.items_other": "{formatted} Einträge",
+  "adminManage.library.btn.alreadyRunning": "wird bereits synchronisiert – erneut versuchen, wenn fertig",
   "adminManage.library.btn.networkError": "Netzwerkfehler",
   "adminManage.library.btn.syncFailed": "Synchronisierung fehlgeschlagen",
   "adminManage.library.btn.rescanConfirm": "Alle Bibliotheken neu scannen?",

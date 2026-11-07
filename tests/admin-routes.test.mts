@@ -105,6 +105,9 @@ const trashAppsById = new Map<string, { id: string; trashSpec: { trashId: string
 let auditThrows = false;
 let casRows = 1; // rows the in-tx CAS ($executeRaw) reports affected
 let txAuthDeleteThrows = false; // simulate the AuthSession DB delete failing (guardrail 27)
+// Runs inside the in-tx $executeRawUnsafe (the advisory lock), i.e. between a
+// route's first read and its locked re-read.
+let onTxLock: ((sql: string) => void) | null = null;
 let counts = { requests: 0, issues: 0, votes: 0 };
 let tmdbDeleteCount = 3;
 // The derived tables a TMDB/ratings reset also has to reach.
@@ -128,7 +131,12 @@ let txOptsSeen: Array<{ timeout?: number } | undefined> = [];
 function makeTx() {
   const rec = (op: string) => (args?: unknown) => { txOps.push({ op, args }); return Promise.resolve({ count: 0 }); };
   return {
-    $executeRawUnsafe: async (sql: string) => { txOps.push({ op: "$executeRawUnsafe", args: sql }); return 0; },
+    $executeRawUnsafe: async (sql: string) => {
+      txOps.push({ op: "$executeRawUnsafe", args: sql });
+      // Lets a test land a concurrent write while this request waits for the lock.
+      onTxLock?.(sql);
+      return 0;
+    },
     // Tagged-template form: strings array + interpolated bind values. Both the
     // role-change CAS and anonymize's last-admin CAS read the row count back.
     $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -371,6 +379,7 @@ const { NextRequest } = await import("next/server");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
+const { purgedEmailFor, USER_ROLE_LOCK_SQL } = await import("../src/lib/account-lifecycle.ts");
 
 const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
 const { DELETE: clearCache } = await import("../src/app/api/admin/clear-cache/route.ts");
@@ -456,6 +465,7 @@ beforeEach(() => {
   auditThrows = false;
   casRows = 1;
   txAuthDeleteThrows = false;
+  onTxLock = null;
   counts = { requests: 0, issues: 0, votes: 0 };
   tmdbDeleteCount = 3;
   coreDeleteCount = 0;
@@ -859,10 +869,12 @@ test("reactivate: clears deactivatedAt via the guarded updateMany and audits USE
   const { sql, values } = restore.args as { sql: string; values: unknown[] };
   assert.match(sql, /"purgedAt" IS NULL/);
   assert.match(sql, /"deactivatedAt" IS NOT NULL/);
-  assert.match(sql, /email <> 'deleted-' \|\| id \|\| '@deleted\.invalid'/); // the legacy-tombstone guard
+  // The legacy-tombstone guard binds purgedEmailFor(id) as a value, so it can't
+  // drift from the address the purge writes.
+  assert.match(sql, /email <> \?/);
   // A re-enabled account must not revive a calendar feed URL issued before it was disabled.
   assert.match(sql, /"calendarTokenHash" = NULL/);
-  assert.deepEqual(values, [targetId]); // id travels as a bind param
+  assert.deepEqual(values, [targetId, purgedEmailFor(targetId)]); // both travel as bind params
   assert.equal(usersById.get(targetId)?.deactivatedAt, null);
   await flush();
   assert.equal(auditRows.length, 1);
@@ -957,6 +969,19 @@ test("purge of a disabled account scrubs it, keeps the row, and audits USER_PURG
   // The audit row is the last record of who this was — captured PRE-scrub, since
   // after the purge the User row no longer carries a name or a real email.
   assert.match(JSON.stringify(auditRows[0]), /target-\d+@example\.com/);
+});
+
+test("purge runs in ONE transaction with the batch timeout, not Prisma's 5s default (guardrail 4)", async () => {
+  // The audit-trail scrubs inside it rewrite matching rows one CAS write at a
+  // time; on a long-lived account the default 5s aborted the irreversible
+  // purge on every retry.
+  const admin = await mintSession("ADMIN");
+  const targetId = seedDisabledUser("USER");
+  const res = await userPurge(req(`http://localhost:3000/api/admin/users/${targetId}/purge`, { method: "POST", headers: admin.header }), ctxFor(targetId));
+  assert.equal(res.status, 200);
+  assert.equal(txOptsSeen.length, 1, "one interactive transaction");
+  assert.ok((txOptsSeen[0]?.timeout ?? 0) >= BATCH_TX_TIMEOUT, `timeout was ${txOptsSeen[0]?.timeout}`);
+  await flush();
 });
 
 test("GUARDRAIL 26 (purge): auditLog throws → 200 kept, the scrub committed, swallow logged", async () => {
@@ -1193,6 +1218,70 @@ test("user-delete: deleting the LAST admin → 400 (LastAdminError) with no audi
   assert.deepEqual(await res.json(), { error: "Cannot disable the last admin" });
   await flush();
   assert.equal(auditAttempts.length, 0);
+});
+
+test("an account removed while the request waits for lock 42 → 404 for a promotion, a demotion, a disable and a 2FA reset — never a 500 or a false 'last admin'", async () => {
+  const admin = await mintSession("ADMIN");
+  const patch = (id: string, role: string) =>
+    userPatch(req(`http://localhost:3000/api/admin/users/${id}`, { method: "PATCH", headers: { ...admin.header, "content-type": "application/json" }, body: JSON.stringify({ role }) }), ctxFor(id));
+  const vanishUnderLock = (id: string) => {
+    onTxLock = (sql) => { if (sql === USER_ROLE_LOCK_SQL) usersById.delete(id); };
+  };
+
+  const promoted = seedUser("USER");
+  vanishUnderLock(promoted);
+  const promote = await patch(promoted, "ADMIN");
+  assert.equal(promote.status, 404);
+  assert.deepEqual(await promote.json(), { error: "Not found" });
+
+  const demoted = seedUser("ADMIN");
+  vanishUnderLock(demoted);
+  casRows = 0; // the CAS would match nothing for a vanished row
+  const demote = await patch(demoted, "USER");
+  assert.equal(demote.status, 404, "a vanished admin is not 'the last admin'");
+
+  const disabled = seedUser("USER");
+  vanishUnderLock(disabled);
+  const del = await userDelete(req(`http://localhost:3000/api/admin/users/${disabled}`, { method: "DELETE", headers: admin.header }), ctxFor(disabled));
+  assert.equal(del.status, 404);
+
+  const reset = seedUser("USER");
+  vanishUnderLock(reset);
+  const mfa = await userMfaReset(req(`http://localhost:3000/api/admin/users/${reset}/mfa`, { method: "DELETE", headers: admin.header }), ctxFor(reset));
+  assert.equal(mfa.status, 404);
+
+  assert.deepEqual(
+    txOps.filter((o) => o.op === "user.update" || o.op === "$executeRaw" || o.op === "authSession.deleteMany" || o.op.endsWith(".deleteMany")).map((o) => o.op),
+    [],
+    "nothing is written for a row that is gone",
+  );
+  await flush();
+  assert.equal(auditAttempts.length, 0);
+});
+
+test("user-delete racing another disable of the same ADMIN: the locked re-read sees it disabled → 200 {ok:true}, no second deactivate, no audit", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("ADMIN");
+  // A double submit: the first disable commits while this one waits for lock 42.
+  onTxLock = (sql) => { if (sql === USER_ROLE_LOCK_SQL) usersById.get(targetId)!.deactivatedAt = new Date(); };
+  casRows = 0; // re-running the CAS on the disabled row would match nothing → LastAdminError
+  const res = await userDelete(req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "DELETE", headers: admin.header }), ctxFor(targetId));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal(txOps.filter((o) => o.op === "$executeRaw" || o.op === "authSession.deleteMany").length, 0);
+  assert.equal(shouldForceDbCheck(targetId, "no-session"), false, "this request changed nothing, so it marks nothing");
+  await flush();
+  assert.equal(auditAttempts.length, 0, "the disable that did it wrote its own audit row");
+});
+
+test("user-delete: a MANAGE_USERS delegate is refused for a role-USER target carrying the ADMIN bit", async () => {
+  const delegate = await mintSession("USER", Permission.MANAGE_USERS);
+  const targetId = seedUser("USER");
+  usersById.get(targetId)!.permissions = Permission.ADMIN;
+  const res = await userDelete(req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "DELETE", headers: delegate.header }), ctxFor(targetId));
+  assert.equal(res.status, 403);
+  assert.equal(usersById.get(targetId)!.deactivatedAt, null);
+  assert.equal(txOps.filter((o) => o.op === "authSession.deleteMany").length, 0);
 });
 
 test("role-change: changing your OWN role → 400, no update, no audit", async () => {

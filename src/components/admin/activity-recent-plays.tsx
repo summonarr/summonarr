@@ -6,7 +6,7 @@ import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import { formatDurationSeconds } from "@/lib/format-duration";
+import { formatDurationHM } from "@/lib/format-duration";
 import {
   ActivityCard,
   Avatar,
@@ -99,12 +99,12 @@ function DetailRow({ play }: { play: RecentPlay }) {
     [t("adminActivity.field.audioCodec"), play.audioCodec?.toUpperCase() ?? "—"],
     [
       t("adminActivity.field.paused"),
-      play.pausedDuration ? formatDurationSeconds(play.pausedDuration) : "—",
+      play.pausedDuration ? formatDurationHM(play.pausedDuration, locale) : "—",
     ],
     [t("adminActivity.field.started"), formatTimestamp(play.startedAt, locale)],
     [t("adminActivity.field.stopped"), formatTimestamp(play.stoppedAt, locale)],
-    [t("adminActivity.field.totalDuration"), formatDurationSeconds(play.duration)],
-    [t("adminActivity.field.actualWatchTime"), formatDurationSeconds(play.playDuration)],
+    [t("adminActivity.field.totalDuration"), formatDurationHM(play.duration, locale)],
+    [t("adminActivity.field.actualWatchTime"), formatDurationHM(play.playDuration, locale)],
   ];
   return (
     <tr style={{ background: "var(--ds-bg-1)" }}>
@@ -556,7 +556,7 @@ export function ActivityRecentPlays({
                             fontVariantNumeric: "tabular-nums",
                           }}
                         >
-                          {formatDurationSeconds(p.playDuration)}
+                          {formatDurationHM(p.playDuration, locale)}
                         </td>
                         <td style={TD}>
                           <MethodPill method={m.label} methodClass={m.cls} />

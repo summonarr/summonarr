@@ -660,6 +660,7 @@
   "adminManage.library.btn.failedStatus": "non riuscito ({status})",
   "adminManage.library.btn.items_one": "{formatted} elemento",
   "adminManage.library.btn.items_other": "{formatted} elementi",
+  "adminManage.library.btn.alreadyRunning": "sincronizzazione già in corso — riprova quando termina",
   "adminManage.library.btn.networkError": "errore di rete",
   "adminManage.library.btn.syncFailed": "Sincronizzazione non riuscita",
   "adminManage.library.btn.rescanConfirm": "Analizzare di nuovo tutte le librerie?",

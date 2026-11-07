@@ -38,13 +38,16 @@ export const GET = withAuth(async (req, { params }: RouteContext, session) => {
     return NextResponse.json({ error: t("apiUser.comments.disabled") }, { status: 403 });
   }
 
-  const comments = await prisma.requestComment.findMany({
+  // The NEWEST 500, answered oldest first: past the cap it is the oldest that
+  // drop off, never the latest replies (the same window a re-request carries —
+  // request-comment-carry.ts). The id breaks createdAt ties so the cut is stable.
+  const newestFirst = await prisma.requestComment.findMany({
     where: { requestId: id },
     include: { author: { select: { name: true, role: true, ...(isManager ? { email: true } : {}) } } },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: 500,
   });
-  return NextResponse.json(comments);
+  return NextResponse.json(newestFirst.reverse());
 });
 
 export const POST = withAuth(async (req, { params }: RouteContext, session) => {

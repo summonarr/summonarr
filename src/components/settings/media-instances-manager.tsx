@@ -7,6 +7,8 @@ import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 
 // Admin UI for the EXTRA (named) Plex or Jellyfin servers, one service per
 // component. The default server keeps its own form (PlexConnectForm /
@@ -17,9 +19,6 @@ import { useT } from "@/components/i18n/i18n-provider";
 // Simpler than ArrInstancesManager on purpose: nothing routes a request to a
 // specific Plex/Jellyfin server (availability is combined across every server
 // of a type — guardrail 35), so there are no routing rules to edit here.
-
-const MASKED_VALUE = "••••••••";
-const SLUG_RE = /^[a-z][a-z0-9]{0,23}$/;
 
 export type MediaServerService = "plex" | "jellyfin";
 type SaveStatus = "idle" | "saving" | "ok" | "error";
@@ -202,7 +201,7 @@ function toDraft(v: InstanceView, service: MediaServerService): Draft {
 }
 
 // Only named instances are managed here — the default ("") has its own form.
-const isNamed = (slug: string) => slug !== "";
+const isNamed = (slug: string) => slug !== DEFAULT_MEDIA_INSTANCE;
 
 export function MediaInstancesManager({ service }: { service: MediaServerService }) {
   const t = useT();
@@ -222,17 +221,30 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
   // server copy, so while this is set it asks before discarding them.
   const [dirty, setDirty] = useState(false);
   const [confirmRefresh, setConfirmRefresh] = useState(false);
+  // The server's version of the list these drafts were loaded from, sent back
+  // as `baseVersion` so a save over a list changed elsewhere (another tab or
+  // admin) is refused instead of removing the servers it added — with their
+  // library, sessions and watch-sync pairs. Absent from an older server, and
+  // then not sent.
+  const [version, setVersion] = useState<string | undefined>(undefined);
+  const saving = status === "saving";
 
   const load = useCallback(async () => {
     try {
       const res = await fetch(withBasePath("/api/admin/media-instances"));
       if (!res.ok) throw new Error();
-      const data = (await res.json()) as Record<MediaServerService, InstanceView[]>;
+      const data = (await res.json()) as Partial<Record<MediaServerService, InstanceView[]>> & { versions?: Partial<Record<MediaServerService, unknown>> };
       const named = (data[service] ?? []).filter((i) => isNamed(i.slug));
       setDrafts(named.map((v) => toDraft(v, service)));
+      const v = data.versions?.[service];
+      setVersion(typeof v === "string" ? v : undefined);
       setConfirmRemove(null);
       setDirty(false);
       setLoadFailed(false);
+      // Test results are keyed by slug and describe the config as it was at
+      // the last Save & Test — stale once the instances are reloaded.
+      setTests({});
+      setStatus("idle");
     } catch {
       // An empty draft list saves as "remove every named instance", which
       // deletes their encrypted (unrecoverable) token/key. So a failed load must
@@ -248,10 +260,15 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
     load();
   }, [load]);
 
+  // While a save is in flight the editors are disabled (its response replaces
+  // every draft), and nothing here may flip "saving" back to "idle" — that
+  // re-enabled Save for a second concurrent POST.
+  const clearStatus = () => setStatus((s) => (s === "saving" ? s : "idle"));
+
   const update = (idx: number, patch: Partial<Draft>) => {
     setDrafts((prev) => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
     setDirty(true);
-    setStatus("idle");
+    clearStatus();
   };
 
   const addInstance = () => {
@@ -266,20 +283,21 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
     ]);
     setConfirmRemove(null);
     setDirty(true);
-    setStatus("idle");
+    clearStatus();
   };
 
   const removeInstance = (idx: number) => {
     setDrafts((prev) => prev.filter((_, i) => i !== idx));
     setConfirmRemove(null);
     setDirty(true);
-    setStatus("idle");
+    clearStatus();
   };
 
   async function save() {
-    // Client-side slug validation before hitting the server.
+    // Client-side slug validation before hitting the server — the server's own
+    // rule, minus the default ("") this manager never edits.
     for (const d of drafts) {
-      if (!SLUG_RE.test(d.slug)) {
+      if (!isNamed(d.slug) || !isValidMediaInstanceSlug(d.slug)) {
         setStatus("error");
         setMessage(t("settings.media.invalidSlug", { slug: d.slug }));
         return;
@@ -309,12 +327,12 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       ...(service === "plex"
         ? {
             serverUrl: d.url.trim(),
-            adminToken: d.token ? d.token : d.hasToken ? MASKED_VALUE : undefined,
+            adminToken: d.token ? d.token : d.hasToken ? SECRET_MASK_SENTINEL : undefined,
             adminEmail: d.adminEmail.trim(),
           }
         : {
             url: d.url.trim(),
-            apiKey: d.token ? d.token : d.hasToken ? MASKED_VALUE : undefined,
+            apiKey: d.token ? d.token : d.hasToken ? SECRET_MASK_SENTINEL : undefined,
             restrictSignIn: d.restrictSignIn,
           }),
     }));
@@ -323,17 +341,21 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       const res = await fetch(withBasePath("/api/admin/media-instances"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ service, instances }),
+        // A 409 means the list changed elsewhere since it was loaded; nothing
+        // was written and the error says to Refresh.
+        body: JSON.stringify({ service, instances, ...(version !== undefined ? { baseVersion: version } : {}) }),
       });
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         error?: string;
         instances?: InstanceView[];
         testResults?: Record<string, { ok?: boolean; error?: string }>;
+        version?: unknown;
       };
       if (res.ok && data.ok) {
         const named = (data.instances ?? []).filter((i) => isNamed(i.slug));
         setDrafts(named.map((v) => toDraft(v, service)));
+        setVersion(typeof data.version === "string" ? data.version : undefined);
         setConfirmRemove(null);
         setDirty(false);
         setTests(data.testResults ?? {});
@@ -368,6 +390,10 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
 
       {drafts.length === 0 && <p className="text-sm text-zinc-500">{t("settings.media.none", { label })}</p>}
 
+      {/* Disabled while a save is in flight: its response replaces every
+          draft, so anything typed meanwhile would be silently discarded. */}
+      {drafts.length > 0 && (
+      <fieldset disabled={saving} className="min-w-0 space-y-4">
       {drafts.map((d, idx) => {
         const test = tests[d.slug];
         return (
@@ -414,9 +440,15 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                 <Input
                   id={`${service}-${idx}-token`}
                   type="password"
+                  // A Plex/Jellyfin credential, not a login: a browser or
+                  // password manager must not fill the Summonarr password in
+                  // (it would be saved as the token and sent to plex.tv).
+                  autoComplete="new-password"
+                  data-1p-ignore
+                  data-lpignore="true"
                   value={d.token}
                   onChange={(e) => update(idx, { token: e.target.value })}
-                  placeholder={d.hasToken ? MASKED_VALUE : t(service === "plex" ? "settings.media.tokenPlaceholder.plex" : "settings.media.tokenPlaceholder.jellyfin")}
+                  placeholder={d.hasToken ? SECRET_MASK_SENTINEL : t(service === "plex" ? "settings.media.tokenPlaceholder.plex" : "settings.media.tokenPlaceholder.jellyfin")}
                   className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 {/* Same "saved, hidden" helper the notification channels and
@@ -601,22 +633,24 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
           </div>
         );
       })}
+      </fieldset>
+      )}
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
+        <Button type="button" variant="outline" onClick={addInstance} disabled={saving} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
           {t("settings.media.add", { label })}
         </Button>
-        <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="h-8 px-3 text-xs">
-          {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />{t("settings.common.saving")}</> : t("settings.instances.saveAndTest")}
+        <Button type="button" onClick={save} disabled={saving || loadFailed} className="h-8 px-3 text-xs">
+          {saving ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />{t("settings.common.saving")}</> : t("settings.instances.saveAndTest")}
         </Button>
         {confirmRefresh ? (
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-400">
             {t("settings.media.discardPrompt")}
-            <button type="button" onClick={load} className="min-h-8 px-2 text-red-400 hover:underline font-medium">{t("settings.media.discard")}</button>
+            <button type="button" onClick={load} disabled={saving} className="min-h-8 px-2 text-red-400 hover:underline font-medium disabled:opacity-50">{t("settings.media.discard")}</button>
             <button type="button" onClick={() => setConfirmRefresh(false)} className="min-h-8 px-2 text-zinc-500 hover:text-zinc-100">{t("settings.common.cancel")}</button>
           </span>
         ) : (
-          <button type="button" onClick={() => (dirty ? setConfirmRefresh(true) : load())} className="flex items-center gap-1 min-h-8 px-2 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}</button>
+          <button type="button" onClick={() => (dirty ? setConfirmRefresh(true) : load())} disabled={saving} className="flex items-center gap-1 min-h-8 px-2 text-xs text-zinc-500 hover:text-zinc-100 disabled:opacity-50"><RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}</button>
         )}
       </div>
       {/* On its own line so a long save error wraps instead of running off

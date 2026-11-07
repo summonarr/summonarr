@@ -69,6 +69,11 @@ test("loopback, RFC1918, link-local, CGNAT, multicast, reserved → blocked (use
     "http://224.0.0.1/", // multicast
     "http://240.0.0.1/", // reserved
     "http://[::1]/",
+    "http://192.0.0.1/", // IETF protocol assignments
+    "http://198.18.0.1/", // benchmarking, often reused as LAN space
+    "http://198.19.255.254/",
+    "http://[64:ff9b:1::a00:1]/", // local-use NAT64 carrying 10.0.0.1
+    "http://[64:ff9b:1:ffff::1]/",
   ]) {
     assert.equal(await resolveToSafeUrl(url), null, `${url} must be blocked`);
   }
@@ -80,6 +85,10 @@ test("boundary addresses just OUTSIDE the private ranges are allowed", async () 
   assert.notEqual(await resolveToSafeUrl("http://100.63.0.1/"), null);
   assert.notEqual(await resolveToSafeUrl("http://100.128.0.1/"), null);
   assert.notEqual(await resolveToSafeUrl("http://11.0.0.1/"), null);
+  assert.notEqual(await resolveToSafeUrl("http://192.0.1.1/"), null);
+  assert.notEqual(await resolveToSafeUrl("http://198.17.255.255/"), null);
+  assert.notEqual(await resolveToSafeUrl("http://198.20.0.1/"), null);
+  assert.notEqual(await resolveToSafeUrl("http://[64:ff9b:2::1]/"), null);
 });
 
 test("IPv6-embedded IPv4 unwraps and inherits the IPv4 verdict", async () => {

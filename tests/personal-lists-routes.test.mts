@@ -220,12 +220,25 @@ shadowPrismaModel(prisma, "user", {
     const u = usersById.get(args.where.id);
     return u ? { ...u } : null;
   },
-  findMany: async (args: { where?: Record<string, unknown>; select?: Record<string, boolean>; take?: number }) => {
-    rec("user.findMany", { where: args.where, select: args.select, take: args.take });
+  findMany: async (args: { where?: Record<string, unknown>; select?: Record<string, boolean>; take?: number; skip?: number; orderBy?: unknown }) => {
+    rec("user.findMany", { where: args.where, select: args.select, take: args.take, skip: args.skip });
     let rows = [...usersById.values()];
     if (args.where && "deactivatedAt" in args.where) {
       rows = rows.filter((u) => u.deactivatedAt === (args.where as { deactivatedAt: null }).deactivatedAt);
     }
+    // Honour orderBy / skip / take like the real query, so paging is observable.
+    if (Array.isArray(args.orderBy)) {
+      const keys = (args.orderBy as Array<Record<string, "asc" | "desc">>).map((o) => Object.keys(o)[0]);
+      rows.sort((a, b) => {
+        for (const k of keys) {
+          const av = String((a as unknown as Record<string, unknown>)[k] ?? "");
+          const bv = String((b as unknown as Record<string, unknown>)[k] ?? "");
+          if (av !== bv) return av < bv ? -1 : 1;
+        }
+        return 0;
+      });
+    }
+    rows = rows.slice(args.skip ?? 0, args.take === undefined ? undefined : (args.skip ?? 0) + args.take);
     // Honor `select` so a widened projection is observable in the payload.
     return rows.map((u) => {
       if (!args.select) return { ...u };
@@ -756,6 +769,32 @@ test("requests/users hides users more privileged than a non-ADMIN caller, and sh
   const asAdmin = await inScope(() => requestsUsers.GET(mk("/api/requests/users", admin.token, { method: "GET" }), undefined));
   const adminIds = ((await asAdmin.json()).users as { id: string }[]).map((u) => u.id);
   for (const id of [admin.userId, peer.userId, power.userId]) assert.ok(adminIds.includes(id), `ADMIN sees ${id}`);
+});
+
+test("requests/users pages past a first page of ineligible users — a pickable account sorting after 1000 others still appears", async () => {
+  // The subset filter runs on the rows read; one page of the first 1000 by name
+  // could be all more-privileged accounts and hide everyone the caller may pick.
+  const power = await mintSession({ permissions: Permission.REQUEST_ON_BEHALF });
+  for (let i = 0; i < 1001; i++) {
+    const id = `admin-${String(i).padStart(4, "0")}`;
+    usersById.set(id, { ...usersById.get(power.userId)!, id, name: `Aaa ${String(i).padStart(4, "0")}`, email: `${id}@example.com`, role: "ADMIN", permissions: Permission.ADMIN, deactivatedAt: null });
+  }
+  const target = await mintSession({ permissions: Permission.REQUEST_ON_BEHALF });
+  usersById.get(target.userId)!.name = "Zed";
+  usersById.get(power.userId)!.name = "Zara";
+  let res: Response;
+  try {
+    res = await inScope(() => requestsUsers.GET(mk("/api/requests/users", power.token, { method: "GET" }), undefined));
+  } finally {
+    // The user table is shared by the whole file.
+    for (const id of [...usersById.keys()]) if (id.startsWith("admin-")) usersById.delete(id);
+  }
+  assert.equal(res.status, 200);
+  const ids = ((await res.json()).users as { id: string }[]).map((u) => u.id);
+  assert.ok(ids.includes(target.userId), "an eligible user past the first page is pickable");
+  assert.ok(!ids.some((id) => id.startsWith("admin-")), "no ADMIN target for a non-ADMIN caller");
+  const reads = opsOf("user.findMany").map((o) => o.args as { take: number; skip?: number });
+  assert.ok(reads.length >= 2 && reads.every((r) => r.take === 1000), "paged, 1000 rows at a time");
 });
 
 test("requests/users bounds its page size", async () => {

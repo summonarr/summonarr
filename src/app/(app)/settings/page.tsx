@@ -33,6 +33,8 @@ import { RequireAdminMfaToggle } from "@/components/settings/forms/require-admin
 import { OidcAllowlistForm } from "@/components/settings/forms/oidc-allowlist-form";
 import { DEFAULT_OIDC_ALLOWLIST, OIDC_ALLOWLIST_SETTING_KEY, parseOidcAllowlist } from "@/lib/oidc-allowlist";
 import { isOidcConfigured } from "@/lib/oidc";
+import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { ArrWatchForm } from "@/components/settings/forms/arr-watch-form";
 import { ARR_WATCH_DISK_LOW_PERCENT_KEY, parseDiskLowPercent } from "@/lib/arr-watch";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
@@ -245,6 +247,16 @@ export default async function SettingsPage({
   // What MDBList last reported about the account, for the plan picker. Only the
   // integrations tab shows it.
   const mdblistSnapshot = tab === "integrations" ? await getMdblistUsageSnapshot() : null;
+  // Whether any non-password sign-in works — the login page's own predicates for
+  // its Plex / Jellyfin / SSO tabs. "Disable local login" can't be switched on
+  // without one (the settings route refuses it too).
+  const externalSignInConfigured =
+    tab === "site"
+      ? isOidcConfigured() ||
+        (await Promise.all([getSyncableMediaInstances("plex"), getSyncableMediaInstances("jellyfin")])).some(
+          (instances) => instances.length > 0,
+        )
+      : true;
   // Only the fields the form shows reach the browser.
   const mdblistUsage = mdblistSnapshot && {
     reportedLimit: mdblistSnapshot.reportedLimit,
@@ -653,7 +665,10 @@ export default async function SettingsPage({
                   supplies both, so the rows read as one list (the features
                   tab's switch list uses the same recipe). */}
               <div className="divide-y divide-[var(--ds-border)] [&>*]:py-3 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0">
-                <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
+                <DisableLocalLoginToggle
+                  initialDisabled={cfg.disableLocalLogin === "true"}
+                  externalSignInConfigured={externalSignInConfigured}
+                />
                 <RequireAdminMfaToggle
                   initialRequired={cfg.requireMfaForAdmins === "true"}
                   envOverride={mfaEnforcementDisabledByEnv()}
@@ -782,7 +797,7 @@ export default async function SettingsPage({
             >
               <JellyfinSyncForm
                 initialUrl={cfg.jellyfinUrl ?? ""}
-                initialApiKey={cfg.jellyfinApiKey ? "••••••••" : ""}
+                initialApiKey={cfg.jellyfinApiKey ? SECRET_MASK_SENTINEL : ""}
                 initialJellyfinLibraries={cfg.jellyfinLibraries ?? ""}
               />
             </SettingsCard>
@@ -859,7 +874,7 @@ export default async function SettingsPage({
                 service="radarr"
                 initialUrl={cfg.radarrUrl ?? ""}
                 initialExternalUrl={cfg.radarrExternalUrl ?? ""}
-                initialApiKey={cfg.radarrApiKey ? "••••••••" : ""}
+                initialApiKey={cfg.radarrApiKey ? SECRET_MASK_SENTINEL : ""}
                 initialRootFolder={cfg.radarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarrQualityProfileId ?? ""}
                 initialMinimumAvailability={cfg.radarrMinimumAvailability ?? ""}
@@ -877,7 +892,7 @@ export default async function SettingsPage({
                 variant="4k"
                 initialUrl={cfg.radarr4kUrl ?? ""}
                 initialExternalUrl={cfg.radarr4kExternalUrl ?? ""}
-                initialApiKey={cfg.radarr4kApiKey ? "••••••••" : ""}
+                initialApiKey={cfg.radarr4kApiKey ? SECRET_MASK_SENTINEL : ""}
                 initialRootFolder={cfg.radarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarr4kQualityProfileId ?? ""}
                 initialMinimumAvailability={cfg.radarr4kMinimumAvailability ?? ""}
@@ -894,7 +909,7 @@ export default async function SettingsPage({
                 service="sonarr"
                 initialUrl={cfg.sonarrUrl ?? ""}
                 initialExternalUrl={cfg.sonarrExternalUrl ?? ""}
-                initialApiKey={cfg.sonarrApiKey ? "••••••••" : ""}
+                initialApiKey={cfg.sonarrApiKey ? SECRET_MASK_SENTINEL : ""}
                 initialRootFolder={cfg.sonarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarrQualityProfileId ?? ""}
                 initialLanguageProfileId={cfg.sonarrLanguageProfileId ?? ""}
@@ -912,7 +927,7 @@ export default async function SettingsPage({
                 variant="4k"
                 initialUrl={cfg.sonarr4kUrl ?? ""}
                 initialExternalUrl={cfg.sonarr4kExternalUrl ?? ""}
-                initialApiKey={cfg.sonarr4kApiKey ? "••••••••" : ""}
+                initialApiKey={cfg.sonarr4kApiKey ? SECRET_MASK_SENTINEL : ""}
                 initialRootFolder={cfg.sonarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarr4kQualityProfileId ?? ""}
                 initialLanguageProfileId={cfg.sonarr4kLanguageProfileId ?? ""}
@@ -950,9 +965,9 @@ export default async function SettingsPage({
                 initialHost={cfg.smtpHost ?? ""}
                 initialPort={cfg.smtpPort ?? ""}
                 initialUser={cfg.smtpUser ?? ""}
-                initialPassword={cfg.smtpPassword ? "••••••••" : ""}
+                initialPassword={cfg.smtpPassword ? SECRET_MASK_SENTINEL : ""}
                 initialFrom={cfg.smtpFrom ?? ""}
-                initialResendApiKey={cfg.resendApiKey ? "••••••••" : ""}
+                initialResendApiKey={cfg.resendApiKey ? SECRET_MASK_SENTINEL : ""}
                 initialResendFrom={cfg.resendFrom ?? ""}
               />
               <EnableUserEmailsToggle initialEnabled={cfg.enableUserEmails === "true"} />
@@ -965,7 +980,7 @@ export default async function SettingsPage({
               description={t("settings.section.discordBot.description")}
             >
               <DiscordBotForm
-                initialBotToken={cfg.discordBotToken ? "••••••••" : ""}
+                initialBotToken={cfg.discordBotToken ? SECRET_MASK_SENTINEL : ""}
                 initialClientId={cfg.discordClientId ?? ""}
                 initialGuildId={cfg.discordGuildId ?? ""}
                 initialPublicKey={cfg.discordPublicKey ?? ""}
@@ -992,7 +1007,7 @@ export default async function SettingsPage({
               <div className="space-y-6">
                 <IosPushRelayForm
                   initialRelayUrl={cfg.apnsRelayUrl ?? ""}
-                  initialRelayKey={cfg.apnsRelayKey ? "••••••••" : ""}
+                  initialRelayKey={cfg.apnsRelayKey ? SECRET_MASK_SENTINEL : ""}
                   initialRecommendedBuild={cfg.recommendedIosBuild ?? ""}
                 />
                 <div className="border-t border-zinc-800 pt-5">
@@ -1029,17 +1044,17 @@ export default async function SettingsPage({
             >
               <div className="space-y-6">
                 <MdblistForm
-                  initialApiKey={cfg.mdblistApiKey ? "••••••••" : ""}
+                  initialApiKey={cfg.mdblistApiKey ? SECRET_MASK_SENTINEL : ""}
                   initialPlan={parseMdblistPlanSetting(cfg[MDBLIST_PLAN_SETTING_KEY])}
                   usage={mdblistUsage ?? EMPTY_MDBLIST_USAGE}
                 />
                 <div className="border-t border-zinc-800 pt-5">
-                  <OmdbForm initialApiKey={cfg.omdbApiKey ? "••••••••" : ""} />
+                  <OmdbForm initialApiKey={cfg.omdbApiKey ? SECRET_MASK_SENTINEL : ""} />
                 </div>
                 <div className="border-t border-zinc-800 pt-5">
                   <TraktForm
-                    initialApiKey={cfg.traktClientId ? "••••••••" : ""}
-                    initialSecret={cfg.traktClientSecret ? "••••••••" : ""}
+                    initialApiKey={cfg.traktClientId ? SECRET_MASK_SENTINEL : ""}
+                    initialSecret={cfg.traktClientSecret ? SECRET_MASK_SENTINEL : ""}
                   />
                 </div>
                 <div className="border-t border-zinc-800 pt-5">
@@ -1057,7 +1072,7 @@ export default async function SettingsPage({
               badge={<StatusBadge t={t} connected={!!cfg.ipinfoToken} />}
               description={t("settings.section.ipGeolocation.description")}
             >
-              <IpinfoForm initialApiKey={cfg.ipinfoToken ? "••••••••" : ""} />
+              <IpinfoForm initialApiKey={cfg.ipinfoToken ? SECRET_MASK_SENTINEL : ""} />
             </SettingsCard>
 
             <SettingsCard
@@ -1067,11 +1082,11 @@ export default async function SettingsPage({
             >
               <div className="space-y-6">
                 <WebhookSecretForm
-                  initialSecret={cfg.webhookSecret ? "••••••••" : ""}
-                  initialSonarrSecret={cfg.sonarrWebhookSecret ? "••••••••" : ""}
-                  initialRadarrSecret={cfg.radarrWebhookSecret ? "••••••••" : ""}
-                  initialSonarr4kSecret={cfg.sonarr4kWebhookSecret ? "••••••••" : ""}
-                  initialRadarr4kSecret={cfg.radarr4kWebhookSecret ? "••••••••" : ""}
+                  initialSecret={cfg.webhookSecret ? SECRET_MASK_SENTINEL : ""}
+                  initialSonarrSecret={cfg.sonarrWebhookSecret ? SECRET_MASK_SENTINEL : ""}
+                  initialRadarrSecret={cfg.radarrWebhookSecret ? SECRET_MASK_SENTINEL : ""}
+                  initialSonarr4kSecret={cfg.sonarr4kWebhookSecret ? SECRET_MASK_SENTINEL : ""}
+                  initialRadarr4kSecret={cfg.radarr4kWebhookSecret ? SECRET_MASK_SENTINEL : ""}
                 />
                 <div className="border-t border-zinc-800 pt-5">
                   <WebhookUrls

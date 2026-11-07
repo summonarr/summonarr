@@ -99,7 +99,22 @@ const fakeTx = {
   },
 };
 
+// The live Setting table the process memos read from (outside the restore's
+// transaction): the Discord key, the session lengths, the feature flags.
+const liveSettings = new Map<string, string>();
 const fakePrisma = {
+  setting: {
+    findUnique: async (args: { where: { key: string } }) => {
+      const value = liveSettings.get(args.where.key);
+      return value === undefined ? null : { key: args.where.key, value };
+    },
+    findMany: async (args: { where?: { key?: { in?: string[] } } } = {}) => {
+      const keys = args.where?.key?.in;
+      return [...liveSettings.entries()]
+        .filter(([key]) => !keys || keys.includes(key))
+        .map(([key, value]) => ({ key, value }));
+    },
+  },
   $transaction: async (fn: (tx: typeof fakeTx) => Promise<unknown>, opts?: Record<string, unknown>) => {
     txCalls.push(opts);
     try {
@@ -116,7 +131,7 @@ const fakePrisma = {
 
 // Dynamic imports so the global pre-seed and env stubs genuinely precede the
 // module-graph load (static imports would hoist above them).
-const { processBackupImport, MAX_PLAINTEXT_BYTES, MAX_CIPHERTEXT_BYTES } =
+const { processBackupImport, MAX_PLAINTEXT_BYTES, MAX_CIPHERTEXT_BYTES, restoreTxTimeoutMs } =
   await import("../src/lib/backup-import.ts");
 const { wrapEncryptStream, ENCRYPTED_MAGIC } = await import("../src/lib/backup-crypto.ts");
 const { BACKUP_TABLES, computeSchemaFingerprint } = await import("../src/lib/backup-schema.ts");
@@ -277,6 +292,7 @@ beforeEach(() => {
   delete process.env.SUMMONARR_ALLOW_SETUP_RESTORE;
   invalidateCachedSessionChecks(0); // a restore's session-check floor is process-wide
   clearArrSnapshots();
+  liveSettings.clear();
 });
 
 // ── caps ────────────────────────────────────────────────────────────────────
@@ -638,4 +654,114 @@ test("a mid-import failure throws through the transaction: 500, rolled-back mess
   // were attempted inside the tx and are all discarded, never half-written.
   assert.equal(txRejections, 1);
   assert.ok(txOps.some((op) => op.startsWith("TRUNCATE TABLE ")), "failure happened after writes began");
+});
+
+// ── the transaction timeout ─────────────────────────────────────────────────
+
+test("the restore timeout scales with the statement count as well as the size", () => {
+  const MB = 1024 * 1024;
+  // A small dump keeps the 10-minute floor (the happy path pins the options).
+  assert.equal(restoreTxTimeoutMs(1 * MB, 10), 10 * 60 * 1000);
+  // Size alone: one second per MB.
+  assert.equal(restoreTxTimeoutMs(1500 * MB, 1000), 1500 * 1000);
+  // Many tiny rows: every statement is its own round trip, so 300 MB of
+  // PlayHistory INSERTs (a million statements) must not get the 10-minute floor.
+  const many = restoreTxTimeoutMs(300 * MB, 1_000_000);
+  assert.ok(many > 300 * 1000 && many > 10 * 60 * 1000, `got ${many}ms`);
+  assert.equal(many, 2_000_000);
+});
+
+// ── reading the spool back ──────────────────────────────────────────────────
+
+test("a multi-MB statement replays byte-identical, in order, without re-copying the spool per read", async () => {
+  // A 5 MB Setting value between two small rows. The spool is read back in
+  // 64 KB pieces; joining every piece onto the unread remainder copied a big
+  // statement once per piece (about 200 MB of copying for this one).
+  const big = "x".repeat(5 * 1024 * 1024);
+  const before = `INSERT INTO "public"."Setting" ("key", "value") VALUES ('a', 'first')`;
+  const huge = `INSERT INTO "public"."Setting" ("key", "value") VALUES ('big', '${big}')`;
+  const after = `INSERT INTO "public"."Setting" ("key", "value") VALUES ('z', 'last')`;
+  const sql = `-- Schema-Fingerprint: ${FP}\n${before};\n${huge};\n${after};\n`;
+  const enc = await encrypt(sql);
+
+  const realConcat = Buffer.concat;
+  let copied = 0;
+  Buffer.concat = ((list: readonly Uint8Array[], total?: number) => {
+    const out = realConcat(list, total);
+    copied += out.length;
+    return out;
+  }) as typeof Buffer.concat;
+  let res: ImportResult;
+  try {
+    res = await runImport([new Uint8Array(enc)]);
+  } finally {
+    Buffer.concat = realConcat;
+  }
+  expectSuccess(res);
+  assert.deepEqual(txOps.slice(2, 5), [
+    `${before} ON CONFLICT DO NOTHING`,
+    `${huge} ON CONFLICT DO NOTHING`,
+    `${after} ON CONFLICT DO NOTHING`,
+  ]);
+  // Decrypt, spool write and spool read each copy the dump about once.
+  assert.ok(copied < 6 * sql.length, `copied ${copied} bytes for a ${sql.length}-byte dump`);
+});
+
+// ── the other process memos ─────────────────────────────────────────────────
+
+const DISCORD_KEY_SPECIFIER = "../src/lib/discord-interactions/signature.ts?chunk=interactions";
+const FLAG = "feature.admin.backup";
+
+async function memoReaders() {
+  // The interactions route lives in another chunk; a cache-busted copy of the
+  // module stands in for it (guardrail 27a).
+  const signature: typeof import("../src/lib/discord-interactions/signature.ts") = await import(DISCORD_KEY_SPECIFIER);
+  const { getSessionDurations, invalidateSessionDurationsCache } = await import("../src/lib/auth.ts");
+  const { getFeatureFlags, invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+  // Start each test from empty memos (they are process-wide).
+  signature.invalidatePublicKeyCache();
+  invalidateSessionDurationsCache();
+  invalidateFeatureFlagCache();
+  return {
+    key: () => signature.getPublicKey(),
+    desktop: async () => (await getSessionDurations()).desktopDuration,
+    flag: async () => (await getFeatureFlags())[FLAG],
+  };
+}
+
+async function primeMemos() {
+  const read = await memoReaders();
+  liveSettings.set("discordPublicKey", "aa".repeat(32));
+  liveSettings.set("sessionDefaultDuration", "7200");
+  liveSettings.set(FLAG, "false");
+  assert.equal(await read.key(), "aa".repeat(32));
+  assert.equal(await read.desktop(), 7200);
+  assert.equal(await read.flag(), false);
+  // The restore brings a different Setting table.
+  liveSettings.set("discordPublicKey", "bb".repeat(32));
+  liveSettings.set("sessionDefaultDuration", "5400");
+  liveSettings.set(FLAG, "true");
+  return read;
+}
+
+test("a committed restore drops the memos built from the replaced Settings (Discord key, session lengths, flags)", async () => {
+  const read = await primeMemos();
+  expectSuccess(await runImport([new Uint8Array(HAPPY_ENC)]));
+  // The Discord key has no TTL: without the drop, interactions are verified
+  // against the old key until a restart.
+  assert.equal(await read.key(), "bb".repeat(32));
+  // Sessions minted now carry the restored length for life (guardrail 6c).
+  assert.equal(await read.desktop(), 5400);
+  assert.equal(await read.flag(), true);
+});
+
+test("a refused or rolled-back restore keeps those memos", async () => {
+  const read = await primeMemos();
+  expectFailure(await runImport([new Uint8Array(COMMENTS_ONLY_ENC)]));
+  failOnSqlIncludes = "'siteUrl'";
+  expectFailure(await runImport([new Uint8Array(HAPPY_ENC)]));
+  assert.equal(txRejections, 1);
+  assert.equal(await read.key(), "aa".repeat(32), "nothing was replaced, so the memo stands");
+  assert.equal(await read.desktop(), 7200);
+  assert.equal(await read.flag(), false);
 });

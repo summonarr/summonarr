@@ -1,7 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { redirect } from "next/navigation";
-import { Film, Smartphone, Wrench } from "@/components/icons";
+import { CheckCircle, Smartphone, Wrench } from "@/components/icons";
+import { AuthBrandHeader } from "@/components/auth/auth-brand-header";
 import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { LoginForm } from "./login-form";
 import { getMaintenanceStatus } from "@/lib/maintenance";
@@ -10,7 +11,11 @@ import { isOidcConfigured } from "@/lib/oidc";
 
 export const dynamic = "force-dynamic";
 
-export default async function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
 
   const count = await prisma.user.count();
   // Fresh install: empty user table always lands on /setup. No exceptions for external providers —
@@ -52,6 +57,9 @@ export default async function LoginPage() {
   // never loses its top level.
   const isDefaultTitle = siteTitle.trim().toLowerCase() === "summonarr";
   const WordmarkTag = isDefaultTitle ? "h1" : "p";
+  // /setup sends the new admin here when its automatic sign-in didn't go
+  // through, so the account it just created doesn't look like a failure.
+  const accountCreated = (await searchParams).created === "1";
 
   return (
     <div
@@ -86,35 +94,25 @@ export default async function LoginPage() {
             </div>
           )}
 
-          <div className="flex flex-col items-center" style={{ marginBottom: 24 }}>
-            <WordmarkTag
-              className="m-0"
-              style={{
-                fontFamily: "var(--font-playfair)",
-                fontSize: 28,
-                fontWeight: 400,
-                color: "var(--ds-fg)",
-                letterSpacing: "0.02em",
-                marginBottom: 14,
-              }}
-            >
-              Summonarr
-            </WordmarkTag>
+          {accountCreated && (
             <div
-              className="flex items-center justify-center"
+              role="status"
+              className="flex items-start gap-2.5 mb-5"
               style={{
-                width: 44,
-                height: 44,
-                borderRadius: 10,
-                background: "var(--ds-accent)",
-                color: "var(--ds-accent-fg)",
-                boxShadow:
-                  "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
-                marginBottom: 12,
+                background: "color-mix(in oklab, var(--ds-success) 12%, transparent)",
+                border: "1px solid color-mix(in oklab, var(--ds-success) 28%, transparent)",
+                borderRadius: "var(--ds-r-md)",
+                padding: "10px 12px",
               }}
             >
-              <Film style={{ width: 22, height: 22 }} />
+              <CheckCircle style={{ width: 14, height: 14, marginTop: 2, color: "var(--ds-success)", flexShrink: 0 }} />
+              <p className="text-sm" style={{ color: "var(--ds-fg)", margin: 0 }}>
+                {t("auth.setup.error.createdSignIn")}
+              </p>
             </div>
+          )}
+
+          <AuthBrandHeader wordmarkAs={WordmarkTag}>
             {!isDefaultTitle && (
               <h1
                 className="m-0 font-semibold"
@@ -129,7 +127,7 @@ export default async function LoginPage() {
             >
               {t("auth.login.subtitle")}
             </p>
-          </div>
+          </AuthBrandHeader>
 
           <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} jellyfinInstances={jellyfinInstances} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
         </div>

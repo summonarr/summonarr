@@ -126,7 +126,9 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
 // Profile → "Two-factor authentication". Every change re-asks for the current
 // password, and once 2FA is on a fresh second factor too (the server enforces
 // both — src/lib/mfa/step-up.ts); one password
-// field serves every action in the section.
+// field serves every action in the section. It is cleared after each change the
+// server accepted, so the next one (planting a new first factor after 2FA was
+// turned off, say) is re-asked, not ridden on a password left in the tab.
 export function TwoFactorSettings({ initial, required }: Props) {
   const t = useT();
   const locale = useLocale();
@@ -220,6 +222,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const r = await call(t, "/api/profile/mfa/totp/setup", "POST", { password, ...sf });
     if (!r.ok) return setError(r.error);
+    setPassword("");
     setSetup({ secret: String(r.data.secret), otpauthUri: String(r.data.otpauthUri) });
     setSetupCode("");
     setSecretCopied(false);
@@ -242,6 +245,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const r = await call(t, "/api/profile/mfa/totp", "DELETE", { password, ...sf });
     if (!r.ok) return setError(r.error);
+    setPassword("");
     setConfirmingRemove(null);
     setNotice(t("profile.mfa.notice.totpRemoved"));
     await refresh();
@@ -255,6 +259,8 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const opts = await call(t, "/api/profile/mfa/passkeys/options", "POST", { password, ...sf });
     if (!opts.ok) return setError(opts.error);
+    // The step-up passed; the registration below doesn't need the password.
+    setPassword("");
     let credential: Record<string, unknown>;
     try {
       credential = await createPasskey(opts.data.publicKey as CreationOptionsJSON);
@@ -281,6 +287,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "PATCH", { password, name, ...sf });
     if (!r.ok) return setError(r.error);
+    setPassword("");
     setRenaming(null);
     await refresh();
   });
@@ -292,6 +299,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "DELETE", { password, ...sf });
     if (!r.ok) return setError(r.error);
+    setPassword("");
     setConfirmingRemove(null);
     setNotice(t("profile.mfa.notice.passkeyRemoved"));
     await refresh();
@@ -304,6 +312,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const r = await call(t, "/api/profile/mfa/recovery-codes", "POST", { password, ...sf });
     if (!r.ok) return setError(r.error);
+    setPassword("");
     setCodes(r.data.recoveryCodes as string[]);
     await refresh();
   });
@@ -315,6 +324,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const r = await call(t, "/api/profile/mfa", "DELETE", { password, ...sf });
     if (!r.ok) return setError(r.error);
+    setPassword("");
     setConfirmDisable(false);
     setSetup(null);
     setNotice(t("profile.mfa.notice.disabled"));

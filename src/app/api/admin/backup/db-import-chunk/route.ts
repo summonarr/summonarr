@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { logAudit, auditContext } from "@/lib/audit";
-import { checkBodySize } from "@/lib/body-size";
+import { checkBodySize, readBodyBytesCapped } from "@/lib/body-size";
 import { checkRateLimit } from "@/lib/rate-limit";
 import {
   processBackupImport,
@@ -12,37 +11,19 @@ import {
   appendChunk,
   getSessionStream,
   clearSession,
+  cancelSession,
 } from "@/lib/import-session";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { localizeBackupMessage } from "@/lib/backup-messages";
-import type { Translator } from "@/lib/i18n/translate";
+import { auditAdminImport, backupPasswordOrResponse, importResultResponse } from "@/lib/backup-routes";
 
 // Per-chunk size cap, the same as the sibling /api/setup/import-chunk route.
-// Without it, one huge chunk could run the server out of memory (OOM) while
-// req.arrayBuffer() reads it in.
-const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
+// Without it, one huge chunk could run the server out of memory (OOM) while it is
+// read in. MUST stay below next.config.ts proxyClientMaxBodySize, which TRUNCATES
+// a longer body instead of refusing it (see the sibling route).
+const MAX_CHUNK_BYTES = 20 * 1024 * 1024;
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-
-const MIN_BACKUP_PASSWORD_LEN = 12;
-
-function passwordOrError(t: Translator): { password: string } | NextResponse {
-  const password = process.env.BACKUP_DB_PASSWORD ?? "";
-  if (password.length === 0) {
-    return NextResponse.json(
-      { error: t("apiAdmin.backup.notConfigured") },
-      { status: 503 },
-    );
-  }
-  if (password.length < MIN_BACKUP_PASSWORD_LEN) {
-    return NextResponse.json(
-      { error: t("apiAdmin.backup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
-      { status: 503 },
-    );
-  }
-  return { password };
-}
 
 // POST: append a chunk. Final chunk runs the import.
 //
@@ -53,7 +34,7 @@ function passwordOrError(t: Translator): { password: string } | NextResponse {
 //   X-File-Size     total file size in bytes
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const pw = passwordOrError(t);
+  const pw = backupPasswordOrResponse(t, "admin");
   if (pw instanceof NextResponse) return pw;
   const { password } = pw;
 
@@ -111,12 +92,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     }
   }
 
-  const chunkBytes = new Uint8Array(await req.arrayBuffer());
-  if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
+  const chunkBytes = await readBodyBytesCapped(req, MAX_CHUNK_BYTES);
+  if (chunkBytes === null) {
     // Belt-and-suspenders for transfer-encoding: chunked uploads where the
-    // Content-Length-based check above can't trigger. An oversized chunk corrupts
-    // the upload, so release the slot for ANY index (not just chunk 0) — otherwise
-    // an oversized non-zero chunk strands the global slot until its TTL.
+    // Content-Length-based check above can't trigger; the read stops at the cap.
+    // An oversized chunk corrupts the upload, so release the slot for ANY index
+    // (not just chunk 0) — otherwise an oversized non-zero chunk strands the
+    // global slot until its TTL.
     await clearSession(uploadId);
     return NextResponse.json(
       { error: t("apiAdmin.backup.chunkTooLarge", { mb: Math.round(MAX_CHUNK_BYTES / (1024 * 1024)) }) },
@@ -136,7 +118,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       return NextResponse.json({ error: t("apiAdmin.backup.uploadExpired") }, { status: 410 });
     }
     if (e.kind === "out-of-order") {
-      return NextResponse.json({ error: t("apiAdmin.backup.outOfOrder", { expected: e.expected }) }, { status: 409 });
+      // `expected` lets a retrying uploader tell "my earlier attempt landed"
+      // (expected === its index + 1) from a real ordering error.
+      return NextResponse.json(
+        { error: t("apiAdmin.backup.outOfOrder", { expected: e.expected }), expected: e.expected },
+        { status: 409 },
+      );
     }
     if (e.kind === "size-mismatch") {
       return NextResponse.json(
@@ -170,54 +157,22 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     await clearSession(uploadId);
   }
 
-  if (!result.ok) {
-    if (result.errors) {
-      return NextResponse.json({
-        ok: false,
-        complete: true,
-        summary: result.summary,
-        errors: result.errors,
-      });
-    }
-    return NextResponse.json({ error: localizeBackupMessage(result.error, t), complete: true }, { status: result.status });
-  }
-
-  // The DB restore already executed; a failed audit write must not 500 a
-  // successful import (GR26). logAudit swallows write failures internally.
-  void logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? session.user.email,
-    action: "BACKUP_IMPORT",
-    target: "backup:full-db",
-    details: {
-      format: "sql",
-      encrypted: true,
-      mode: "admin-chunked",
-      after: {
-        totalStatements: result.summary.total,
-        executed: result.summary.executed,
-        skipped: result.summary.skipped,
-        errors: result.summary.errors,
-      },
-    },
-    ...auditContext(req, session),
-  });
-
-  return NextResponse.json({
-    ok: true,
-    complete: true,
-    summary: result.summary,
-    ...(result.warning ? { warning: result.warning } : {}),
-  });
+  // Audited whether or not it succeeded — after the restore, never inside it
+  // (guardrail 26). Every rejection above happened before the import and is not.
+  auditAdminImport(req, session, result, "admin-chunked");
+  return importResultResponse(result, t, { chunked: true });
 });
 
-// DELETE: cancel the in-flight upload.
+// DELETE: cancel the in-flight upload. Always 200 (the uploader ignores the
+// answer). A session already being imported is left alone: the uploader cancels
+// when the final chunk's request fails at a proxy while the restore still runs,
+// and the importer frees the slot itself when it ends.
 export const DELETE = withAdmin(async (req, _ctx, _session) => {
   const t = translatorForRequest(req);
   const uploadId = req.headers.get("x-upload-id") ?? "";
   if (!uploadId) {
     return NextResponse.json({ error: t("apiAdmin.backup.missingUploadId") }, { status: 400 });
   }
-  await clearSession(uploadId);
+  await cancelSession(uploadId);
   return NextResponse.json({ ok: true });
 });

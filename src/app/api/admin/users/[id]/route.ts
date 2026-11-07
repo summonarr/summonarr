@@ -10,13 +10,17 @@ import type { InstanceGrants, MediaServerGrants } from "@/lib/permissions";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { isValidContentRatingCap, exceedsCap } from "@/lib/content-rating";
-import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
+import {
+  deactivateUserInTx,
+  isAdminTarget,
+  LastAdminError,
+  lockTargetInTx,
+  lockUserRolesInTx,
+  TargetBecameAdminError,
+  TargetGoneError,
+} from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
-
-// Thrown by the DELETE tx when the in-transaction role re-read shows the target became
-// ADMIN after the pre-tx authority check (guardrail 23: propagate, never swallow in-tx).
-class TargetBecameAdminError extends Error {}
 
 // Module-scoped so the self-escalation gate below and the quota branch read the
 // SAME list — a second copy would drift and silently reopen the hole.
@@ -466,9 +470,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   const now = new Date().toISOString();
   const newRole = body.role as "ADMIN" | "ISSUE_ADMIN" | "USER";
   const outcome = await prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+    await lockUserRolesInTx(tx);
     const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
-    const freshRole = fresh?.role ?? target.role;
+    // Gone since the read above (a Discord merge hard-deletes its shadow row):
+    // nothing to change. Falling back to the stale role turned this into an
+    // uncaught P2025 (500) or a false "last admin".
+    if (!fresh) return { kind: "not-found" as const };
+    const freshRole = fresh.role;
 
     // A target that is ADMIN now (even if it was promoted after our first read)
     // still needs a full-admin caller.
@@ -497,6 +505,9 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     });
     return { kind: "ok" as const };
   });
+  if (outcome.kind === "not-found") {
+    return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+  }
   if (outcome.kind === "forbidden") {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminGrantAdmin") }, { status: 403 });
   }
@@ -528,15 +539,16 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: t("apiAdmin.users.cannotDeleteSelf") }, { status: 400 });
   }
 
-  const target = await prisma.user.findUnique({ where: { id }, select: { role: true, name: true, email: true, deactivatedAt: true } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { role: true, permissions: true, name: true, email: true, deactivatedAt: true } });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
   // Idempotent, and load-bearing: re-running deactivateUserInTx on an already
   // disabled ADMIN would see its own row excluded from the active-admin count
-  // and throw LastAdminError spuriously.
+  // and throw LastAdminError spuriously. Re-checked under the lock below.
   if (target.deactivatedAt) return NextResponse.json({ ok: true });
 
   // A non-admin MANAGE_USERS holder must not delete/deactivate an admin account.
-  if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+  const callerIsAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
+  if (isAdminTarget(target) && !callerIsAdmin) {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminDelete") }, { status: 403 });
   }
 
@@ -554,21 +566,23 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   // scrub is the separate purge route. Both paths share deactivateUserInTx.
   const now = new Date();
 
+  let outcome: "disabled" | "already";
   try {
-    await prisma.$transaction(async (tx) => {
+    outcome = await prisma.$transaction(async (tx) => {
       // The role read above is three DB round-trips stale by the time the tx opens, and
       // deactivateUserInTx only arms the advisory lock + last-admin CAS when the role it is
       // HANDED is ADMIN. A promotion landing in that window would otherwise slip past both
       // that CAS and the caller-authority gate, letting a non-admin MANAGE_USERS holder
-      // deactivate the instance's last admin. Re-resolve the role inside the tx, under the
+      // deactivate the instance's last admin. Re-resolve the row inside the tx, under the
       // same lock 42 the role-change CAS takes, and decide on that value.
-      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-      const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
-      const freshRole = fresh?.role ?? target.role;
-      if (freshRole === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-        throw new TargetBecameAdminError();
-      }
-      await deactivateUserInTx(tx, id, freshRole, now);
+      const fresh = await lockTargetInTx(tx, id, callerIsAdmin);
+      if (!fresh) throw new TargetGoneError();
+      // A concurrent disable (a double submit, the user's own self-delete) committed
+      // after the read above. Re-running the deactivate would miss its own row in
+      // the active-admin count and report a false "last admin" (guardrail 33).
+      if (fresh.deactivatedAt) return "already" as const;
+      await deactivateUserInTx(tx, id, fresh.role, now);
+      return "disabled" as const;
     });
   } catch (err) {
     if (err instanceof LastAdminError) {
@@ -577,8 +591,13 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     if (err instanceof TargetBecameAdminError) {
       return NextResponse.json({ error: t("apiAdmin.users.onlyAdminDelete") }, { status: 403 });
     }
+    if (err instanceof TargetGoneError) {
+      return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+    }
     throw err;
   }
+  // The other request disabled it and wrote its own audit row; this one changed nothing.
+  if (outcome === "already") return NextResponse.json({ ok: true });
 
   invalidateUserSession(id);
 

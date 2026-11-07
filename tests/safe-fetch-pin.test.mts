@@ -26,6 +26,7 @@ import {
   PINNED_CONNECT_TIMEOUT_MS,
   PINNED_IDLE_TIMEOUT_MS,
   MAX_CONTENT_ENCODINGS,
+  createDeflateDecoder,
 } from "../src/lib/safe-fetch.ts";
 
 type LookupFn = typeof dns.lookup;
@@ -267,6 +268,40 @@ test("timeout: a stall mid-body surfaces as a timeout SafeFetchError on read", a
   await assert.rejects(res.text(), (e: unknown) => e instanceof SafeFetchError && e.reason === "timeout");
 });
 
+// A resolver that never answers — getaddrinfo with an unreachable nameserver.
+function hangDns(): void {
+  (dns as { lookup: unknown }).lookup = () => new Promise(() => { /* never settles */ });
+}
+
+test("DNS phase: a caller abort is the caller's, not a timeout — network, with the caller's reason", async () => {
+  hangDns();
+  const ac = new AbortController();
+  const p = safeFetch("http://dns-hang-caller.test/", { signal: ac.signal, timeoutMs: 5000 });
+  setTimeout(() => ac.abort(new Error("caller gave up")), 30);
+  const err = await settlesWithin(rejection(p), 2000);
+  assert.equal(err.reason, "network");
+  assert.match(err.message, /caller gave up/);
+  assert.doesNotMatch(err.message, /timed out|budget/);
+
+  // A caller signal already aborted before DNS starts is the same.
+  const done = new AbortController();
+  done.abort(new Error("cancelled early"));
+  const early = await rejection(safeFetch("http://dns-hang-early.test/", { signal: done.signal }));
+  assert.equal(early.reason, "network");
+  assert.match(early.message, /cancelled early/);
+});
+
+test("DNS phase: our own budget running out is still reason timeout", async () => {
+  hangDns();
+  const ac = new AbortController();
+  const err = await settlesWithin(rejection(safeFetch("http://dns-hang-budget.test/", { signal: ac.signal, timeoutMs: 60 })), 2000);
+  assert.equal(err.reason, "timeout");
+  assert.match(err.message, /exceeded the 60ms budget/);
+  // The caller's OWN deadline (a TimeoutError reason) reads as a timeout, as it does mid-request.
+  const own = await settlesWithin(rejection(safeFetch("http://dns-hang-own.test/", { signal: AbortSignal.timeout(40), timeoutMs: 5000 })), 2000);
+  assert.equal(own.reason, "timeout");
+});
+
 test("caller AbortSignal cancels the request", async () => {
   const { port } = await listen(() => { /* never respond */ });
   const ac = new AbortController();
@@ -374,6 +409,32 @@ test("a short brotli tail yields what decoded instead of erroring, as fetch does
   assert.ok(JSON_BODY.startsWith(text), "decoded prefix of the original");
 });
 
+test("the deflate decoder honours backpressure: an unread decoder does not inflate a whole high-ratio chunk", async () => {
+  // 32 MiB of zeros deflates to ~32 KB — one socket chunk. Its 'data' listener
+  // used to keep the inflater flowing, so the whole 32 MiB landed in the
+  // decoder's buffer before the byte cap downstream could see any of it.
+  const plain = 32 * 1024 * 1024;
+  for (const compress of [zlib.deflateSync, zlib.deflateRawSync]) {
+    const d = createDeflateDecoder();
+    d.write(compress(Buffer.alloc(plain)));
+    await new Promise((r) => setTimeout(r, 300)); // nobody reads
+    const bound = 4 * Math.max(d.readableHighWaterMark, 64 * 1024);
+    assert.ok(d.readableLength <= bound, `${compress.name}: ${d.readableLength} bytes buffered unread (bound ${bound})`);
+    // Read, and the whole body still decodes.
+    d.end();
+    let total = 0;
+    for await (const c of d) total += (c as Buffer).length;
+    assert.equal(total, plain, compress.name);
+  }
+});
+
+test("a deflate bomb served in one write is cut at maxResponseBytes", async () => {
+  const bomb = zlib.deflateSync(Buffer.alloc(16 * 1024 * 1024));
+  const { port } = await listen((_q, r) => { r.setHeader("content-encoding", "deflate"); r.end(bomb); });
+  const res = await safeFetchAdminConfigured(`http://127.0.0.1:${port}/`, { maxResponseBytes: 64 * 1024 });
+  await assert.rejects(res.arrayBuffer(), (e: unknown) => e instanceof SafeFetchError && e.reason === "size");
+});
+
 test("five stacked content-codings decode; a sixth is refused, as fetch refuses it", async () => {
   const { port } = await listen((req, r) => {
     const n = Number(req.url!.slice(1));
@@ -411,13 +472,34 @@ test("a decode failure keeps its reason in the error message", async () => {
     e instanceof SafeFetchError && e.reason === "network" && /^Response body read failed for \S+: \S.*$/.test(e.message));
 });
 
-test("redirects are refused, never followed", async () => {
+test("redirects are refused, never followed — and reported as reason \"redirect\", not a retryable network failure", async () => {
   const { port, hits } = await listen((req, r) => {
     if (req.url === "/start") { r.statusCode = 302; r.setHeader("location", "/next"); r.end(); } else r.end("followed");
   });
   const err = await rejection(safeFetchAdminConfigured(`http://127.0.0.1:${port}/start`));
   assert.match(err.message, /unexpected redirect/);
+  // A 3xx is deterministic: arr reads retry "network", notify agents re-queue it,
+  // and arrWriteOutcomeUnknown treats it as a write that may have happened.
+  assert.equal(err.reason, "redirect");
   assert.equal(hits.length, 1, "the redirect target must not be requested");
+});
+
+test("a redirect refused by fetch() itself (env-proxy path, redirect:\"error\") is reason \"redirect\" too", async () => {
+  process.env.NODE_USE_ENV_PROXY = "1";
+  process.env.HTTP_PROXY = "http://proxy.invalid:3128";
+  stubDns(() => ["127.0.0.1"]);
+  const realFetch = globalThis.fetch;
+  // undici's shape for redirect:"error": TypeError("fetch failed") with the reason as its cause.
+  globalThis.fetch = (async () => { throw new TypeError("fetch failed", { cause: new Error("unexpected redirect") }); }) as typeof fetch;
+  try {
+    const err = await rejection(safeFetchAdminConfigured("http://proxied-redirect.test:9/x"));
+    assert.equal(err.reason, "redirect");
+    // Any other fetch failure stays "network".
+    globalThis.fetch = (async () => { throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED") }); }) as typeof fetch;
+    assert.equal((await rejection(safeFetchAdminConfigured("http://proxied-refused.test:9/x"))).reason, "network");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("POST bodies, methods and headers reach the server intact", async () => {

@@ -9,6 +9,7 @@
 // tests/db/notification-retention.test.mts.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Client } from "pg";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
@@ -103,6 +104,17 @@ beforeEach(() => {
   rows = []; findManyCalls = 0; deleteWheres = []; lockCalls = []; lockFree = true; errors.length = 0; audits.length = 0;
   delete process.env.NOTIFICATION_READ_RETENTION_DAYS;
   delete process.env.NOTIFICATION_RETENTION_DAYS;
+});
+
+test("Notification declares an index led by createdAt — the purge reads across every user by createdAt", () => {
+  // The only other indexes lead with userId, which the purge's where-shape never
+  // names, so each batch was a sequential scan plus a sort.
+  const schema = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
+  const model = /^model Notification \{([\s\S]*?)^\}/m.exec(schema);
+  assert.ok(model, "Notification model did not parse");
+  const leads = [...model[1].matchAll(/^\s*@@index\(\[([^\]]*)\]/gm)].map((m) => m[1].split(",")[0].trim().replace(/\(.*\)$/, ""));
+  assert.ok(leads.length >= 2, `Notification's @@index lines did not parse: ${JSON.stringify(leads)}`);
+  assert.ok(leads.includes("createdAt"), `no Notification index leads with createdAt: ${JSON.stringify(leads)}`);
 });
 
 test("lock id is its own: distinct from every other cron lock", () => {

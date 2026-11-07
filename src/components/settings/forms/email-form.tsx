@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -43,9 +43,14 @@ export function EmailForm({
   const [resendFrom,   setResendFrom]   = useState(initialResendFrom);
   const [status,       setStatus]       = useState<SaveStatus>("idle");
   const [message,      setMessage]      = useState("");
+  // Only the "Saved" line fades, like the sibling forms; an error stays until
+  // the next edit or save. Ref'd so a new save cancels the previous timer.
+  const okTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (okTimer.current) clearTimeout(okTimer.current); }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (okTimer.current) clearTimeout(okTimer.current);
     setStatus("saving");
     setMessage("");
 
@@ -73,6 +78,7 @@ export function EmailForm({
       if (res.ok && data.ok) {
         setMessage(data.smtpTested ? t("settings.form.email.savedTested") : t("settings.form.common.saved"));
         setStatus("ok");
+        okTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
       } else {
         setMessage(data.smtpError ?? data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
@@ -83,7 +89,10 @@ export function EmailForm({
     }
   }
 
-  const canSubmit = backend === "smtp" ? Boolean(host) : Boolean(resendApiKey);
+  // The route refuses a port outside 1–65535 and can't store a blank one
+  // (email.ts would read it as invalid), so the form doesn't send either.
+  const portValid = /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535;
+  const canSubmit = backend === "smtp" ? Boolean(host) && portValid : Boolean(resendApiKey);
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
@@ -126,6 +135,10 @@ export function EmailForm({
               <Label htmlFor="smtp-port">{t("settings.form.email.port")}</Label>
               <Input
                 id="smtp-port"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={65535}
                 value={port}
                 onChange={(e) => { setPort(e.target.value); setStatus("idle"); }}
                 placeholder="587"
@@ -149,6 +162,9 @@ export function EmailForm({
               <Input
                 id="smtp-password"
                 type="password"
+                autoComplete="new-password"
+                data-1p-ignore
+                data-lpignore="true"
                 value={password}
                 onChange={(e) => { setPassword(e.target.value); setStatus("idle"); }}
                 placeholder="••••••••••••••••"
@@ -175,6 +191,9 @@ export function EmailForm({
             <Input
               id="resend-api-key"
               type="password"
+              autoComplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
               value={resendApiKey}
               onChange={(e) => { setResendApiKey(e.target.value); setStatus("idle"); }}
               placeholder="re_••••••••••••••••"

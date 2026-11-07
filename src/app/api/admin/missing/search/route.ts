@@ -42,9 +42,8 @@ const LIMIT_WINDOW_MS = 60_000;
 // malformed body is refused first and spends none of the budget.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
+  if (body instanceof NextResponse) return body;
   const service = parseMissingService(typeof body.service === "string" ? body.service : null);
   const instance = body.instance === undefined ? "" : body.instance;
   const arrId = body.arrId;

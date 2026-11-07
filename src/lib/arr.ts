@@ -752,7 +752,17 @@ async function resolveRequesterTagIds(cfg: ArrCfgFull, requesterUserId: string |
   }
 }
 
-export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "", qualityProfileIdOverride?: number, requesterUserId?: string | null): Promise<void> {
+/**
+ * Whether an add reached the point of sending POST /movie or /series (set on the
+ * line before it). A failure BEFORE it — no config, a lookup, a dark arr refusing
+ * the first connection — added nothing; only after it can a timeout or a lost
+ * answer (arrWriteOutcomeUnknown) mean the title may have been added anyway.
+ */
+export interface AddProgress {
+  sent: boolean;
+}
+
+export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "", qualityProfileIdOverride?: number, requesterUserId?: string | null, progress?: AddProgress): Promise<void> {
   const cfg = await getCfg("radarr", variant);
   if (!cfg) throw new Error(instanceLabel("Radarr", variant) + " is not configured");
 
@@ -854,6 +864,7 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
     }
   };
 
+  if (progress) progress.sent = true;
   try {
     await postMovie();
   } catch (err) {
@@ -1186,7 +1197,10 @@ export async function isMovieDownloadedInRadarr(
 // an in-progress season import (defer, keep the library scan), while "absent"
 // and "ids-disagree" are the forgery shapes the guard exists to refuse.
 export type SeriesDownloadVerdict =
-  | { downloaded: true; episodeFileCount: number; episodeCount: number }
+  // tmdbId: the one Sonarr's own library row carries (null when it has none —
+  // Sonarr v3, or a series it never mapped). The webhook keys a tvdb-only
+  // event's cache rows on it, as the sync writer does.
+  | { downloaded: true; tmdbId: number | null; episodeFileCount: number; episodeCount: number }
   | { downloaded: false; reason: "incomplete"; episodeFileCount: number; episodeCount: number }
   | { downloaded: false; reason: "absent" | "ids-disagree" };
 
@@ -1248,6 +1262,8 @@ export async function isSeriesDownloadedInSonarr(
     );
     const match = library.find((s) => s.tvdbId === tvdbId);
     if (!match) return { downloaded: false, reason: "absent" };
+    const libraryTmdbId =
+      Number.isInteger(match.tmdbId) && (match.tmdbId as number) > 0 ? (match.tmdbId as number) : null;
 
     if (payloadTvdbId !== null && claimedTmdbId !== null) {
       // The payload's two ids must name the SAME series. This is the forgery shape the
@@ -1264,8 +1280,6 @@ export async function isSeriesDownloadedInSonarr(
       // see validation that happened several lines earlier. The webhook payload is
       // attacker-shaped (secret-only auth, no schema), so a string id carrying a
       // newline would otherwise be able to forge a second "[arr] …" log entry.
-      const libraryTmdbId =
-        Number.isInteger(match.tmdbId) && (match.tmdbId as number) > 0 ? (match.tmdbId as number) : null;
       if (libraryTmdbId !== null) {
         if (libraryTmdbId !== claimedTmdbId) {
           console.warn(
@@ -1288,7 +1302,7 @@ export async function isSeriesDownloadedInSonarr(
 
     const { complete, episodeFileCount, episodeCount } = sonarrSeriesCompletion(match);
     return complete
-      ? { downloaded: true, episodeFileCount, episodeCount }
+      ? { downloaded: true, tmdbId: libraryTmdbId, episodeFileCount, episodeCount }
       : { downloaded: false, reason: "incomplete", episodeFileCount, episodeCount };
   } catch (err) {
     console.warn("[arr] isSeriesDownloadedInSonarr failed:", arrErrorMessage(err));
@@ -1646,7 +1660,7 @@ export async function getSonarrSeasons(tvdbId: number, variant: ArrVariant = "")
   return out.sort((a, b) => a.seasonNumber - b.seasonNumber);
 }
 
-export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "", qualityProfileIdOverride?: number, requesterUserId?: string | null): Promise<number> {
+export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "", qualityProfileIdOverride?: number, requesterUserId?: string | null, progress?: AddProgress): Promise<number> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error(instanceLabel("Sonarr", variant) + " is not configured");
 
@@ -1761,6 +1775,7 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
     }
   };
 
+  if (progress) progress.sent = true;
   try {
     await postSeries();
   } catch (err) {

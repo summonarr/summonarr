@@ -42,7 +42,7 @@
 import { prisma } from "./prisma";
 import { revokeAllUserSessions } from "./auth";
 import { logAudit } from "./audit";
-import { Permission } from "./permissions";
+import { isAdminTarget, lockTargetInTx } from "./account-lifecycle";
 import { processSingleton } from "./process-singleton";
 import type { MediaInstanceKey } from "./media-instances";
 
@@ -50,10 +50,6 @@ export const OFFBOARD_PENDING_KEY = "jellyfin-offboarding:pending";
 const pendingIds = () => processSingleton(OFFBOARD_PENDING_KEY, () => new Set<string>());
 
 class OffboardExemptError extends Error {}
-
-function isAdminRow(row: { role: string; permissions: bigint | null }): boolean {
-  return row.role === "ADMIN" || (typeof row.permissions === "bigint" && (row.permissions & Permission.ADMIN) !== 0n);
-}
 
 export type OffboardOutcome = "revoked" | "admin" | "still-member" | "no-account";
 
@@ -130,12 +126,10 @@ async function offboardOne(jellyfinUserId: string): Promise<OffboardOutcome> {
   // revoke, so a promotion landing after the reads above still counts.
   try {
     await revokeAllUserSessions(user.id, async (tx) => {
-      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-      const fresh = await tx.user.findUnique({
-        where: { id: user.id },
-        select: { role: true, permissions: true },
-      });
-      if (!fresh || isAdminRow(fresh)) throw new OffboardExemptError();
+      // The system acts here, not a delegate: nothing to refuse, only an
+      // exemption to decide (the same admin-target rule the admin routes use).
+      const fresh = await lockTargetInTx(tx, user.id, true);
+      if (!fresh || isAdminTarget(fresh)) throw new OffboardExemptError();
     });
   } catch (err) {
     if (err instanceof OffboardExemptError) return "admin";

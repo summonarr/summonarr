@@ -23,6 +23,9 @@ export function getCachedCandidates<T>(key: string, now: number = Date.now()): T
 }
 
 export function setCachedCandidates(key: string, body: unknown, now: number = Date.now()): void {
+  // Re-setting a key moves it to the newest slot (Map keeps a key's original
+  // insertion position on set) and never evicts an unrelated entry for it.
+  entries.delete(key);
   if (entries.size >= MAX_ENTRIES) {
     // Oldest first; Map iterates in insertion order.
     const oldest = entries.keys().next().value;

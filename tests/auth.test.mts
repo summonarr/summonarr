@@ -2365,3 +2365,174 @@ test("credentials: a successful sign-in refunds ITS OWN reserved hit, not a conc
     Date.now = realNow;
   }
 });
+
+// ── provisioning races, name hygiene, log hygiene, the mint's row ordering ──
+
+const P2002 = () => Object.assign(new Error("Unique constraint failed"), { name: "PrismaClientKnownRequestError", code: "P2002" });
+
+// The first user.create throws P2002 after `winner` lands the racing request's
+// row — two first sign-ins of one identity, this one losing.
+async function withCreateRace<T>(winner: (data: Record<string, unknown>) => void, fn: () => Promise<T>): Promise<T> {
+  const realCreate = models.user.create;
+  let raced = false;
+  models.user.create = async (args) => {
+    if (!raced) {
+      raced = true;
+      winner(args.data);
+      throw P2002();
+    }
+    return realCreate(args);
+  };
+  try {
+    return await fn();
+  } finally {
+    models.user.create = realCreate;
+  }
+}
+
+test("a concurrent FIRST sign-in that loses the create race (P2002) resolves to the winner's account — and the 34e binding is still checked", async () => {
+  // Jellyfin, same server: the winner's identity comes back, no second row.
+  const jf = asUser(await withCreateRace(
+    (d) => { seedUser({ id: "u-jf-winner", email: d.email as string, jellyfinUserId: d.jellyfinUserId as string, jellyfinInstance: d.jellyfinInstance as string }); },
+    () => findOrCreateJellyfinUser("jf-race", "Racer"),
+  ));
+  assert.equal(jf.id, "u-jf-winner");
+
+  // Jellyfin, the winner signed in through ANOTHER server first: refused, never adopted.
+  const mismatch = await withCreateRace(
+    (d) => { seedUser({ id: "u-jf-other", email: d.email as string, jellyfinUserId: d.jellyfinUserId as string, jellyfinInstance: "remote" }); },
+    () => findOrCreateJellyfinUser("jf-race-2", "Racer"),
+  );
+  assert.equal(refusalReason(mismatch), "instance_mismatch");
+
+  // Plex: the winner's identity.
+  const px = asUser(await withCreateRace(
+    (d) => { seedUser({ id: "u-px-winner", email: d.email as string, plexUserId: d.plexUserId as string }); },
+    () => findOrCreatePlexUser({ plexUserId: "px-race", email: "race@example.com" }),
+  ));
+  assert.equal(px.id, "u-px-winner");
+
+  // Plex, the collision was on the EMAIL (another account took it meanwhile): the rebind refusal.
+  const collided = await withCreateRace(
+    (d) => { seedUser({ id: "u-px-email", email: d.email as string }); },
+    () => findOrCreatePlexUser({ plexUserId: "px-race-2", email: "taken@example.com" }),
+  );
+  assert.equal(collided, PROVIDER_REBIND_REQUIRED);
+
+  // OIDC: the P2002 surfaces from the create $transaction and is answered outside it.
+  const oidc = asUser(await withCreateRace(
+    (d) => {
+      seedUser({ id: "u-oidc-winner", email: d.email as string });
+      seedOidcAccount({ userId: "u-oidc-winner", providerAccountId: "sub-race" });
+    },
+    () => findOrCreateOidcUser(oidcClaims({ sub: "sub-race", email: "oidc-race@example.com" })),
+  ));
+  assert.equal(oidc.id, "u-oidc-winner");
+
+  // Anything other than a unique violation still propagates.
+  const realCreate = models.user.create;
+  models.user.create = async () => { throw new Error("connection reset"); };
+  try {
+    await assert.rejects(() => findOrCreatePlexUser({ plexUserId: "px-boom", email: "boom@example.com" }), /connection reset/);
+  } finally {
+    models.user.create = realCreate;
+  }
+});
+
+test("jellyfin: a display name made only of stripped characters is NO name — a returning user keeps theirs, a new one is created with null", async () => {
+  seedUser({ id: "u-jf-named", email: "jellyfin-jf-named@jellyfin.local", name: "Stored Name", jellyfinUserId: "jf-named", jellyfinInstance: "" });
+  const back = asUser(await findOrCreateJellyfinUser("jf-named", "<>"));
+  assert.equal(back.name, "Stored Name", "an empty sanitized name must not replace the stored one in the session");
+  assert.equal(userById("u-jf-named").name, "Stored Name");
+
+  const fresh = asUser(await findOrCreateJellyfinUser("jf-blank", "   "));
+  assert.equal(fresh.name, null);
+  assert.equal(userById(fresh.id).name, null, "stored as null, like the Plex and OIDC paths — never \"\"");
+});
+
+test("provider refusals never write the raw email to the log: rebind warns name the colliding user's id and the email hash; pre-setup warns name no address", async () => {
+  seedUser({ id: "u-holds-email", email: "victim@example.com", role: "ADMIN" });
+  warns.length = 0;
+  assert.equal(await findOrCreatePlexUser({ plexUserId: "px-log", email: "Victim@Example.com" }), PROVIDER_REBIND_REQUIRED);
+  assert.equal(await findOrCreateOidcUser(oidcClaims({ sub: "sub-log", email: "victim@example.com" })), PROVIDER_REBIND_REQUIRED);
+  const rebind = warns.filter((w) => w.includes("Manual rebind required"));
+  assert.equal(rebind.length, 2);
+  for (const w of rebind) {
+    assert.ok(w.includes("u-holds-email"), "the admin needs the colliding row's id to rebind");
+    assert.ok(w.includes(hashAuditEmail("victim@example.com")), "the keyed hash correlates with the audit row");
+  }
+
+  settings.delete("setup_completed_at");
+  users.length = 0;
+  await findOrCreatePlexUser({ plexUserId: "px-pre", email: "pre@example.com" });
+  await findOrCreateOidcUser(oidcClaims({ sub: "sub-pre", email: "pre-oidc@example.com" }));
+  assert.ok(warns.some((w) => w.includes("pre-setup")), "precondition: the pre-setup refusals logged");
+  for (const addr of ["victim@example.com", "pre@example.com", "pre-oidc@example.com"]) {
+    assert.ok(!warns.some((w) => w.toLowerCase().includes(addr)), `${addr} must not be in the log`);
+  }
+});
+
+test("mint: a sign-in step that fails leaves NO AuthSession row — promotion and the permissions read run first, and a failed JWT sign removes the row it wrote", async () => {
+  // (a) The first-admin promotion throws (pre-setup credentials sign-in, DB down).
+  settings.delete("setup_completed_at");
+  seedUser({ id: "u-first", email: "first@example.com" });
+  failTransactions = true;
+  await assert.rejects(() => signInAndMintSession({ user: mintableUser("u-first"), providerId: "credentials" }), /transaction failure/);
+  failTransactions = false;
+  assert.equal([...authSessions.values()].filter((r) => r.userId === "u-first").length, 0, "no orphan row from a failed promotion");
+
+  // (b) The JWT can't be signed: the row written for it is removed again.
+  settings.set("setup_completed_at", "2026-01-01T00:00:00.000Z");
+  seedUser({ id: "u-nosign", email: "nosign@example.com" });
+  const secret = process.env.NEXTAUTH_SECRET;
+  delete process.env.NEXTAUTH_SECRET;
+  try {
+    await assert.rejects(() => signInAndMintSession({ user: mintableUser("u-nosign"), providerId: "credentials" }), /NEXTAUTH_SECRET/);
+  } finally {
+    process.env.NEXTAUTH_SECRET = secret;
+  }
+  assert.equal([...authSessions.values()].filter((r) => r.userId === "u-nosign").length, 0, "no device row without a token");
+  await flushAsync();
+  assert.ok(!auditRows.some((a) => a.action === "AUTH_LOGIN" && a.userId === "u-nosign"), "no AUTH_LOGIN for a session that never existed");
+});
+
+test("plex: the per-token bucket is keyed on a HASH of the token, and a tripped bucket refuses before any plex.tv call", async () => {
+  const plexToken = "plex-token-bucket-0123456789";
+  const key = `plex:${createHash("sha256").update(plexToken).digest("hex").slice(0, 16)}`;
+  for (let i = 0; i < 10; i++) checkRateLimit(key, 10, 5 * 60 * 1000);
+  assert.equal(await authorizeWithPlex({ plexToken }, makeReq(chromeUa("plex-bucket"))), null);
+  assert.equal(fetchCalls.length, 0, "a rate-limited token never reaches plex.tv");
+  await flushAsync();
+  assert.equal(lastAudit().provider, "plex");
+  assert.equal(auditDetails().reason, "rate_limited");
+});
+
+test("plex: a token-cache hit whose cache-row refresh fails (purged concurrently, P2025) still signs the member in", async () => {
+  const ua = chromeUa("plex-cache-race");
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  const FRIENDS_XML =
+    '<?xml version="1.0"?><MediaContainer size="1">' +
+    '<User id="1" email="cache@example.com"><Server id="1" machineIdentifier="machine-1"/></User>' +
+    "</MediaContainer>";
+  respond = (url) => {
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return jsonResponse({ id: 5151, email: "cache@example.com", username: "Cache", thumb: "" });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/ping") return jsonResponse({});
+    if (url.hostname === "203.0.113.10" && url.pathname === "/identity") return jsonResponse({ MediaContainer: { machineIdentifier: "machine-1" } });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/users") return new Response(FRIENDS_XML, { status: 200, headers: { "content-type": "application/xml" } });
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  assert.ok(await authorizeWithPlex({ plexToken: "plex-tok-cache-race" }, makeReq(ua)), "the live sign-in writes the cache row");
+  const realUpdate = models.plexTokenCache.update;
+  models.plexTokenCache.update = async () => {
+    throw Object.assign(new Error("record not found"), { name: "PrismaClientKnownRequestError", code: "P2025" });
+  };
+  try {
+    fetchCalls.length = 0;
+    const cached = await authorizeWithPlex({ plexToken: "plex-tok-cache-race" }, makeReq(ua));
+    assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/ping"), "precondition: this sign-in took the token-cache path");
+    assert.ok(cached, "a failed cache-lifetime bump must not fail a verified sign-in");
+  } finally {
+    models.plexTokenCache.update = realUpdate;
+  }
+});

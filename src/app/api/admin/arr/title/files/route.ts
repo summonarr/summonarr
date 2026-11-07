@@ -69,11 +69,10 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   if (q.has("fileIds")) {
     fileIds = parseIdList(q.get("fileIds"), 1_000);
   } else {
-    const parsed = await readJsonCapped<Record<string, unknown>>(req, TITLE_FILE_IDS_BODY_BYTES);
-    if (parsed instanceof NextResponse) return parsed;
-    const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-    fileIds = parseIdArray(body ? body.fileIds : null, MAX_TITLE_FILE_IDS);
-    background = body?.async === true;
+    const body = await readJsonCapped<Record<string, unknown>>(req, TITLE_FILE_IDS_BODY_BYTES);
+    if (body instanceof NextResponse) return body;
+    fileIds = parseIdArray(body.fileIds, MAX_TITLE_FILE_IDS);
+    background = body.async === true;
   }
   if (!fileIds) return NextResponse.json({ error: t("apiAdmin.arr.fileIdsInvalid") }, { status: 400 });
   const ids = fileIds;

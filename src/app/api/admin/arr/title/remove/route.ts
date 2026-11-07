@@ -26,9 +26,8 @@ const REMOVES_PER_MIN = 10;
 //       requestsStamped }. Audited ARR_TITLE_DELETE after the arr accepted it.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 4 * 1024);
+  if (body instanceof NextResponse) return body;
   const target = await arrTitleGate(body.service, body.instance, body.id, t);
   if (target instanceof NextResponse) return target;
   if (typeof body.deleteFiles !== "boolean" || typeof body.addImportExclusion !== "boolean") {
@@ -50,7 +49,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // The execute echoes the id it was shown — a removal is never one blind click.
   if (body.confirm !== target.arrId) return NextResponse.json({ error: t("apiAdmin.arr.removeConfirm") }, { status: 400 });
   if (!checkRateLimit(`arr-title-remove:${session.user.id}`, REMOVES_PER_MIN, 60_000)) {
-    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   let result;
   try {

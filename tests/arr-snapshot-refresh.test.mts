@@ -261,8 +261,9 @@ test("the cron route skips without a lock when nothing is due, and is wired into
   assert.match(route, /withCronRunRecording\("arr-snapshots", \(\) => withAdvisoryLock\(\s*ARR_SNAPSHOT_LOCK_ID,/);
   assert.match(route, /refreshArrSnapshots\(\{ signal \}\)/);
   const entry = readFileSync(new URL("../docker-entrypoint.sh", import.meta.url), "utf8");
-  assert.match(entry, /\/api\/cron\/refresh-arr-snapshots\}" "arr-snapshots" quiet/);
-  assert.match(entry, /ARR_SNAPSHOT_NEXT=\$\(_cron_next "\$rc" "\$NOW" "\$\{ARR_SNAPSHOT_INTERVAL:-300\}" 300\)/);
+  // One row of the entrypoint's schedule table: label, URL override, path,
+  // interval var, default, quiet, first run, and the short-cadence loop.
+  assert.match(entry, /\narr-snapshots\|ARR_SNAPSHOT_URL\|\/api\/cron\/refresh-arr-snapshots\|ARR_SNAPSHOT_INTERVAL\|300\|quiet\|300\|fast\n/);
   const settings = readFileSync(new URL("../src/app/(app)/settings/page.tsx", import.meta.url), "utf8");
   assert.match(settings, /endpoint: "\/api\/cron\/refresh-arr-snapshots", interval: formatInterval\(t, process\.env\.ARR_SNAPSHOT_INTERVAL, "300"\), \.\.\.lastRunInfo\("arr-snapshots"\)/);
 });

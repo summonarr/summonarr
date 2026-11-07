@@ -22,7 +22,8 @@
 //              extension actually encrypts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -137,6 +138,53 @@ test("every operator script connects to the bundled Postgres the way the entrypo
     assert.ok(pg >= 0 && bundled >= 0 && url >= 0, `${rel}: connection branches not found`);
     assert.ok(pg < bundled, `${rel}: explicit PG* vars must still win`);
     assert.ok(bundled < url, `${rel}: the .env DATABASE_URL the entrypoint ignores must not win over POSTGRES_PASSWORD`);
+  }
+});
+
+// The bundled Postgres password can be a Docker secret instead of an env var
+// (it otherwise shows in `docker inspect`). The entrypoint reads
+// /run/secrets/postgres_password; a `docker compose exec` script never sees
+// that export, so each script reads the same file, the same way, before it
+// picks a connection branch — PG* > POSTGRES_PASSWORD > DATABASE_URL unchanged.
+function extractPasswordFileLoader(rel: string, src: string): (file: string, env: Record<string, string | undefined>) => void {
+  const m = src.match(/function loadPostgresPasswordFile\(\) \{[\s\S]*?\n\}/);
+  assert.ok(m, `${rel}: loadPostgresPasswordFile not found`);
+  return (file, env) =>
+    new Function("existsSync", "readFileSync", "POSTGRES_PASSWORD_FILE", "process", `${m[0]}; loadPostgresPasswordFile();`)(
+      existsSync, readFileSync, file, { env },
+    );
+}
+
+test("every operator script reads the postgres_password secret before choosing a connection", () => {
+  const dir = mkdtempSync(join(tmpdir(), "summonarr-pgsecret-"));
+  try {
+    const file = join(dir, "postgres_password");
+    for (const rel of SCRIPTS) {
+      const src = source(rel);
+      assert.match(src, /^import \{ existsSync, readFileSync \} from "node:fs";$/m, rel);
+      assert.match(src, /const POSTGRES_PASSWORD_FILE = "\/run\/secrets\/postgres_password";/, `${rel}: the entrypoint's path`);
+      const call = src.indexOf("  loadPostgresPasswordFile();\n");
+      const pg = src.indexOf("process.env.PGHOST && process.env.PGUSER");
+      assert.ok(call > 0 && call < pg, `${rel}: the file must be read before the connection branches`);
+      assert.doesNotMatch(src.slice(call, pg), /\n(?:async )?function /, `${rel}: …in the same function`);
+
+      const load = extractPasswordFileLoader(rel, src);
+      // Mounted: wins over the env var, trailing newlines dropped like `$(cat …)`.
+      writeFileSync(file, "p@ss/word\n\n");
+      const env: Record<string, string | undefined> = { POSTGRES_PASSWORD: "from-env" };
+      load(file, env);
+      assert.equal(env.POSTGRES_PASSWORD, "p@ss/word", rel);
+      // Empty: refused, as the entrypoint refuses to boot on it.
+      writeFileSync(file, "\n");
+      assert.throws(() => load(file, {}), /is empty/, rel);
+      // Not mounted: the env var stands.
+      rmSync(file);
+      const untouched: Record<string, string | undefined> = { POSTGRES_PASSWORD: "from-env" };
+      load(file, untouched);
+      assert.equal(untouched.POSTGRES_PASSWORD, "from-env", rel);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

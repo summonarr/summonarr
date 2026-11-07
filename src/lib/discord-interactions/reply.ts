@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { escMd } from "@/lib/discord-notify";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { processSingleton } from "@/lib/process-singleton";
 import { isLocale, type Locale } from "@/lib/i18n/locales";
 import { instanceDefaultLocale, localeForUser, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
@@ -53,7 +54,13 @@ export function quotaWindowLabel(t: Translator, label: string | undefined): stri
 }
 
 export function truncateText(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+  if (text.length <= max) return text;
+  let cut = max - 1;
+  // Lengths are UTF-16 code units: never keep the high half of a surrogate pair
+  // (an emoji) without its low half, which Discord shows as a replacement mark.
+  const last = text.charCodeAt(cut - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut--;
+  return `${text.slice(0, cut)}…`;
 }
 
 // Discord answers a message with content over 2000 characters with a 400 and
@@ -62,10 +69,15 @@ export function truncateText(text: string, max: number): string {
 // content at the one edit boundary.
 const DISCORD_CONTENT_MAX = 2000;
 
-export async function editOriginal(appId: string, token: string, rawPayload: Record<string, unknown>): Promise<void> {
-  const payload = typeof rawPayload.content === "string" && rawPayload.content.length > DISCORD_CONTENT_MAX
-    ? { ...rawPayload, content: truncateText(rawPayload.content, DISCORD_CONTENT_MAX) }
-    : rawPayload;
+// The edits of one interaction's original message, in call order. Discord
+// applies each PATCH as it arrives, so two in flight at once — the timeout's
+// "taking longer" line and a handler's final edit — could land in either order
+// and the line could replace the result. Each edit starts only once the one
+// before it on the same token has settled. Process-wide (guardrail 27a), keyed
+// by the interaction token; an entry is dropped when its last edit settles.
+const editChains = processSingleton("discord-interactions:editChains", () => new Map<string, Promise<void>>());
+
+async function sendEdit(appId: string, token: string, payload: Record<string, unknown>): Promise<void> {
   const res = await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}/messages/@original`, {
     allowedHosts: DISCORD_HOSTS,
     method: "PATCH",
@@ -76,6 +88,55 @@ export async function editOriginal(appId: string, token: string, rawPayload: Rec
   if (!res.ok) {
     console.error("[interactions] editOriginal failed:", res.status, await res.text());
   }
+}
+
+export function editOriginal(appId: string, token: string, rawPayload: Record<string, unknown>): Promise<void> {
+  const payload = typeof rawPayload.content === "string" && rawPayload.content.length > DISCORD_CONTENT_MAX
+    ? { ...rawPayload, content: truncateText(rawPayload.content, DISCORD_CONTENT_MAX) }
+    : rawPayload;
+  const run = (editChains.get(token) ?? Promise.resolve()).then(() => sendEdit(appId, token, payload));
+  // A failed edit never blocks the next one; the caller still sees its own failure.
+  const tail = run.catch(() => {});
+  editChains.set(token, tail);
+  void tail.then(() => {
+    if (editChains.get(token) === tail) editChains.delete(token);
+  });
+  return run;
+}
+
+// Resolves once no edit of this interaction's message is queued or in flight,
+// one macrotask after the last one settled (so whatever awaited it has run).
+export async function editsIdle(token: string): Promise<void> {
+  for (let chain = editChains.get(token); chain; chain = editChains.get(token)) {
+    await chain;
+    await new Promise<void>((r) => setImmediate(r));
+  }
+}
+
+// A reply only the clicker sees (flags 64), posted as a follow-up to a deferred
+// component interaction. The clicked message itself is left as it is.
+export async function ephemeralFollowup(appId: string, token: string, content: string): Promise<void> {
+  const res = await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
+    allowedHosts: DISCORD_HOSTS,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, flags: 64 }),
+    timeoutMs: 15_000,
+  });
+  if (!res.ok) {
+    console.error("[interactions] follow-up failed:", res.status, await res.text());
+  }
+}
+
+// The grey "already handled" card an admin button leaves behind when the
+// request was decided elsewhere. Written in the shared channel's language.
+export function handledEmbed(channelT: Translator, title: string): Record<string, unknown> {
+  return {
+    color: 0x71767B,
+    title,
+    description: channelT("notify.bot.admin.handled"),
+    timestamp: new Date().toISOString(),
+  };
 }
 
 // `buttons` picks what a result button does: "pick" files a request (/request),

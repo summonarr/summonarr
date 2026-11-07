@@ -131,6 +131,28 @@ test("mapLimit: a rejection stops workers from claiming further items", async ()
   assert.deepEqual(started, [0]);
 });
 
+test("mapLimit: with several workers, no worker claims an item after the first rejection", async () => {
+  // Item 0 fails after one tick while worker 2 is still busy with item 1. Once
+  // item 1 settles, that worker must stop instead of draining items 2..5 in the
+  // background after the caller has already been handed the error.
+  const started: number[] = [];
+  await assert.rejects(
+    mapLimit([0, 1, 2, 3, 4, 5], 2, async (item) => {
+      started.push(item);
+      if (item === 0) {
+        await tick();
+        throw new Error("item 0 failed");
+      }
+      for (let t = 0; t < 4; t++) await tick();
+      return item;
+    }),
+    /item 0 failed/,
+  );
+  // Give a still-running worker every chance to claim more.
+  for (let t = 0; t < 20; t++) await tick();
+  assert.deepEqual(started, [0, 1]);
+});
+
 test("mapLimit: garbage limits (0, negative, NaN, fractional) clamp to a sane worker count", async () => {
   for (const limit of [0, -3, Number.NaN, 0.4]) {
     const { task, max } = instrumented<number, number>((item) => item, 2);

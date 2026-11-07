@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
+import { bodyTooLarge, checkBodySize, readBodyBytesCapped } from "@/lib/body-size";
 import { isFeatureEnabled } from "@/lib/features";
 import { discordGuildVerdict } from "@/lib/discord-guild";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
@@ -14,21 +14,22 @@ import type { DiscordInteraction } from "@/lib/discord-interactions/types";
 
 export const dynamic = "force-dynamic";
 
-// Imported by instrumentation.ts (boot prewarm) and the settings route (key rotation).
-export { invalidatePublicKeyCache, prewarmPublicKeyCache } from "@/lib/discord-interactions/signature";
+const MAX_BODY_BYTES = 1_048_576;
 
 export async function POST(req: NextRequest) {
   const signature = req.headers.get("x-signature-ed25519") ?? "";
   const timestamp = req.headers.get("x-signature-timestamp") ?? "";
 
-  const tooLarge = checkBodySize(req, 1_048_576);
+  const tooLarge = checkBodySize(req, MAX_BODY_BYTES);
   if (tooLarge) return tooLarge;
 
-  const body = await req.text();
-  // Post-read backstop for chunked-transfer clients that omit Content-Length
-  // (Discord doesn't, but a malicious proxy might rewrite headers).
-  const oversize = assertBodyBytesUnderCap(new TextEncoder().encode(body), 1_048_576);
-  if (oversize) return oversize;
+  // A chunked body has no Content-Length for the check above (Discord sends one,
+  // but a proxy can rewrite headers). The read stops at the cap, and the bytes are
+  // decoded once — no second full copy just to measure it, on a public route
+  // that has not verified anything yet.
+  const raw = await readBodyBytesCapped(req, MAX_BODY_BYTES);
+  if (raw === null) return bodyTooLarge(MAX_BODY_BYTES, req);
+  const body = new TextDecoder().decode(raw);
 
   const publicKey = await getPublicKey();
   if (!publicKey) {

@@ -28,7 +28,9 @@ import {
   getFeatureFlags,
   groupFeaturesByCategory,
   invalidateFeatureFlagCache,
+  isFeatureEnabled,
   type FeatureCategory,
+  type FeatureKey,
 } from "../src/lib/features.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
 
@@ -272,4 +274,17 @@ test("invalidateFeatureFlagCache is DB-free and callable at any time", () => {
   // throw or touch the database (the throwing stub would surface it).
   invalidateFeatureFlagCache();
   invalidateFeatureFlagCache(); // idempotent — double invalidation is fine
+});
+
+test("FeatureKey is the union of registered keys, so a mistyped key does not compile", () => {
+  // A compile-time pin, checked by both typecheck runs; the closure never runs
+  // (it would hit the throwing Setting stub). When FeatureKey widened to
+  // `string`, a typo compiled and read as disabled at runtime.
+  const typo = () => {
+    // @ts-expect-error -- not a registered feature key
+    void isFeatureEnabled("feature.page.typo");
+  };
+  void typo;
+  const key: FeatureKey = "feature.page.top";
+  assert.ok((FEATURE_KEYS as readonly string[]).includes(key));
 });

@@ -33,9 +33,8 @@ const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 // (guardrail 26 — the swallowing logAudit, the DELETE has already happened).
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
+  if (body instanceof NextResponse) return body;
   const service = parseQueueService(body.service);
   const instance = body.instance === undefined ? "" : body.instance;
   const ids = body.ids;

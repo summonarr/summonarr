@@ -73,6 +73,8 @@ type LoadedRequest = {
   arrInstance: string;
 };
 
+type SearchTarget = { kind: "movie" } | { kind: "tv"; tvdbId: number; season: number };
+
 async function loadRequest(id: string, t: Translator): Promise<LoadedRequest | NextResponse> {
   const req = await prisma.mediaRequest.findUnique({
     where: { id },
@@ -92,7 +94,8 @@ async function loadRequest(id: string, t: Translator): Promise<LoadedRequest | N
       : t("apiUser.issues.instanceNotConfigured", { service, instance: req.arrInstance });
     return NextResponse.json({ error }, { status: 422 });
   }
-  return req as LoadedRequest;
+  // No cast: a field dropped from the select above must fail to compile here.
+  return req;
 }
 
 async function tvdbIdFor(req: LoadedRequest): Promise<number | null> {
@@ -135,14 +138,18 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
   const background = req.nextUrl.searchParams.get("async") === "1";
 
   try {
-    let tvdbId: number | null = null;
+    // What to search, built per media type so the TV fields are known numbers
+    // inside the search closure below (no casts on control flow the compiler
+    // can't see).
+    let target: SearchTarget = { kind: "movie" };
     if (loaded.mediaType === "TV") {
-      tvdbId = await tvdbIdFor(loaded);
+      const tvdbId = await tvdbIdFor(loaded);
       if (!tvdbId) return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
       // The season list costs one library read, no indexer hit — not rate limited.
       if (season === undefined) return NextResponse.json({ seasons: await getSonarrSeasons(tvdbId, loaded.arrInstance) });
+      target = { kind: "tv", tvdbId, season };
     }
-    const key = handleScope(loaded, loaded.mediaType === "MOVIE" ? undefined : season);
+    const key = handleScope(loaded, target.kind === "movie" ? undefined : target.season);
     // Joining a search already running costs no indexer hit, so no rate token.
     const running = background ? runningReleaseSearchJob(session.user.id, key) : null;
     if (running) return NextResponse.json({ job: running }, { status: 202 });
@@ -151,9 +158,9 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
     }
     const search = async (): Promise<NextResponse> => {
       try {
-        const releases = loaded.mediaType === "MOVIE"
+        const releases = target.kind === "movie"
           ? await getReleasesForMovie(loaded.tmdbId, loaded.arrInstance)
-          : await getReleasesForSeries(tvdbId as number, "SEASON", season as number, null, loaded.arrInstance);
+          : await getReleasesForSeries(target.tvdbId, "SEASON", target.season, null, loaded.arrInstance);
         return NextResponse.json({ releases: issueReleaseHandles(key, releases, { owner: session.user.id }) });
       } catch (err) {
         return arrFailure(err, t, service, "search");
@@ -173,9 +180,8 @@ export const POST = withPermission(Permission.MANAGE_REQUESTS)(async (req, { par
   if (maint) return maint;
 
   const { id } = await params;
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  const body = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
+  if (body instanceof NextResponse) return body;
 
   const handle = body.release;
   if (typeof handle !== "string" || !HANDLE_RE.test(handle)) {

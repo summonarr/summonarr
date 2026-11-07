@@ -66,10 +66,6 @@ function sameString(a: string, b: string): boolean {
 
 export async function POST(req: NextRequest) {
   const t = translatorForRequest(req);
-  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_MFA_BODY_BYTES);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed;
-
   const ip = getClientIp(req.headers);
   const ua = req.headers.get("user-agent")?.slice(0, 512) ?? null;
   const fail = (reason: string, userId?: string, details: Record<string, unknown> = {}) =>
@@ -84,10 +80,18 @@ export async function POST(req: NextRequest) {
       details: { reason, ...details },
     });
 
+  // Before the body is read: a refused request costs neither the 32 KB parse
+  // nor more than one audit row per window per IP. Auditing every refusal made
+  // the limiter itself the flood — one INSERT per junk request, unbounded. The
+  // dedupe key bounds no secret, so it is not a protected prefix (6e).
   if (!checkRateLimit(`mfa-ip:${ipBucketKey(ip)}`, IP_LIMIT, IP_WINDOW_MS)) {
-    fail("mfa_rate_limited");
+    if (checkRateLimit(`mfa-ip-audit:${ipBucketKey(ip)}`, 1, IP_WINDOW_MS)) fail("mfa_rate_limited");
     return NextResponse.json({ error: t("apiAuth.mfa.tooManyAttemptsMinutes") }, { status: 429 });
   }
+
+  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_MFA_BODY_BYTES);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const claims = await verifyMfaSigninToken(body.mfaToken);
   if (!claims || !isTokenUsable(claims.jti)) return expired(t);

@@ -660,6 +660,7 @@
   "adminManage.library.btn.failedStatus": "失败（{status}）",
   "adminManage.library.btn.items_one": "{formatted} 个条目",
   "adminManage.library.btn.items_other": "{formatted} 个条目",
+  "adminManage.library.btn.alreadyRunning": "已在同步中——请在完成后重试",
   "adminManage.library.btn.networkError": "网络错误",
   "adminManage.library.btn.syncFailed": "同步失败",
   "adminManage.library.btn.rescanConfirm": "重新扫描所有媒体库？",

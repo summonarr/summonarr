@@ -39,6 +39,9 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
   const hl = (node: React.ReactNode) => <span className="text-zinc-300">{node}</span>;
   const portal = (term: string) => hl(t(`settings.form.discord.portal.${term}`));
   const [botToken,          setBotToken]          = useState(initialBotToken);
+  // Whether a token is saved. The token is masked on GET, so the route can't
+  // tell a blank field from an echo and never clears it: a blank is not sent.
+  const [tokenSaved,        setTokenSaved]        = useState(initialBotToken.length > 0);
   const [clientId,          setClientId]          = useState(initialClientId);
   const [guildId,           setGuildId]           = useState(initialGuildId);
   const [publicKey,         setPublicKey]         = useState(initialPublicKey);
@@ -125,7 +128,14 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
       savedRef.current = Object.fromEntries(fields.map(([key, , initial]) => [key, initial]));
     }
     const saved = savedRef.current;
-    const changed = Object.fromEntries(fields.filter(([key, current]) => current !== saved[key]).map(([key, current]) => [key, current]));
+    // A blank token is never sent: the route would drop it and answer ok, and
+    // this form would then believe the token was gone (see the hint under the
+    // field for how to turn the bot off).
+    const changed = Object.fromEntries(
+      fields
+        .filter(([key, current]) => current !== saved[key] && !(key === "discordBotToken" && current === ""))
+        .map(([key, current]) => [key, current]),
+    );
     if (Object.keys(changed).length === 0) {
       setMessage(t("settings.form.discord.noChanges"));
       setStatus("ok");
@@ -144,6 +154,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
 
       if (res.ok && data.ok) {
         Object.assign(saved, changed);
+        if (changed.discordBotToken) setTokenSaved(true);
         setMessage(t("settings.form.discord.savedRestart"));
         setStatus("ok");
         saveTimer.current = setTimeout(() => setStatus("idle"), 5000);
@@ -344,12 +355,18 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
               <Input
                 id="discord-token"
                 type="password"
+                autoComplete="new-password"
+                data-1p-ignore
+                data-lpignore="true"
                 value={botToken}
                 onChange={(e) => { setBotToken(e.target.value); setStatus("idle"); }}
                 placeholder="••••••••••••••••"
                 className="bg-zinc-800 border-zinc-700 font-mono"
               />
               <p className="text-xs text-zinc-500">{t("settings.form.discord.botTokenHelp")}</p>
+              {botToken === "" && tokenSaved && (
+                <p className="text-xs text-amber-400">{t("settings.form.discord.botTokenKept")}</p>
+              )}
             </div>
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
               <div className="space-y-1.5">

@@ -187,7 +187,7 @@
   "settings.arr.minAvail.announced": "Announced",
   "settings.arr.minAvail.inCinemas": "In Cinemas",
   "settings.arr.minAvail.released": "Released",
-  "settings.arr.invalidSlug": "Invalid slug \"{slug}\" — use lowercase letters/digits, starting with a letter (not \"hd\").",
+  "settings.arr.invalidSlug": "Invalid slug \"{slug}\" — use lowercase letters/digits, starting with a letter (not \"hd\" or \"external\").",
   "settings.arr.heading": "{label} — additional instances",
   "settings.arr.intro": "Extra {label} instances (e.g. a dedicated anime instance). Requests auto-route here when an instance's rule matches; a request can also target one explicitly. Restricted instances need a per-user grant (Users → Instance access).",
   "settings.arr.none": "No additional {label} instances configured.",

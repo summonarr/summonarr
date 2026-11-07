@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
-import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, arrWriteOutcomeUnknown, type AddProgress } from "@/lib/arr";
+import { alertAdminsNewRequest } from "@/lib/request-create";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { exceedsCap } from "@/lib/content-rating";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -42,7 +43,10 @@ import { dropStaleDeclinedMany, restoreThread } from "@/lib/request-comment-carr
 //
 // Each new PENDING row emits a `request:new` SSE (the admin request list is
 // live), but per-item email/push/Discord admin nudges are intentionally NOT
-// sent — a 50-item "Request all" would flood every admin channel.
+// sent — a 50-item "Request all" would flood every admin channel. The one
+// exception is an auto-approval whose push failed and rolled back to PENDING:
+// the requester expected no review, so the call sends ONE admin alert for those
+// rows (phase 3) and marks each `pushFailed` in the results.
 
 const MAX_ITEMS = 50;
 const ARR_CONCURRENCY = 5;
@@ -63,6 +67,9 @@ interface CreateOutcome {
   tmdbId: number;
   mediaType: MediaType;
   result: ItemResult;
+  // Additive: an auto-approval whose push failed; the row went back to PENDING
+  // (result "created").
+  pushFailed?: true;
 }
 
 const keyOf = (tmdbId: number, mediaType: string) => `${tmdbId}:${mediaType}`;
@@ -746,12 +753,16 @@ export const POST = withPermission([
   }
 
   // Phase 3 — push auto-approved rows to *arr (bounded, post-commit), rolling back
-  // to PENDING on push failure like the single route. Every created row emits request:new.
+  // to PENDING on a definite push failure like the single route (an unknown outcome
+  // stays APPROVED). Every created row emits request:new.
   const rowByKey = new Map(createdRows.map((r) => [keyOf(r.tmdbId, r.mediaType), r]));
   // Rows that armed pendingNotifyAt AND landed in *arr — collected here rather than
   // derived from `outcomes`, which cannot distinguish an auto-approved row that was
   // pushed from a mirrored one that deliberately skipped both the push and the flag.
   const downloadChecks: DownloadCheckTarget[] = [];
+  // Auto-approvals whose push failed and rolled back to PENDING, row id by
+  // (tmdbId:mediaType) — for the one admin alert after the loop.
+  const rolledBack = new Map<string, string>();
   const outcomes = await mapLimit(prepared, ARR_CONCURRENCY, async (p): Promise<CreateOutcome> => {
     const row = rowByKey.get(keyOf(p.tmdbId, p.mediaType));
     if (!row) return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "error" };
@@ -770,23 +781,39 @@ export const POST = withPermission([
       return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created" };
     }
     let pushedTvdbId: number | null = null;
+    const pushProgress: AddProgress = { sent: false };
     try {
       if (p.mediaType === "MOVIE") {
-        await addMovieToRadarr(p.tmdbId, p.arrInstance, undefined, targetUserId);
+        await addMovieToRadarr(p.tmdbId, p.arrInstance, undefined, targetUserId, pushProgress);
       } else {
-        pushedTvdbId = await addSeriesToSonarr(p.tmdbId, p.arrInstance, undefined, targetUserId);
+        pushedTvdbId = await addSeriesToSonarr(p.tmdbId, p.arrInstance, undefined, targetUserId, pushProgress);
       }
     } catch (err) {
-      console.error(
-        `[requests/bulk] auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
-      );
-      // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
-      // may have flipped this row to AVAILABLE. Clear pendingNotifyAt too.
-      await prisma.mediaRequest.updateMany({ where: { id: row.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } }).catch(() => {});
-      // The client already saw request:new for an APPROVED row; emit a corrective
-      // update so it reflects the rolled-back PENDING state (mirrors the single route).
-      emitSSE({ type: "request:updated", requestId: row.id, status: "PENDING", userId: targetUserId });
-      return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created" };
+      const message = sanitizeForLog(err instanceof Error ? err.message : String(err));
+      // Unknown only once the add itself was sent (AddProgress).
+      if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {
+        // No definite answer (a timeout, a dropped connection, a gateway 502/504):
+        // the arr may have added it. Left APPROVED, like the single route; the sync
+        // re-pushes an APPROVED title the arr doesn't hold. Falls through to the
+        // auto-approved bookkeeping below (the armed backstop is still consumed).
+        console.error(`[requests/bulk] auto-approve push outcome unknown, left APPROVED: ${message}`);
+      } else {
+        console.error(`[requests/bulk] auto-approve push failed: ${message}`);
+        // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
+        // may have flipped this row to AVAILABLE. Clear pendingNotifyAt too.
+        const rb = await prisma.mediaRequest
+          .updateMany({ where: { id: row.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } })
+          .catch((rbErr: unknown) => {
+            console.error(`[requests/bulk] rollback to PENDING failed: ${sanitizeForLog(rbErr instanceof Error ? rbErr.message : String(rbErr))}`);
+            return { count: 0 };
+          });
+        // The client already saw request:new for an APPROVED row; emit a corrective
+        // update so it reflects the rolled-back PENDING state (mirrors the single route).
+        emitSSE({ type: "request:updated", requestId: row.id, status: "PENDING", userId: targetUserId });
+        // Only a row that really went back to PENDING is the admins' to review.
+        if (rb.count === 1) rolledBack.set(keyOf(p.tmdbId, p.mediaType), row.id);
+        return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created", pushFailed: true };
+      }
     }
 
     // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
@@ -820,6 +847,27 @@ export const POST = withPermission([
   // orchestrator's next sweep. One batched job, not one per row — a 50-item bulk
   // request would otherwise take half the delayed-job run queue on its own.
   scheduleDownloadChecks(downloadChecks, { name: "requests/bulk:90s-download-check" });
+
+  // The rolled-back auto-approvals sit in the admin queue with their backstop
+  // cleared, and nothing else will tell an admin (the single route announces its
+  // one). ONE alert per call, never one per row — a failing arr would otherwise
+  // flood every admin channel on a 50-item "Request all" (header). It names the
+  // first in the caller's order; the queue lists them all.
+  const firstRolledBack = prepared.find((p) => rolledBack.has(keyOf(p.tmdbId, p.mediaType)));
+  if (firstRolledBack) {
+    alertAdminsNewRequest({
+      requestId: rolledBack.get(keyOf(firstRolledBack.tmdbId, firstRolledBack.mediaType))!,
+      tmdbId: firstRolledBack.tmdbId,
+      mediaType: firstRolledBack.mediaType,
+      instance: firstRolledBack.arrInstance,
+      title: firstRolledBack.title,
+      posterPath: firstRolledBack.posterPath ?? null,
+      releaseYear: firstRolledBack.releaseYear ?? null,
+      requestedBy: target.name ?? target.email ?? targetUserId,
+      note: null,
+      excludeUserId: session.user.id,
+    });
+  }
 
   const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
   const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;
