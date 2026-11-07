@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrWriteOutcomeUnknown, type AddProgress } from "@/lib/arr";
 import { localizedTitleFor } from "@/lib/tmdb-localize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -93,21 +93,32 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
       return;
     }
     let arrFailed = false;
+    let arrPushOutcomeUnknown = false;
     let pushedTvdbId: number | null = null;
+    const pushProgress: AddProgress = { sent: false };
     try {
       if (request.mediaType === "MOVIE") {
         // Forward the requester's stored quality profile (a REQUEST_ADVANCED web
         // requester may have chosen one) — parity with requests/[id] approve.
-        await addMovieToRadarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy);
+        await addMovieToRadarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy, pushProgress);
       } else {
-        pushedTvdbId = await addSeriesToSonarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy);
+        pushedTvdbId = await addSeriesToSonarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy, pushProgress);
       }
     } catch (err) {
-      console.error("[interactions] admin_approve arr push failed:", err);
-      // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
-      // may have flipped this row to AVAILABLE since we claimed it.
-      await prisma.mediaRequest.updateMany({ where: { id: requestId, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
-      arrFailed = true;
+      // Unknown only once the add itself was sent (AddProgress).
+      if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {
+        // No definite answer (a timeout, a dropped connection, a gateway
+        // 502/504): the arr may have added it. The approval stands, like the
+        // web PATCH; the sync re-pushes an APPROVED title the arr doesn't hold.
+        console.error("[interactions] admin_approve arr push outcome unknown, left APPROVED:", arrErrorMessage(err));
+        arrPushOutcomeUnknown = true;
+      } else {
+        console.error("[interactions] admin_approve arr push failed:", arrErrorMessage(err));
+        // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
+        // may have flipped this row to AVAILABLE since we claimed it.
+        await prisma.mediaRequest.updateMany({ where: { id: requestId, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
+        arrFailed = true;
+      }
     }
     // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
     // series by this point, so a P2025 (row deleted mid-push) or transient DB error
@@ -123,7 +134,7 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
       userName: adminName,
       action: "REQUEST_APPROVE",
       target: `request:${request.id}`,
-      details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord", arrFailed },
+      details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord", arrFailed, ...(arrPushOutcomeUnknown ? { arrPushOutcomeUnknown } : {}) },
       provider: "discord",
     });
     // Keep the admin request list live (parity with the web PATCH path's emit).

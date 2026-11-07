@@ -595,6 +595,42 @@ test("a FAILED push is REPORTED: `failed` names each rolled-back row, `arrError`
   assert.deepEqual(await (await doBatch(token, { ids: ["clean"], status: "APPROVED" })).json(), { ok: true });
 });
 
+// A gateway 504 after the add was sent is no answer: Radarr may already hold the
+// title. Like the single PATCH, the batch leaves that row APPROVED (the sync
+// re-pushes one the arr doesn't hold); only a definite failure rolls back.
+test("a batch push with no definite answer (gateway 504) stays APPROVED: reported apart from `failed`, notified, audited", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [
+    reqRow({ id: "ok", requestedBy: owner.userId, tmdbId: 100 }),
+    reqRow({ id: "slow", requestedBy: owner.userId, tmdbId: 777, title: "Slow Movie" }),
+    reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999, title: "Bad Movie" }),
+  ];
+  arrGatewayTmdbIds = new Set([777]);
+  arrFailTmdbIds = new Set([999]);
+  const res = await doBatch(token, { ids: ["ok", "slow", "bad"], status: "APPROVED" });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+
+  const slow = reqRows.find((r) => r.id === "slow")!;
+  assert.equal(slow.status, "APPROVED", "no rollback on an unknown outcome");
+  assert.ok(slow.pendingNotifyAt instanceof Date, "the backstop stays armed");
+  assert.equal(reqRows.find((r) => r.id === "bad")!.status, "PENDING", "a definite failure still rolls back");
+
+  assert.deepEqual(body.failed.map((f: { id: string }) => f.id), ["bad"], "the queue keeps only rolled-back rows selected");
+  assert.deepEqual(body.outcomeUnknown, ["slow"]);
+
+  await drainAfter();
+  const inbox = opsOf("notification.createMany").flatMap((o) => (o.args as { data: Array<{ requestId?: string }> }).data);
+  assert.equal(inbox.length, 2, "the approval stands for ok and slow, so both are told; bad is not");
+
+  for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+  const details = JSON.parse((opsOf("auditLog.create")[0].args as { data: { details: string } }).data.details);
+  assert.deepEqual(details.rolledBackIds, ["bad"]);
+  assert.deepEqual(details.outcomeUnknownIds, ["slow"]);
+  assert.equal(details.transitioned, 2);
+});
+
 // Sonarr has ALREADY accepted the series when the tvdbId write runs, so that write
 // must sit outside the try whose catch rolls APPROVED → PENDING — otherwise a
 // P2025 (row deleted mid-push) or a transient pool error reverts a request Sonarr

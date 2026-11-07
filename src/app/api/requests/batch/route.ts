@@ -3,7 +3,7 @@ import { emitNotificationEvents } from "@/lib/notify-agents";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrErrorMessageForClient } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrErrorMessageForClient, arrWriteOutcomeUnknown, type AddProgress } from "@/lib/arr";
 import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/discord-notify";
 import { notifyUsersRequestsApprovedPush, notifyUsersRequestsDeclinedPush } from "@/lib/push";
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail } from "@/lib/email";
@@ -236,6 +236,11 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   // quietly went back to PENDING — the reason existed only in the server log.
   const failureReasons = new Map<string, string>();
   let failures: { id: string; title: string; error: string }[] = [];
+  // Rows whose add was SENT but got no definite answer (a timeout, a dropped
+  // connection, a gateway 502/504). The arr may have added the title, so they
+  // stay APPROVED like the single PATCH; the sync re-pushes an APPROVED title
+  // the arr doesn't hold. Never in failedIds.
+  const outcomeUnknownIds = new Set<string>();
 
   if (typedStatus === "APPROVED") {
     // Load the full rows for just the ids THIS call claimed (the claim above
@@ -246,6 +251,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
 
     await settleLimit(approved, ARR_CONCURRENCY, async (r) => {
       let pushedTvdbId: number | null = null;
+      const pushProgress: AddProgress = { sent: false };
       try {
         const variant = r.arrInstance;
         // Honor the profile the requester chose at request time (REQUEST_ADVANCED);
@@ -253,15 +259,22 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
         // and the sync re-push — batch approve previously discarded it.
         const profileId = r.qualityProfileId ?? undefined;
         if (r.mediaType === "MOVIE") {
-          await addMovieToRadarr(r.tmdbId, variant, profileId, r.requestedBy);
+          await addMovieToRadarr(r.tmdbId, variant, profileId, r.requestedBy, pushProgress);
         } else {
-          pushedTvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy);
+          pushedTvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy, pushProgress);
         }
       } catch (err) {
-        console.error("[arr] Batch approve push failed for", r.id, arrErrorMessage(err));
-        failedIds.add(r.id);
-        // The kind, never the arr's internal URL: the caller may be a delegate (guardrail 5g).
-        failureReasons.set(r.id, arrErrorMessageForClient(err, t));
+        // Unknown only once the add itself was sent: a failure before it (a
+        // lookup, a dark arr refusing the connection) added nothing.
+        if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {
+          console.error("[arr] Batch approve push outcome unknown, left APPROVED:", r.id, arrErrorMessage(err));
+          outcomeUnknownIds.add(r.id);
+        } else {
+          console.error("[arr] Batch approve push failed for", r.id, arrErrorMessage(err));
+          failedIds.add(r.id);
+          // The kind, never the arr's internal URL: the caller may be a delegate (guardrail 5g).
+          failureReasons.set(r.id, arrErrorMessageForClient(err, t));
+        }
       }
       // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
       // series by this point, so a P2025 (row deleted mid-push) or transient DB error
@@ -385,6 +398,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       ids: typedIds,
       claimedIds,
       rolledBackIds: [...failedIds],
+      ...(outcomeUnknownIds.size > 0 ? { outcomeUnknownIds: [...outcomeUnknownIds] } : {}),
       transitioned: claimedIds.length - failedIds.size,
       adminNote: typedAdminNote ?? null,
       permanent: typedPermanent,
@@ -396,9 +410,12 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   // PENDING; `arrError` is the one-line summary the single-request PATCH already
   // returns under the same name, which the group Approve button renders as-is.
   // Both are omitted when every push landed, so a clean batch reads as before.
+  // Additive: `outcomeUnknown` lists the ids whose add got no answer and that
+  // stay APPROVED (never in `failed`, which the queue keeps selected for retry).
   return NextResponse.json({
     ok: true,
     ...(failures.length > 0 ? { failed: failures, arrError: summarizeArrFailures(failures, t) } : {}),
+    ...(outcomeUnknownIds.size > 0 ? { outcomeUnknown: [...outcomeUnknownIds] } : {}),
   });
 });
 

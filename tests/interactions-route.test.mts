@@ -1242,6 +1242,36 @@ test("admin_approve button: the outbound request.approved carries the ROW's id, 
   );
 });
 
+// A gateway 504 after the add was sent is no answer: Radarr may already hold the
+// title. Like the web PATCH, the approval stands (the sync re-pushes one the arr
+// doesn't hold); a definite failure still rolls back.
+test("admin_approve: a push with no definite answer (gateway 504) stays APPROVED and is announced; a 500 still rolls back", async () => {
+  seedDecisionFixture("");
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  agentRows.push(agentRow("request.approved"));
+  radarrAddStatus = 504;
+  await post(button("admin_approve:req-1"));
+  await waitFor(() => agentPosts.length >= 1, 400);
+  assert.ok(fetchCalls.some((u) => u.hostname === RADARR_HOST && u.pathname.endsWith("/api/v3/movie")), "fixture sanity: the add was sent");
+  assert.equal(requestRows[0].status, "APPROVED", "no rollback on an unknown outcome");
+  assert.ok(requestRows[0].pendingNotifyAt instanceof Date, "the backstop stays armed");
+  assert.deepEqual(agentPosts.map((p) => p.event), ["request.approved"], "the approval stands, so it is announced");
+  assert.equal((await finalEmbedEdit()).embeds?.[0]?.title, "✅ Approved — The Matrix");
+  assert.ok(errors.some((e) => e.includes("admin_approve arr push outcome unknown")));
+
+  // Control: a definite refusal rolls back exactly as before.
+  seedDecisionFixture("");
+  agentPosts.length = 0;
+  discordEdits.length = 0;
+  radarrAddStatus = 500;
+  await post(button("admin_approve:req-1"));
+  const edit = await finalEmbedEdit();
+  assert.equal(requestRows[0].status, "PENDING");
+  assert.equal(edit.embeds?.[0]?.title, "⚠️ Approved (arr failed) — The Matrix");
+  assert.deepEqual(agentPosts, []);
+});
+
 // ── admin buttons: the final edit clears the timeout's `content` ────────────
 // Discord's edit-webhook-message is a PARTIAL PATCH — omitted fields keep their
 // value. withDiscordTimeout writes "This is taking longer than expected…" into
