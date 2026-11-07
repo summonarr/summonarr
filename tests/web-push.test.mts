@@ -419,3 +419,21 @@ test("sendPushNotification: private/loopback endpoints are blocked by the SSRF p
   });
   assert.equal(calls.length, 0);
 });
+
+test("VAPID JWT: every signature is a verifiable 64-byte r||s, including r/s with leading zero bytes", async () => {
+  // About 1 in 128 signatures has a 0x00 high byte in r or s — the case a
+  // hand-rolled DER conversion gets wrong. Sign enough times to meet some.
+  const ua = makeUa("https://203.0.113.5/wp/box-loop");
+  const keyObj = vapidPublicKeyObject(VAPID.publicKey);
+  for (let i = 0; i < 64; i++) {
+    const { calls } = await withFetchStub(ok201, () => sendPushNotification(ua.subscription, "hello", SEND_OPTS));
+    const m = calls[0].headers.get("authorization")!.match(/^vapid t=([A-Za-z0-9_.-]+), k=/);
+    assert.ok(m);
+    const { signingInput, signature } = parseJwt(m[1]);
+    assert.equal(signature.length, 64);
+    assert.equal(
+      createVerify("sha256").update(signingInput).verify({ key: keyObj, dsaEncoding: "ieee-p1363" }, signature),
+      true,
+    );
+  }
+});

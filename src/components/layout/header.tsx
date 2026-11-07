@@ -16,15 +16,8 @@ import { useSummonarrSession } from "@/components/auth/summonarr-session-provide
 import { getVisibleAdminItems } from "@/lib/nav-items";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { NotificationBell } from "@/components/layout/notification-bell";
-
-async function signOutAndRedirect(callbackUrl: string) {
-  try {
-    await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
-  } catch {
-    // Best-effort: redirect to the login page even if the request failed.
-  }
-  window.location.href = withBasePath(callbackUrl);
-}
+import { signOutAndRedirect } from "@/components/auth/sign-out";
+import { avatarInitials } from "@/lib/avatar-initials";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useDetailTitle } from "@/components/layout/detail-title";
@@ -107,6 +100,11 @@ export function SearchBar({
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      // The desktop header's instance stays mounted below lg inside a
+      // display:none bar. A hidden input has no offsetParent: leave the key
+      // alone there, so it neither swallows the browser's own Ctrl+K nor takes
+      // focus from the instance that is actually on screen.
+      if (!inputRef.current || inputRef.current.offsetParent === null) return;
       if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         inputRef.current?.focus();
@@ -120,6 +118,13 @@ export function SearchBar({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // Results that land after the user clicked away (or pressed Escape) must not
+  // pop the list back open over the page: open only while focus is still in
+  // the search. The results themselves are kept for when it is refocused.
+  function openIfStillActive() {
+    if (containerRef.current?.contains(document.activeElement)) setOpen(true);
+  }
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -156,13 +161,13 @@ export function SearchBar({
         setResults(Array.isArray(data) ? (data as TmdbMedia[]).slice(0, 8) : []);
         setSearchFailed(!res.ok || !Array.isArray(data));
         setActiveIndex(-1);
-        setOpen(true);
+        openIfStillActive();
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           setResults([]);
           setSearchFailed(true);
           setActiveIndex(-1);
-          setOpen(true);
+          openIfStillActive();
         }
       } finally {
         // Only the newest request may clear the spinner. An aborted older
@@ -265,11 +270,10 @@ export function SearchBar({
           }}
           onFocus={() => setOpen(true)}
           onKeyDown={handleInputKeyDown}
-          className="flex-1 min-w-0 bg-transparent border-0 outline-none rounded-sm focus-visible:ring-2 focus-visible:ring-ring"
-          style={{
-            fontSize: variant === "full" ? 14 : 13,
-            color: "var(--ds-fg)",
-          }}
+          // The full variant is the mobile search sheet: 16px below md, or iOS
+          // Safari zooms the page on focus. The compact one shows only at lg+.
+          className={`flex-1 min-w-0 bg-transparent border-0 outline-none rounded-sm focus-visible:ring-2 focus-visible:ring-ring ${variant === "full" ? "text-base md:text-sm" : "text-[13px]"}`}
+          style={{ color: "var(--ds-fg)" }}
         />
         {loading ? (
           <Loader2
@@ -362,8 +366,15 @@ export function SearchBar({
                 <button
                   key={`${media.mediaType}-${media.id}`}
                   id={`${optionIdBase}-option-${i}`}
+                  type="button"
                   role="option"
                   aria-selected={activeIndex === i}
+                  // Combobox pattern: focus stays on the input (the active
+                  // option is announced via aria-activedescendant), so the
+                  // options are out of the tab order and a click doesn't blur
+                  // the input.
+                  tabIndex={-1}
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={() => handleSelect(media)}
                   className="flex items-center gap-2.5 w-full text-left transition-colors"
                   style={{
@@ -470,11 +481,7 @@ export function Header() {
   // `image` isn't part of SummonarrSession (the session is kept slim), so this
   // is normally undefined and the avatar shows the user's initials instead.
   const sessionUserImage = (session?.user as { image?: string | null } | undefined)?.image;
-  const initials = session?.user?.name
-    ?.split(" ")
-    .map((n: string) => n[0])
-    .join("")
-    .toUpperCase();
+  const initials = avatarInitials(session?.user?.name);
 
   const detailTitle = useDetailTitle();
   const crumbs = breadcrumbFor(pathname, detailTitle, t);
@@ -585,7 +592,7 @@ export function Header() {
                   color: "var(--ds-fg)",
                 }}
               >
-                {initials ?? "?"}
+                {initials}
               </AvatarFallback>
             </Avatar>
           </DropdownMenuTrigger>

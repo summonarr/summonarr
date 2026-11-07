@@ -19,29 +19,41 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   const router = useRouter();
   const { toast } = useToast();
   const t = useT();
-  // Which action is in flight: both buttons disable, only the clicked one spins.
+  // Which action is in flight: both buttons disable. The dismiss confirm spins
+  // until the PATCH answers; an unvote hides its own button at once.
   const [pending, setPending] = useState<"unvote" | "dismiss" | null>(null);
   const loading = pending !== null;
 
-  const [voted, setVoted] = useState(userVoted);
+  // `userVoted` is live: the rows are keyed by title, so a router.refresh()
+  // (after another row's action, or a vote cast in another tab) re-renders
+  // this instance with the server's answer. `override` is this row's own
+  // optimistic state, dropped once the prop moves and nothing is in flight.
+  const [override, setOverride] = useState<boolean | null>(null);
+  const [seenUserVoted, setSeenUserVoted] = useState(userVoted);
+  if (userVoted !== seenUserVoted && !loading) {
+    setSeenUserVoted(userVoted);
+    setOverride(null);
+  }
+  const voted = override ?? userVoted;
   const [dismissed, setDismissed] = useState(false);
   const [confirmingDismiss, setConfirmingDismiss] = useState(false);
 
   async function handleUnvote() {
     if (loading) return;
     setPending("unvote");
-    setVoted(false);
+    setOverride(false);
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
       if (res.ok) {
         toast({ title: t("personal.votes.removed"), variant: "success" });
         router.refresh();
       } else {
-        setVoted(true);
+        // Back to the PRE-CLICK state (voted), never the possibly stale prop.
+        setOverride(true);
         toast({ title: rateLimitMessage(res, t) ?? t("personal.votes.removeFailed"), variant: "error" });
       }
     } catch {
-      setVoted(true);
+      setOverride(true);
       toast({ title: t("personal.votes.removeFailed"), variant: "error" });
     } finally {
       setPending(null);
@@ -51,19 +63,18 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   async function handleDismiss() {
     if (loading) return;
     setPending("dismiss");
-    setDismissed(true);
-    setConfirmingDismiss(false);
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "PATCH" });
       if (res.ok) {
+        setDismissed(true);
         toast({ title: t("personal.votes.dismissed"), variant: "success" });
         router.refresh();
       } else {
-        setDismissed(false);
+        setConfirmingDismiss(false);
         toast({ title: rateLimitMessage(res, t) ?? t("personal.votes.dismissFailed"), variant: "error" });
       }
     } catch {
-      setDismissed(false);
+      setConfirmingDismiss(false);
       toast({ title: t("personal.votes.dismissFailed"), variant: "error" });
     } finally {
       setPending(null);
@@ -90,7 +101,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           aria-label={t("request.vote.votedLabel")}
           className="flex items-center gap-1.5 min-h-[32px] text-xs px-3 py-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 transition-colors disabled:opacity-50"
         >
-          {pending === "unvote" ? <Loader2 className="w-3 h-3 animate-spin" /> : <ThumbsUp className="w-3 h-3" />}
+          <ThumbsUp className="w-3 h-3" />
           {t("personal.votes.voted")}
         </button>
       )}
@@ -100,7 +111,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           disabled={loading}
           className="flex items-center gap-1.5 min-h-[32px] text-xs px-3 py-1.5 rounded-lg border border-red-500/50 bg-red-600/10 text-red-400 hover:bg-red-600/20 transition-colors disabled:opacity-50"
         >
-          {pending === "dismiss" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+          <Trash2 className="w-3 h-3" />
           {t("personal.votes.dismiss")}
         </button>
       )}

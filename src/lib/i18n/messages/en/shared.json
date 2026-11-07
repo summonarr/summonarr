@@ -2,6 +2,7 @@
   "shared.bell.empty": "No notifications yet.",
   "shared.bell.viewAll": "View all",
   "shared.common.dismiss": "Dismiss",
+  "shared.common.loading": "Loading…",
   "shared.common.cancel": "Cancel",
   "shared.maintenance.active": "Maintenance mode is active.",
   "shared.maintenance.blocked": "Non-admin users are blocked.",
@@ -56,5 +57,10 @@
   "shared.common.clearSearch": "Clear search",
   "shared.thread.placeholderShortcut": "Write a message… ({shortcut} to send)",
   "shared.rateLimited.generic": "Too many requests. Please try again shortly.",
-  "shared.rateLimited.seconds": "Too many requests. Try again in {seconds}s."
+  "shared.rateLimited.seconds": "Too many requests. Try again in {seconds}s.",
+  "shared.upload.chunkFailed": "Part {chunk} of {total} failed to upload (HTTP {status}).",
+  "shared.upload.nonJson": "The server sent an unexpected response. The request was probably redirected, for example to the sign-in page.",
+  "shared.upload.noCompletion": "The upload finished, but the server never confirmed the restore.",
+  "shared.upload.network": "The upload failed. Check your connection and try again.",
+  "shared.upload.cancelled": "Upload cancelled."
 }

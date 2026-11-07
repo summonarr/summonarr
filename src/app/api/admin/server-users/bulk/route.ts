@@ -52,7 +52,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   });
 
   const updated = await prisma.mediaServerUser.updateMany({
-    where: { id: { in: targets.map((t) => t.id) } },
+    where: { id: { in: targets.map((row) => row.id) } },
     data: { downloadsEnabled },
   });
 
@@ -61,10 +61,10 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   // every user to the default server would push unknown (or colliding) ids
   // there while their own server never got the policy.
   const byInstance = new Map<string, typeof targets>();
-  for (const t of targets) {
-    const list = byInstance.get(t.serverInstance);
-    if (list) list.push(t);
-    else byInstance.set(t.serverInstance, [t]);
+  for (const row of targets) {
+    const list = byInstance.get(row.serverInstance);
+    if (list) list.push(row);
+    else byInstance.set(row.serverInstance, [row]);
   }
 
   let pushed = 0;

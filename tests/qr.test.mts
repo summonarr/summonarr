@@ -94,3 +94,10 @@ test("encoding is deterministic, UTF-8 aware, and the SVG path has one square pe
   assert.equal(viewBox, `0 0 ${a.size + 8} ${a.size + 8}`);
   assert.throws(() => encodeQr("z".repeat(3000), "H"), RangeError);
 });
+
+test("a forced mask outside 0-7 or not an integer is refused, not drawn into the format bits", () => {
+  for (const bad of [8, -1, 1.5, Number.NaN, 255]) {
+    assert.throws(() => encodeQr("x", "M", bad), RangeError, `mask ${bad}`);
+  }
+  for (let mask = 0; mask < 8; mask++) assert.equal(encodeQr("x", "M", mask).mask, mask);
+});

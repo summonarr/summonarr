@@ -1,16 +1,24 @@
 import { NextResponse } from "next/server";
+import type { Prisma } from "@/generated/prisma";
 import { auditContext, logAudit } from "@/lib/audit";
 import { withAuth } from "@/lib/api-auth";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
-import { normalizeEmail } from "@/lib/auth";
+import { normalizeEmail, PLAUSIBLE_EMAIL_RE } from "@/lib/email-normalize";
 import { isNotificationEmailEnabled } from "@/lib/email";
 import { prisma } from "@/lib/prisma";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
-// RFC-5322-lite: local@domain, at least one dot in the domain, no whitespace.
-// Intentionally loose — SMTP will reject anything the regex lets through.
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// The boolean preference columns a PATCH may set. Each must be a User column:
+// `data` is typed as Prisma's update input, so a misspelt key fails to compile.
+const PREF_KEYS = [
+  "notifyOnApproved", "notifyOnAvailable", "notifyOnDeclined",
+  "emailOnApproved", "emailOnAvailable", "emailOnDeclined",
+  "pushOnApproved", "pushOnAvailable", "pushOnDeclined",
+  "notifyOnIssue",
+  "notifyOnComment", "emailOnComment", "pushOnComment",
+] as const satisfies ReadonlyArray<keyof Prisma.UserUpdateInput>;
+type PrefKey = (typeof PREF_KEYS)[number];
 
 // Current notification preferences for the signed-in user. The web settings
 // page reads these server-side; native clients need a REST surface.
@@ -42,31 +50,17 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   // profile delete/password routes. GET stays open.
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
-  const parsed = await readJsonCapped<{
-    notifyOnApproved?: boolean; notifyOnAvailable?: boolean; notifyOnDeclined?: boolean;
-    emailOnApproved?: boolean;  emailOnAvailable?: boolean;  emailOnDeclined?: boolean;
-    pushOnApproved?: boolean;   pushOnAvailable?: boolean;   pushOnDeclined?: boolean;
-    notifyOnIssue?: boolean;
-    notifyOnComment?: boolean; emailOnComment?: boolean; pushOnComment?: boolean;
-    notificationEmail?: string | null;
-  }>(req, 16384);
+  const parsed = await readJsonCapped<Partial<Record<PrefKey, unknown>> & { notificationEmail?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const data: Record<string, boolean | string | null> = {};
-  if (typeof body.notifyOnApproved === "boolean") data.notifyOnApproved = body.notifyOnApproved;
-  if (typeof body.notifyOnAvailable === "boolean") data.notifyOnAvailable = body.notifyOnAvailable;
-  if (typeof body.notifyOnDeclined === "boolean") data.notifyOnDeclined = body.notifyOnDeclined;
-  if (typeof body.emailOnApproved === "boolean")  data.emailOnApproved  = body.emailOnApproved;
-  if (typeof body.emailOnAvailable === "boolean") data.emailOnAvailable = body.emailOnAvailable;
-  if (typeof body.emailOnDeclined === "boolean")  data.emailOnDeclined  = body.emailOnDeclined;
-  if (typeof body.pushOnApproved === "boolean")   data.pushOnApproved   = body.pushOnApproved;
-  if (typeof body.pushOnAvailable === "boolean")  data.pushOnAvailable  = body.pushOnAvailable;
-  if (typeof body.pushOnDeclined === "boolean")   data.pushOnDeclined   = body.pushOnDeclined;
-  if (typeof body.notifyOnIssue === "boolean")    data.notifyOnIssue    = body.notifyOnIssue;
-  if (typeof body.notifyOnComment === "boolean")  data.notifyOnComment  = body.notifyOnComment;
-  if (typeof body.emailOnComment === "boolean")   data.emailOnComment   = body.emailOnComment;
-  if (typeof body.pushOnComment === "boolean")    data.pushOnComment    = body.pushOnComment;
+  // Non-boolean values and unknown keys are ignored (the iOS client PATCHes the
+  // whole prefs object back).
+  const data: Prisma.UserUpdateInput = {};
+  for (const key of PREF_KEYS) {
+    const v = body[key];
+    if (typeof v === "boolean") data[key] = v;
+  }
 
   // notificationEmail is Jellyfin-users-only: Plex and OIDC notificationEmail values are
   // owned by the auth provider and synced on every sign-in in src/lib/auth.ts. Allowing
@@ -82,7 +76,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     if (raw === null || (typeof raw === "string" && raw.trim() === "")) {
       data.notificationEmail = null;
     } else if (typeof raw === "string") {
-      if (raw.length > 320 || !EMAIL_RE.test(raw.trim())) {
+      if (raw.length > 320 || !PLAUSIBLE_EMAIL_RE.test(raw.trim())) {
         return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
       }
       // A Jellyfin-authenticated user has no provider-verified email the way Plex

@@ -31,6 +31,8 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
 import { canRequest } from "@/lib/permissions";
+import { parsePageNumber } from "@/lib/pagination";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 const PER_PAGE = 100;
 
@@ -66,7 +68,7 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function ForYouPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.page.forYou");
   const [sp, session, plexEnabled, jellyfinEnabled, t] = await Promise.all([
@@ -76,10 +78,11 @@ export default async function ForYouPage({
     isFeatureEnabled("feature.integration.jellyfin"),
     getTranslator(),
   ]);
-  const availability = parseAvailability(sp.filter);
-  const type = parseRecommendationType(sp.type);
-  const sort = parseRecommendationSort(sp.sort);
-  const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+  // A repeated key arrives as an array; each parser reads its first value.
+  const availability = parseAvailability(first(sp.filter));
+  const type = parseRecommendationType(first(sp.type));
+  const sort = parseRecommendationSort(first(sp.sort));
+  const page = parsePageNumber(sp.page);
   // Integration flags passed explicitly — they default to TRUE when omitted.
   const { showPlex, showJellyfin } = getBadgeVisibility(session, {
     plex: plexEnabled,

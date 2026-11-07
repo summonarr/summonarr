@@ -196,6 +196,7 @@ model User {
   requestComments   RequestComment[]
   issueGrabs        IssueGrab[]
   pushSubscriptions PushSubscription[]
+  pushRemovals      PushSubscriptionRemoval[]
   deletionVotes     DeletionVote[]
   discordLinkToken  DiscordLinkToken?
   discordMergeCode  DiscordMergeCode?
@@ -232,6 +233,25 @@ model PushSubscription {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// A web push endpoint whose row was REMOVED on purpose — the profile's "Remove
+// device", or the per-user cap evicting it. That browser still holds its
+// subscription and re-sends it on every page load (the bell's resync,
+// push-notifications.tsx), so without this the removal was undone on its next
+// visit. A resync of a tombstoned endpoint is refused (410); a deliberate
+// subscribe clears it. The 6g sign-out/password wipe writes none: its resync is
+// how the owner's own browsers come back. Holds a hash, never the endpoint
+// (push-registration.ts); a few dozen newest per user are kept.
+model PushSubscriptionRemoval {
+  id           String   @id @default(cuid(2))
+  userId       String
+  endpointHash String
+  removedAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, endpointHash])
 }
 
 // Admin-configured outbound notification channel (generic JSON webhook, ntfy,
@@ -1440,6 +1460,10 @@ model PlayHistory {
   // whole table on every admin TV page view. The movie twin is served by
   // [source, sourceItemId, …] above (never-watched-data.ts scopes it by source).
   @@index([sourceShowId])
+  // The Activity page resolves a live session with no tmdbId by its title
+  // (a DISTINCT ON ("title", "mediaType") lookup on every render and live
+  // refresh); without this it scans the whole table each time.
+  @@index([title, mediaType])
 }
 
 model ActiveSession {
@@ -1662,7 +1686,8 @@ model AutoRequestLedger {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   tmdbId    Int
   mediaType MediaType
-  // "watchlist" (Summonarr watchlist add) | "plex-watchlist" (the cron)
+  // An AutoRequestSource: "watchlist" (Summonarr watchlist add) |
+  // "plex-watchlist" (the Plex cron) | "trakt-watchlist" (the Trakt cron)
   source    String    @db.VarChar(32)
   // An AutoRequestOutcome — see src/lib/auto-request.ts
   outcome   String    @db.VarChar(32)

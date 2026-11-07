@@ -17,14 +17,12 @@ const LIST_CAP = 500;
 export default async function HiddenPage() {
   const session = await requireAppSession();
   const t = await getTranslator();
-  const items = session
-    ? await prisma.hiddenItem.findMany({
-        where: { userId: session.user.id },
-        select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
-        orderBy: { createdAt: "desc" },
-        take: LIST_CAP,
-      })
-    : [];
+  const items = await prisma.hiddenItem.findMany({
+    where: { userId: session.user.id },
+    select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
+    orderBy: { createdAt: "desc" },
+    take: LIST_CAP,
+  });
 
   return (
     <div className="ds-page-enter">

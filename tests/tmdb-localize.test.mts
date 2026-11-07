@@ -27,6 +27,12 @@
 //    through the prewarm + a concurrent biography read, sweeping the newcomer's
 //    arrival across every microtask offset so the pin survives internal
 //    refactors that shift the chains by a tick.
+//  - the prewarm holds at most MAX_IN_FLIGHT of its own titles in that limiter,
+//    so a viewer's miss takes the next free slot instead of queueing behind the
+//    rest of a 500-title chunk; a TMDB 404 is cached as an answer ({}), never
+//    re-fetched every run as a failure;
+//  - a collection name or biography that isn't cached within the miss budget
+//    falls back to English, and the late answer still fills the cache.
 //
 // No DB or network: prisma.tmdbCache is an in-memory map, fetch is scripted,
 // dns.lookup is stubbed (the tests/tmdb.test.mts harness).
@@ -402,9 +408,97 @@ test("prewarm: an aborted signal stops before fetching", async () => {
 });
 
 
+test("prewarm: a TMDB 404 is a definitive answer — cached as {}, counted fetched, not fetched again", async () => {
+  users = [{ id: "u", locale: "de", deactivatedAt: null }];
+  library = [{ tmdbId: 96, mediaType: "MOVIE" }, { tmdbId: 97, mediaType: "MOVIE" }];
+  respond = (url) =>
+    url.pathname === "/3/movie/96"
+      ? json({ status_message: "The resource you requested could not be found." }, 404)
+      : json({ translations: { translations: [] }, images: { posters: [] } });
+  const first = await prewarmTitleTranslations();
+  assert.deepEqual(first, { skipped: false, candidates: 2, fetched: 2, failed: 0 }, "a dead id is not a failed run");
+  const row = cacheRows.get("movie:96:i18n:v2");
+  assert.ok(row, "the 404 is cached");
+  assert.deepEqual(JSON.parse(row.data), {});
+  const ttlDays = (row.expiresAt.getTime() - Date.now()) / 86_400_000;
+  assert.ok(ttlDays > 13 && ttlDays <= 14, `a shorter TTL than a real answer (${ttlDays.toFixed(1)} days)`);
+
+  fetched.length = 0;
+  const second = await prewarmTitleTranslations();
+  assert.equal(second.fetched + second.failed, 0);
+  assert.equal(fetched.length, 0, "the dead id is not fetched again");
+});
+
 // ── the in-flight cap (guardrail 31) ────────────────────────────────────────
 
 const settle = () => new Promise<void>((r) => setImmediate(r));
+const until = async (pred: () => boolean, label: string) => {
+  for (let i = 0; i < 500 && !pred(); i++) await settle();
+  assert.ok(pred(), label);
+};
+// Every translation endpoint answers "nothing translated" in its own shape.
+const emptyTranslations = (path: string) =>
+  path.includes("/person/") || path.includes("/collection/")
+    ? json({ translations: [] })
+    : json({ translations: { translations: [] }, images: { posters: [] } });
+
+test("a collection name or biography past the miss budget falls back to English; the late answer still fills the cache", async () => {
+  const held = new Map<string, Deferred<Response>>();
+  respond = (url) => {
+    const d = deferred<Response>();
+    held.set(url.pathname, d);
+    return d.promise;
+  };
+  // Raced against a much longer timer so a missing budget fails here, not at the test timeout.
+  const bounded = <T,>(p: Promise<T>) =>
+    Promise.race([p, new Promise<"no answer">((r) => setTimeout(() => r("no answer"), 1_000))]);
+  try {
+    assert.equal(await bounded(localizedCollectionName(71, "Thing Collection", "fr", { budgetMs: 20 })), "Thing Collection");
+    assert.equal(await bounded(localizedBiography(81, "fr", { budgetMs: 20 })), null);
+  } finally {
+    held.get("/3/collection/71/translations")?.resolve(json({ translations: [{ iso_639_1: "fr", iso_3166_1: "FR", data: { title: "Saga Truc" } }] }));
+    held.get("/3/person/81/translations")?.resolve(json({ translations: [{ iso_639_1: "fr", iso_3166_1: "FR", data: { biography: "Biographie" } }] }));
+  }
+  await until(() => cacheRows.has("collection:71:i18n:v1") && cacheRows.has("person:81:i18n:v1"), "the background fetches wrote the cache");
+  fetched.length = 0;
+  assert.equal(await localizedCollectionName(71, "Thing Collection", "fr"), "Saga Truc");
+  assert.equal(await localizedBiography(81, "fr"), "Biographie");
+  assert.equal(fetched.length, 0, "the next view reads the cache");
+});
+
+test("prewarm: a viewer's miss takes the next free slot instead of queueing behind the rest of the chunk", async () => {
+  users = [{ id: "u", locale: "fr", deactivatedAt: null }];
+  library = Array.from({ length: MAX_IN_FLIGHT + 3 }, (_, i) => ({ tmdbId: 7600 + i, mediaType: "MOVIE" }));
+  const pending = new Map<string, Deferred<Response>>();
+  const order: string[] = [];
+  respond = (url) => {
+    order.push(url.pathname);
+    const d = deferred<Response>();
+    pending.set(url.pathname, d);
+    return d.promise;
+  };
+  const release = (path: string) => {
+    pending.get(path)!.resolve(emptyTranslations(path));
+    pending.delete(path);
+  };
+  const run = prewarmTitleTranslations();
+  await until(() => order.length === MAX_IN_FLIGHT, `${MAX_IN_FLIGHT} prewarm fetches in flight`);
+  const bio = localizedBiography(9700, "fr", { budgetMs: 60_000 });
+  for (let i = 0; i < 4; i++) await settle();
+  assert.equal(order.length, MAX_IN_FLIGHT, "the biography waits for a slot");
+
+  release(order[0]);
+  await until(() => order.length === MAX_IN_FLIGHT + 1, "a freed slot is taken");
+  assert.equal(order[MAX_IN_FLIGHT], "/3/person/9700/translations", "the viewer's fetch goes before the next prewarm title");
+
+  let done = false;
+  void Promise.allSettled([run, bio]).then(() => { done = true; });
+  while (!done) {
+    for (const path of [...pending.keys()]) release(path);
+    await settle();
+  }
+  assert.equal(order.length, MAX_IN_FLIGHT + 4, "every prewarm title still ran");
+});
 
 test("createInFlightLimiter: a finishing task hands its slot to the parked waiter — a newcomer in the wake-up gap never runs on top of it", async () => {
   // The waiter resumes one microtask AFTER the finishing task's `finally` wakes
@@ -448,14 +542,15 @@ test("createInFlightLimiter: FIFO, and a rejecting task still passes its slot on
 });
 
 test("translation fetches never exceed MAX_IN_FLIGHT across concurrent callers, whatever microtask a newcomer lands on", async () => {
-  // End to end through the real limiter singleton: the prewarm parks seven
-  // titles (six fetch, one waits), one of the six is released and its cache
-  // write is held at the gate so its slot hand-off happens a known distance
-  // from where a concurrent biography read (another caller, another request)
-  // enters the limiter. The newcomer's arrival is swept across microtask
-  // offsets 0..8 — the hand-off-to-resumption gap is one specific offset, and
-  // the sweep finds it without the test knowing how many awaits sit inside
-  // setCache or getCacheMany.
+  // End to end through the real limiter singleton: the prewarm fills every slot
+  // with its own titles and a collection-name read (a second caller) parks
+  // behind them. One prewarm fetch is released and its cache write is held at
+  // the gate, so its slot hand-off to that parked read happens a known
+  // distance from where a concurrent biography read (a third caller) enters
+  // the limiter. The newcomer's arrival is swept across microtask offsets
+  // 0..8 — the hand-off-to-resumption gap is one specific offset, and the sweep
+  // finds it without the test knowing how many awaits sit inside setCache or
+  // getCacheMany.
   users = [{ id: "u", locale: "fr", deactivatedAt: null }];
   const pending = new Map<string, Deferred<Response>>();
   let inFlight = 0;
@@ -471,20 +566,17 @@ test("translation fetches never exceed MAX_IN_FLIGHT across concurrent callers, 
     const d = pending.get(path)!;
     pending.delete(path);
     inFlight--;
-    d.resolve(path.includes("/person/") ? json({ translations: [] }) : json({ translations: { translations: [] }, images: { posters: [] } }));
-  };
-  const until = async (pred: () => boolean, label: string) => {
-    for (let i = 0; i < 500 && !pred(); i++) await settle();
-    assert.ok(pred(), label);
+    d.resolve(emptyTranslations(path));
   };
 
   for (let d = 0; d <= 8; d++) {
     const base = 7000 + d * 10;
-    library = Array.from({ length: MAX_IN_FLIGHT + 1 }, (_, i) => ({ tmdbId: base + i, mediaType: "MOVIE" }));
+    library = Array.from({ length: MAX_IN_FLIGHT }, (_, i) => ({ tmdbId: base + i, mediaType: "MOVIE" }));
     const run = prewarmTitleTranslations();
     await until(() => inFlight === MAX_IN_FLIGHT, `d=${d}: ${MAX_IN_FLIGHT} fetches in flight`);
-    await settle();
-    assert.equal(inFlight, MAX_IN_FLIGHT, `d=${d}: the ${MAX_IN_FLIGHT + 1}th title is parked, not fetched`);
+    const waiter = localizedCollectionName(8000 + d, "Collection", "fr", { budgetMs: 60_000 });
+    for (let i = 0; i < 4; i++) await settle();
+    assert.equal(inFlight, MAX_IN_FLIGHT, `d=${d}: the collection read is parked, not fetched`);
 
     // Release one fetch; its chain runs on to setCache, where the gate holds it.
     const [aPath] = [...pending.keys()];
@@ -495,7 +587,7 @@ test("translation fetches never exceed MAX_IN_FLIGHT across concurrent callers, 
     await until(() => upsertGateReached, `d=${d}: the released fetch reached its cache write`);
     upsertGate.resolve(); // its slot hand-off is now a fixed number of microtasks away
     for (let i = 0; i < d; i++) await null;
-    const bio = localizedBiography(9000 + d, "fr"); // the newcomer enters the limiter d ticks later
+    const bio = localizedBiography(9000 + d, "fr", { budgetMs: 60_000 }); // the newcomer enters the limiter d ticks later
     for (let i = 0; i < 4; i++) await settle();
     assert.ok(most <= MAX_IN_FLIGHT, `d=${d}: ${most} translation fetches in flight at once — the cap is ${MAX_IN_FLIGHT}`);
 
@@ -503,12 +595,13 @@ test("translation fetches never exceed MAX_IN_FLIGHT across concurrent callers, 
     gatedUpsertKey = null;
     upsertGate = null;
     let done = false;
-    void Promise.allSettled([run, bio]).then(() => { done = true; });
+    void Promise.allSettled([run, waiter, bio]).then(() => { done = true; });
     while (!done) {
       for (const path of [...pending.keys()]) release(path);
       await settle();
     }
     assert.equal(inFlight, 0, `d=${d}: drained`);
+    assert.equal(cacheRows.has(`collection:${8000 + d}:i18n:v1`), true, `d=${d}: the parked read did run`);
     assert.equal(cacheRows.has(`person:${9000 + d}:i18n:v1`), true, `d=${d}: the newcomer did run`);
   }
 });

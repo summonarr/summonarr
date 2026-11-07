@@ -19,6 +19,10 @@
   "settings.cron.error": "Erreur",
   "settings.cron.running": "En cours",
   "settings.cron.run": "Exécuter",
+  "settings.cron.runNamed": "Exécuter {name}",
+  "settings.cron.runningNamed": "{name} en cours",
+  "settings.cron.skipped": "Ignoré, rien n'a été exécuté : {reason}",
+  "settings.cron.skippedNoReason": "Ignoré, rien n'a été exécuté",
   "settings.cron.interval.hourly": "toutes les heures",
   "settings.cron.interval.daily": "tous les jours",
   "settings.cron.interval.weekly": "toutes les semaines",
@@ -42,6 +46,8 @@
   "settings.cron.job.warmLibrary.description": "Métadonnées TMDB pour toute la bibliothèque + le graphe de suggestions « Pour vous »",
   "settings.cron.job.purgeSessions.name": "Purge des sessions",
   "settings.cron.job.purgeSessions.description": "Supprime les sessions d'authentification expirées",
+  "settings.cron.job.purgeNotifications.name": "Purge des notifications",
+  "settings.cron.job.purgeNotifications.description": "Supprime les anciennes notifications au-delà de leur durée de conservation",
   "settings.cron.job.scrubAuditPii.name": "Nettoyage des données personnelles d'audit",
   "settings.cron.job.scrubAuditPii.description": "Retire l'IP et l'agent utilisateur des entrées d'audit au-delà de la période de conservation (90 jours par défaut)",
   "settings.cron.job.trashSync.name": "Synchronisation TRaSH",
@@ -438,6 +444,8 @@
   "settings.featureDesc.behavior_requestComments": "Permet au demandeur et aux personnes qui gèrent les demandes d'échanger des commentaires sur une demande (« une autre version ? »). Chaque partie est notifiée selon ses préférences de notification. Désactivé, les fils sont masqués et les nouveaux commentaires des demandeurs sont refusés ; les gestionnaires peuvent toujours publier.",
   "settings.playHistory.concurrentLimit": "Alerte de flux simultanés",
   "settings.playHistory.concurrentLimitHelp": "Avertit quand une personne diffuse plus de titres à la fois que cette valeur (Plex et Jellyfin comptent ensemble). 0 désactive. Seuls les administrateurs sont notifiés (boîte de réception et vos canaux de notification) ; rien n'est interrompu. Les comptes propriétaires du serveur ne sont jamais comptés.",
+  "settings.playHistory.timeZone": "Fuseau horaire des statistiques",
+  "settings.playHistory.timeZoneHelp": "Le fuseau horaire dans lequel les statistiques d'activité, les cartes de chaleur et le calendrier, Mes statistiques et le Bilan de l'année comptent les heures et les jours : un nom IANA comme America/New_York ou Europe/Berlin. Laissez vide pour utiliser le fuseau du serveur ({zone}).",
   "settings.featureLabel.behavior_issueAutoResolve": "Résoudre automatiquement les problèmes",
   "settings.featureDesc.behavior_issueAutoResolve": "Lorsque le remplacement demandé par un administrateur (Corriger le fichier, Choisir une version ou Relancer) est importé par Radarr/Sonarr, le problème est marqué résolu et le signaleur est prévenu. Films et problèmes d'un seul épisode uniquement — un problème de saison ou de série entière reste ouvert pour un administrateur. Une réponse du signaleur le rouvre."
 }

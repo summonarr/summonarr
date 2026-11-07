@@ -122,6 +122,7 @@
   "personal.stats.noActivityDescription": "Sobald Sie etwas auf dem Server abspielen, erscheinen Ihre Statistiken hier.",
   "personal.stats.totalPlays": "Wiedergaben gesamt",
   "personal.stats.watchTime": "Wiedergabezeit",
+  "personal.stats.watchTimeValue": "{hours} Std.",
   "personal.stats.lastActive": "Zuletzt aktiv",
   "personal.stats.avgSession": "Ø Sitzungsdauer",
   "personal.stats.calendar": "Aktivität (365 Tage)",

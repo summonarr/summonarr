@@ -8,13 +8,29 @@
 // Fills are --ds-bg-3 throughout: --ds-bg-2 is pure white in light mode and a
 // block filled with it is invisible on the --ds-bg page. Card containers use
 // --ds-bg-1 + a hairline for the same reason.
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { SkeletonLoadingLabel } from "@/components/loading/skeleton-label";
 
 export const SKELETON_FILL = "var(--ds-bg-3)";
 export const SKELETON_CARD: CSSProperties = {
   background: "var(--ds-bg-1)",
   border: "1px solid var(--ds-border)",
 };
+
+// The root of every skeleton (loading.tsx boundaries and the kit's page-level
+// skeletons): the pulse plus what assistive tech needs — a status region that
+// is busy, named by a translated, visually hidden "Loading…". The bars are
+// empty boxes with nothing to read. The label is the FIRST child and sr-only
+// (absolutely positioned), so it takes no space and the no-reflow footprint
+// holds. Never nest one inside another: a skeleton has one status.
+export function SkeletonRoot({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <div role="status" aria-busy="true" className={className ? `${className} animate-pulse` : "animate-pulse"}>
+      <SkeletonLoadingLabel />
+      {children}
+    </div>
+  );
+}
 
 // One text / control bar. `w` is a px number or any CSS width.
 export function Bar({
@@ -191,7 +207,7 @@ export function PosterGridSkeleton({
   rows?: number;
 }) {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle={subtitle} right={right} />
       {controls > 0 && (
         <div className="flex flex-col gap-3 mb-6">
@@ -205,6 +221,6 @@ export function PosterGridSkeleton({
           <MediaCardTile key={i} />
         ))}
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

@@ -115,6 +115,9 @@ let coreDeleteCount = 0;
 let edgeDeleteCount = 0;
 let verdictResetCount = 0;
 let trashDeleteCount = 1;
+// Thrown by the top-level user.update — a row deleted between a branch's read
+// and its write.
+let topUserUpdateError: unknown = null;
 
 // Audit surface: attempts are recorded even on throw (proves logAudit was
 // invoked); committed rows only land in auditRows (proves the write succeeded).
@@ -150,6 +153,7 @@ function makeTx() {
     },
     account: { deleteMany: rec("account.deleteMany") },
     pushSubscription: { deleteMany: rec("pushSubscription.deleteMany") },
+    pushSubscriptionRemoval: { deleteMany: rec("pushSubscriptionRemoval.deleteMany") },
     discordLinkToken: { deleteMany: rec("discordLinkToken.deleteMany") },
     discordMergeCode: { deleteMany: rec("discordMergeCode.deleteMany") },
     watchlistItem: { deleteMany: rec("watchlistItem.deleteMany") },
@@ -266,7 +270,11 @@ const fakePrisma = {
       const u = usersById.get(args.where.id);
       return u ? { ...u } : null;
     },
-    update: async (args: unknown) => { txOps.push({ op: "user.update(top)", args }); return {}; },
+    update: async (args: unknown) => {
+      if (topUserUpdateError) throw topUserUpdateError;
+      txOps.push({ op: "user.update(top)", args });
+      return {};
+    },
     // reactivateUser()'s guarded restore — the WHERE is the whole contract, so
     // the stub enforces it rather than blindly reporting a hit.
     updateMany: async (args: { where: { id: string; purgedAt: null; deactivatedAt: unknown }; data: { deactivatedAt: null } }) => {
@@ -473,6 +481,7 @@ beforeEach(() => {
   edgeDeleteCount = 0;
   verdictResetCount = 0;
   trashDeleteCount = 1;
+  topUserUpdateError = null;
   auditAttempts.length = 0;
   auditRows.length = 0;
   txOps = [];
@@ -1102,6 +1111,25 @@ test("link: unknown target → 404, unknown server user → 404, empty body → 
   assert.equal(auditAttempts.length, 0, "no rejected request may audit a link that didn't happen");
 });
 
+test("link + download policy in ONE body is refused whole — the policy is never silently dropped", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  const msuId = seedServerUser({ source: "jellyfin" });
+  for (const body of [
+    { userId: targetId, downloadsEnabled: false },
+    { userId: null, downloadsEnabled: true },
+    { autoLink: true, downloadsEnabled: false },
+  ]) {
+    const res = await serverUserPatch(linkReq(msuId, body, admin.header), ctxFor(msuId));
+    assert.equal(res.status, 400, JSON.stringify(body));
+  }
+  assert.equal(serverUsersById.get(msuId)?.userId, null);
+  assert.equal(serverUsersById.get(msuId)?.manualUserLink, false);
+  assert.ok(!txOps.some((o) => o.op.startsWith("mediaServerUser.update")), "nothing may be written");
+  await flush();
+  assert.equal(auditAttempts.length, 0, "a refused body must not audit a link");
+});
+
 test("a DEPARTED server user can still be linked — its history outlives the account", async () => {
   // The likeliest row to need a hand-set binding: the person left the media
   // server (or was pruned), their MediaServerUser was soft-deleted, and their
@@ -1291,6 +1319,55 @@ test("role-change: changing your OWN role → 400, no update, no audit", async (
   assert.equal(res.status, 400);
   assert.deepEqual(await res.json(), { error: "Cannot change your own role" });
   assert.equal(txOps.filter((o) => o.op === "$executeRaw" || o.op === "user.update(top)").length, 0);
+  await flush();
+  assert.equal(auditAttempts.length, 0);
+});
+
+// ── every single-field PATCH branch shares one write/audit/answer tail ──────
+
+const FIELD_BRANCHES: Array<{ body: Record<string, unknown>; field: string; action: string; resigns: boolean }> = [
+  { body: { mediaServer: "plex" }, field: "mediaServer", action: "SETTINGS_CHANGE", resigns: true },
+  { body: { maxContentRating: "PG-13" }, field: "maxContentRating", action: "SETTINGS_CHANGE", resigns: true },
+  { body: { permissions: "16" }, field: "permissions", action: "USER_PERMISSIONS_CHANGE", resigns: true },
+  { body: { instanceGrants: {} }, field: "instanceGrants", action: "USER_PERMISSIONS_CHANGE", resigns: true },
+  { body: { mediaServerGrants: {} }, field: "mediaServerGrants", action: "USER_PERMISSIONS_CHANGE", resigns: true },
+  { body: { movieQuotaLimit: 5 }, field: "movieQuotaLimit", action: "SETTINGS_CHANGE", resigns: true },
+  // Notification preferences don't ride the session token.
+  { body: { notifyOnApproved: false }, field: "notifyOnApproved", action: "SETTINGS_CHANGE", resigns: false },
+];
+
+const fieldPatch = (header: Record<string, string>, id: string, body: unknown) =>
+  userPatch(req(`http://localhost:3000/api/admin/users/${id}`, { method: "PATCH", headers: { ...header, "content-type": "application/json" }, body: JSON.stringify(body) }), ctxFor(id));
+
+test("field PATCH: each branch answers { id, <field> }, writes once, audits once and re-signs only token fields", async () => {
+  for (const c of FIELD_BRANCHES) {
+    auditRows.length = 0;
+    txOps = [];
+    const admin = await mintSession("ADMIN", Permission.ADMIN);
+    const targetId = seedUser("USER");
+    const res = await fieldPatch(admin.header, targetId, c.body);
+    assert.equal(res.status, 200, c.field);
+    const json = await res.json();
+    assert.deepEqual(Object.keys(json).sort(), ["id", c.field].sort(), c.field);
+    assert.equal(json.id, targetId);
+    assert.equal(txOps.filter((o) => o.op === "user.update(top)").length, 1, `${c.field}: one write`);
+    await flush();
+    assert.equal(auditRows.length, 1, `${c.field}: one audit row`);
+    assert.equal(auditRows[0].action, c.action, c.field);
+    assert.equal(auditRows[0].target, `user:${targetId}`, c.field);
+    assert.equal(shouldForceDbCheck(targetId, "no-session"), c.resigns, `${c.field}: session re-sign`);
+  }
+});
+
+test("field PATCH: a row deleted between a branch's read and its write is 404, never a P2025 500, and audits nothing", async () => {
+  topUserUpdateError = Object.assign(new Error("Record to update not found."), { name: "PrismaClientKnownRequestError", code: "P2025" });
+  for (const c of FIELD_BRANCHES) {
+    const admin = await mintSession("ADMIN", Permission.ADMIN);
+    const targetId = seedUser("USER");
+    const res = await fieldPatch(admin.header, targetId, c.body);
+    assert.equal(res.status, 404, c.field);
+    assert.equal(shouldForceDbCheck(targetId, "no-session"), false, `${c.field}: nothing changed, nothing to re-sign`);
+  }
   await flush();
   assert.equal(auditAttempts.length, 0);
 });

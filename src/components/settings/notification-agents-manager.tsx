@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,8 +25,15 @@ interface AgentView {
   events: string[];
   config: Record<string, unknown>;
   hasSecret: boolean;
+  // false: the stored config fails today's validation, so nothing is sent.
+  configValid?: boolean;
   lastStatus: string | null;
   lastError: string | null;
+}
+
+interface TestResult {
+  ok: boolean;
+  text: string;
 }
 
 interface Draft {
@@ -119,17 +126,38 @@ async function errorOf(res: Response): Promise<string> {
   return data && typeof data.error === "string" ? data.error : "";
 }
 
+function withoutKey<T>(rec: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in rec)) return rec;
+  const next = { ...rec };
+  delete next[key];
+  return next;
+}
+
 export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: boolean }) {
   const t = useT();
   const [agents, setAgents] = useState<AgentView[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
+  // Set by an edit in the form (patchDraft), not by a list toggle mirrored into
+  // it — only the admin's own edits are worth a "discard?" prompt.
+  const [draftDirty, setDraftDirty] = useState(false);
+  // An Edit clicked while the open form has unsaved edits: held here until the
+  // admin confirms in the row's panel.
+  const [pendingDraft, setPendingDraft] = useState<Draft | null>(null);
+  // Bumped on every open, so the effect below can move focus into the form.
+  const [draftOpenSeq, setDraftOpenSeq] = useState(0);
+  const formRef = useRef<HTMLFormElement>(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
   // List-level actions (delete) have no form to report into.
   const [actionError, setActionError] = useState("");
-  const [testing, setTesting] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<{ id: string; ok: boolean; text: string } | null>(null);
+  // Per channel: two tests can overlap, and one finishing must not clear the
+  // other's spinner or result.
+  const [testing, setTesting] = useState<Record<string, true>>({});
+  const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
+  // Per channel: a toggle answered after a newer toggle of the same channel
+  // must not roll the switch back over it.
+  const toggleSeq = useRef<Record<string, number>>({});
   // Id of the channel whose Delete is waiting for confirmation — the same
   // inline red panel the arr/media managers use, instead of window.confirm.
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -153,8 +181,17 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
 
   useEffect(() => { void load(); }, [load]);
 
+  // The form renders below the whole list: move focus to its first editable
+  // field (scrolling it into view) so keyboard and screen-reader users land in
+  // the form they just opened.
+  useEffect(() => {
+    if (draftOpenSeq === 0) return;
+    formRef.current?.querySelector<HTMLElement>("input:not([disabled]), select:not([disabled]), textarea:not([disabled])")?.focus();
+  }, [draftOpenSeq]);
+
   function patchDraft(p: Partial<Draft>) {
     setDraft((d) => (d ? { ...d, ...p } : d));
+    setDraftDirty(true);
     setFormError("");
   }
 
@@ -174,7 +211,7 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
         setFormError((await errorOf(res)) || t("settings.form.common.saveFailed"));
         return;
       }
-      setDraft(null);
+      closeDraft();
       await load();
       setSaved(true);
     } catch {
@@ -184,11 +221,31 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
     }
   }
 
-  function openDraft(d: Draft) {
+  function openDraft(d: Draft, opts: { discard?: boolean } = {}) {
+    setConfirmDelete(null);
+    if (draft && draftDirty && !opts.discard) {
+      // The same channel's form is already open with the edits: keep them.
+      if (d.id !== null && d.id === draft.id) {
+        setPendingDraft(null);
+        setDraftOpenSeq((n) => n + 1);
+        return;
+      }
+      setPendingDraft(d);
+      return;
+    }
+    setPendingDraft(null);
     setDraft(d);
+    setDraftDirty(false);
     setFormError("");
     setSaved(false);
-    setConfirmDelete(null);
+    setDraftOpenSeq((n) => n + 1);
+  }
+
+  function closeDraft() {
+    setDraft(null);
+    setDraftDirty(false);
+    setPendingDraft(null);
+    setFormError("");
   }
 
   // The edit form is a snapshot taken at "Edit" and its save sends the full
@@ -200,18 +257,25 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
   }
 
   async function toggleEnabled(a: AgentView, next: boolean) {
+    const seq = (toggleSeq.current[a.id] ?? 0) + 1;
+    toggleSeq.current[a.id] = seq;
+    setActionError("");
     mirrorEnabled(a.id, next);
     const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}`), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: next }),
     }).catch(() => null);
-    if (!res?.ok) {
-      // Roll both back before the reload: load() can itself fail and would
-      // otherwise leave the optimistic state standing.
-      mirrorEnabled(a.id, a.enabled);
-      await load();
-    }
+    if (res?.ok) return;
+    const error = (res ? await errorOf(res) : "") || t("settings.form.common.requestFailed");
+    // A newer toggle of this channel owns the switch now; it reports its own outcome.
+    if (toggleSeq.current[a.id] !== seq) return;
+    // A switch that just flips back reads as a UI glitch; say why.
+    setActionError(error);
+    // Roll both back before the reload: load() can itself fail and would
+    // otherwise leave the optimistic state standing.
+    mirrorEnabled(a.id, !next);
+    await load();
   }
 
   // Reached only from the confirm panel's Delete button — the row's trash
@@ -222,7 +286,8 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
     setSaved(false);
     const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}`), { method: "DELETE" }).catch(() => null);
     if (res?.ok) {
-      setDraft((d) => (d && d.id === a.id ? null : d));
+      if (draft?.id === a.id) closeDraft();
+      setPendingDraft((d) => (d && d.id === a.id ? null : d));
     } else {
       // A silent failure reads as a UI glitch; say the delete did not happen.
       setActionError((res ? await errorOf(res) : "") || t("settings.form.common.requestFailed"));
@@ -231,21 +296,22 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
   }
 
   async function test(a: AgentView) {
-    setTesting(a.id);
-    setTestResult(null);
+    setTesting((s) => ({ ...s, [a.id]: true }));
+    setTestResults((r) => withoutKey(r, a.id));
+    const report = (result: TestResult) => setTestResults((r) => ({ ...r, [a.id]: result }));
     try {
       const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}/test`), { method: "POST" });
       const data = (await res.json().catch(() => null)) as { ok?: boolean; status?: number | null; error?: string | null } | null;
       if (res.ok && data?.ok) {
-        setTestResult({ id: a.id, ok: true, text: t("settings.form.agents.testOk", { status: data.status ?? 200 }) });
+        report({ ok: true, text: t("settings.form.agents.testOk", { status: data.status ?? 200 }) });
       } else {
         const err = data?.error || t("settings.form.common.testFailed");
-        setTestResult({ id: a.id, ok: false, text: t("settings.form.agents.testFailed", { error: err }) });
+        report({ ok: false, text: t("settings.form.agents.testFailed", { error: err }) });
       }
     } catch {
-      setTestResult({ id: a.id, ok: false, text: t("settings.form.common.testFailed") });
+      report({ ok: false, text: t("settings.form.common.testFailed") });
     } finally {
-      setTesting(null);
+      setTesting((s) => withoutKey(s, a.id));
       void load();
     }
   }
@@ -294,10 +360,16 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
                   {a.lastStatus === "failed" && <span className="text-red-400">{t("settings.form.agents.status.failed", { error: a.lastError ?? "" })}</span>}
                   {!a.lastStatus && t("settings.form.agents.status.never")}
                 </p>
-                {testResult?.id === a.id && (
-                  <p className={`mt-1 flex items-center gap-1 text-xs ${testResult.ok ? "text-green-400" : "text-red-400"}`}>
-                    {testResult.ok ? <CheckCircle className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                    {testResult.text}
+                {a.configValid === false && (
+                  <p className="mt-1 flex items-center gap-1 text-xs text-red-400">
+                    <XCircle className="w-3.5 h-3.5 shrink-0" />
+                    {t("settings.form.agents.status.invalidConfig")}
+                  </p>
+                )}
+                {testResults[a.id] && (
+                  <p className={`mt-1 flex items-center gap-1 text-xs ${testResults[a.id].ok ? "text-green-400" : "text-red-400"}`}>
+                    {testResults[a.id].ok ? <CheckCircle className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                    {testResults[a.id].text}
                   </p>
                 )}
               </div>
@@ -308,8 +380,8 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
                 {/* The label stays while testing (spinner in front) so the
                     button keeps its name and width instead of collapsing to
                     an unnamed 14px icon. */}
-                <Button type="button" variant="outline" size="sm" className="border-zinc-700" disabled={testing === a.id} aria-busy={testing === a.id} onClick={() => void test(a)}>
-                  {testing === a.id && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                <Button type="button" variant="outline" size="sm" className="border-zinc-700" disabled={!!testing[a.id]} aria-busy={!!testing[a.id]} onClick={() => void test(a)}>
+                  {testing[a.id] && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   {t("settings.form.agents.test")}
                 </Button>
                 <Button type="button" variant="outline" size="sm" className="border-zinc-700" onClick={() => openDraft(draftFrom(a))}>
@@ -322,11 +394,36 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
                   className="border-zinc-700 text-red-400 hover:text-[var(--ds-danger-hover)]"
                   aria-label={t("settings.form.agents.delete")}
                   aria-expanded={confirmDelete === a.id}
-                  onClick={() => setConfirmDelete(confirmDelete === a.id ? null : a.id)}
+                  onClick={() => { setPendingDraft(null); setConfirmDelete(confirmDelete === a.id ? null : a.id); }}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </Button>
               </div>
+
+              {/* Edit while the open form has unsaved edits: the same inline
+                  panel as Delete, instead of silently dropping them. */}
+              {pendingDraft?.id === a.id && (
+                <div className="basis-full rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+                  <p className="text-xs text-red-400">{t("settings.form.agents.confirmDiscard")}</p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openDraft(pendingDraft, { discard: true })}
+                      autoFocus
+                      className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
+                    >
+                      {t("settings.form.agents.discardAndEdit")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPendingDraft(null)}
+                      className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+                    >
+                      {t("settings.form.agents.keepEditing")}
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Unlike the arr/media managers' Remove (which lands on Save),
                   this DELETE fires at once — the panel says so. */}
@@ -376,7 +473,7 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
           own message in formError, the same inline red line the arr/media
           cards show — not the browser's unstyled "Please enter a URL" bubble. */}
       {draft && (
-        <form onSubmit={save} noValidate className="space-y-4 rounded-md border border-zinc-800 p-4">
+        <form ref={formRef} onSubmit={save} noValidate className="space-y-4 rounded-md border border-zinc-800 p-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="agent-kind">{t("settings.form.agents.field.kind")}</Label>
@@ -524,7 +621,7 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
             <Button type="submit" disabled={saving}>
               {saving ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
             </Button>
-            <Button type="button" variant="outline" className="border-zinc-700" onClick={() => { setDraft(null); setFormError(""); }}>
+            <Button type="button" variant="outline" className="border-zinc-700" onClick={closeDraft}>
               {t("settings.form.common.cancel")}
             </Button>
           </div>

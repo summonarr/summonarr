@@ -20,7 +20,8 @@ import ts from "typescript";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 const COMPONENT = resolve(ROOT, "src/components/media/request-button.tsx");
-const BULK_ROUTE = resolve(ROOT, "src/app/api/requests/bulk/route.ts");
+// The bulk route's per-item verdicts live in its pipeline module.
+const BULK_ROUTE = resolve(ROOT, "src/lib/request-bulk.ts");
 
 const componentSource = readFileSync(COMPONENT, "utf8");
 const componentSf = ts.createSourceFile(COMPONENT, componentSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -127,4 +128,42 @@ test("submitOnBehalf actually reads results[0].result off the bulk response", ()
   assert.ok(fn);
   assert.match(fn, /onBehalfMessage\(data\.results\?\.\[0\]\?\.result, data\.created\)/);
   assert.doesNotMatch(fn, /data\.created \? "Requested for user/);
+});
+
+// ── the two pickers' loads ───────────────────────────────────────────────────
+function innerFnText(name: string): string {
+  const fn = componentSf.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === "RequestButton");
+  assert.ok(fn && ts.isFunctionDeclaration(fn) && fn.body);
+  const inner = fn.body.statements.find((s) => ts.isFunctionDeclaration(s) && s.name?.text === name);
+  assert.ok(inner, `${name} not found inside RequestButton`);
+  return inner.getText(componentSf);
+}
+
+test("loadProfiles sends one live arr read at a time and records a failure", () => {
+  // Request → Cancel → Request before the first answer used to fire a second
+  // rate-limited Radarr/Sonarr read, and a failure was swallowed silently.
+  const body = innerFnText("loadProfiles");
+  assert.match(body, /profilesState === "loading"\) return;/);
+  assert.ok(body.indexOf('setProfilesState("loading")') < body.indexOf("fetch("), "marked in flight before the fetch");
+  assert.match(body, /\.catch\(\(\) => setProfilesState\("error"\)\)/);
+  assert.match(body, /if \(!r\.ok\) throw/, "a non-ok answer is a failure, not an empty picker");
+  // The failure is shown where the picker would be.
+  assert.match(componentSource, /profilesState === "error" \? \([\s\S]{0,200}request\.profilesLoadFailed/);
+});
+
+test("openOnBehalf fetches the user list once — an EMPTY answer is kept, not refetched", () => {
+  const body = innerFnText("openOnBehalf");
+  assert.match(body, /if \(obUsersState === "idle" \|\| obUsersState === "error"\) \{/);
+  assert.doesNotMatch(body, /obUsers\.length === 0/, "an empty list must not trigger a refetch on every open");
+  assert.match(body, /setObUsersState\("loaded"\)/);
+  assert.match(componentSource, /obUsersState === "loaded" && obUsers\.length === 0 \? \([\s\S]{0,200}request\.noEligibleUsers/);
+});
+
+test("the new picker hints exist in every locale", () => {
+  for (const loc of ["en", "es", "fr", "de", "pt", "it", "zh"]) {
+    const catalog = JSON.parse(readFileSync(resolve(ROOT, `src/lib/i18n/messages/${loc}/request.json`), "utf8")) as Record<string, string>;
+    for (const key of ["request.profilesLoadFailed", "request.noEligibleUsers", "request.collection.doneSkipped"]) {
+      assert.ok(Object.hasOwn(catalog, key), `${loc}: ${key}`);
+    }
+  }
 });

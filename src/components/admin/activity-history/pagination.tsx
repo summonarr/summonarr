@@ -105,12 +105,12 @@ export function HistoryPagination({
       >
         {(
           [
-            ["«", () => setPage(1), page === 1],
-            ["‹", () => setPage(page - 1), page === 1],
+            ["«", t("adminActivity.pagination.first"), () => setPage(1), page === 1],
+            ["‹", t("adminActivity.pagination.previous"), () => setPage(page - 1), page === 1],
           ] as const
-        ).map(([label, fn, disabled], idx) => (
-          <PageBtn key={idx} onClick={fn} disabled={disabled}>
-            {label}
+        ).map(([glyph, label, fn, disabled], idx) => (
+          <PageBtn key={idx} onClick={fn} disabled={disabled} ariaLabel={label}>
+            {glyph}
           </PageBtn>
         ))}
         {pageRange[0] > 1 && (
@@ -148,12 +148,12 @@ export function HistoryPagination({
         )}
         {(
           [
-            ["›", () => setPage(page + 1), page >= totalPages],
-            ["»", () => setPage(totalPages), page >= totalPages],
+            ["›", t("adminActivity.pagination.next"), () => setPage(page + 1), page >= totalPages],
+            ["»", t("adminActivity.pagination.last"), () => setPage(totalPages), page >= totalPages],
           ] as const
-        ).map(([label, fn, disabled], idx) => (
-          <PageBtn key={idx} onClick={fn} disabled={disabled}>
-            {label}
+        ).map(([glyph, label, fn, disabled], idx) => (
+          <PageBtn key={idx} onClick={fn} disabled={disabled} ariaLabel={label}>
+            {glyph}
           </PageBtn>
         ))}
       </div>
@@ -161,22 +161,27 @@ export function HistoryPagination({
   );
 }
 
+// `ariaLabel` names the glyph-only buttons (« ‹ › »), which a screen reader
+// would otherwise announce as punctuation.
 function PageBtn({
   children,
   onClick,
   disabled,
   active,
+  ariaLabel,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   disabled?: boolean;
   active?: boolean;
+  ariaLabel?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-label={ariaLabel}
       aria-current={active ? "page" : undefined}
       className="ds-mono"
       style={{

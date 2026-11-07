@@ -6,30 +6,35 @@ import { posterUrl } from "./tmdb-types";
 import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import { DELIVERED_KBPS_SQL } from "./bitrate";
 import { processSingleton } from "./process-singleton";
-import { coalesce, settleLimit } from "./concurrency";
+import { coalesce, mapLimit, settleLimit } from "./concurrency";
 import { pickPlexRowForKey } from "./plex-dedupe";
 import { LEGACY_PLEX_REASON_LABELS, OTHER_REASONS, UNKNOWN_REASON } from "./transcode-reasons";
 import { TRACKING_STAMP_KEYS, parseStampDate } from "./never-watched";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
+import { tmdbDetailsKey } from "./tmdb-cache";
+import { getStatsTimeZone } from "./stats-time-zone-data";
+import { dayKeysBetween, zonedDayKey, zonedMidnightSql, zonedTimestampSql } from "./stats-time-zone";
 
 // Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
-// day in the window so gaps render as 0 instead of collapsing the x-axis.
+// day in the window so gaps render as 0 instead of collapsing the x-axis. The
+// windows are a rolling `since` cutoff, so the series runs from the cutoff's day
+// to today's, both in the statistics zone like the SQL day buckets: `days + 1`
+// days (both edges partial), give or take one when a DST change falls inside.
 function padDailySeries<T extends { day: string }>(
   rows: T[],
-  daysBack: number,
+  since: Date,
+  timeZone: string,
   fill: (day: string) => T,
 ): T[] {
   const byDay = new Map(rows.map((r) => [r.day, r]));
-  const out: T[] = [];
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  for (let i = daysBack - 1; i >= 0; i--) {
-    const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
-    const key = d.toISOString().slice(0, 10);
-    out.push(byDay.get(key) ?? fill(key));
-  }
-  return out;
+  return dayKeysBetween(zonedDayKey(since, timeZone), zonedDayKey(new Date(), timeZone)).map(
+    (day) => byDay.get(day) ?? fill(day),
+  );
 }
+
+// The play's start on the statistics zone's wall clock (stats-time-zone.ts).
+// Every hour, day-of-week, day, month and year bucket in this file groups on it.
+const localStartedAt = (zoneRef: string) => zonedTimestampSql(`"startedAt"`, zoneRef);
 
 const SETTING_KEYS = [
   "playHistoryEnabled",
@@ -560,7 +565,7 @@ export async function recordCompletedSession(
 
   let posterPath: string | null = null;
   if (session.tmdbId && session.mediaType) {
-    const cacheKey = `${session.mediaType === "TV" ? "tv" : "movie"}:${session.tmdbId}:details`;
+    const cacheKey = tmdbDetailsKey(session.mediaType === "TV" ? "TV" : "MOVIE", session.tmdbId);
     const cacheRow = await prisma.tmdbCache.findUnique({ where: { key: cacheKey }, select: { data: true } }).catch(() => null);
     if (cacheRow) {
       try {
@@ -767,15 +772,20 @@ export async function emitActiveSessionsSnapshot(): Promise<void> {
       .flatMap((s) => posterKeysFor(s.tmdbId, s.mediaType)),
   )];
   if (posterKeys.length > 0) {
+    // details key → the `<ns>:<id>` key the poster map is filled under.
+    const byDetailsKey = new Map(posterKeys.map((k) => {
+      const [ns, id] = k.split(":");
+      return [tmdbDetailsKey(ns === "tv" ? "tv" : "movie", Number(id)), k] as const;
+    }));
     const cacheRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: posterKeys.map((k) => `${k}:details`) } },
+      where: { key: { in: [...byDetailsKey.keys()] } },
       select: { key: true, data: true },
     });
     for (const row of cacheRows) {
       try {
         const parsed = JSON.parse(row.data) as { posterPath?: string | null };
-        if (parsed.posterPath) {
-          const key = row.key.slice(0, -":details".length);
+        const key = byDetailsKey.get(row.key);
+        if (parsed.posterPath && key) {
           if (!sessionPosterMap[key]) {
             sessionPosterMap[key] = posterUrl(parsed.posterPath, "w342");
           }
@@ -966,8 +976,10 @@ export const RECENT_PLAYS_SHOWN = 12;
 
 // Aggregate the full per-user stats bundle (totals, recent plays, top media,
 // daily/heatmap series, codec/resolution/device breakdowns) across a SET of
-// MediaServerUser ids (one person can have several server identities).
-export async function getPlayStatsForServerUsers(ids: string[]) {
+// MediaServerUser ids (one person can have several server identities). The day
+// and day × hour buckets are in the statistics zone, which the bundle names.
+export async function getPlayStatsForServerUsers(ids: string[], timeZone?: string) {
+  const zone = timeZone ?? (await getStatsTimeZone());
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
   // Bind every id as its own $N placeholder; the optional date filter takes the
@@ -979,6 +991,10 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
   // for the same reason).
   const idIn = ids.length > 0 ? ids.map((_, i) => `$${i + 1}`).join(", ") : "NULL";
   const dateBind = `$${ids.length + 1}`;
+  // The zone sits after the date on the windowed series, right after the ids on
+  // the all-history heatmap.
+  const dayLocal = localStartedAt(`$${ids.length + 2}`);
+  const heatmapLocal = localStartedAt(`$${ids.length + 1}`);
 
   const [
     totalPlays,
@@ -1031,7 +1047,7 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
       ...ids,
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint; hours: number }[]>(
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
+      `SELECT to_char(date_trunc('day', ${dayLocal}), 'YYYY-MM-DD') AS day,
               COUNT(*) FILTER (WHERE "watched" = true)::bigint AS count,
               (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
        FROM "PlayHistory"
@@ -1039,6 +1055,7 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
        GROUP BY day ORDER BY day`,
       ...ids,
       ninetyDaysAgo,
+      zone,
     ),
     prisma.$queryRawUnsafe<{ platform: string | null; count: bigint }[]>(
       `SELECT "platform", COUNT(*)::bigint AS count
@@ -1047,13 +1064,14 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
       ...ids,
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
+      `SELECT to_char(date_trunc('day', ${dayLocal}), 'YYYY-MM-DD') AS day,
               COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "mediaServerUserId" IN (${idIn}) AND "watched" = true AND "startedAt" >= ${dateBind}
        GROUP BY day ORDER BY day`,
       ...ids,
       oneYearAgo,
+      zone,
     ),
     prisma.$queryRawUnsafe<{ avg_secs: number | null }[]>(
       `SELECT AVG("playDuration")::float8 AS avg_secs FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn})`,
@@ -1073,12 +1091,13 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
       ...ids,
     ),
     prisma.$queryRawUnsafe<{ dow: number; hour: number; count: bigint }[]>(
-      `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow,
-              EXTRACT(HOUR FROM "startedAt")::int AS hour,
+      `SELECT EXTRACT(DOW FROM ${heatmapLocal})::int AS dow,
+              EXTRACT(HOUR FROM ${heatmapLocal})::int AS hour,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn}) AND "watched" = true
        GROUP BY dow, hour ORDER BY dow, hour`,
       ...ids,
+      zone,
     ),
     prisma.$queryRawUnsafe<{ device: string | null; count: bigint }[]>(
       `SELECT "device", COUNT(*)::bigint AS count
@@ -1090,16 +1109,17 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
   ]);
 
   return {
+    timeZone: zone,
     totalPlays,
     totalWatchTimeHours: Math.round(Number(totalWatchTime[0]?.hours ?? 0) * 10) / 10,
     recentPlays,
     topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, posterPath: r.posterPath, count: Number(r.count) })),
-    // Rolling `now - 90d` cutoff spans 91 UTC calendar days (both edges
-    // partial) — pad to 91 so the oldest edge's rows aren't dropped, as
-    // getPlayHistoryStatsUncached does with `seriesDays = days + 1`.
+    // Padded from the rolling cutoff's day (padDailySeries), so the oldest
+    // partial day's rows are charted, not dropped.
     playsByDay: padDailySeries(
       playsByDay.map((r) => ({ day: r.day, count: Number(r.count), hours: Math.round(r.hours * 100) / 100 })),
-      91,
+      ninetyDaysAgo,
+      zone,
       (day) => ({ day, count: 0, hours: 0 }),
     ),
     platformBreakdown: platformBreakdown.map((r) => ({ platform: r.platform ?? "Unknown", count: Number(r.count) })),
@@ -1120,7 +1140,10 @@ export async function getUserPlayStats(mediaServerUserId: string) {
 
 // ── "Wrapped" — personal year-in-review ──────────────────────────────────────
 
+// Every day, month, day-of-week and hour here is in `timeZone`, the statistics
+// zone (stats-time-zone.ts), and so is the calendar year the bundle covers.
 export interface WrappedBundle {
+  timeZone: string;
   totals: { plays: number; hours: number; titles: number };
   movies: { titles: number; hours: number };
   tv: { shows: number; episodes: number; hours: number };
@@ -1150,34 +1173,39 @@ export interface WrappedBundle {
   topDevice: string | null;
 }
 
-// Distinct calendar years (UTC) that have a watched play for the id set, newest
-// first — drives the year picker. `watched` only, so a year of aborted starts
-// with no real watch doesn't offer an empty review.
-export async function getPlayYearsForServerUsers(ids: string[]): Promise<number[]> {
+// Distinct calendar years (in the statistics zone) that have a watched play for
+// the id set, newest first — drives the year picker. `watched` only, so a year
+// of aborted starts with no real watch doesn't offer an empty review.
+export async function getPlayYearsForServerUsers(ids: string[], timeZone?: string): Promise<number[]> {
   if (ids.length === 0) return [];
+  const zone = timeZone ?? (await getStatsTimeZone());
   const idIn = ids.map((_, i) => `$${i + 1}`).join(", ");
   const rows = await prisma.$queryRawUnsafe<{ y: number }[]>(
-    `SELECT DISTINCT EXTRACT(YEAR FROM "startedAt")::int AS y
+    `SELECT DISTINCT EXTRACT(YEAR FROM ${localStartedAt(`$${ids.length + 1}`)})::int AS y
      FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn}) AND watched
      ORDER BY y DESC`,
     ...ids,
+    zone,
   );
   return rows.map((r) => r.y);
 }
 
-// Year-in-review aggregates for the id SET, bounded to one UTC calendar year.
-// Same IN(...) + bind discipline as getPlayStatsForServerUsers; every query is
-// scoped by the shared `scope` predicate ($ids…, then $yearStart, $yearEnd).
-export async function getWrappedForServerUsers(ids: string[], year: number): Promise<WrappedBundle> {
-  const yearStart = new Date(Date.UTC(year, 0, 1));
-  const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
+// Year-in-review aggregates for the id SET, bounded to one calendar year in the
+// statistics zone. Same IN(...) + bind discipline as getPlayStatsForServerUsers;
+// every query is scoped by the shared `scope` predicate ($ids…, then the year's
+// first day, the next year's first day and the zone). The bounds are the zone's
+// midnights as stored-UTC instants, so the bare column still uses its indexes.
+export async function getWrappedForServerUsers(ids: string[], year: number, timeZone?: string): Promise<WrappedBundle> {
+  const zone = timeZone ?? (await getStatsTimeZone());
   // "IN (NULL)" on an empty list: matches nothing instead of the "IN ()" syntax
-  // error, and keeps $y1/$y2 offsets consistent (see getPlayStatsForServerUsers).
+  // error, and keeps the later offsets consistent (see getPlayStatsForServerUsers).
   const idIn = ids.length > 0 ? ids.map((_, i) => `$${i + 1}`).join(", ") : "NULL";
   const y1 = `$${ids.length + 1}`;
   const y2 = `$${ids.length + 2}`;
-  const scope = `"mediaServerUserId" IN (${idIn}) AND "startedAt" >= ${y1} AND "startedAt" < ${y2}`;
-  const binds = [...ids, yearStart, yearEnd];
+  const z = `$${ids.length + 3}`;
+  const local = localStartedAt(z);
+  const scope = `"mediaServerUserId" IN (${idIn}) AND "startedAt" >= ${zonedMidnightSql(`${y1}::date`, z)} AND "startedAt" < ${zonedMidnightSql(`${y2}::date`, z)}`;
+  const binds = [...ids, `${year}-01-01`, `${year + 1}-01-01`, zone];
 
   const [totalsR, splitR, topR, dayR, monthR, dowR, hourR, longR, compR, platR, devR] = await Promise.all([
     prisma.$queryRawUnsafe<{ plays: number; hours: number; titles: number }[]>(
@@ -1205,7 +1233,7 @@ export async function getWrappedForServerUsers(ids: string[], year: number): Pro
       ...binds,
     ),
     prisma.$queryRawUnsafe<{ day: string; plays: number; hours: number }[]>(
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
+      `SELECT to_char(date_trunc('day', ${local}), 'YYYY-MM-DD') AS day,
               COUNT(*) FILTER (WHERE watched)::int AS plays,
               (COALESCE(SUM("playDuration") FILTER (WHERE watched), 0) / 3600.0)::float8 AS hours
        FROM "PlayHistory" WHERE ${scope}
@@ -1213,18 +1241,19 @@ export async function getWrappedForServerUsers(ids: string[], year: number): Pro
       ...binds,
     ),
     prisma.$queryRawUnsafe<{ month: string; plays: number }[]>(
-      `SELECT to_char(date_trunc('month', "startedAt"), 'YYYY-MM') AS month, COUNT(*) FILTER (WHERE watched)::int AS plays
+      `SELECT to_char(date_trunc('month', ${local}), 'YYYY-MM') AS month, COUNT(*) FILTER (WHERE watched)::int AS plays
        FROM "PlayHistory" WHERE ${scope} GROUP BY month ORDER BY plays DESC LIMIT 1`,
       ...binds,
     ),
+    // Ties go to the earliest day / hour, so the answer is the same on every read.
     prisma.$queryRawUnsafe<{ dow: number; c: number }[]>(
-      `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow, COUNT(*)::int AS c
-       FROM "PlayHistory" WHERE ${scope} AND watched GROUP BY dow ORDER BY c DESC LIMIT 1`,
+      `SELECT EXTRACT(DOW FROM ${local})::int AS dow, COUNT(*)::int AS c
+       FROM "PlayHistory" WHERE ${scope} AND watched GROUP BY dow ORDER BY c DESC, dow ASC LIMIT 1`,
       ...binds,
     ),
     prisma.$queryRawUnsafe<{ hour: number; c: number }[]>(
-      `SELECT EXTRACT(HOUR FROM "startedAt")::int AS hour, COUNT(*)::int AS c
-       FROM "PlayHistory" WHERE ${scope} AND watched GROUP BY hour ORDER BY c DESC LIMIT 1`,
+      `SELECT EXTRACT(HOUR FROM ${local})::int AS hour, COUNT(*)::int AS c
+       FROM "PlayHistory" WHERE ${scope} AND watched GROUP BY hour ORDER BY c DESC, hour ASC LIMIT 1`,
       ...binds,
     ),
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; secs: number; startedAt: Date }[]>(
@@ -1237,12 +1266,14 @@ export async function getWrappedForServerUsers(ids: string[], year: number): Pro
       ...binds,
     ),
     prisma.$queryRawUnsafe<{ v: string; c: number }[]>(
-      `SELECT "platform" AS v, COUNT(*)::int AS c FROM "PlayHistory" WHERE ${scope} AND watched AND "platform" IS NOT NULL
+      // A blank value (some clients send "") is no answer — it must not win the
+      // top slot over a real name.
+      `SELECT "platform" AS v, COUNT(*)::int AS c FROM "PlayHistory" WHERE ${scope} AND watched AND NULLIF(btrim("platform"), '') IS NOT NULL
        GROUP BY v ORDER BY c DESC LIMIT 1`,
       ...binds,
     ),
     prisma.$queryRawUnsafe<{ v: string; c: number }[]>(
-      `SELECT "device" AS v, COUNT(*)::int AS c FROM "PlayHistory" WHERE ${scope} AND watched AND "device" IS NOT NULL
+      `SELECT "device" AS v, COUNT(*)::int AS c FROM "PlayHistory" WHERE ${scope} AND watched AND NULLIF(btrim("device"), '') IS NOT NULL
        GROUP BY v ORDER BY c DESC LIMIT 1`,
       ...binds,
     ),
@@ -1252,6 +1283,7 @@ export async function getWrappedForServerUsers(ids: string[], year: number): Pro
   const split = splitR[0];
   const long = longR[0];
   return {
+    timeZone: zone,
     totals: {
       plays: totalsR[0]?.plays ?? 0,
       hours: r1(totalsR[0]?.hours ?? 0),
@@ -1289,7 +1321,10 @@ export async function getWrappedForServerUsers(ids: string[], year: number): Pro
 
 // Aggregate the per-title stats bundle (totals, unique/top viewers, completion,
 // recent plays, daily series, transcode/resolution breakdowns) for one tmdbId.
+// The daily series is bucketed in the statistics zone and padded like the
+// other bundles' (padDailySeries), so the chart gets one entry per day.
 export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
+  const timeZone = await getStatsTimeZone();
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
   // TMDB namespaces movie and TV IDs separately, so the same numeric id can be
@@ -1364,7 +1399,7 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
       select: { title: true, mediaType: true, year: true },
     }),
     prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
+      `SELECT to_char(date_trunc('day', ${localStartedAt("$4")}), 'YYYY-MM-DD') AS day,
               COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "tmdbId" = $1 AND ${mtClause} AND "watched" = true AND "startedAt" >= $3
@@ -1372,6 +1407,7 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
       tmdbId,
       mt,
       ninetyDaysAgo,
+      timeZone,
     ),
     prisma.$queryRawUnsafe<{ method: string | null; count: bigint }[]>(
       `SELECT "playMethod" AS method, COUNT(*)::bigint AS count
@@ -1420,7 +1456,13 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
     title: resolvedMedia.title ?? `TMDB ${tmdbId}`,
     mediaType: resolvedMedia.mediaType,
     year: resolvedMedia.year,
-    playsByDay: playsByDayRaw.map((r) => ({ day: r.day, count: Number(r.count) })),
+    timeZone,
+    playsByDay: padDailySeries(
+      playsByDayRaw.map((r) => ({ day: r.day, count: Number(r.count) })),
+      ninetyDaysAgo,
+      timeZone,
+      (day) => ({ day, count: 0 }),
+    ),
     transcodeRatio: transcodeRatioRaw.map((r) => ({ method: r.method ?? "Unknown", count: Number(r.count) })),
     resolutionBreakdown: resolutionBreakdownRaw.map((r) => ({ resolution: r.resolution!, count: Number(r.count) })),
   };
@@ -1428,7 +1470,14 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
 
 // One-row-per-MediaServerUser leaderboard for the admin users list: plays, watch
 // hours, last-active, favourite platform, and direct-play vs transcode split.
+// Memoized like the other aggregates (guardrail 19b): the users page re-renders
+// on every search, sort and status click, and each render used to rescan the
+// whole PlayHistory table. A finalize still clears it.
 export async function getAllUsersStats() {
+  return memoizeActivity(getCacheKey("all-users", {}), STATS_TTL, getAllUsersStatsUncached);
+}
+
+async function getAllUsersStatsUncached() {
   const rows = await prisma.$queryRaw<
     {
       id: string;
@@ -1536,6 +1585,59 @@ const popularCache = processSingleton(
   () => new Map<string, { data: PopularResult; expiresAt: number }>(),
 );
 
+// The arc chain shared by /popular and the Statistics completion figures. An arc
+// is a run of consecutive sessions by one viewer on one item (`key`, mediaType,
+// season, episode), broken by a gap of at least the arc-gap param ($arcGapIdx,
+// seconds) or by a prior `completed=true` row (a rewatch boundary). Returns the
+// CTE list WITHOUT the leading WITH, ending in `arcs`, so a caller appends its
+// own CTEs. `keyExpr`, when given, is projected in `base` AS `key`; `arcSelect`
+// and `arcGroupBy` shape the `arcs` rows. One definition, so the two callers
+// can't drift apart.
+function arcCtes(
+  where: string,
+  arcGapIdx: number,
+  opts: { key: string; keyExpr?: string; arcSelect: string; arcGroupBy: string },
+): string {
+  const keyColumn = opts.keyExpr ? `${opts.keyExpr} AS ${opts.key}, ` : "";
+  const partition = `"mediaServerUserId", ${opts.key}, "mediaType",
+                     COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)`;
+  return `base AS (
+      SELECT "mediaServerUserId", "tmdbId", "mediaType",
+             "seasonNumber", "episodeNumber", ${keyColumn}
+             "startedAt", "playDuration", "duration", "completed"
+      FROM "PlayHistory"
+      WHERE ${where}
+    ),
+    arc_flags AS (
+      SELECT *,
+        CASE
+          WHEN LAG("startedAt") OVER w IS NULL
+            OR EXTRACT(EPOCH FROM ("startedAt" - LAG("startedAt") OVER w)) >= $${arcGapIdx}
+            OR LAG("completed") OVER w = true
+          THEN 1 ELSE 0
+        END AS arc_start
+      FROM base
+      WINDOW w AS (
+        PARTITION BY ${partition}
+        ORDER BY "startedAt"
+      )
+    ),
+    arc_ids AS (
+      SELECT *,
+        SUM(arc_start) OVER (
+          PARTITION BY ${partition}
+          ORDER BY "startedAt"
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS arc_id
+      FROM arc_flags
+    ),
+    arcs AS (
+      SELECT ${opts.arcSelect}
+      FROM arc_ids
+      GROUP BY ${opts.arcGroupBy}
+    )`;
+}
+
 // Popularity counts *completed arcs*, not raw sessions. An "arc" is a run of consecutive
 // sessions on the same (user, tmdbId, season, episode) that hasn't been broken by either
 // a `completed=true` finish (a rewatch boundary) or a gap longer than playHistoryArcGapDays.
@@ -1558,7 +1660,21 @@ export async function getMostPopularOnServer(
   // Read before computing: a clearActivityCache() landing mid-query must not be
   // undone by this result being stored afterwards (see activityCacheGeneration).
   const generation = activityGeneration();
+  // /popular is open to every user and every finalize empties this cache, so
+  // concurrent visitors missing on one key share ONE full-history window query
+  // (guardrail 31). The generation in the key keeps a load that starts after a
+  // clear from joining a computation that predates it.
+  return coalesce(`popular:${generation}:${cacheKey}`, () =>
+    computeMostPopular({ mediaType, sort, page, limit }, cacheKey, generation),
+  );
+}
 
+async function computeMostPopular(
+  opts: { mediaType?: "MOVIE" | "TV"; sort: PopularSort; page: number; limit: number },
+  cacheKey: string,
+  generation: number,
+): Promise<PopularResult> {
+  const { mediaType, sort, page, limit } = opts;
   const [completionPct, arcGapDays] = await Promise.all([
     getCompletionThreshold(),
     getArcGapDays(),
@@ -1604,49 +1720,19 @@ export async function getMostPopularOnServer(
   params.push((page - 1) * limit);
   const offsetIdx = params.length;
 
-  const sql = `
-    WITH base AS (
-      SELECT "mediaServerUserId", "tmdbId", "mediaType",
-             "seasonNumber", "episodeNumber",
-             "startedAt", "playDuration", "duration", "completed"
-      FROM "PlayHistory"
-      WHERE ${baseWhere}
-    ),
-    arc_flags AS (
-      SELECT *,
-        CASE
-          WHEN LAG("startedAt") OVER w IS NULL
-            OR EXTRACT(EPOCH FROM ("startedAt" - LAG("startedAt") OVER w)) >= $${arcGapIdx}
-            OR LAG("completed") OVER w = true
-          THEN 1 ELSE 0
-        END AS arc_start
-      FROM base
-      WINDOW w AS (
-        PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
-                     COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
-        ORDER BY "startedAt"
-      )
-    ),
-    arc_ids AS (
-      SELECT *,
-        SUM(arc_start) OVER (
-          PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
-                       COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
-          ORDER BY "startedAt"
-          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) AS arc_id
-      FROM arc_flags
-    ),
-    arcs AS (
-      SELECT "tmdbId", "mediaType", "mediaServerUserId",
+  const arcs = arcCtes(baseWhere, arcGapIdx, {
+    key: `"tmdbId"`,
+    arcSelect: `"tmdbId", "mediaType", "mediaServerUserId",
              "seasonNumber", "episodeNumber", arc_id,
              SUM("playDuration") AS arc_play,
              MAX("duration") AS arc_dur,
-             MIN("startedAt") AS arc_started_at
-      FROM arc_ids
-      GROUP BY "tmdbId", "mediaType", "mediaServerUserId",
-               "seasonNumber", "episodeNumber", arc_id
-    ),
+             MIN("startedAt") AS arc_started_at`,
+    arcGroupBy: `"tmdbId", "mediaType", "mediaServerUserId",
+               "seasonNumber", "episodeNumber", arc_id`,
+  });
+
+  const sql = `
+    WITH ${arcs},
     completed_arcs AS (
       SELECT *
       FROM arcs
@@ -1930,10 +2016,12 @@ function buildStatsFilters(filters: PlayHistoryStatsFilters, tableAlias = "") {
     mediaType: filters.mediaType,
     tableAlias,
   });
-  return { where: `${prefix}"startedAt" >= $1${sql}`, params };
+  return { where: `${prefix}"startedAt" >= $1${sql}`, params, cutoff };
 }
 
 export type PlayHistoryStatsResult = {
+  // The statistics zone every day, day-of-week and hour bucket below is in.
+  timeZone: string;
   totalPlays: number;
   totalWatchTimeHours: number;
   playsByDay: { day: string; count: number }[];
@@ -1998,15 +2086,38 @@ export async function getPlayHistoryStats(
   // or dynamic fragments built only from whitelisted enum values + parseInt +
   // bound parameters. No user-controlled strings reach SQL structure or identifiers.
   // Keep this discipline on any future edits. See also the route's groupedQuery.
+  // The zone is part of the key: a changed zone re-buckets everything, so the
+  // old zone's answer must not be served under the new one (19b).
+  const timeZone = await getStatsTimeZone();
   return memoizeActivity(
-    getCacheKey("stats", filters as Record<string, unknown>),
+    getCacheKey("stats", { ...filters, zone: timeZone }),
     STATS_TTL,
-    () => getPlayHistoryStatsUncached(filters),
+    () => getPlayHistoryStatsUncached(filters, timeZone),
   );
 }
 
-async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}) {
-  const { where, params } = buildStatsFilters(filters);
+// In-flight statement cap for the Statistics fan-out. The pg pool holds five
+// connections (prisma.ts); an uncached load used to issue every statement at
+// once and hold all five until the batch drained, so the 5s play-history
+// poller (its resolve transaction waits at most 10s for a connection) and
+// every other request queued behind it. Three leaves two free.
+const STATS_STATEMENT_CONCURRENCY = 3;
+
+// Runs the thunks at most STATS_STATEMENT_CONCURRENCY at a time, keeping each
+// result's type at its position (mapLimit preserves input order).
+function runCapped<T extends readonly (() => Promise<unknown>)[]>(
+  tasks: T,
+): Promise<{ -readonly [K in keyof T]: T[K] extends () => Promise<infer R> ? R : never }> {
+  return mapLimit(tasks, STATS_STATEMENT_CONCURRENCY, (task) => task()) as unknown as Promise<{
+    -readonly [K in keyof T]: T[K] extends () => Promise<infer R> ? R : never;
+  }>;
+}
+
+async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters, timeZone: string) {
+  const { where, params, cutoff } = buildStatsFilters(filters);
+  // The two bucketed statements (daily series, day × hour heatmap) bind the zone
+  // right after `where`'s params.
+  const local = localStartedAt(`$${params.length + 1}`);
   const { where: joinWhere, params: joinParams } = buildStatsFilters(filters, "p");
   // "plays" surfaces use wwhere (filter watched=true); analytics surfaces (completion rate, codecs,
   // bitrate, bandwidth, peak concurrent, stream method, source split, client apps) use the raw
@@ -2038,13 +2149,13 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   const sourceFiltered = filters.source === "plex" || filters.source === "jellyfin";
 
   // Arc-grouped completion: three sittings of one movie should count as one completion, not
-  // "one watched + two incomplete". Same arc definition as getMostPopularOnServer — consecutive
-  // sessions on the same (user, tmdbId, season, episode) split by playHistoryArcGapDays or by a
-  // prior `completed=true` row (rewatch boundary). The arc CTE needs one extra param (arcGap)
-  // on top of `where`'s params; the rate query needs a second (completionRatio), but the
-  // histogram uses fixed bucket thresholds so it must NOT receive completionRatio — Postgres
-  // rejects prepared statements with unused binds ("bind message supplies N parameters, but
-  // prepared statement requires M"). Keep arcHistogramParams and arcRateParams separate.
+  // "one watched + two incomplete". Same arc chain as getMostPopularOnServer (arcCtes) —
+  // consecutive sessions on the same (user, title, season, episode) split by
+  // playHistoryArcGapDays or by a prior `completed=true` row (rewatch boundary). The arc
+  // CTE needs one extra param (arcGap) on top of `where`'s params, and the ONE statement
+  // that reads it binds a second (completionRatio) for the rate; the histogram buckets in
+  // the same statement use fixed thresholds. Every bound param must be referenced —
+  // Postgres rejects a prepared statement with an unused bind.
   const [completionPct, arcGapDays, settings] = await Promise.all([
     getCompletionThreshold(),
     getArcGapDays(),
@@ -2095,8 +2206,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     const stamp = parseStampDate(settings[key as SettingKey]);
     return stamp === null || stamp.getTime() <= prevStart.getTime();
   });
-  const arcHistogramParams = [...params, arcGapDays * 24 * 60 * 60];
-  const arcRateParams = [...arcHistogramParams, completionPct / 100];
+  const arcParams = [...params, arcGapDays * 24 * 60 * 60, completionPct / 100];
   const arcGapIdx = params.length + 1;
   const completionIdx = params.length + 2;
   // Identity for the arc partition. tmdbId and mediaType are BOTH NULL on an unmatched
@@ -2104,65 +2214,34 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   // collapsed into ONE arc spanning unrelated titles, and the completion rate was
   // computed across them. Fall back to the title, matching how the sibling topMedia
   // query identifies an unmatched item.
-  const arcCte = `WITH base AS (
-       SELECT "mediaServerUserId", "tmdbId", "mediaType",
-              "seasonNumber", "episodeNumber",
-              COALESCE("tmdbId"::text, 'title:' || LOWER(COALESCE("title", ''))) AS arc_key,
-              "startedAt", "playDuration", "duration", "completed"
-       FROM "PlayHistory" WHERE ${where}
-     ),
-     arc_flags AS (
-       SELECT *,
-         CASE
-           WHEN LAG("startedAt") OVER w IS NULL
-             OR EXTRACT(EPOCH FROM ("startedAt" - LAG("startedAt") OVER w)) >= $${arcGapIdx}
-             OR LAG("completed") OVER w = true
-           THEN 1 ELSE 0
-         END AS arc_start
-       FROM base
-       WINDOW w AS (
-         PARTITION BY "mediaServerUserId", arc_key, "mediaType",
-                      COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
-         ORDER BY "startedAt"
-       )
-     ),
-     arc_ids AS (
-       SELECT *,
-         SUM(arc_start) OVER (
-           PARTITION BY "mediaServerUserId", arc_key, "mediaType",
-                        COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
-           ORDER BY "startedAt"
-           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-         ) AS arc_id
-       FROM arc_flags
-     ),
-     arcs AS (
-       SELECT SUM("playDuration") AS arc_play,
-              MAX("duration") AS arc_dur
-       FROM arc_ids
-       GROUP BY "mediaServerUserId", arc_key, "mediaType",
-                COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1), arc_id
-     )`;
+  const arcs = arcCtes(where, arcGapIdx, {
+    key: "arc_key",
+    keyExpr: `COALESCE("tmdbId"::text, 'title:' || LOWER(COALESCE("title", '')))`,
+    arcSelect: `SUM("playDuration") AS arc_play,
+              MAX("duration") AS arc_dur`,
+    arcGroupBy: `"mediaServerUserId", arc_key, "mediaType",
+                COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1), arc_id`,
+  });
+  // An arc's watched share. NULLIF so no evaluation order can divide by a zero
+  // runtime: every FILTER below also requires arc_dur > 0.
+  const arcRatio = `(arc_play::float / NULLIF(arc_dur, 0))`;
+  // A bitrate the delivered-bytes figures can use (see DELIVERED_KBPS_SQL below).
+  const hasBitrate = `"bitrate" IS NOT NULL AND "bitrate" > 0`;
 
+  // At most STATS_STATEMENT_CONCURRENCY statements in flight (guardrail 31): an
+  // uncached load used to issue all of them at once and hold every pooled
+  // connection until the batch drained. Statements reading the same rows with
+  // the same grouping are folded into one (summary, daily, heatmap, arcs).
   const [
-    totalPlays,
-    totalWatchTime,
-    playsByDay,
+    summary,
+    daily,
     topUsers,
     topMedia,
     transcodeRatio,
     playsByPlatform,
-    playsByHour,
     mediaTypeBreakdown,
-    watchTimeByDay,
     heatmap,
-    completionStats,
-    completionBuckets,
-    bitrateStats,
-    bandwidthByDayRaw,
-    summaryExtras,
-    uniqueViewersByDay,
-    playsByDow,
+    arcStats,
     resolutionBreakdown,
     videoCodecBreakdown,
     audioCodecBreakdown,
@@ -2180,22 +2259,72 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     topWatchedRaw,
     rewatchRaw,
     observedRaw,
-  ] = await Promise.all([
-    prisma.$queryRawUnsafe<{ count: bigint }[]>(
-      `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE ${wwhere}`,
+  ] = await runCapped([
+    // The window's totals: plays and viewers/titles are plays-semantic (watched);
+    // hours, session length, pause and bitrate are session analytics over every
+    // row, so "how long do people sit through this" stays honest. unique_titles
+    // counts (tmdbId, mediaType) PAIRS: TMDB movie and TV ids are separate
+    // namespaces that overlap numerically, so a bare DISTINCT "tmdbId" merged a
+    // movie and a show sharing an integer into one title.
+    //
+    // DELIVERED_KBPS_SQL, not the raw column: these figures answer "how many
+    // bytes left the server", so a transcoded Plex session must not be measured
+    // at its source bitrate. See lib/bitrate.ts — it also carries the unit
+    // normalization, which is by SOURCE and never by magnitude (the two servers'
+    // ranges overlap, and both possible thresholds have already shipped as bugs:
+    // one erased Plex UHD sessions, the other inflated sub-1-Mbps Jellyfin
+    // sessions 1000x).
+    //
+    // Byte conversion is DECIMAL throughout (/1000/1000), matching the kbps input and
+    // the avg_mbps figure beside it. It previously divided by 1024 twice, mixing a
+    // decimal-k numerator with binary denominators: the result was 2.4% above true GiB
+    // and 4.6% below true GB — neither convention, and inconsistent with the Mbps
+    // number on the same panel.
+    () => prisma.$queryRawUnsafe<{
+      plays: bigint;
+      hours: number | null;
+      unique_viewers: bigint;
+      unique_titles: bigint;
+      avg_session_s: number | null;
+      longest_session_s: number | null;
+      pause_ratio: number | null;
+      avg_mbps: number | null;
+      total_gb: number | null;
+    }[]>(
+      `SELECT COUNT(*) FILTER (WHERE "watched" = true)::bigint AS plays,
+              (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours,
+              COUNT(DISTINCT "mediaServerUserId") FILTER (WHERE "watched" = true)::bigint AS unique_viewers,
+              COUNT(DISTINCT ("tmdbId", "mediaType")) FILTER (WHERE "tmdbId" IS NOT NULL AND "watched" = true)::bigint AS unique_titles,
+              COALESCE(AVG(NULLIF("playDuration", 0)), 0)::float8 AS avg_session_s,
+              COALESCE(MAX("playDuration"), 0)::int AS longest_session_s,
+              (COALESCE(SUM("pausedDuration"), 0)::float8
+                / NULLIF(SUM("playDuration"), 0)::float8)::float8 AS pause_ratio,
+              (AVG(${DELIVERED_KBPS_SQL} / 1000.0) FILTER (WHERE ${hasBitrate}))::float8 AS avg_mbps,
+              ((SUM(
+                ${DELIVERED_KBPS_SQL}
+                * "playDuration"::float8
+              ) FILTER (WHERE ${hasBitrate})) / 8.0 / 1000.0 / 1000.0)::float8 AS total_gb
+       FROM "PlayHistory" WHERE ${where}`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ hours: number | null }[]>(
-      `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours FROM "PlayHistory" WHERE ${where}`,
-      ...params,
-    ),
-    prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${wwhere}
+    // The four per-day series in one pass, with the same semantics per column as
+    // the totals above. A day with rows but no watched play reads 0, exactly what
+    // padDailySeries fills in for a day with no rows at all.
+    () => prisma.$queryRawUnsafe<{ day: string; plays: bigint; hours: number; viewers: bigint; gb: number }[]>(
+      `SELECT to_char(date_trunc('day', ${local}), 'YYYY-MM-DD') AS day,
+              COUNT(*) FILTER (WHERE "watched" = true)::bigint AS plays,
+              (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours,
+              COUNT(DISTINCT "mediaServerUserId") FILTER (WHERE "watched" = true)::bigint AS viewers,
+              (COALESCE(SUM(
+                ${DELIVERED_KBPS_SQL}
+                * "playDuration"::float8
+              ) FILTER (WHERE ${hasBitrate}), 0) / 8.0 / 1000.0 / 1000.0)::float8 AS gb
+       FROM "PlayHistory" WHERE ${where}
        GROUP BY day ORDER BY day`,
       ...params,
+      timeZone,
     ),
-    prisma.$queryRawUnsafe<{ id: string; username: string; source: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ id: string; username: string; source: string; count: bigint }[]>(
       `WITH user_counts AS (
          SELECT m."id", m."username", m."source", COUNT(*)::bigint AS count
          FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
@@ -2212,167 +2341,82 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...joinParams,
     ),
     // See per-user equivalent earlier in this file — same dedupe strategy.
-    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
       `SELECT MAX("title") AS title, "tmdbId", "mediaType"::text AS "mediaType", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY "tmdbId", "mediaType", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ method: string | null; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ method: string | null; count: bigint }[]>(
       `SELECT "playMethod" AS method, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY "playMethod" ORDER BY count DESC`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ platform: string | null; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ platform: string | null; count: bigint }[]>(
       `SELECT "platform", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY "platform" ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ hour: number; count: bigint }[]>(
-      `SELECT EXTRACT(HOUR FROM "startedAt")::int AS hour, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY hour ORDER BY hour`,
-      ...params,
-    ),
-    prisma.$queryRawUnsafe<{ type: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ type: string; count: bigint }[]>(
       `SELECT "mediaType"::text AS type, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere} AND "mediaType" IS NOT NULL
        GROUP BY "mediaType" ORDER BY count DESC`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ day: string; hours: number }[]>(
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
-              (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
-       FROM "PlayHistory" WHERE ${where}
-       GROUP BY day ORDER BY day`,
-      ...params,
-    ),
-    prisma.$queryRawUnsafe<{ dow: number; hour: number; count: bigint }[]>(
-      `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow,
-              EXTRACT(HOUR FROM "startedAt")::int AS hour,
+    () => prisma.$queryRawUnsafe<{ dow: number; hour: number; count: bigint }[]>(
+      `SELECT EXTRACT(DOW FROM ${local})::int AS dow,
+              EXTRACT(HOUR FROM ${local})::int AS hour,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY dow, hour ORDER BY dow, hour`,
       ...params,
+      timeZone,
     ),
-    prisma.$queryRawUnsafe<{ watched: bigint; total: bigint }[]>(
-      `${arcCte}
-       SELECT COUNT(*) FILTER (WHERE arc_dur > 0 AND (arc_play::float / arc_dur) >= $${completionIdx})::bigint AS watched,
-              COUNT(*) FILTER (WHERE arc_dur > 0)::bigint AS total
+    // Completion rate and its histogram from ONE pass over the arc chain. The
+    // buckets keep the old CASE's boundaries: [0, .25), [.25, .5), [.5, .75), [.75, ∞).
+    () => prisma.$queryRawUnsafe<{ watched: bigint; total: bigint; b0: bigint; b25: bigint; b50: bigint; b75: bigint }[]>(
+      `WITH ${arcs}
+       SELECT COUNT(*) FILTER (WHERE arc_dur > 0 AND ${arcRatio} >= $${completionIdx})::bigint AS watched,
+              COUNT(*) FILTER (WHERE arc_dur > 0)::bigint AS total,
+              COUNT(*) FILTER (WHERE arc_dur > 0 AND ${arcRatio} < 0.25)::bigint AS b0,
+              COUNT(*) FILTER (WHERE arc_dur > 0 AND ${arcRatio} >= 0.25 AND ${arcRatio} < 0.50)::bigint AS b25,
+              COUNT(*) FILTER (WHERE arc_dur > 0 AND ${arcRatio} >= 0.50 AND ${arcRatio} < 0.75)::bigint AS b50,
+              COUNT(*) FILTER (WHERE arc_dur > 0 AND ${arcRatio} >= 0.75)::bigint AS b75
        FROM arcs`,
-      ...arcRateParams,
-    ),
-    prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
-      `${arcCte}
-       SELECT CASE
-         WHEN (arc_play::float / arc_dur) < 0.25 THEN '0-25%'
-         WHEN (arc_play::float / arc_dur) < 0.50 THEN '25-50%'
-         WHEN (arc_play::float / arc_dur) < 0.75 THEN '50-75%'
-         ELSE '75-100%'
-       END AS bucket, COUNT(*)::bigint AS count
-       FROM arcs WHERE arc_dur > 0
-       GROUP BY bucket ORDER BY bucket`,
-      ...arcHistogramParams,
+      ...arcParams,
     ),
 
-    // DELIVERED_KBPS_SQL, not the raw column: these figures answer "how many
-    // bytes left the server", so a transcoded Plex session must not be measured
-    // at its source bitrate. See lib/bitrate.ts — it also carries the unit
-    // normalization, which is by SOURCE and never by magnitude (the two servers'
-    // ranges overlap, and both possible thresholds have already shipped as bugs:
-    // one erased Plex UHD sessions, the other inflated sub-1-Mbps Jellyfin
-    // sessions 1000x).
-    //
-    // Byte conversion is DECIMAL throughout (/1000/1000), matching the kbps input and
-    // the avg_mbps figure beside it. It previously divided by 1024 twice, mixing a
-    // decimal-k numerator with binary denominators: the result was 2.4% above true GiB
-    // and 4.6% below true GB — neither convention, and inconsistent with the Mbps
-    // number on the same panel.
-    prisma.$queryRawUnsafe<{ avg_mbps: number | null; total_gb: number | null }[]>(
-      `SELECT AVG(${DELIVERED_KBPS_SQL} / 1000.0)::float8 AS avg_mbps,
-              (SUM(
-                ${DELIVERED_KBPS_SQL}
-                * "playDuration"::float8
-              ) / 8.0 / 1000.0 / 1000.0)::float8 AS total_gb
-       FROM "PlayHistory" WHERE ${where} AND "bitrate" IS NOT NULL AND "bitrate" > 0`,
-      ...params,
-    ),
-    prisma.$queryRawUnsafe<{ day: string; gb: number }[]>(
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
-              (SUM(
-                ${DELIVERED_KBPS_SQL}
-                * "playDuration"::float8
-              ) / 8.0 / 1000.0 / 1000.0)::float8 AS gb
-       FROM "PlayHistory"
-       WHERE ${where} AND "bitrate" IS NOT NULL AND "bitrate" > 0
-       GROUP BY day ORDER BY day`,
-      ...params,
-    ),
-    prisma.$queryRawUnsafe<{
-      unique_viewers: bigint;
-      unique_titles: bigint;
-      avg_session_s: number | null;
-      longest_session_s: number | null;
-      pause_ratio: number | null;
-    }[]>(
-      // unique_viewers/unique_titles are plays-semantic (filter watched). avg/longest/pause are
-      // session analytics; keep across all sessions for honest "how long do people sit through this".
-      // unique_titles counts (tmdbId, mediaType) PAIRS: TMDB movie and TV ids are separate
-      // namespaces that overlap numerically, so a bare DISTINCT "tmdbId" merged a movie and a
-      // show sharing an integer into one title.
-      `SELECT COUNT(DISTINCT "mediaServerUserId") FILTER (WHERE "watched" = true)::bigint AS unique_viewers,
-              COUNT(DISTINCT ("tmdbId", "mediaType")) FILTER (WHERE "tmdbId" IS NOT NULL AND "watched" = true)::bigint AS unique_titles,
-              COALESCE(AVG(NULLIF("playDuration", 0)), 0)::float8 AS avg_session_s,
-              COALESCE(MAX("playDuration"), 0)::int AS longest_session_s,
-              (COALESCE(SUM("pausedDuration"), 0)::float8
-                / NULLIF(SUM("playDuration"), 0)::float8)::float8 AS pause_ratio
-       FROM "PlayHistory" WHERE ${where}`,
-      ...params,
-    ),
-    prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
-              COUNT(DISTINCT "mediaServerUserId")::bigint AS count
-       FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY day ORDER BY day`,
-      ...params,
-    ),
-    prisma.$queryRawUnsafe<{ dow: number; count: bigint }[]>(
-      `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY dow ORDER BY dow`,
-      ...params,
-    ),
-    prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
       `SELECT ${RESOLUTION_BUCKET_SQL} AS bucket, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY bucket ORDER BY count DESC`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ codec: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ codec: string; count: bigint }[]>(
       `SELECT COALESCE(NULLIF(UPPER("videoCodec"), ''), 'Unknown') AS codec,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY codec ORDER BY count DESC LIMIT 8`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ codec: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ codec: string; count: bigint }[]>(
       `SELECT COALESCE(NULLIF(UPPER("audioCodec"), ''), 'Unknown') AS codec,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY codec ORDER BY count DESC LIMIT 8`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ container: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ container: string; count: bigint }[]>(
       `SELECT COALESCE(NULLIF(LOWER("container"), ''), 'unknown') AS container,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY 1 ORDER BY count DESC LIMIT 8`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
       `SELECT CASE
          WHEN "bitrate" IS NULL OR "bitrate" <= 0 THEN 'Unknown'
          WHEN (${DELIVERED_KBPS_SQL} / 1000.0) < 2 THEN '<2 Mbps'
@@ -2386,7 +2430,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        GROUP BY bucket ORDER BY count DESC`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
       // Group by the captured transcodeReason (Plex-derived / Jellyfin
       // TranscodeReasons). Multi-reason sessions keep their comma-joined
       // label as one bucket, and pre-capture rows have a null reason and fall
@@ -2418,7 +2462,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        SELECT reason, count FROM rolled ORDER BY rn`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ device: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ device: string; count: bigint }[]>(
       `SELECT COALESCE(NULLIF("device", ''), 'Unknown') AS device,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere}
@@ -2429,14 +2473,14 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     // resolution and stream-method breakdowns they sit beside on the Statistics page. They
     // used to count watched plays only, so "Source split" summed to fewer sessions than the
     // stream-method bar directly above it in the same card.
-    prisma.$queryRawUnsafe<{ player: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ player: string; count: bigint }[]>(
       `SELECT COALESCE(NULLIF("player", ''), 'Unknown') AS player,
               COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY 1 ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{ source: string; count: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ source: string; count: bigint }[]>(
       `SELECT "source", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY "source" ORDER BY count DESC`,
@@ -2447,7 +2491,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     // Under a TV filter the two predicates contradict — the answer is [] by construction,
     // so it is not asked (one statement fewer on the five-connection pool; the wire
     // shape is the same []).
-    filters.mediaType === "TV"
+    () => filters.mediaType === "TV"
       ? Promise.resolve([] as { decade: string; count: bigint }[])
       : prisma.$queryRawUnsafe<{ decade: string; count: bigint }[]>(
           `SELECT CASE
@@ -2459,7 +2503,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
            GROUP BY decade ORDER BY decade`,
           ...params,
         ),
-    prisma.$queryRawUnsafe<{
+    () => prisma.$queryRawUnsafe<{
       tmdbId: number | null;
       title: string;
       season: number | null;
@@ -2481,7 +2525,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     // before the start (+1). Both pollers finalize an autoplayed episode and create the
     // next one with the SAME `now`, so ordering starts first counted every autoplay
     // hand-off as two simultaneous streams — one viewer binge-watching read as a peak of 2.
-    prisma.$queryRawUnsafe<{ peak: number | null }[]>(
+    () => prisma.$queryRawUnsafe<{ peak: number | null }[]>(
       `SELECT COALESCE(MAX(concurrent), 0)::int AS peak FROM (
          SELECT SUM(delta) OVER (ORDER BY t, delta ASC) AS concurrent
          FROM (
@@ -2492,7 +2536,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        ) sweeps`,
       ...params,
     ),
-    prisma.$queryRawUnsafe<{
+    () => prisma.$queryRawUnsafe<{
       plays: bigint;
       hours: number | null;
       viewers: bigint;
@@ -2504,8 +2548,8 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        FROM "PlayHistory" WHERE ${prevWhere}`,
       ...prevParams,
     ),
-    getMostRewatchedUncached(filters, 10),
-    getTopWatchedUncached(filters, 8),
+    () => getMostRewatchedUncached(filters, 10),
+    () => getTopWatchedUncached(filters, 8),
     // Rewatch rate. A watched play is a REWATCH when the same viewer (server identity, like
     // every viewer count on this page) had already watched the same item before it started:
     // the same movie, or the same EPISODE. Matching per episode is the point — episode 2
@@ -2524,7 +2568,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     // (mediaServerUserId, tmdbId, mediaType, seasonNumber, episodeNumber, startedAt) and
     // (source, sourceItemId, mediaServerUserId, startedAt). `plays` is counted here, over the
     // same rows, so the rate's two halves can't drift apart.
-    prisma.$queryRawUnsafe<{ plays: bigint; rewatches: bigint }[]>(
+    () => prisma.$queryRawUnsafe<{ plays: bigint; rewatches: bigint }[]>(
       `SELECT COUNT(*)::bigint AS plays,
               COUNT(*) FILTER (WHERE (CASE
                 WHEN p."tmdbId" IS NOT NULL AND p."mediaType" IS NOT NULL
@@ -2552,17 +2596,34 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        FROM "PlayHistory" p WHERE ${joinWWhere}`,
       ...joinParams,
     ),
-    prisma.$queryRawUnsafe<{ observed: boolean }[]>(
+    () => prisma.$queryRawUnsafe<{ observed: boolean }[]>(
       `SELECT (EXISTS (
          SELECT 1 FROM "PlayHistory" WHERE "startedAt" < $1${observedFilterSql}
        )${perSourceObservedSql}) AS observed`,
       ...observedParams,
     ),
-  ]);
+  ] as const);
 
-  const watchedCount = Number(completionStats[0]?.watched ?? 0);
-  const totalCount = Number(completionStats[0]?.total ?? 0);
-  const extras = summaryExtras[0];
+  const arc = arcStats[0];
+  const watchedCount = Number(arc?.watched ?? 0);
+  const totalCount = Number(arc?.total ?? 0);
+  // Same rows, order and labels the per-bucket GROUP BY returned: empty buckets
+  // omitted, sorted by label.
+  const completionBuckets = (
+    [["0-25%", arc?.b0], ["25-50%", arc?.b25], ["50-75%", arc?.b50], ["75-100%", arc?.b75]] as const
+  )
+    .map(([bucket, n]) => ({ bucket, count: Number(n ?? 0) }))
+    .filter((b) => b.count > 0);
+  // playsByHour and playsByDow are the heatmap's margins (same watched rows, same
+  // zone buckets), in bucket order with empty buckets omitted, like their GROUP BYs.
+  const hourTotals = new Map<number, number>();
+  const dowTotals = new Map<number, number>();
+  for (const r of heatmap) {
+    const n = Number(r.count);
+    hourTotals.set(r.hour, (hourTotals.get(r.hour) ?? 0) + n);
+    dowTotals.set(r.dow, (dowTotals.get(r.dow) ?? 0) + n);
+  }
+  const extras = summary[0];
   const avgSessionMinutes = extras ? Math.round((Number(extras.avg_session_s ?? 0) / 60) * 10) / 10 : 0;
   const longestSessionMinutes = extras ? Math.round(Number(extras.longest_session_s ?? 0) / 60) : 0;
   const pauseRatio = extras ? Math.round(Number(extras.pause_ratio ?? 0) * 1000) / 1000 : 0;
@@ -2571,38 +2632,39 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   const rewatchBase = Number(rewatchRaw[0]?.plays ?? 0);
   const rewatchPlays = Number(rewatchRaw[0]?.rewatches ?? 0);
 
-  // The cutoff is a rolling `now - days*24h`, so the window spans days+1 UTC
-  // calendar days (both edges partial). Padding to `days` would drop the oldest
-  // edge's rows from the series while totalPlays above still counts them.
-  const seriesDays = days + 1;
-
+  // The series run from the rolling cutoff's day (padDailySeries): padding to
+  // `days` would drop the oldest edge's rows while totalPlays above counts them.
   return {
-    totalPlays: Number(totalPlays[0]?.count ?? 0),
-    totalWatchTimeHours: Math.round(Number(totalWatchTime[0]?.hours ?? 0) * 10) / 10,
+    timeZone,
+    totalPlays: Number(extras?.plays ?? 0),
+    totalWatchTimeHours: Math.round(Number(extras?.hours ?? 0) * 10) / 10,
     playsByDay: padDailySeries(
-      playsByDay.map((r) => ({ day: r.day, count: Number(r.count) })),
-      seriesDays,
+      daily.map((r) => ({ day: r.day, count: Number(r.plays) })),
+      cutoff,
+      timeZone,
       (day) => ({ day, count: 0 }),
     ),
     topUsers: topUsers.map((r) => ({ id: r.id, username: r.username, source: r.source, count: Number(r.count) })),
     topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, count: Number(r.count) })),
     transcodeRatio: transcodeRatio.map((r) => ({ method: r.method ?? "Unknown", count: Number(r.count) })),
     playsByPlatform: playsByPlatform.map((r) => ({ platform: r.platform ?? "Unknown", count: Number(r.count) })),
-    playsByHour: playsByHour.map((r) => ({ hour: r.hour, count: Number(r.count) })),
+    playsByHour: [...hourTotals].sort((a, b) => a[0] - b[0]).map(([hour, count]) => ({ hour, count })),
     mediaTypeBreakdown: mediaTypeBreakdown.map((r) => ({ type: r.type, count: Number(r.count) })),
     watchTimeByDay: padDailySeries(
-      watchTimeByDay.map((r) => ({ day: r.day, hours: Math.round(r.hours * 100) / 100 })),
-      seriesDays,
+      daily.map((r) => ({ day: r.day, hours: Math.round(r.hours * 100) / 100 })),
+      cutoff,
+      timeZone,
       (day) => ({ day, hours: 0 }),
     ),
     heatmap: heatmap.map((r) => ({ dow: r.dow, hour: r.hour, count: Number(r.count) })),
     completionRate: totalCount > 0 ? Math.round((watchedCount / totalCount) * 100) : 0,
-    completionBuckets: completionBuckets.map((r) => ({ bucket: r.bucket, count: Number(r.count) })),
-    avgBitrateMbps: Math.round(Number(bitrateStats[0]?.avg_mbps ?? 0) * 10) / 10,
-    totalBandwidthGB: Math.round(Number(bitrateStats[0]?.total_gb ?? 0) * 10) / 10,
+    completionBuckets,
+    avgBitrateMbps: Math.round(Number(extras?.avg_mbps ?? 0) * 10) / 10,
+    totalBandwidthGB: Math.round(Number(extras?.total_gb ?? 0) * 10) / 10,
     bandwidthByDay: padDailySeries(
-      bandwidthByDayRaw.map((r) => ({ day: r.day, gb: Math.round(r.gb * 100) / 100 })),
-      seriesDays,
+      daily.map((r) => ({ day: r.day, gb: Math.round(r.gb * 100) / 100 })),
+      cutoff,
+      timeZone,
       (day) => ({ day, gb: 0 }),
     ),
     uniqueViewers: Number(extras?.unique_viewers ?? 0),
@@ -2614,11 +2676,12 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     pauseRatio,
     peakConcurrent,
     uniqueViewersByDay: padDailySeries(
-      uniqueViewersByDay.map((r) => ({ day: r.day, count: Number(r.count) })),
-      seriesDays,
+      daily.map((r) => ({ day: r.day, count: Number(r.viewers) })),
+      cutoff,
+      timeZone,
       (day) => ({ day, count: 0 }),
     ),
-    playsByDow: playsByDow.map((r) => ({ dow: r.dow, count: Number(r.count) })),
+    playsByDow: [...dowTotals].sort((a, b) => a[0] - b[0]).map(([dow, count]) => ({ dow, count })),
     resolutionBreakdown: resolutionBreakdown.map((r) => ({ bucket: r.bucket, count: Number(r.count) })),
     videoCodecBreakdown: videoCodecBreakdown.map((r) => ({ codec: r.codec, count: Number(r.count) })),
     audioCodecBreakdown: audioCodecBreakdown.map((r) => ({ codec: r.codec, count: Number(r.count) })),
@@ -2652,33 +2715,35 @@ export async function getActivityCalendar(
   source?: string,
   mediaType?: string,
 ): Promise<{ day: string; count: number }[]> {
+  const timeZone = await getStatsTimeZone();
   return memoizeActivity(
-    getCacheKey("calendar", { source, mediaType }),
+    getCacheKey("calendar", { source, mediaType, zone: timeZone }),
     CALENDAR_TTL,
-    () => getActivityCalendarUncached(source, mediaType),
+    () => getActivityCalendarUncached(source, mediaType, timeZone),
   );
 }
 
 async function getActivityCalendarUncached(
-  source?: string,
-  mediaType?: string,
+  source: string | undefined,
+  mediaType: string | undefined,
+  timeZone: string,
 ): Promise<{ day: string; count: number }[]> {
-  // No params bound before the suffix here (the CURRENT_DATE window uses no
-  // placeholder), so filter params start at $1 — see appendPlayHistoryFilter.
-  const { sql: filterSql, params: filterParams } = appendPlayHistoryFilter([], {
+  // The zone is $1, so the filter params start at $2 — see appendPlayHistoryFilter.
+  const { sql: filterSql, params: filterParams } = appendPlayHistoryFilter([timeZone], {
     source,
     mediaType,
   });
 
   const result = await prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
-    // startedAt is a tz-naive UTC timestamp and is bucketed by its UTC day, so the
-    // window edge must be a UTC date too. CURRENT_DATE evaluates in the Postgres
-    // session timezone — on a non-UTC DB that drifts a day off the UTC buckets and
-    // the UTC window the client (activity-calendar.tsx) renders. Pin it to UTC.
-    `SELECT DATE("startedAt")::text AS day, COUNT(*)::bigint AS count
+    // Days are the statistics zone's, and so is the window: today there, back 364
+    // days (365 calendar days inclusive of today), as the zone's midnight in
+    // stored UTC so the bare column keeps its index. CURRENT_DATE would be the
+    // Postgres session's day, which need not be the zone's; the page hands the
+    // client (activity-calendar.tsx) the same zone's today.
+    `SELECT to_char(${localStartedAt("$1")}, 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
      FROM "PlayHistory"
-     WHERE "startedAt" >= (now() AT TIME ZONE 'UTC')::date - INTERVAL '364 days' AND "watched" = true${filterSql} -- 365 calendar days inclusive of today
-     GROUP BY DATE("startedAt")
+     WHERE "startedAt" >= ${zonedMidnightSql("(now() AT TIME ZONE $1::text)::date - 364", "$1")} AND "watched" = true${filterSql}
+     GROUP BY day
      ORDER BY day ASC`,
     ...filterParams,
   );
@@ -2692,9 +2757,9 @@ async function getActivityCalendarUncached(
 // cell was coloured by (both heatmaps colour from watched=true aggregates).
 export interface HeatmapCellQuery {
   mode: "day" | "hour";
-  day?: string; // YYYY-MM-DD (UTC) — mode="day"
-  dow?: number; // Postgres DOW 0=Sun..6=Sat — mode="hour"
-  hour?: number; // 0-23 — mode="hour"
+  day?: string; // YYYY-MM-DD in the statistics zone — mode="day"
+  dow?: number; // Postgres DOW 0=Sun..6=Sat, statistics zone — mode="hour"
+  hour?: number; // 0-23, statistics zone — mode="hour"
   userId?: string; // mediaServerUserId — user-scoped pages
   source?: string; // "plex" | "jellyfin"
   mediaType?: string; // "MOVIE" | "TV"
@@ -2724,12 +2789,19 @@ export interface HeatmapCellDetail {
   topUsers: { id: string; username: string; count: number }[];
 }
 
+// Through memoizeActivity, so the overview page and the native heatmap-cell
+// route asking for one cell at once share ONE five-statement computation. The
+// cell is a bucket in the statistics zone, so the zone is part of the key.
 export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<HeatmapCellDetail> {
-  const cacheKey = `heatmap-cell:${JSON.stringify(q)}`;
-  const cached = getCached<HeatmapCellDetail>(cacheKey);
-  if (cached) return cached;
-  const generation = activityGeneration();
+  const timeZone = await getStatsTimeZone();
+  return memoizeActivity(
+    `heatmap-cell:z=${timeZone}:${JSON.stringify(q)}`,
+    STATS_TTL,
+    () => getHeatmapCellDetailUncached(q, timeZone),
+  );
+}
 
+async function getHeatmapCellDetailUncached(q: HeatmapCellQuery, timeZone: string): Promise<HeatmapCellDetail> {
   // Build the WHERE incrementally so the $-index always tracks params.length —
   // same discipline as appendPlayHistoryFilter (the 803cd11 bug class).
   const conditions: string[] = [`"watched" = true`];
@@ -2746,14 +2818,18 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     // sequential scan of the whole table on every popover click.
     //
     // The boundaries are computed in SQL from the bound date string rather than
-    // from a JS Date: startedAt is a tz-naive UTC column, so ::date arithmetic
-    // here buckets identically to DATE("startedAt"), with no dependency on how
-    // the driver serializes a JS Date. It also keeps the loud failure on an
-    // impossible-but-well-shaped day like 2026-02-30 — the route's regex admits
-    // it, Postgres rejects it, whereas new Date("2026-02-30") silently rolls
-    // over to March 2 and would quietly return the wrong day's rows.
+    // from a JS Date: the day's midnight and the next one IN THE STATISTICS ZONE,
+    // as stored-UTC instants, so the range holds exactly the rows the calendar's
+    // day bucket counted (a DST day is 23 or 25 hours long, never a fixed 24).
+    // It also keeps the loud failure on an impossible-but-well-shaped day like
+    // 2026-02-30 — the route's regex admits it, Postgres rejects it, whereas
+    // new Date("2026-02-30") silently rolls over to March 2 and would quietly
+    // return the wrong day's rows.
     const day = bind(q.day);
-    conditions.push(`"startedAt" >= ${day}::date AND "startedAt" < ${day}::date + INTERVAL '1 day'`);
+    const zone = bind(timeZone);
+    conditions.push(
+      `"startedAt" >= ${zonedMidnightSql(`${day}::date`, zone)} AND "startedAt" < ${zonedMidnightSql(`${day}::date + 1`, zone)}`,
+    );
   } else {
     // Match the source heatmaps' scoping: admin grid is bounded by the `days`
     // window (getPlayHistoryStats); the per-user grid is all-history. Only apply
@@ -2763,8 +2839,9 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
         `"startedAt" >= ${bind(new Date(Date.now() - q.days * 24 * 60 * 60 * 1000))}`,
       );
     }
-    conditions.push(`EXTRACT(DOW FROM "startedAt")::int = ${bind(q.dow)}`);
-    conditions.push(`EXTRACT(HOUR FROM "startedAt")::int = ${bind(q.hour)}`);
+    const local = localStartedAt(bind(timeZone));
+    conditions.push(`EXTRACT(DOW FROM ${local})::int = ${bind(q.dow)}`);
+    conditions.push(`EXTRACT(HOUR FROM ${local})::int = ${bind(q.hour)}`);
   }
   if (q.userId) conditions.push(`"mediaServerUserId" = ${bind(q.userId)}`);
   if (q.source === "plex" || q.source === "jellyfin") {
@@ -2916,7 +2993,6 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     })),
   };
 
-  setCached(cacheKey, detail, STATS_TTL, generation);
   return detail;
 }
 
@@ -2932,15 +3008,23 @@ export interface TranscodeOffenders {
   topTitles: { title: string; tmdbId: number | null; mediaType: string | null; count: number }[];
 }
 
+// Memoized like the heatmap cell above: the overview page and the native
+// transcode-offenders route share one computation per key.
 export async function getTranscodeOffenders(
   filters: PlayHistoryStatsFilters = {},
   limit = 6,
 ): Promise<TranscodeOffenders> {
-  const cacheKey = `transcode-offenders:${JSON.stringify({ ...filters, limit })}`;
-  const cached = getCached<TranscodeOffenders>(cacheKey);
-  if (cached) return cached;
-  const generation = activityGeneration();
+  return memoizeActivity(
+    `transcode-offenders:${JSON.stringify({ ...filters, limit })}`,
+    STATS_TTL,
+    () => getTranscodeOffendersUncached(filters, limit),
+  );
+}
 
+async function getTranscodeOffendersUncached(
+  filters: PlayHistoryStatsFilters,
+  limit: number,
+): Promise<TranscodeOffenders> {
   const { where, params } = buildStatsFilters(filters);
   const twhere = `${where} AND "playMethod" = 'Transcode'`;
   const limitIdx = params.length + 1;
@@ -2984,8 +3068,81 @@ export async function getTranscodeOffenders(
       count: Number(t.count),
     })),
   };
-  setCached(cacheKey, result, STATS_TTL, generation);
   return result;
+}
+
+// The overview's watch-time leaderboard: the top viewers by hours in the window.
+// `plays` is computed HERE, per row, with the same `watched = true` rule as
+// getPlayHistoryStats' topUsers. Looking it up from topUsers instead read 0 for
+// anyone outside the per-source top 10 by PLAY COUNT — exactly the
+// few-long-plays viewer a watch-time leaderboard surfaces ("42h · 0 plays").
+// One overall ranking (the page shows a single list), with `id` breaking ties so
+// equal-hours viewers keep their order across refreshes.
+export const WATCH_TIME_LEADERBOARD_SIZE = 8;
+
+export async function getWatchTimeLeaderboard(
+  filters: PlayHistoryStatsFilters = {},
+): Promise<{ id: string; username: string; source: string; hours: number; plays: number }[]> {
+  return memoizeActivity(getCacheKey("watch-leaderboard", filters as Record<string, unknown>), STATS_TTL, async () => {
+    const { where, params } = buildStatsFilters(filters, "p");
+    params.push(WATCH_TIME_LEADERBOARD_SIZE);
+    const limitIdx = params.length;
+    const rows = await prisma.$queryRawUnsafe<
+      { id: string; username: string; source: string; hours: number | null; plays: bigint }[]
+    >(
+      `SELECT m."id", m."username", m."source",
+              (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours,
+              COUNT(*) FILTER (WHERE p."watched" = true)::bigint AS plays
+       FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
+       WHERE ${where}
+       GROUP BY m."id", m."username", m."source"
+       ORDER BY hours DESC, m."id" ASC
+       LIMIT $${limitIdx}`,
+      ...params,
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      username: r.username,
+      source: r.source,
+      hours: r.hours ?? 0,
+      plays: Number(r.plays),
+    }));
+  });
+}
+
+// The window's busiest day (in the statistics zone) by watched plays.
+// `watched = true` is NOT optional: the "Plays per day" chart this sits beside
+// is built from watched plays, and counting every row named a day of many
+// abandoned starts the busiest while the chart showed it as a trough.
+export async function getBusiestDay(
+  filters: PlayHistoryStatsFilters = {},
+): Promise<{ day: string; count: number } | null> {
+  const timeZone = await getStatsTimeZone();
+  const cached = await memoizeActivity(getCacheKey("busiest-day", { ...filters, zone: timeZone }), STATS_TTL, async () => {
+    const { where, params } = buildStatsFilters(filters);
+    const rows = await prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
+      `SELECT to_char(date_trunc('day', ${localStartedAt(`$${params.length + 1}`)}), 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${where} AND "watched" = true
+       GROUP BY day ORDER BY count DESC, day DESC LIMIT 1`,
+      ...params,
+      timeZone,
+    );
+    // Wrapped so "no plays" is a cacheable value (memoizeActivity skips a null).
+    return { day: rows[0] ? { day: rows[0].day, count: Number(rows[0].count) } : null };
+  });
+  return cached.day;
+}
+
+// Every platform name in play history, for the history table's filter. A
+// DISTINCT over the whole table (no index serves it), so memoized: the table
+// fetches it on every mount, and a finalize that adds a new platform clears it.
+export async function getPlayHistoryPlatforms(): Promise<string[]> {
+  return memoizeActivity(getCacheKey("platforms", {}), STATS_TTL, async () => {
+    const rows = await prisma.$queryRawUnsafe<{ platform: string }[]>(
+      `SELECT DISTINCT "platform" FROM "PlayHistory" WHERE "platform" IS NOT NULL ORDER BY "platform"`,
+    );
+    return rows.map((r) => r.platform);
+  });
 }
 
 // Each part is NAME-tagged, not positional. Absent params were simply skipped, so the
@@ -3000,6 +3157,8 @@ function getCacheKey(prefix: string, params: Record<string, unknown>): string {
   if (params.source) parts.push(`s=${String(params.source)}`);
   if (params.mediaType) parts.push(`m=${String(params.mediaType)}`);
   if (params.limit) parts.push(`n=${String(params.limit)}`);
+  // Every aggregate that buckets by hour or day passes the statistics zone.
+  if (params.zone) parts.push(`z=${String(params.zone)}`);
   return parts.join(":");
 }
 

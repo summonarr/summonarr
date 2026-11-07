@@ -122,6 +122,7 @@ test("structural: LiveRefresh refreshes through the shared timer, never its own"
 test("structural: the issue page's buttons refresh only through the shared timer", () => {
   for (const file of [
     "src/components/admin/issue-actions.tsx",
+    "src/components/admin/issue-fix-options.tsx",
     "src/components/admin/issue-claim-button.tsx",
     "src/components/admin/issue-fix-match-button.tsx",
   ]) {
@@ -139,10 +140,12 @@ test("structural: the Fix file window holds the refresh while open, and its writ
   assert.match(dialog, /useEffect\(\(\) => holdLiveRefresh\(\), \[\]\);/, "released on unmount");
   // Each function cut at its own closing brace, never a fixed window.
   const grab = functionBody(dialog, "async function grabRelease(");
-  assert.match(grab, /setGrabOk\(true\);[\s\S]*?requestPageRefresh\(\(\) => router\.refresh\(\)\)/);
-  const search = functionBody(dialog, "async function searchNow(");
+  assert.match(grab, /patchSearch\(instance, \{ grabOk: true \}\);[\s\S]*?requestPageRefresh\(\(\) => router\.refresh\(\)\)/);
+  // The search and the delete live in the options view, inside the window.
+  const options = read("src/components/admin/issue-fix-options.tsx");
+  const search = functionBody(options, "async function searchNow(");
   assert.match(search, /setSearched\(true\);[\s\S]*?requestPageRefresh\(\(\) => router\.refresh\(\)\)/);
-  const replaceFn = functionBody(dialog, "async function replace(");
+  const replaceFn = functionBody(options, "async function replace(");
   assert.match(replaceFn, /void load\(instance\);\s*\}\s*$/, "the cut reaches the function's own tail");
   assert.match(replaceFn, /setSelected\(new Set\(\)\);\s*\/\/[^\n]*\n\s*requestPageRefresh\(\(\) => router\.refresh\(\)\);/);
 });
@@ -153,4 +156,14 @@ test("structural: a refused grab is shown INSIDE the Fix file window, with Searc
   assert.match(dialog, /\{releaseError && \(\s*<div role="alert"/, "the error renders inside the window");
   assert.match(dialog, /onClick=\{\(\) => void loadReleases\(instance\)\}\s*disabled=\{working\}/, "Search again, disabled during a write");
   assert.match(dialog, /t\("adminQueue\.issueActions\.searchAgain"\)/);
+});
+
+test("structural: the issue Fix Match dialog holds the refresh while OPEN — released on close, hide and unmount", () => {
+  // Resolving the issue refreshes the page; on the OPEN tab that dropped the
+  // issue's card, and the open dialog with it, before the result or the
+  // add-as-request step was seen. Hidden-but-busy holds nothing: a remap can
+  // run for hours and the page's live refresh must not wait on it.
+  const src = read("src/components/admin/issue-fix-match-button.tsx");
+  assert.match(src, /import \{[^}]*\bholdLiveRefresh\b[^}]*\} from "@\/lib\/client\/refresh-hold";/);
+  assert.match(src, /useEffect\(\(\) => \{\s*if \(!open\) return;\s*return holdLiveRefresh\(\);\s*\}, \[open\]\);/);
 });

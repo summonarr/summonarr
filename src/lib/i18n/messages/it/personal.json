@@ -122,6 +122,7 @@
   "personal.stats.noActivityDescription": "Quando riprodurrai qualcosa sul server, le tue statistiche appariranno qui.",
   "personal.stats.totalPlays": "Riproduzioni totali",
   "personal.stats.watchTime": "Tempo di visione",
+  "personal.stats.watchTimeValue": "{hours} h",
   "personal.stats.lastActive": "Ultima attività",
   "personal.stats.avgSession": "Sessione media",
   "personal.stats.calendar": "Attività degli ultimi 365 giorni",

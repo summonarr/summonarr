@@ -124,3 +124,24 @@ export function resolveUnmappedEntry<T extends TitleEntry>(
   if (!r) return entry;
   return { ...entry, tmdbId: r.tmdbId, mediaType: entry.mediaType ?? r.mediaType };
 }
+
+// What the Activity overview may PERSIST onto a live session it resolved. The
+// render backfills ActiveSession.tmdbId so later renders skip the lookup, and
+// the finalize copies it into PlayHistory, while the poller never overwrites a
+// stored id it can't resolve itself. So only an ITEM-level match (the session's
+// own server item, through play history or the library) is written. A
+// title-only match is a guess: same-titled remakes, two shows sharing a name, or
+// a music track matching a film. It stays display-only. Nor is a media type the
+// session lacks invented: the item's own type is written, and a session whose
+// type and item type are both unknown, or disagree, is left for the sync.
+export function sessionBackfill(
+  sessionMediaType: string | null | undefined,
+  resolved: { tmdbId: number; mediaType: string | null; via: "item" | "title" } | undefined,
+): { tmdbId: number; mediaType: ActivityMediaType } | null {
+  if (!resolved || resolved.via !== "item") return null;
+  const own = toActivityMediaType(sessionMediaType);
+  const item = toActivityMediaType(resolved.mediaType);
+  if (own && item && own !== item) return null;
+  const mediaType = own ?? item;
+  return mediaType ? { tmdbId: resolved.tmdbId, mediaType } : null;
+}

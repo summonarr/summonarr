@@ -69,6 +69,48 @@ function shouldUseManualInputs(
   return formVisible && seasonCount === 0;
 }
 
+// A season/episode pick carried across a change of the lists or the scope:
+// the current season stays when the list still has it (else the first season),
+// and the current episode stays when that season still lists it (else the
+// season's first episode). Never a null episode while the chosen season has
+// episodes — see the scope-change block for why. Module-level and pure so
+// tests/report-issue-manual-inputs.test.mts can pin it.
+function keepSeasonEpisode(
+  seasons: TVSeasonInfo[],
+  season: number | null,
+  episode: number | null,
+): { season: number | null; episode: number | null } {
+  const kept = season != null ? seasons.find((s) => s.seasonNumber === season) : undefined;
+  const chosen = kept ?? seasons[0];
+  if (!chosen) return { season: null, episode: null };
+  const keepEpisode = kept !== undefined && episode != null && chosen.episodes.includes(episode);
+  return { season: chosen.seasonNumber, episode: keepEpisode ? episode : chosen.episodes[0] ?? null };
+}
+
+// The library lists can miss what a watch-history row reports: tv-availability
+// lists only the sign-in provider's sources, and TVEpisodeCache lags live play
+// history. A seeded season/episode is the one the viewer actually played, so it
+// JOINS the options instead of being swapped for the first season's first
+// episode, which the selects (no manual inputs once a list exists) left
+// unreachable. An empty list stays empty: that keeps the manual inputs, already
+// seeded with the same numbers.
+function withSeedOptions(
+  seasons: TVSeasonInfo[],
+  seedSeason: number | null,
+  seedEpisode: number | null,
+): TVSeasonInfo[] {
+  if (seasons.length === 0 || seedSeason == null) return seasons;
+  const existing = seasons.find((s) => s.seasonNumber === seedSeason);
+  if (!existing) {
+    const added = { seasonNumber: seedSeason, episodes: seedEpisode != null ? [seedEpisode] : [] };
+    return [...seasons, added].sort((a, b) => a.seasonNumber - b.seasonNumber);
+  }
+  if (seedEpisode == null || existing.episodes.includes(seedEpisode)) return seasons;
+  return seasons.map((s) =>
+    s === existing ? { ...s, episodes: [...s.episodes, seedEpisode].sort((a, b) => a - b) } : s,
+  );
+}
+
 export function ReportIssueButton({
   tmdbId,
   tvdbId,
@@ -97,23 +139,23 @@ export function ReportIssueButton({
   const [manualSeason, setManualSeason] = useState("");
   const [manualEpisode, setManualEpisode] = useState("");
 
-  // Reset season/episode selections when scope changes (setState-during-render avoids useEffect cascade)
+  // Re-validate season/episode selections when scope changes (setState-during-
+  // render avoids a useEffect cascade). A pick the lists still hold is KEPT —
+  // Season 3 chosen under SEASON stays Season 3 under EPISODE — and the manual
+  // inputs keep their values (resolveNumbers ignores the episode outside
+  // EPISODE scope).
   const [prevScope, setPrevScope] = useState(scope);
   if (scope !== prevScope) {
     setPrevScope(scope);
-    const nextSeason = tvSeasons.length > 0 ? tvSeasons[0].seasonNumber : null;
-    setSelectedSeason(nextSeason);
-    // Seed the episode too, exactly as the season above is seeded. Leaving it
-    // null did NOT leave the field blank — a controlled <select> whose value
-    // matches no option falls back to displaying the first one, so the dropdown
-    // read "Episode 1" while the state was null. The user saw a complete form,
-    // submitted, and got the server's raw `episodeNumber is required for
-    // EPISODE scope` back about a field they were looking at.
-    setSelectedEpisode(
-      tvSeasons.find((s) => s.seasonNumber === nextSeason)?.episodes[0] ?? null,
-    );
-    setManualSeason("");
-    setManualEpisode("");
+    // The episode is seeded too, never left null while the season has
+    // episodes. A null did NOT leave the field blank — a controlled <select>
+    // whose value matches no option falls back to displaying the first one, so
+    // the dropdown read "Episode 1" while the state was null. The user saw a
+    // complete form, submitted, and got the server's raw `episodeNumber is
+    // required for EPISODE scope` back about a field they were looking at.
+    const next = keepSeasonEpisode(tvSeasons, selectedSeason, selectedEpisode);
+    setSelectedSeason(next.season);
+    setSelectedEpisode(next.episode);
   }
 
   const isTV = mediaType === "TV";
@@ -143,33 +185,35 @@ export function ReportIssueButton({
     setManualSeason(seedSeason != null ? String(seedSeason) : "");
     setManualEpisode(seedEpisode != null ? String(seedEpisode) : "");
     setAvailabilityFailed(false);
+    // The previous open's lists: left in place, a failed re-load showed its
+    // "Showing from Plex" next to the load-failed warning.
+    setTvSeasons([]);
+    setAvailabilitySource(null);
 
     if (isTV) {
+      // Every write below is guarded by the generation: a response for an open
+      // the user already dismissed must not overwrite a newer open's lists or
+      // picks (the dialog can be closed while this is in flight).
       try {
         const res = await fetch(withBasePath(`/api/tv-availability?tmdbId=${tmdbId}`));
+        if (openGen.current !== myGen) return;
         if (res.ok) {
           const data: TVAvailabilityResponse = await res.json();
-          setTvSeasons(data.seasons);
+          if (openGen.current !== myGen) return;
+          const seasons = withSeedOptions(data.seasons, seedSeason, seedEpisode);
+          setTvSeasons(seasons);
           setAvailabilitySource(data.source);
-          if (data.seasons.length > 0) {
-            // Honor the seeded season/episode when the library lists actually
-            // contain them; otherwise fall back to the first available.
-            const seededSeason =
-              seedSeason != null
-                ? data.seasons.find((s) => s.seasonNumber === seedSeason)
-                : undefined;
-            const season = seededSeason ?? data.seasons[0];
-            setSelectedSeason(season.seasonNumber);
-            setSelectedEpisode(
-              seededSeason && seedEpisode != null && seededSeason.episodes.includes(seedEpisode)
-                ? seedEpisode
-                : season.episodes[0] ?? null,
-            );
+          if (seasons.length > 0) {
+            // The seed when given (now always in the list), else the first.
+            const pick = keepSeasonEpisode(seasons, seedSeason, seedEpisode);
+            setSelectedSeason(pick.season);
+            setSelectedEpisode(pick.episode);
           }
         } else {
           setAvailabilityFailed(true);
         }
       } catch {
+        if (openGen.current !== myGen) return;
         setAvailabilityFailed(true);
       }
     }
@@ -207,9 +251,13 @@ export function ReportIssueButton({
       };
     }
 
+    // A season with no listed episodes (a seeded one the library doesn't know)
+    // shows the manual episode input instead of an empty select.
     return {
       season: selectedSeason ?? undefined,
-      episode: scope === "EPISODE" ? (selectedEpisode ?? undefined) : undefined,
+      episode: scope === "EPISODE"
+        ? (selectedEpisode ?? (manualEpisode ? parseInt(manualEpisode, 10) : undefined))
+        : undefined,
     };
   }
 
@@ -503,7 +551,7 @@ export function ReportIssueButton({
                     {scope === "EPISODE" && (
                       <div className="flex-1 space-y-1.5">
                         <label htmlFor="report-issue-episode" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.episode")}</label>
-                        {!useManualInputs && currentSeason ? (
+                        {!useManualInputs && currentSeason && currentSeason.episodes.length > 0 ? (
                           <StyledSelect
                             id="report-issue-episode"
                             value={String(selectedEpisode ?? "")}

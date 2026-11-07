@@ -22,10 +22,14 @@ test("ApiKeySettingForm: the field starts empty — the mask is only a placehold
 
 test("DiscordBotForm: a blank bot token is never sent (the route can't clear it) and the form says how to turn the bot off", () => {
   const src = form("discord-bot-form.tsx");
-  const save = src.slice(src.indexOf("async function handleSave"), src.indexOf("return (\n"));
-  assert.match(save, /current !== saved\[key\] && !\(key === "discordBotToken" && current === ""\)/);
+  // The one diff Save sends (and the dirty flag reads) drops a blank token.
+  const diff = src.slice(src.indexOf("function pendingChanges"), src.indexOf("export function DiscordBotForm"));
+  assert.match(diff, /current !== saved\[key\] && !\(key === "discordBotToken" && current === ""\)/);
+  const save = src.slice(src.indexOf("async function handleSave"), src.indexOf("// A labelled text input"));
+  assert.match(save, /const changed = pendingChanges\(values, saved\);/);
+  assert.match(save, /body: JSON\.stringify\(changed\)/);
   // The hint shows while the field is blank over a saved token.
-  assert.match(src, /\{botToken === "" && tokenSaved && \(\s*<p[^>]*>\{t\("settings\.form\.discord\.botTokenKept"\)\}<\/p>/);
+  assert.match(src, /\{values\.discordBotToken === "" && tokenSaved && \(\s*<p[^>]*>\{t\("settings\.form\.discord\.botTokenKept"\)\}<\/p>/);
 });
 
 test("EmailForm: the SMTP port is a bounded number and Save waits for a valid one; the Saved line fades", () => {
@@ -39,8 +43,9 @@ test("EmailForm: the SMTP port is a bounded number and Save waits for a valid on
 test("DeletionVoteThresholdForm: the input carries the route's 0–10000 range and the error is set only by a failure", () => {
   const src = form("deletion-vote-threshold-form.tsx");
   assert.match(src, /min="0"\s+max="10000"/);
-  assert.match(src, /const \[error, setError\] = useState\(""\);/);
-  const okBranch = src.match(/if \(res\.ok && data\.ok !== false\) \{([\s\S]*?)\} else \{/);
-  assert.ok(okBranch, "success branch not found");
-  assert.doesNotMatch(okBranch[1], /setError\(/, "a success never writes an error message");
+  // The message is the shared save's, which only a failure writes
+  // (tests/settings-save.test.mts); the form keeps no error of its own.
+  assert.match(src, /const \{ status, message, save, edited \} = useSettingsSave\(\);/);
+  assert.doesNotMatch(src, /setError\(|useState\(""\)/);
+  assert.match(src, /errorLabel=\{message \|\| t\("settings\.form\.common\.saveFailed"\)\}/);
 });

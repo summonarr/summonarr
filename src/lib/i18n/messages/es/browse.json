@@ -119,6 +119,8 @@
   "browse.forYou.rebuild.failed": "Error al reconstruir (HTTP {status})",
   "browse.forYou.rebuild.done_one": "Reconstruida {updated} de {count} lista",
   "browse.forYou.rebuild.done_other": "Reconstruidas {updated} de {count} listas",
+  "browse.forYou.rebuild.partial_one": "Reconstruida {updated} de {count} lista; {failed} con error",
+  "browse.forYou.rebuild.partial_other": "Reconstruidas {updated} de {count} listas; {failed} con error",
   "browse.forYou.rebuild.label": "Reconstruir sugerencias",
   "browse.forYou.rebuild.labelWait": "Reconstruir sugerencias: espera {seconds} s",
   "browse.forYou.rebuild.wait": "Espera {seconds} s",

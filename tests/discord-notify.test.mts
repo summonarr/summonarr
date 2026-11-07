@@ -95,14 +95,13 @@ const {
   notifyAdminsNewRequestDiscord,
   notifyAdminsNewIssueDiscord,
   notifyAdminsIssueMessage,
-  notifyUserRequestApproved,
+  notifyUserDownloadPending,
   notifyUserRequestAvailable,
   notifyUsersRequestsApproved,
   notifyAdminsRequestComment,
   notifyUserRequestComment,
   notifyUserIssueMessage,
   notifyUserIssueResolved,
-  notifyUserRequestDeclined,
   notifyUsersRequestsDeclined,
 } = await import("../src/lib/discord-notify.ts");
 
@@ -128,10 +127,12 @@ let userFindUniqueRow: UserRow | null = null;
 let userFindManyRows: UserRow[] = [];
 const userFindUniqueCalls: unknown[] = [];
 const userFindManyWheres: Array<Record<string, unknown>> = [];
+const userFindManySelects: Array<Record<string, unknown> | undefined> = [];
 shadowPrismaModel(prisma, "user", {
   findUnique: async (args: unknown) => { userFindUniqueCalls.push(args); return userFindUniqueRow; },
-  findMany: async (args: { where: Record<string, unknown> }) => {
+  findMany: async (args: { where: Record<string, unknown>; select?: Record<string, unknown> }) => {
     userFindManyWheres.push(args.where);
+    userFindManySelects.push(args.select);
     return userFindManyRows;
   },
 });
@@ -192,6 +193,7 @@ beforeEach(() => {
   userFindManyRows = [];
   userFindUniqueCalls.length = 0;
   userFindManyWheres.length = 0;
+  userFindManySelects.length = 0;
   respond = () => okJson({ id: "999999999999999999" });
   translationRows.clear();
 });
@@ -209,7 +211,7 @@ test("feature flag off: every entry point returns before any fetch or user read,
   });
   userFindUniqueRow = linkedUser();
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
   await notifyAdminsNewRequestDiscord({ requestId: "r1", title: "Dune", mediaType: "MOVIE", requestedBy: "alice", note: null, posterPath: null });
   await notifyAdminsNewIssueDiscord({ issueId: "i1", title: "Dune", mediaType: "MOVIE", issueType: "OTHER", reportedBy: "alice", note: null, posterPath: null });
   await assignDiscordRolesOnLink(DID, account());
@@ -227,9 +229,11 @@ test("half-configured: missing botToken / channel / valid snowflake all short-ci
   // Flag on (default), channel present, but no bot token → getConfig() null,
   // and the user row is never read (config gates BEFORE recipient resolution).
   setSettings({ discordNotifyChannelId: CHANNEL });
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+  await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }]);
   assert.equal(sent.length, 0);
   assert.equal(userFindUniqueCalls.length, 0);
+  assert.equal(userFindManyWheres.length, 0);
 
   // Bot token but no admin-request channel → the admin post is skipped.
   setSettings({ discordBotToken: BOT });
@@ -256,11 +260,12 @@ test("half-configured: missing botToken / channel / valid snowflake all short-ci
 
 test("DM path (no channel configured): opens the DM channel then posts, with no mention content", async () => {
   setSettings({ discordBotToken: BOT });
-  userFindUniqueRow = linkedUser();
+  userFindManyRows = [{ id: "u1", discordId: DID }];
   respond = (url) =>
     url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({});
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  // An approval, one request or many, is this batch notifier's (request-notifications.ts).
+  await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }]);
 
   assert.equal(sent.length, 2);
   const [open, msg] = sent;
@@ -306,28 +311,29 @@ test("a DM is written in the linked user's language; a shared-channel post uses 
   delete process.env.SUMMONARR_DEFAULT_LOCALE;
   try {
     // DM to a Spanish user → Spanish.
+    const approve = () => notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }]);
     setSettings({ discordBotToken: BOT });
-    userFindUniqueRow = linkedUser({ locale: "es" });
+    userFindManyRows = [{ id: "u1", discordId: DID, locale: "es" }];
     respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    await approve();
     const dm = (sent[1].body?.embeds as Array<Record<string, unknown>>)[0];
     assert.equal(dm.title, "✅ Solicitud aprobada — Dune");
     assert.ok(String(dm.description).startsWith("Tu solicitud (**Película**) se aprobó"), String(dm.description));
-    assert.ok((userFindUniqueCalls[0] as { select: Record<string, unknown> }).select.locale, "the locale rides the existing user read");
+    assert.ok(userFindManySelects[0]?.locale, "the locale rides the existing recipient read");
 
     // Same Spanish user, but the notify channel is configured → everyone reads
     // it, so it stays in the instance default (English here).
     sent.length = 0;
     setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    await approve();
     const shared = (sent[0].body?.embeds as Array<Record<string, unknown>>)[0];
     assert.equal(shared.title, "✅ Request Approved — Dune");
 
     // An instance default of "es" moves the shared channel to Spanish.
     sent.length = 0;
     process.env.SUMMONARR_DEFAULT_LOCALE = "es";
-    userFindUniqueRow = linkedUser();
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    userFindManyRows = [{ id: "u1", discordId: DID }];
+    await approve();
     assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Solicitud aprobada — Dune");
   } finally {
     if (before === undefined) delete process.env.SUMMONARR_DEFAULT_LOCALE;
@@ -341,21 +347,15 @@ test("the media title follows the EMBED's language: the user's in a DM, the chan
   translationRows.set("movie:438631:i18n:v2", JSON.stringify({ es: { title: "Duna" } }));
   try {
     setSettings({ discordBotToken: BOT });
-    userFindUniqueRow = linkedUser({ locale: "es" });
+    userFindManyRows = [{ id: "u1", discordId: DID, locale: "es" }];
     respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE", 438631);
+    await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 }]);
     assert.equal((sent[1].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Solicitud aprobada — Duna");
 
     // A shared channel is read in the instance default — an English embed must
     // not carry the Spanish requester's title.
     sent.length = 0;
     setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
-    await notifyUserRequestApproved("u1", "Dune", "MOVIE", 438631);
-    assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Request Approved — Dune");
-
-    // Batch path, same rule.
-    sent.length = 0;
-    userFindManyRows = [{ id: "u1", discordId: DID, locale: "es" }];
     await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 }]);
     assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Request Approved — Dune");
 
@@ -373,10 +373,11 @@ test("the media title follows the EMBED's language: the user's in a DM, the chan
 test("recipient gating: no linked account or an opted-out preference sends nothing; other prefs stay independent", async () => {
   setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
 
-  // Opted out of approved notifications specifically…
+  // Opted out of approved notifications specifically (the download-pending
+  // follow-up rides that preference)…
   userFindUniqueRow = linkedUser({ notifyOnApproved: false });
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
-  assert.equal(sent.length, 0, "notifyOnApproved=false must gate the approved ping");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+  assert.equal(sent.length, 0, "notifyOnApproved=false must gate the download-pending ping");
 
   // …while the available preference on the same user still delivers.
   await notifyUserRequestAvailable("u1", "Dune", "MOVIE");
@@ -385,7 +386,7 @@ test("recipient gating: no linked account or an opted-out preference sends nothi
   // No linked Discord account at all → nothing, no error noise.
   sent.length = 0;
   userFindUniqueRow = linkedUser({ discordId: null });
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
   assert.equal(sent.length, 0);
   assert.equal(errors.length, 0);
 });
@@ -395,7 +396,7 @@ test("a failed Discord post degrades to a [discord-notify] error log and never t
   userFindUniqueRow = linkedUser();
   respond = () => new Response("Missing Access", { status: 403 });
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE"); // must resolve, not reject
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE"); // must resolve, not reject
   assert.equal(sent.length, 1, "the post was attempted");
   assert.ok(
     errors.some((e) => e.includes("[discord-notify] Failed to send notification:") && e.includes("403")),
@@ -407,7 +408,7 @@ test("embed titles are clamped to 256 chars at the send boundary (Discord 400-dr
   setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
   userFindUniqueRow = linkedUser();
 
-  await notifyUserRequestApproved("u1", "x".repeat(300), "MOVIE");
+  await notifyUserDownloadPending("u1", "x".repeat(300), "MOVIE");
 
   const embed = (sent[0].body?.embeds as Array<Record<string, unknown>>)[0];
   const title = String(embed.title);
@@ -840,8 +841,9 @@ test("an issue resolution and a decline note stay out of the shared channel; a D
   userFindUniqueRow = linkedUser();
 
   await notifyUserIssueResolved("u1", "Dune", "MOVIE", "re-encoded the private file");
-  await notifyUserRequestDeclined("u1", "Dune", "MOVIE", "a private note");
   userFindManyRows = [{ id: "u1", discordId: DID }];
+  // A decline's note: the row's own (what every decline sends), or a batch-wide one.
+  await notifyUsersRequestsDeclined([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", adminNote: "a private note" }]);
   await notifyUsersRequestsDeclined([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE" }], "a private batch note");
 
   assert.equal(sent.length, 3);
@@ -856,7 +858,7 @@ test("an issue resolution and a decline note stay out of the shared channel; a D
   setSettings({ discordBotToken: BOT });
   respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
   await notifyUserIssueResolved("u1", "Dune", "MOVIE", "re-encoded the private file");
-  await notifyUserRequestDeclined("u1", "Dune", "MOVIE", "a private note");
+  await notifyUsersRequestsDeclined([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", adminNote: "a private note" }]);
   const dms = sent.filter((r) => r.url.endsWith("/messages")).map((r) => JSON.stringify(r.body));
   assert.ok(dms.some((d) => d.includes("re-encoded the private file")));
   assert.ok(dms.some((d) => d.includes("a private note")));
@@ -872,7 +874,7 @@ test("a 429 is retried after Discord's retry_after, then sent; the caller never 
     ? new Response(JSON.stringify({ message: "You are being rate limited.", retry_after: 0.02, global: false }), { status: 429, headers: { "content-type": "application/json" } })
     : okJson({}));
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
 
   assert.equal(sent.length, 2, "the same post, sent again once Discord's wait passed");
   assert.deepEqual(sent[0].body, sent[1].body);
@@ -884,7 +886,7 @@ test("the Retry-After header is honoured too, and retries are bounded: a channel
   userFindUniqueRow = linkedUser();
   respond = () => new Response("slow down", { status: 429, headers: { "retry-after": "0.01" } });
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE"); // must resolve
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE"); // must resolve
 
   assert.equal(sent.length, 4, "one send plus three retries, then the 429 is the answer");
   assert.ok(errors.some((e) => e.includes("[discord-notify] Failed to send notification:") && e.includes("429")));
@@ -896,7 +898,7 @@ test("a 429 asking for a wait past the budget is not retried", { timeout: 10_000
   respond = () => new Response(JSON.stringify({ retry_after: 600 }), { status: 429, headers: { "content-type": "application/json" } });
 
   const started = Date.now();
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
   assert.equal(sent.length, 1, "ten minutes is not worth holding a notification for");
   assert.ok(Date.now() - started < 5_000);
   assert.ok(errors.some((e) => e.includes("429")));
@@ -914,8 +916,8 @@ test("a bucket that reports nothing left holds the next post on that channel unt
     });
   };
 
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
-  await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
+  await notifyUserDownloadPending("u1", "Dune", "MOVIE");
 
   assert.equal(at.length, 2);
   assert.ok(at[1] - at[0] >= 120, `the second post waited for the bucket (${at[1] - at[0]}ms)`);

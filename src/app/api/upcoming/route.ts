@@ -5,6 +5,7 @@ import { getUpcomingMovies, getUpcomingTV, type TmdbMedia } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { prisma } from "@/lib/prisma";
+import { upcomingCutoffDate } from "@/lib/format-release-date";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -14,7 +15,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // live TMDB for whichever side the cache is missing, interleaved by release
 // date. Keep the cache window + interleave logic in sync with that page.
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = upcomingCutoffDate();
   const rows = await prisma.upcomingCacheItem.findMany({
     where: {
       cachedAt: { gt: new Date(Date.now() - 49 * 60 * 60 * 1000) },
@@ -59,7 +60,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const raw: TmdbMedia[] = [];
 
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = upcomingCutoffDate();
 
     let all = await getUpcomingFromCache();
     const hasMovies = all.some((m) => m.mediaType === "movie");

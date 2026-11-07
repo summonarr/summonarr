@@ -46,9 +46,9 @@ test("#1 arrFailure: a mark held by another mark is 409 'still in progress', nev
 });
 
 test("#3 Replace file: no answer is never 'network error, try again' — both paths say the replace may still be running, and reload", () => {
-  const src = read("src/components/admin/issue-actions.tsx");
-  const dialog = src.slice(src.indexOf("function FixFileDialog("));
-  assert.ok(src.includes("function FixFileDialog("), "the Fix file window holds the delete");
+  const src = read("src/components/admin/issue-fix-options.tsx");
+  assert.ok(src.includes("export function FixFileOptions("), "the Fix file window's options view holds the delete");
+  const dialog = functionBody(src, "export function FixFileOptions(");
   const code = stripComments(functionBody(dialog, "async function replace("));
   const NO_ANSWER = /setActionError\(t\("adminQueue\.issueActions\.replaceFileNoAnswer"\)\);\s*reload = true;/;
 

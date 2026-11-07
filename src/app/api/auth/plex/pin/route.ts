@@ -13,6 +13,7 @@ import {
   verifyPlexConnectCookie,
 } from "@/lib/plex-flow-state";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isSecureCookieContext } from "@/lib/session-cookie";
 
 // The admin "Connect Plex" flow (Settings → Media → Plex).
 //
@@ -40,13 +41,6 @@ function plexPinHeaders(clientId: string): Record<string, string> {
   };
 }
 
-function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? "";
-  if (url.startsWith("https://")) return true;
-  if (url.startsWith("http://")) return false;
-  return process.env.NODE_ENV === "production";
-}
-
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const clientId = newPlexConnectClientId();
@@ -59,14 +53,27 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     },
     body: "strong=true",
     timeoutMs: 15_000,
+  }).catch((err: unknown) => {
+    // A thrown SafeFetchError (DNS, timeout, non-public address) is the same
+    // "plex.tv didn't answer" as a refusal, not a 500. Logged for diagnosis.
+    console.error("[auth/plex/pin] PIN create failed:", err instanceof Error ? err.message : String(err));
+    return null;
   });
 
-  if (!res.ok) {
+  if (!res?.ok) {
     return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailedLower") }, { status: 502 });
   }
 
-  const data = (await res.json()) as { id?: number; code?: string };
-  if (typeof data.id !== "number" || !Number.isInteger(data.id) || data.id <= 0 || typeof data.code !== "string") {
+  // A 2xx proxy page, an empty body or a JSON `null` is malformed, not a 500.
+  const data = (await res.json().catch(() => null)) as { id?: unknown; code?: unknown } | null;
+  if (
+    data === null ||
+    typeof data !== "object" ||
+    typeof data.id !== "number" ||
+    !Number.isInteger(data.id) ||
+    data.id <= 0 ||
+    typeof data.code !== "string"
+  ) {
     return NextResponse.json({ error: t("apiAuth.plex.pinMalformedLower") }, { status: 502 });
   }
 
@@ -98,12 +105,19 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     allowedHosts: ["plex.tv"],
     headers: plexPinHeaders(state.clientId),
     timeoutMs: 15_000,
+  }).catch((err: unknown) => {
+    console.error("[auth/plex/pin] PIN poll failed:", err instanceof Error ? err.message : String(err));
+    return null;
   });
-  if (!res.ok) {
+  if (!res?.ok) {
     return NextResponse.json({ error: t("apiAuth.plex.pinPollFailed") }, { status: 502 });
   }
 
-  const data = (await res.json()) as { authToken?: string | null };
+  const data = (await res.json().catch(() => undefined)) as { authToken?: unknown } | null | undefined;
+  // Unparseable is a failed poll; valid JSON without a token is still pending.
+  if (data === undefined || data === null || typeof data !== "object") {
+    return NextResponse.json({ error: t("apiAuth.plex.pinPollFailed") }, { status: 502 });
+  }
   if (typeof data.authToken !== "string" || data.authToken.length === 0) {
     return NextResponse.json({ status: "pending" }, { headers: { "Cache-Control": "no-store" } });
   }

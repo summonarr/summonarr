@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 
 interface DonationFormProps {
@@ -27,46 +26,22 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
   const [amazon,        setAmazon]        = useState(initialAmazon);
   const [patreon,       setPatreon]       = useState(initialPatreon);
   const [buyMeACoffee,  setBuyMeACoffee]  = useState(initialBuyMeACoffee);
-  const [status,        setStatus]        = useState<SaveStatus>("idle");
-  const [message,       setMessage]       = useState("");
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-  }, []);
+  // The route says WHY a save failed (https-only link, cooldown, too long) —
+  // `message` is shown instead of a bare "Failed to save". Only the success
+  // state auto-dismisses; an error stays until the admin edits a field or
+  // saves again.
+  const { status, message, save, edited } = useSettingsSave();
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    setStatus("saving");
-    setMessage("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          donationPaypal:       paypal,
-          donationVenmo:        venmo,
-          donationZelle:        zelle,
-          donationAmazon:       amazon,
-          donationPatreon:      patreon,
-          donationBuyMeACoffee: buyMeACoffee,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setStatus("ok");
-      } else {
-        // The route says WHY (https-only link, cooldown, too long) — show it
-        // instead of a bare "Failed to save".
-        setMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-      }
-    } catch {
-      setStatus("error");
-    }
-    // Only the success state auto-dismisses; an error stays until the admin
-    // edits a field (every onChange resets to idle) or saves again.
-    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
+    await save({
+      donationPaypal:       paypal,
+      donationVenmo:        venmo,
+      donationZelle:        zelle,
+      donationAmazon:       amazon,
+      donationPatreon:      patreon,
+      donationBuyMeACoffee: buyMeACoffee,
+    });
   }
 
   return (
@@ -76,7 +51,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
         <Input
           id="donation-paypal"
           value={paypal}
-          onChange={(e) => { setPaypal(e.target.value); setStatus("idle"); }}
+          onChange={(e) => { setPaypal(e.target.value); edited(); }}
           placeholder={t("settings.form.donation.paypalPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
@@ -86,7 +61,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
         <Input
           id="donation-venmo"
           value={venmo}
-          onChange={(e) => { setVenmo(e.target.value); setStatus("idle"); }}
+          onChange={(e) => { setVenmo(e.target.value); edited(); }}
           placeholder={t("settings.form.donation.venmoPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
@@ -96,7 +71,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
         <Input
           id="donation-zelle"
           value={zelle}
-          onChange={(e) => { setZelle(e.target.value); setStatus("idle"); }}
+          onChange={(e) => { setZelle(e.target.value); edited(); }}
           placeholder={t("settings.form.donation.zellePlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
@@ -106,7 +81,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
         <Input
           id="donation-amazon"
           value={amazon}
-          onChange={(e) => { setAmazon(e.target.value); setStatus("idle"); }}
+          onChange={(e) => { setAmazon(e.target.value); edited(); }}
           placeholder="https://www.amazon.com/hz/wishlist/ls/…"
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
@@ -116,7 +91,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
         <Input
           id="donation-patreon"
           value={patreon}
-          onChange={(e) => { setPatreon(e.target.value); setStatus("idle"); }}
+          onChange={(e) => { setPatreon(e.target.value); edited(); }}
           placeholder={t("settings.form.donation.patreonPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
@@ -126,7 +101,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
         <Input
           id="donation-bmac"
           value={buyMeACoffee}
-          onChange={(e) => { setBuyMeACoffee(e.target.value); setStatus("idle"); }}
+          onChange={(e) => { setBuyMeACoffee(e.target.value); edited(); }}
           placeholder={t("settings.form.donation.bmacPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />

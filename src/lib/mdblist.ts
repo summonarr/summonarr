@@ -42,6 +42,11 @@ const MDBLIST_NEGATIVE_TTL = 24 * 60 * 60;
 // Sentinel stored in cache to distinguish "MDBList returned no data" from "not yet fetched"
 const NOT_FOUND_SENTINEL = { _notFound: true } as const;
 
+// The one name of a title's MDBList ratings row in TmdbCache.
+export function mdblistCacheKey(mediaType: "movie" | "tv", tmdbId: number): string {
+  return `mdblist:tmdb:${mediaType}:${tmdbId}`;
+}
+
 export interface MdblistRatings {
   imdbId: string | null;
   imdbRating: string | null;
@@ -65,25 +70,29 @@ export interface MdblistRatings {
 // small Prisma pool per request. Cache the resolved value for a short window, and
 // coalesce concurrent cold reads into one query, so a key change still propagates
 // within seconds. Pass { fresh: true } to bypass the cache (admin connection test,
-// where stale-by-up-to-TTL would be confusing).
+// where stale-by-up-to-TTL would be confusing). Process-wide (guardrail 27a),
+// like the rest of this module's state.
 const API_KEY_TTL_MS = 30_000;
-let apiKeyCache: { value: string | null; at: number } | null = null;
-let apiKeyInflight: Promise<string | null> | null = null;
+const apiKeyMemo = processSingleton<{
+  cache: { value: string | null; at: number } | null;
+  inflight: Promise<string | null> | null;
+}>("mdblist:api-key", () => ({ cache: null, inflight: null }));
 
 async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null> {
-  if (!opts.fresh && apiKeyCache && Date.now() - apiKeyCache.at < API_KEY_TTL_MS) {
-    return apiKeyCache.value;
+  const memo = apiKeyMemo.cache;
+  if (!opts.fresh && memo && Date.now() - memo.at < API_KEY_TTL_MS) {
+    return memo.value;
   }
-  if (!opts.fresh && apiKeyInflight) return apiKeyInflight;
+  if (!opts.fresh && apiKeyMemo.inflight) return apiKeyMemo.inflight;
   const p = (async () => {
     const row = await prisma.setting.findUnique({ where: { key: "mdblistApiKey" } });
     const value = row?.value.trim() || null;
-    apiKeyCache = { value, at: Date.now() };
+    apiKeyMemo.cache = { value, at: Date.now() };
     return value;
   })();
   if (!opts.fresh) {
-    apiKeyInflight = p;
-    p.finally(() => { apiKeyInflight = null; }).catch(() => {});
+    apiKeyMemo.inflight = p;
+    p.finally(() => { apiKeyMemo.inflight = null; }).catch(() => {});
   }
   return p;
 }
@@ -95,7 +104,9 @@ export type MdblistResult =
   // pin a null/not-found result into a long-lived cache.
   | { found: false; keyConfigured: boolean; quotaExhausted?: boolean; transient?: boolean };
 
-const mdblistRevalidating = new Set<string>();
+// The SWR refreshes in flight, process-wide (guardrail 27a): a per-chunk Set let
+// a page render and a cron route refresh the same row at once.
+const mdblistRevalidating = processSingleton("mdblist:revalidating", () => new Set<string>());
 
 // Who is asking. A background job (pre-warm, ratings sync, For You) stops at the
 // reserve so pages people open keep part of the day's limit (mdblist-plan.ts).
@@ -103,6 +114,25 @@ const mdblistRevalidating = new Set<string>();
 export interface MdblistCallOptions {
   background?: boolean;
 }
+
+// The batch walk's consecutive-failure breaker. fetchMdblistBatch keeps its own
+// per call; a caller that walks a library one page per call (the pre-warm)
+// passes one that lives for the whole run, or the breaker could never trip.
+export interface MdblistBatchBreaker {
+  consecutiveFailures: number;
+  tripped: boolean;
+}
+
+export function newMdblistBatchBreaker(): MdblistBatchBreaker {
+  return { consecutiveFailures: 0, tripped: false };
+}
+
+export interface MdblistBatchOptions extends MdblistCallOptions {
+  breaker?: MdblistBatchBreaker;
+}
+
+// Consecutive failed pages (no ratings answer) that stop a batch walk.
+export const MDBLIST_BATCH_MAX_CONSECUTIVE_FAILURES = 3;
 
 // ── Process-wide state ─────────────────────────────────────────────────────
 // One copy for the whole server (guardrail 27a): Turbopack gives every server
@@ -301,13 +331,22 @@ async function mdblistRequest(url: string, init: SafeFetchOptions = {}): Promise
   });
 }
 
-// The `error` text of a JSON error body, or null.
-async function errorTextOf(res: Response): Promise<string | null> {
-  const data = (await res.json().catch(() => null)) as { error?: unknown; message?: unknown } | null;
-  if (!data || typeof data !== "object") return null;
-  if (typeof data.error === "string") return data.error;
-  if (data.error === true && typeof data.message === "string") return data.message;
+// The error a parsed MDBList body carries, or null when it is not an error body.
+// MDBList answers some failures with HTTP 200 and `{ error: "<text>" }`, or
+// `{ error: true, message: "<text>" }`; an `error: true` with no message text
+// reads as `fallback`. The one parser every call path uses.
+export function mdblistErrorMessage(data: unknown, fallback: string | null = "unknown"): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const d = data as { error?: unknown; message?: unknown };
+  if (typeof d.error === "string") return d.error;
+  if (d.error === true) return typeof d.message === "string" ? d.message : fallback;
   return null;
+}
+
+// The `error` text of a JSON error body, or null (an `error: true` with no text
+// is null too: pauseForLimit then goes by the headers alone).
+async function errorTextOf(res: Response): Promise<string | null> {
+  return mdblistErrorMessage(await res.json().catch(() => null), null);
 }
 
 // What the settings page and the debug route show.
@@ -397,23 +436,17 @@ export async function fetchAndCacheMdblistForTmdb(
 
     const data = await res.json() as unknown;
 
-    if (data && typeof data === "object" && !Array.isArray(data)) {
-      const d = data as { error?: unknown; message?: string };
-      const errMsg =
-        typeof d.error === "string" ? d.error :
-        d.error === true ? (d.message ?? "unknown") :
-        null;
-      if (errMsg) {
-        if (isQuotaErrorMessage(errMsg)) {
-          pauseForLimit(res.headers, errMsg, `for ${mediaType}:${tmdbId}`);
-          return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
-        }
-        console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}: ${sanitizeForLog(errMsg)}`);
-        // A 200-with-error-body (other than 404, handled above as a real not-found) is an
-        // app-level error that may be transient — do NOT negative-cache it for 24h, or a
-        // valid item's ratings stay suppressed for the full TTL. Matches the 5xx reasoning.
-        return { found: false, keyConfigured: true, transient: true };
+    const errMsg = mdblistErrorMessage(data);
+    if (errMsg) {
+      if (isQuotaErrorMessage(errMsg)) {
+        pauseForLimit(res.headers, errMsg, `for ${mediaType}:${tmdbId}`);
+        return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
       }
+      console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}: ${sanitizeForLog(errMsg)}`);
+      // A 200-with-error-body (other than 404, handled above as a real not-found) is an
+      // app-level error that may be transient — do NOT negative-cache it for 24h, or a
+      // valid item's ratings stay suppressed for the full TTL. Matches the 5xx reasoning.
+      return { found: false, keyConfigured: true, transient: true };
     }
 
     const ratings = parseBatchItem(data as MdblistBatchRaw);
@@ -483,13 +516,21 @@ function sourceValue(value: number | null | undefined): number | null {
   return value != null && value >= 0 ? value : null;
 }
 
+// A batch row we can read at all: a plain object. A null, a number or an array
+// in its place would throw on the first property access.
+function isBatchRow(raw: unknown): raw is MdblistBatchRaw {
+  return raw !== null && typeof raw === "object" && !Array.isArray(raw);
+}
+
 // Exported for direct unit coverage (tests/mdblist-parse.test.mts) — pure parser, no I/O.
 export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
+  // A `ratings` that is not an array, or a non-object entry in it, is read as
+  // no rating rather than thrown on.
+  const sources = Array.isArray(raw.ratings) ? raw.ratings : [];
   // MDBList source names vary across API versions; multiple aliases are checked per source
   const findSrc = (...names: string[]) => {
-    const arr = raw.ratings ?? [];
     for (const n of names) {
-      const hit = arr.find((s) => s.source === n);
+      const hit = sources.find((s) => s !== null && typeof s === "object" && s.source === n);
       if (hit) return hit;
     }
     return undefined;
@@ -532,7 +573,7 @@ export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
 export async function fetchMdblistBatch(
   items: { id: number; releaseDate?: string | null }[],
   mediaType: "movie" | "tv",
-  opts: MdblistCallOptions = {},
+  opts: MdblistBatchOptions = {},
 ): Promise<Map<number, MdblistRatings>> {
   const result = new Map<number, MdblistRatings>();
   if (items.length === 0) return result;
@@ -552,14 +593,21 @@ export async function fetchMdblistBatch(
   // Breaker state: a wall of consecutive failed pages (upstream incident, an
   // invalid key answering 200-with-error on every page) must stop the walk
   // instead of burning one request per remaining page. Reset on any success.
-  let consecutiveFailures = 0;
-  const MAX_CONSECUTIVE_FAILURES = 3;
+  // The caller's breaker when it passes one (it spans that caller's calls).
+  const breaker = opts.breaker ?? newMdblistBatchBreaker();
+  // True when the page failure just counted is the one that trips the breaker.
+  const pageFailed = (): boolean => {
+    if (++breaker.consecutiveFailures < MDBLIST_BATCH_MAX_CONSECUTIVE_FAILURES) return false;
+    breaker.tripped = true;
+    console.warn(`[mdblist] batch ${mediaType}: ${breaker.consecutiveFailures} consecutive page failures — stopping the walk`);
+    return true;
+  };
 
   for (let offset = 0; offset < items.length; offset += MDBLIST_BATCH_SIZE) {
     // A pause tripped mid-run (this loop's own 429 breaks directly; a
     // CONCURRENT caller's trip, the breaker, or the budget running down is only
     // visible here) must stop later pages.
-    if (isMdblistQuotaLocked(opts)) break;
+    if (breaker.tripped || isMdblistQuotaLocked(opts)) break;
     const page = items.slice(offset, offset + MDBLIST_BATCH_SIZE);
     const ids  = page.map((item) => item.id);
 
@@ -588,47 +636,46 @@ export async function fetchMdblistBatch(
 
       if (!res.ok) {
         console.warn(`[mdblist] batch ${mediaType} returned ${res.status}`);
-        if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          console.warn(`[mdblist] batch ${mediaType}: ${consecutiveFailures} consecutive page failures — stopping the walk`);
-          break;
-        }
+        if (pageFailed()) break;
         continue;
       }
 
       const data = await res.json() as unknown;
 
-      if (data && typeof data === "object" && !Array.isArray(data)) {
-        const d = data as { error?: unknown; message?: string };
-        const errMsg = typeof d.error === "string" ? d.error : d.error === true ? (d.message ?? "unknown") : null;
-        if (errMsg && isQuotaErrorMessage(errMsg)) {
-          pauseForLimit(res.headers, errMsg, `on batch ${mediaType}`);
-          break;
-        }
-        if (errMsg) {
-          // A 200-with-error body (bad key, malformed request) is not a ratings
-          // answer. Log the real error and count it toward the failure breaker.
-          console.warn(`[mdblist] batch ${mediaType} API error: ${sanitizeForLog(errMsg)}`);
-          if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-            console.warn(`[mdblist] batch ${mediaType}: ${consecutiveFailures} consecutive page failures — stopping the walk`);
-            break;
-          }
-          continue;
-        }
-        consecutiveFailures = 0;
-      } else {
-        consecutiveFailures = 0;
+      const errMsg = mdblistErrorMessage(data);
+      if (errMsg && isQuotaErrorMessage(errMsg)) {
+        pauseForLimit(res.headers, errMsg, `on batch ${mediaType}`);
+        break;
       }
+      if (errMsg) {
+        // A 200-with-error body (bad key, malformed request) is not a ratings
+        // answer. Log the real error and count it toward the failure breaker.
+        console.warn(`[mdblist] batch ${mediaType} API error: ${sanitizeForLog(errMsg)}`);
+        if (pageFailed()) break;
+        continue;
+      }
+      breaker.consecutiveFailures = 0;
 
-      const arr = Array.isArray(data) ? (data as MdblistBatchRaw[]) : [];
+      // Rows stay `unknown` until isBatchRow says they can be read.
+      const arr: unknown[] = Array.isArray(data) ? data : [];
 
       // Collect the page's cache upserts and flush them with bounded concurrency
       // below, rather than awaiting each one serially in-loop.
       const cacheWrites: Array<() => Promise<unknown>> = [];
-      // Rows that resolved to no REQUESTED item (a foreign id, or an id-less row
-      // past the page's end). They must not count toward "the response covered
-      // the full request" below, or the requested ids they displaced get a 24h
-      // NOT_FOUND sentinel MDBList never actually answered for.
+      // Rows that resolved to no REQUESTED item (a foreign id, an id-less row that
+      // can't be placed, or a row that isn't an object). They must not count
+      // toward "the response covered the full request" below, or the requested
+      // ids they displaced get a 24h NOT_FOUND sentinel MDBList never actually
+      // answered for.
       let unmatchedRows = 0;
+
+      // Positional binding for a row with no TMDB id is safe only when the
+      // response lines up with the request one to one: as many rows as ids, and
+      // none of them carrying an id. MDBList leaves out unknown ids and may
+      // reorder rows, so in any other response a position names the wrong title,
+      // and its ratings would be cached under that title's key for the full TTL.
+      const positionalOk = arr.length === page.length
+        && arr.every((r) => isBatchRow(r) && batchRowTmdbId(r) == null);
 
       for (let i = 0; i < arr.length; i++) {
         const raw = arr[i];
@@ -636,24 +683,28 @@ export async function fetchMdblistBatch(
         // Match by the response's TMDB id (batchRowTmdbId — resolves tmdb_id/tmdbid/
         // ids.tmdb, never MDBList's internal `id`). MDBList batch responses may return
         // items in a different order than the request, so match by id, not position.
-        // Positional fallback applies ONLY when the row carries no TMDB id at all — a
-        // row whose TMDB id isn't in the page must NOT bind positionally (that mis-binds
-        // it to the wrong requested item: wrong TTL, foreign id in the result map).
-        const respTmdbId = batchRowTmdbId(raw);
-        const pageItem = respTmdbId != null
-          ? page.find((p) => p.id === respTmdbId)
-          : page[i];
+        // A row whose TMDB id isn't in the page must NOT bind positionally (that
+        // mis-binds it to the wrong requested item: wrong TTL, foreign id in the
+        // result map). A row that isn't an object is skipped, not thrown on: one
+        // bad row must not cost the page's other ratings.
+        let pageItem: (typeof page)[number] | undefined;
+        if (isBatchRow(raw)) {
+          const respTmdbId = batchRowTmdbId(raw);
+          pageItem = respTmdbId != null
+            ? page.find((p) => p.id === respTmdbId)
+            : positionalOk ? page[i] : undefined;
+        }
         // MDBList can return MORE items than requested (or unmatched ids), so
         // page.find()/page[i] can be undefined — guard before any property access
         // or the whole 200-item batch throws and silently yields zero ratings.
-        if (!pageItem) {
+        if (!pageItem || !isBatchRow(raw)) {
           unmatchedRows++;
           // Surface the real row shape ONCE if nothing resolves — makes a future
           // MDBList field rename diagnosable instead of a silent zero-ratings run.
           // Keys only (no values) so no rating/id data lands in logs.
           if (!loggedUnmatchedShape) {
             loggedUnmatchedShape = true;
-            console.warn(`[mdblist] batch row did not resolve to a requested TMDB id — row keys: [${Object.keys(raw ?? {}).join(",")}]`);
+            console.warn(`[mdblist] batch row did not resolve to a requested TMDB id — row keys: [${Object.keys(isBatchRow(raw) ? raw : {}).join(",")}]`);
           }
           continue;
         }
@@ -664,7 +715,7 @@ export async function fetchMdblistBatch(
         const ratings = parseBatchItem(raw);
         result.set(tmdbId, ratings);
 
-        const cacheKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
+        const cacheKey = mdblistCacheKey(mediaType, tmdbId);
         // Prefer the requested item's date; fall back to the response row's
         // year so dateless prewarm items land in the right TTL bucket.
         const ttl = libraryDetailsTtl(pageItem.releaseDate ?? (raw.year ? `${raw.year}-01-01` : null));
@@ -685,7 +736,7 @@ export async function fetchMdblistBatch(
       if (unmatchedRows === 0 && arr.length > 0) {
         for (const item of page) {
           if (!result.has(item.id)) {
-            const cacheKey = `mdblist:tmdb:${mediaType}:${item.id}`;
+            const cacheKey = mdblistCacheKey(mediaType, item.id);
             cacheWrites.push(() => setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL));
           }
         }
@@ -707,10 +758,7 @@ export async function fetchMdblistBatch(
     } catch (err) {
       const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
       console.error(`[mdblist] batch error for ${mediaType}: ${reason}`);
-      if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.warn(`[mdblist] batch ${mediaType}: ${consecutiveFailures} consecutive page failures — stopping the walk`);
-        break;
-      }
+      if (pageFailed()) break;
     }
   }
 
@@ -718,7 +766,14 @@ export async function fetchMdblistBatch(
 }
 
 // Coalesce concurrent cold-miss callers — see omdb.ts inflightCold rationale.
-const mdblistInflightCold = new Map<string, Promise<MdblistResult>>();
+// Process-wide (guardrail 27a), keyed by the cache key AND the caller class
+// (coldInflightKey): a page joining a background call would share its refusal
+// at the reserve.
+const mdblistInflightCold = processSingleton("mdblist:inflight-cold", () => new Map<string, Promise<MdblistResult>>());
+
+function coldInflightKey(cacheKey: string, opts: MdblistCallOptions): string {
+  return `${cacheKey}|${opts.background ? "bg" : "fg"}`;
+}
 
 // Public entry: cache-first (stale-while-revalidate) MDBList ratings lookup keyed by
 // TMDB id. A stale row is served immediately and its refresh is DETACHED.
@@ -756,16 +811,15 @@ async function readMdblistForTmdb(
   awaitRefresh: boolean,
   opts: MdblistCallOptions,
 ): Promise<MdblistResult> {
-  const cacheKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
+  const cacheKey = mdblistCacheKey(mediaType, tmdbId);
   const { value: cached, isStale } = await getCacheStale<MdblistRatings | typeof NOT_FOUND_SENTINEL>(cacheKey);
 
   if (cached !== null) {
     if (isStale) {
-      const revalKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
-      if (!mdblistRevalidating.has(revalKey)) {
-        mdblistRevalidating.add(revalKey);
+      if (!mdblistRevalidating.has(cacheKey)) {
+        mdblistRevalidating.add(cacheKey);
         const refresh = fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate, opts).catch(() => {}).finally(() => {
-          mdblistRevalidating.delete(revalKey);
+          mdblistRevalidating.delete(cacheKey);
         });
         if (awaitRefresh) await refresh;
       }
@@ -777,11 +831,12 @@ async function readMdblistForTmdb(
   const apiKey = await getApiKey();
   if (!apiKey) return { found: false, keyConfigured: false };
 
-  const existing = mdblistInflightCold.get(cacheKey);
+  const inflightKey = coldInflightKey(cacheKey, opts);
+  const existing = mdblistInflightCold.get(inflightKey);
   if (existing) return existing;
   const p = fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate, opts)
-    .finally(() => mdblistInflightCold.delete(cacheKey));
-  mdblistInflightCold.set(cacheKey, p);
+    .finally(() => mdblistInflightCold.delete(inflightKey));
+  mdblistInflightCold.set(inflightKey, p);
   return p;
 }
 
@@ -798,19 +853,12 @@ export async function testMdblistConnection(): Promise<string> {
   const res = await mdblistRequest(url.toString());
   if (!res.ok) throw new Error(`MDBList returned HTTP ${res.status}`);
 
-  const data = await res.json() as {
-    error?: boolean | string;
-    message?: string;
-    title?: string;
-  };
+  const data = await res.json() as unknown;
 
-  const errMsg =
-    typeof data.error === "string" ? data.error :
-    data.error === true ? (data.message ?? "unknown error") :
-    null;
-
+  const errMsg = mdblistErrorMessage(data, "unknown error");
   if (errMsg) throw new Error(`MDBList: ${errMsg}`);
-  return data.title ?? "OK";
+  const title = (data as { title?: unknown } | null)?.title;
+  return typeof title === "string" ? title : "OK";
 }
 
 import type { TmdbMedia } from "./tmdb-types";
@@ -861,13 +909,10 @@ export async function getMdblistTopLists(limit = 10, opts: MdblistCallOptions = 
     // body (same shape the single-item path handles). Returning that object as
     // a list crashed getMdblistTopRated on `lists.map` — surface the error,
     // trip the lockout on quota messages, and only ever return an array.
-    if (data && typeof data === "object" && !Array.isArray(data)) {
-      const d = data as { error?: unknown; message?: string };
-      const errMsg = typeof d.error === "string" ? d.error : d.error === true ? (d.message ?? "unknown") : null;
-      if (errMsg) {
-        if (isQuotaErrorMessage(errMsg)) pauseForLimit(res.headers, errMsg, "on top lists");
-        console.warn(`[mdblist] top lists API error: ${sanitizeForLog(errMsg)}`);
-      }
+    const errMsg = mdblistErrorMessage(data);
+    if (errMsg) {
+      if (isQuotaErrorMessage(errMsg)) pauseForLimit(res.headers, errMsg, "on top lists");
+      console.warn(`[mdblist] top lists API error: ${sanitizeForLog(errMsg)}`);
     }
     if (!Array.isArray(data)) return [];
     const lists = data as MdblistListMeta[];

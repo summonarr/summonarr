@@ -12,28 +12,28 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
 import { Prisma } from "@/generated/prisma";
-import { hiddenVoteTitles, scopeVotesWhere } from "@/lib/votes-visibility";
+import { hiddenVoteTitles, myVotesByCountScope, scopeVotesWhere } from "@/lib/votes-visibility";
+import { parsePageNumber } from "@/lib/pagination";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 import { getTranslator } from "@/lib/i18n/server";
+// A repeated query key (?q=a&q=b) arrives as an array; every read takes the
+// first value (`.trim()` on the array would throw and 500 the page).
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 const PAGE_SIZE = 40;
 const VALID_SORTS = ["votes", "recent"] as const;
 
-// A repeated query key (?q=a&q=b) is delivered as an array, so every read takes
-// the first value — `.trim()` on the array throws and 500s the whole page.
-const first = (v: string | string[] | undefined): string | undefined =>
-  Array.isArray(v) ? v[0] : v;
-
 export default async function VotesPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.page.votes");
   const [sp, session, t] = await Promise.all([searchParams, requireAppSession(), getTranslator()]);
-  const page = Math.max(1, parseInt(first(sp.page) ?? "1", 10) || 1);
+  // Clamped: an oversized ?page= would reach Prisma's skip as a huge offset.
+  const page = parsePageNumber(sp.page);
 
   const mine = first(sp.mine) === "1";
   const sortParam = first(sp.sort);
@@ -70,8 +70,19 @@ export default async function VotesPage({
   // titles are read only when something IS hidden from this viewer, so an
   // unrestricted deployment keeps the raw COUNT below; when they were read,
   // the count is theirs minus the hidden ones and the raw query is skipped.
-  const { hidden, votedTitles } = await hiddenVoteTitles(session, where);
-  const scopedWhere = scopeVotesWhere(where, hidden);
+  // "My votes" sorted by count pages over every voter's rows on the caller's
+  // titles, so the order follows the real totals (votes-visibility.ts).
+  let scopedWhere: Prisma.DeletionVoteWhereInput;
+  let knownTotal: number | null;
+  if (mine && sort === "votes") {
+    const scope = await myVotesByCountScope(session, where);
+    scopedWhere = scope.where;
+    knownTotal = scope.total;
+  } else {
+    const { hidden, votedTitles } = await hiddenVoteTitles(session, where);
+    scopedWhere = scopeVotesWhere(where, hidden);
+    knownTotal = votedTitles !== null ? votedTitles - hidden.length : null;
+  }
 
   const [grouped, [{ count }]] = await Promise.all([
     prisma.deletionVote.groupBy({
@@ -97,8 +108,8 @@ export default async function VotesPage({
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
-    votedTitles !== null
-      ? Promise.resolve([{ count: BigInt(votedTitles - hidden.length) }])
+    knownTotal !== null
+      ? Promise.resolve([{ count: BigInt(knownTotal) }])
       : prisma.$queryRaw<{ count: bigint }[]>(
           Prisma.sql`SELECT COUNT(*)::bigint AS count FROM (SELECT 1 FROM "DeletionVote" ${whereSql} GROUP BY "tmdbId", "mediaType") AS g`,
         ),
@@ -159,7 +170,8 @@ export default async function VotesPage({
       posterPath: representative?.posterPath ?? null,
       // `votes` holds EVERY vote for this title (groupWhere ignores the
       // mine/q filters), so its length is the real total. g._count.id is
-      // filtered: under "My votes only" it is always 1. Mirrors /api/votes.
+      // filtered under "My votes only" sorted by recent (always 1). Mirrors
+      // /api/votes.
       voteCount: votes.length || g._count.id,
       userVoted: votes.some((v) => v.userId === session.user.id),
       reasons: reasons.map((v) => ({ reason: v.reason!, userName: v.user.name ?? t("personal.votes.anonymous") })),

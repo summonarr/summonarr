@@ -4,14 +4,16 @@
 // expensive playback path (server CPU + bandwidth); this surfaces the users and
 // titles driving the most of them in the selected period so an admin can spot
 // heavy hitters. Data is fetched server-side (getTranscodeOffenders) and passed
-// as serializable props. Marked "use client" because it composes client-only
-// primitives from activity-ui (sourceDotColor can't be called from the server).
+// as serializable props. Marked "use client" because it reads the UI language
+// through the client i18n hooks.
 
-import { ActivityCard, SectionHeader, sourceDotColor } from "@/components/admin/activity-ui";
+import { ActivityCard, SectionHeader, SourceDot } from "@/components/admin/activity-ui";
 import type { TranscodeOffenders } from "@/lib/play-history";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
-function RankList({
+// A bar per row, scaled to the leader. Not stats-ui's RankList (a linked,
+// numbered list): a distinct name so the two never get confused.
+function TranscodeBarList({
   rows,
 }: {
   rows: { key: string; label: string; source?: string; count: number }[];
@@ -33,17 +35,7 @@ function RankList({
                 color: "var(--ds-fg)",
               }}
             >
-              {r.source && (
-                <span
-                  style={{
-                    width: 7,
-                    height: 7,
-                    borderRadius: 999,
-                    background: sourceDotColor(r.source),
-                    flexShrink: 0,
-                  }}
-                />
-              )}
+              {r.source && <SourceDot source={r.source} size={7} />}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {r.label}
               </span>
@@ -83,7 +75,7 @@ export function TranscodePressure({ data, days }: { data: TranscodeOffenders; da
         <ActivityCard>
           <SectionHeader label={t("adminActivity.transcode.users")} sub={t("adminActivity.transcode.usersSub", { days })} />
           {data.topUsers.length > 0 ? (
-            <RankList
+            <TranscodeBarList
               rows={data.topUsers.map((u) => ({
                 // MediaServerUser.id, not username — username is not unique
                 // (same person on two instances, or a departed + re-created row).
@@ -103,7 +95,7 @@ export function TranscodePressure({ data, days }: { data: TranscodeOffenders; da
         <ActivityCard>
           <SectionHeader label={t("adminActivity.transcode.titles")} sub={t("adminActivity.transcode.titlesSub", { days })} />
           {data.topTitles.length > 0 ? (
-            <RankList
+            <TranscodeBarList
               rows={data.topTitles.map((tt) => ({
                 // Key on the same tuple the SQL groups by — (tmdbId, mediaType),
                 // falling back to the lowercased title when tmdbId is null. TMDB

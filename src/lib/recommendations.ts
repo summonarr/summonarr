@@ -383,6 +383,10 @@ export const QUIT_SHOW_SETTLE_MS = 30 * 24 * 60 * 60 * 1000;
 export const COWATCH_WEIGHT = 0.6;
 
 export interface TasteSignal {
+  // The title it is about, so a loved seed is built from typed fields rather
+  // than by splitting its candidateKey back apart.
+  tmdbId: number;
+  mediaType: MediaType;
   // Multiplier on the seed's weight; 0 = vetoed (never a seed).
   factor: number;
   // The latest evidence (rated, or last watched) — orders the loved pool.
@@ -411,12 +415,12 @@ export function buildTasteSignals(
   ratings: readonly { tmdbId: number; mediaType: MediaType; title: string; rating: number; ratedAt: Date }[],
   favorites: readonly { tmdbId: number; mediaType: MediaType; title: string; plays: number; lastWatchedAt: Date | null }[],
 ): Map<string, TasteSignal> {
-  const fav = new Map<string, { title: string; plays: number; lastWatchedAt: Date | null }>();
+  const fav = new Map<string, { tmdbId: number; mediaType: MediaType; title: string; plays: number; lastWatchedAt: Date | null }>();
   for (const f of favorites) {
     const k = candidateKey(f.tmdbId, f.mediaType);
     const prior = fav.get(k);
     if (!prior) {
-      fav.set(k, { title: f.title, plays: f.plays, lastWatchedAt: f.lastWatchedAt });
+      fav.set(k, { tmdbId: f.tmdbId, mediaType: f.mediaType, title: f.title, plays: f.plays, lastWatchedAt: f.lastWatchedAt });
       continue;
     }
     // The same title favorited on two servers: one signal, the larger evidence.
@@ -428,11 +432,27 @@ export function buildTasteSignals(
     const k = candidateKey(r.tmdbId, r.mediaType);
     const f = fav.get(k);
     const at = f?.lastWatchedAt && f.lastWatchedAt > r.ratedAt ? f.lastWatchedAt : r.ratedAt;
-    out.set(k, { factor: tasteFactor(r.rating, f !== undefined), at, title: r.title, watched: true, plays: f?.plays ?? 0 });
+    out.set(k, {
+      tmdbId: r.tmdbId,
+      mediaType: r.mediaType,
+      factor: tasteFactor(r.rating, f !== undefined),
+      at,
+      title: r.title,
+      watched: true,
+      plays: f?.plays ?? 0,
+    });
   }
   for (const [k, f] of fav) {
     if (out.has(k)) continue;
-    out.set(k, { factor: tasteFactor(null, true), at: f.lastWatchedAt, title: f.title, watched: f.plays > 0, plays: f.plays });
+    out.set(k, {
+      tmdbId: f.tmdbId,
+      mediaType: f.mediaType,
+      factor: tasteFactor(null, true),
+      at: f.lastWatchedAt,
+      title: f.title,
+      watched: f.plays > 0,
+      plays: f.plays,
+    });
   }
   return out;
 }
@@ -670,10 +690,15 @@ export function mergeHistorySeedRows(
 
 // A connected user's imported Trakt history (src/lib/trakt-user.ts), newest
 // first — only while they keep "use my Trakt history" on. Local rows, so the
-// engine still makes no upstream call (guardrail 40).
-function readTraktHistory(userId: string, take?: number) {
+// engine still makes no upstream call (guardrail 40). `tmdbIds` narrows the read
+// to those titles (the read-time drift filter, see collectKnownTitleKeys).
+function readTraktHistory(userId: string, take?: number, tmdbIds?: number[]) {
   return prisma.traktWatchedItem.findMany({
-    where: { userId, user: { traktConnection: { is: { historySeeds: true } } } },
+    where: {
+      userId,
+      user: { traktConnection: { is: { historySeeds: true } } },
+      ...(tmdbIds ? { tmdbId: { in: tmdbIds } } : {}),
+    },
     orderBy: { lastWatchedAt: "desc" },
     ...(take !== undefined ? { take } : {}),
     select: { tmdbId: true, mediaType: true, title: true, lastWatchedAt: true, plays: true },
@@ -707,9 +732,13 @@ function readServerFavorites(linkedServerUserIds: string[]) {
 
 // The user's own Trakt ratings — under the SAME switch as their Trakt history,
 // carried in the where clause so an opted-out user's rows are never read.
-function readTraktRatings(userId: string) {
+function readTraktRatings(userId: string, tmdbIds?: number[]) {
   return prisma.traktRating.findMany({
-    where: { userId, user: { traktConnection: { is: { historySeeds: true } } } },
+    where: {
+      userId,
+      user: { traktConnection: { is: { historySeeds: true } } },
+      ...(tmdbIds ? { tmdbId: { in: tmdbIds } } : {}),
+    },
     select: { tmdbId: true, mediaType: true, title: true, rating: true, ratedAt: true },
   });
 }
@@ -827,20 +856,22 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
     ].slice(0, MAX_WATCH_HISTORY_SEEDS);
   }
 
-  // groupBy's TS types don't narrow tmdbId/mediaType past their nullable
-  // column types even though the where clause already excludes nulls.
-  const serverHistory: HistorySeedRow[] = historyRows
-    .filter((r) => r.tmdbId != null && r.mediaType != null)
-    .map((r) => ({
-      tmdbId: r.tmdbId as number,
-      mediaType: r.mediaType as MediaType,
+  // groupBy's TS types keep tmdbId/mediaType nullable even though the where
+  // clause already excludes nulls, so they are narrowed here rather than cast.
+  const serverHistory: HistorySeedRow[] = [];
+  for (const r of historyRows) {
+    if (r.tmdbId == null || r.mediaType == null) continue;
+    serverHistory.push({
+      tmdbId: r.tmdbId,
+      mediaType: r.mediaType,
       // PlayHistory.title is NOT NULL, but _max over an empty group is typed
       // nullable; fall back to the id so a reason is never a blank string.
       title: r._max.title ?? `TMDB #${r.tmdbId}`,
       // Fetched to ORDER the groups; also used to weight each seed.
       lastAt: r._max.startedAt,
       count: r._count.tmdbId,
-    }));
+    });
+  }
   // A disliked title never seeds, and is dropped BEFORE the merge so the slot it
   // would have held goes to the next most recent watch.
   const historySeeds = mergeHistorySeedRows(
@@ -902,10 +933,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
     .filter(([k, t]) => t.factor > 1 && t.watched && !seededKeys.has(k))
     .sort(([, a], [, b]) => (b.at?.getTime() ?? -Infinity) - (a.at?.getTime() ?? -Infinity))
     .slice(0, MAX_LOVED_SEEDS)
-    .map(([k, t]) => {
-      const [id, type] = k.split(":");
-      return { tmdbId: Number(id), mediaType: type as MediaType, title: t.title, lastAt: t.at, count: Math.max(1, t.plays) };
-    });
+    .map(([, t]) => ({ tmdbId: t.tmdbId, mediaType: t.mediaType, title: t.title, lastAt: t.at, count: Math.max(1, t.plays) }));
 
   // Taste multiplies the seed it is about, and a dropped series is dampened.
   const adjust = (seeds: Seed[]): Seed[] => {
@@ -969,9 +997,22 @@ const MAX_EXCLUSION_HIDDEN = 10_000;
 //     deliberate divergence from attachAllAvailability, which KEEPS blacklisted
 //     titles visible in general discovery: a browse grid states facts about the
 //     catalog, a recommendation is advice to act.
-async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string[]): Promise<Set<string>> {
+//
+// `onlyTmdbIds` narrows every user-scoped read to those titles. The read-time
+// filter passes the stored shelf's ids: it only ever asks about ≤300 rows, and
+// reading a heavy viewer's whole watch history on every home and /for-you render
+// to answer that was thousands of rows a view. Same reader, same rules — a
+// title outside the list simply isn't asked about. The compute-time exclusion
+// passes nothing and reads everything. The blacklist is a cached global set and
+// is never narrowed.
+async function collectKnownTitleKeys(
+  userId: string,
+  linkedServerUserIds: string[],
+  onlyTmdbIds?: number[],
+): Promise<Set<string>> {
+  const only = onlyTmdbIds ? { tmdbId: { in: onlyTmdbIds } } : {};
   const [watchlistRows, watchedRows, hiddenRows, requestRows, voteRows, blacklistSet, traktWatchedRows, serverWatchedRows, ratedRows] = await Promise.all([
-    prisma.watchlistItem.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
+    prisma.watchlistItem.findMany({ where: { userId, ...only }, select: { tmdbId: true, mediaType: true } }),
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
       : // groupBy, not findMany + distinct: Prisma applies `distinct` in Node,
@@ -983,12 +1024,12 @@ async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string
           where: {
             mediaServerUserId: { in: linkedServerUserIds },
             watched: true,
-            tmdbId: { not: null },
+            tmdbId: onlyTmdbIds ? { in: onlyTmdbIds } : { not: null },
             mediaType: { not: null },
           },
         }),
     prisma.hiddenItem.findMany({
-      where: { userId },
+      where: { userId, ...only },
       select: { tmdbId: true, mediaType: true },
       orderBy: { createdAt: "desc" },
       take: MAX_EXCLUSION_HIDDEN,
@@ -997,26 +1038,27 @@ async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string
       // Across every arrInstance: a request on ANY instance makes the title known.
       where: {
         requestedBy: userId,
+        ...only,
         OR: [{ status: { in: ["PENDING", "APPROVED"] } }, { permanentlyDeclined: true }],
       },
       select: { tmdbId: true, mediaType: true },
     }),
-    prisma.deletionVote.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
+    prisma.deletionVote.findMany({ where: { userId, ...only }, select: { tmdbId: true, mediaType: true } }),
     getBlacklistSet(),
     // Bounded by MAX_TRAKT_HISTORY_ITEMS at import.
-    readTraktHistory(userId),
+    readTraktHistory(userId, undefined, onlyTmdbIds),
     // The servers' own history and favorites (guardrail 40c): a film watched
     // years before Summonarr was installed is just as watched. Bounded per
     // identity at import (MAX_SERVER_WATCHED_TITLES).
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
       : prisma.serverWatchedTitle.findMany({
-          where: { mediaServerUserId: { in: linkedServerUserIds } },
+          where: { mediaServerUserId: { in: linkedServerUserIds }, ...only },
           select: { tmdbId: true, mediaType: true },
         }),
     // A title the viewer rated is one they already formed a view of. Bounded by
     // MAX_TRAKT_RATINGS at import.
-    readTraktRatings(userId),
+    readTraktRatings(userId, onlyTmdbIds),
   ]);
 
   // blacklistKey (blacklist.ts) emits the same "{tmdbId}:{MOVIE|TV}" shape as
@@ -1124,6 +1166,73 @@ export interface RecommendationComputation {
   conclusive: boolean;
 }
 
+// A candidate while it is being scored. The extra fields are bookkeeping, all
+// dropped before the candidates are returned (none has a column):
+//   - reasonWeight picks the strongest seed (the reason);
+//   - language feeds the language profile;
+//   - voteCount lets the quality prior's TMDB term see the vote count it gates
+//     on — the graph's stored verdict leaves TMDB out, so this is the ONLY
+//     place it can come from (withTmdbTerm);
+//   - contributions hold each seed's contribution until the corroboration
+//     decay-sum collapses them into the score;
+//   - seedRefs become reasonSeeds; seedKeys are the distinct seeds behind the
+//     candidate, so a seed that reaches it through BOTH TMDB and the server's
+//     co-watching counts once in seedCount.
+export interface ScoredCandidate extends RecommendationCandidate {
+  reasonWeight: number;
+  language?: string;
+  voteCount: number;
+  contributions: number[];
+  seedRefs: { seed: RecommendationReasonSeed; contribution: number }[];
+  seedKeys: Set<string>;
+}
+
+// ── Corroboration decay-sum ────────────────────────────────────────────────
+// Collapses each candidate's contribution list into its score: strongest
+// first, the i-th scaled by DECAY^i, bounding total amplification at 4x the
+// best single contribution (see CORROBORATION_DECAY). Mutates in place; no I/O.
+export function applyCorroboration(candidates: Iterable<{ score: number; contributions: number[] }>): void {
+  for (const candidate of candidates) {
+    candidate.contributions.sort((a, b) => b - a);
+    let sum = 0;
+    let factor = 1;
+    for (const c of candidate.contributions) {
+      sum += c * factor;
+      factor *= CORROBORATION_DECAY;
+    }
+    candidate.score = sum;
+  }
+}
+
+// ── Language de-emphasis ───────────────────────────────────────────────────
+// Applied after the accumulation pass because the profile is only known once
+// every contribution has been counted. A candidate with no language recorded
+// is left alone (factor 1.0) — missing metadata is not evidence. No I/O.
+export function applyLanguageProfile(
+  candidates: Iterable<{ score: number; language?: string }>,
+  languageWeight: ReadonlyMap<string, number>,
+  totalLanguageWeight: number,
+): void {
+  if (totalLanguageWeight <= 0) return;
+  for (const candidate of candidates) {
+    if (!candidate.language) continue;
+    const share = (languageWeight.get(candidate.language) ?? 0) / totalLanguageWeight;
+    candidate.score *= languageFactor(share);
+  }
+}
+
+// ── Abandoned-play dampening ───────────────────────────────────────────────
+// A per-title multiplier, never a neighborhood effect (see ABANDON_DAMP). No I/O.
+export function applyAbandonDamp(
+  candidates: Iterable<{ score: number; tmdbId: number; mediaType: MediaType }>,
+  abandoned: ReadonlySet<string>,
+): void {
+  if (abandoned.size === 0) return;
+  for (const candidate of candidates) {
+    if (abandoned.has(candidateKey(candidate.tmdbId, candidate.mediaType))) candidate.score *= ABANDON_DAMP;
+  }
+}
+
 // One user's seed selection, resolved once and reused.
 //
 // warmRecommendationsCache resolves these for every user BEFORE the graph
@@ -1214,18 +1323,7 @@ export async function computeRecommendationsForUser(
   // the outage case. Filtering first would collapse the two back together.
   let rawSuggestions = 0;
 
-  // reasonWeight, language, voteCount and contributions are bookkeeping — the
-  // first picks the strongest seed, the second feeds the language profile, the
-  // third lets the quality prior's TMDB term see the vote count it gates on,
-  // and the fourth holds each seed's contribution until the corroboration
-  // decay-sum below collapses them into the score. All are dropped before the
-  // candidates are returned; none has a column. voteCount matters because the
-  // graph's stored verdict leaves TMDB out, so this is the ONLY place the TMDB
-  // term's vote count can come from (withTmdbTerm).
-  // seedKeys is the same kind of bookkeeping: the distinct seeds behind a
-  // candidate, so a seed that reaches it through BOTH TMDB and the server's
-  // co-watching counts once in seedCount.
-  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number; contributions: number[]; seedRefs: { seed: RecommendationReasonSeed; contribution: number }[]; seedKeys: Set<string> }>();
+  const scored = new Map<string, ScoredCandidate>();
   // Weighted language tally, accumulated in the same pass that scores.
   const languageWeight = new Map<string, number>();
   let totalLanguageWeight = 0;
@@ -1322,43 +1420,11 @@ export async function computeRecommendationsForUser(
     });
   });
 
-  // ── Corroboration decay-sum ─────────────────────────────────────────────
-  // Collapse each candidate's contribution list into its score: strongest
-  // first, the i-th scaled by DECAY^i, bounding total amplification at 4x the
-  // best single contribution (see CORROBORATION_DECAY). Runs before every
-  // multiplier below — they scale the bounded score, not the raw sum.
-  for (const candidate of scored.values()) {
-    candidate.contributions.sort((a, b) => b - a);
-    let sum = 0;
-    let factor = 1;
-    for (const c of candidate.contributions) {
-      sum += c * factor;
-      factor *= CORROBORATION_DECAY;
-    }
-    candidate.score = sum;
-  }
-
-  // ── Language de-emphasis ────────────────────────────────────────────────
-  // Applied after the accumulation pass because the profile is only known once
-  // every contribution has been counted. A candidate with no language recorded
-  // is left alone (factor 1.0) — missing metadata is not evidence.
-  if (totalLanguageWeight > 0) {
-    for (const candidate of scored.values()) {
-      if (!candidate.language) continue;
-      const share = (languageWeight.get(candidate.language) ?? 0) / totalLanguageWeight;
-      candidate.score *= languageFactor(share);
-    }
-  }
-
-  // ── Abandoned-play dampening ────────────────────────────────────────────
-  // A per-title multiplier, never a neighborhood effect (see ABANDON_DAMP).
-  if (abandoned.size > 0) {
-    for (const candidate of scored.values()) {
-      if (abandoned.has(candidateKey(candidate.tmdbId, candidate.mediaType))) {
-        candidate.score *= ABANDON_DAMP;
-      }
-    }
-  }
+  // The post-accumulation passes, in this order: the decay-sum sets each score,
+  // and the two multipliers then scale the bounded score, not the raw sum.
+  applyCorroboration(scored.values());
+  applyLanguageProfile(scored.values(), languageWeight, totalLanguageWeight);
+  applyAbandonDamp(scored.values(), abandoned);
 
   const byRelevance = [...scored.values()]
     // Scores come from a continuous product of factors, so exact ties are rare
@@ -1859,8 +1925,10 @@ export async function getUserRecommendations(
   // The SAME reader the compute-time exclusion uses (collectKnownTitleKeys), so
   // anything the user has acted on since the last cron — watched, watchlisted,
   // hidden, requested, voted to delete, or admin-blacklisted — vacates its slot
-  // at the next render instead of squatting until the next 12h cycle.
-  const currentlyKnown = await collectKnownTitleKeys(userId, linkedServerUserIds);
+  // at the next render instead of squatting until the next 12h cycle. Asked
+  // only about the stored titles: nothing else can be filtered out of them.
+  const storedIds = [...new Set(cached.map((row) => row.tmdbId))];
+  const currentlyKnown = await collectKnownTitleKeys(userId, linkedServerUserIds, storedIds);
 
   // Tier is assigned over the SERVED set, so a shelf whose top pick has since
   // been watched promotes the next title into the top band rather than leaving

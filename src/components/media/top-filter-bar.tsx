@@ -1,12 +1,13 @@
 "use client";
 
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useTransition } from "react";
+import { useMemo, useTransition } from "react";
 import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { FilterBar as Segments } from "@/components/ui/design";
 import { useT } from "@/components/i18n/i18n-provider";
+import { pendingFlag, pendingValue } from "@/lib/browse-filters";
 import { voteCountLabel } from "./filter-bar";
+import { usePendingFilters } from "./use-pending-filters";
 
 interface TopFilterBarProps {
   activeMediaType?: string;
@@ -74,18 +75,15 @@ function buildYears(maxYear: number): string[] {
 }
 
 export function TopFilterBar({
-  activeMediaType,
-  activeSortBy,
-  activeMinImdb,
-  activeMinVotes,
-  activeFromYear,
-  activeToYear,
-  activeHideAvailable,
+  activeMediaType: committedMediaType,
+  activeSortBy: committedSortBy,
+  activeMinImdb: committedMinImdb,
+  activeMinVotes: committedMinVotes,
+  activeFromYear: committedFromYear,
+  activeToYear: committedToYear,
+  activeHideAvailable: committedHideAvailable = false,
   maxYear,
 }: TopFilterBarProps) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
   const t = useT();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
   // /top re-fetches and re-ranks its whole pool on every change, so a push can
@@ -94,47 +92,18 @@ export function TopFilterBar({
   // BrowseGrid's spinner; here the bar is the only client surface.
   const [isPending, startTransition] = useTransition();
 
-  // Filter changes we've pushed but the URL hasn't caught up with yet.
-  // `searchParams` only shows the URL as it is NOW, and router.push is async,
-  // so without this two quick changes in a row would build the second URL from
-  // stale params and silently undo the first. Each entry is dropped once the
-  // URL shows it. Same approach as filter-bar.tsx — see the longer note there.
-  const pendingRef = useRef<Record<string, string | undefined>>({});
-  const committed = searchParams.toString();
-
-  useEffect(() => {
-    const current = new URLSearchParams(committed);
-    for (const [k, v] of Object.entries(pendingRef.current)) {
-      const landed = v === undefined || v === "" ? current.get(k) === null : current.get(k) === v;
-      if (landed) delete pendingRef.current[k];
-    }
-  }, [committed]);
-
-  useEffect(() => {
-    const onPop = () => { pendingRef.current = {}; };
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
-
-  const push = useCallback((updates: Record<string, string | undefined>) => {
-    Object.assign(pendingRef.current, updates);
-    const params = new URLSearchParams(searchParams.toString());
-    for (const [k, v] of Object.entries(pendingRef.current)) {
-      if (v === undefined || v === "") params.delete(k);
-      else params.set(k, v);
-    }
-    // Any filter change invalidates the current page number — the result set
-    // it indexed into no longer exists. Without this a user on page 7 who
-    // narrows to two pages of results lands on an out-of-range slice.
-    // filter-bar.tsx does the same on its own push.
-    params.delete("page");
-    startTransition(() => router.push(`${pathname}?${params.toString()}`));
-  }, [router, pathname, searchParams]);
-
-  const clearAll = useCallback(() => {
-    pendingRef.current = {};
-    startTransition(() => router.push(pathname));
-  }, [router, pathname]);
+  // Same pending-delta machinery as filter-bar.tsx (use-pending-filters.ts).
+  // The props are the server's normalised COMMITTED values; each control shows
+  // them overlaid with the change still in flight, so a pick doesn't snap back
+  // and the hide-available button toggles from what it shows.
+  const { pending, push, clearAll } = usePendingFilters(startTransition);
+  const activeMediaType = pendingValue(pending, "mediaType", committedMediaType);
+  const activeSortBy = pendingValue(pending, "sortBy", committedSortBy);
+  const activeMinImdb = pendingValue(pending, "minImdb", committedMinImdb);
+  const activeMinVotes = pendingValue(pending, "minVotes", committedMinVotes);
+  const activeFromYear = pendingValue(pending, "fromYear", committedFromYear);
+  const activeToYear = pendingValue(pending, "toYear", committedToYear);
+  const activeHideAvailable = pendingFlag(pending, "hideAvailable", committedHideAvailable);
 
   const hasFilters = !!(activeMediaType || activeSortBy || activeMinImdb || activeMinVotes || activeFromYear || activeToYear || activeHideAvailable);
 
@@ -216,7 +185,7 @@ export function TopFilterBar({
         <button
           type="button"
           onClick={() => push({ hideAvailable: activeHideAvailable ? undefined : "1" })}
-          aria-pressed={!!activeHideAvailable}
+          aria-pressed={activeHideAvailable}
           className="ds-tap ds-hover-tint inline-flex items-center gap-1.5 font-medium"
           style={{
             padding: "5px 12px",
@@ -259,7 +228,7 @@ export function TopFilterBar({
       {hasFilters && (
         <div className="flex flex-wrap gap-1.5">
           {activeMediaType && (
-            <Chip label={activeMediaType === "movies" ? t("media.filter.moviesOnly") : t("media.filter.tvOnly")} onRemove={() => push({ mediaType: undefined })} />
+            <Chip label={activeMediaType === "tv" ? t("media.filter.tvOnly") : t("media.filter.moviesOnly")} onRemove={() => push({ mediaType: undefined })} />
           )}
           {activeSortBy && (
             <Chip

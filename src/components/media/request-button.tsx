@@ -19,6 +19,7 @@ import {
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
+import { postMediaRequest } from "@/lib/client/media-request";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -42,8 +43,6 @@ interface RequestButtonProps {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
   title: string;
-  posterPath?: string | null;
-  releaseYear?: string;
   plexAvailable?: boolean;
   jellyfinAvailable?: boolean;
   arrPending?: boolean;
@@ -74,7 +73,7 @@ interface RequestButtonProps {
 }
 
 // Per-item outcome → status line for the on-behalf flow. The keys mirror the
-// bulk route's `ItemResult` union (src/app/api/requests/bulk/route.ts) and
+// bulk pipeline's `ItemResult` union (src/lib/request-bulk.ts) and
 // tests/request-button-on-behalf.test.mts pins the two in step. Every outcome
 // used to collapse into "Already requested or available", which was false for
 // no-permission (target lacks the instance grant), rating-blocked, blacklisted
@@ -142,13 +141,19 @@ export function RequestButton({
   const [obMsg, setObMsg] = useState("");
   const [obMsgError, setObMsgError] = useState(false);
   // The picker's user list: "loading" while the fetch is in flight, "error"
-  // when it failed — an empty select alone read as "there are no users".
-  const [obUsersState, setObUsersState] = useState<"idle" | "loading" | "error">("idle");
+  // when it failed — an empty select alone read as "there are no users" —
+  // and "loaded" once it answered, so an EMPTY list is kept rather than
+  // refetched on every open.
+  const [obUsersState, setObUsersState] = useState<"idle" | "loading" | "loaded" | "error">("idle");
   const [obSubmitting, setObSubmitting] = useState(false);
   // Request-time quality profile (REQUEST_ADVANCED). profiles===null ⇒ not yet
   // loaded; profileId==="" ⇒ use the server default.
   const [profiles, setProfiles] = useState<{ id: number; name: string }[] | null>(null);
   const [profileId, setProfileId] = useState<number | "">("");
+  // Each profile read is a live, rate-limited Radarr/Sonarr call: "loading"
+  // stops Request → Cancel → Request from sending a second one, and "error"
+  // tells the user why there is no picker (the next open retries).
+  const [profilesState, setProfilesState] = useState<"idle" | "loading" | "error">("idle");
   // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
   // the title is already in a library this viewer can see (or, for
   // auto-approvers, already downloaded by Radarr/Sonarr). Same handling as
@@ -172,34 +177,49 @@ export function RequestButton({
     setObSubmitting(false);
     setProfiles(null);
     setProfileId("");
+    setProfilesState("idle");
     setFoundAvailable(false);
+  }
+  // `requested` going true → false (the request was declined or deleted, then
+  // something on the page called router.refresh) must clear a "View request"
+  // this button was showing — isDone below ORs the local state in.
+  const [prevRequested, setPrevRequested] = useState(!!requested);
+  if (!titleChanged && prevRequested !== !!requested) {
+    setPrevRequested(!!requested);
+    if (!requested && (state === "duplicate" || state === "requested")) setState("idle");
   }
 
   function loadProfiles() {
-    if (!canChooseProfile || profiles !== null) return;
+    if (!canChooseProfile || profiles !== null || profilesState === "loading") return;
+    setProfilesState("loading");
     fetch(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}`))
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: { qualityProfiles?: { id: number; name: string }[] } | null) => {
-        if (d?.qualityProfiles) setProfiles(d.qualityProfiles);
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
       })
-      .catch(() => {});
+      .then((d: { qualityProfiles?: { id: number; name: string }[] } | null) => {
+        if (!Array.isArray(d?.qualityProfiles)) throw new Error("no qualityProfiles");
+        setProfiles(d.qualityProfiles);
+        setProfilesState("idle");
+      })
+      .catch(() => setProfilesState("error"));
   }
 
   async function submitRequest() {
     setState("loading");
     setErrorMsg("");
     try {
-      const res = await fetch(withBasePath("/api/requests"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      // The page-minted token is refreshed once if it expired while the tab
+      // sat open (postMediaRequest).
+      const res = await postMediaRequest(
+        {
           tmdbId,
           mediaType,
           ...(note.trim() ? { note: note.trim() } : {}),
           ...(profileId ? { qualityProfileId: profileId } : {}),
-          _token: requestToken,
-        }),
-      });
+        },
+        requestToken,
+      );
       if (res.status === 409) {
         setState("duplicate");
         return;
@@ -231,7 +251,9 @@ export function RequestButton({
     setObMsg("");
     setObMsgError(false);
     setState("onbehalf");
-    if (obUsers.length === 0 && obUsersState !== "loading") {
+    // Fetched once: a loaded list (even an empty one) is kept; only a failed
+    // read is retried on the next open.
+    if (obUsersState === "idle" || obUsersState === "error") {
       setObUsersState("loading");
       fetch(withBasePath("/api/requests/users"))
         .then((r) => {
@@ -240,7 +262,7 @@ export function RequestButton({
         })
         .then((d: { users?: { id: string; name: string | null; email: string }[] }) => {
           setObUsers(d.users ?? []);
-          setObUsersState("idle");
+          setObUsersState("loaded");
         })
         .catch(() => setObUsersState("error"));
     }
@@ -299,9 +321,14 @@ export function RequestButton({
   const confirmPrompt = t("request.confirmPrompt", { title: "\u0000" }).split("\u0000");
 
   // Reused in the confirm and note panels. Same element in two spots is fine — it
-  // only renders when the user can choose a profile and options have loaded.
+  // only renders when the user can choose a profile and options have loaded; a
+  // failed load says the server default will be used instead of vanishing.
   const profileSelect =
-    canChooseProfile && profiles && profiles.length > 0 ? (
+    canChooseProfile && profilesState === "error" ? (
+      <p className="ds-mono max-w-sm" role="status" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
+        {t("request.profilesLoadFailed")}
+      </p>
+    ) : canChooseProfile && profiles && profiles.length > 0 ? (
       <StyledSelect
         compact
         value={profileId}
@@ -468,6 +495,10 @@ export function RequestButton({
               {obUsersState === "error" ? (
                 <p className="ds-mono" role="alert" style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}>
                   {t("request.usersLoadFailed")}
+                </p>
+              ) : obUsersState === "loaded" && obUsers.length === 0 ? (
+                <p className="ds-mono" role="status" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
+                  {t("request.noEligibleUsers")}
                 </p>
               ) : (
               <StyledSelect

@@ -1,6 +1,8 @@
 import "server-only";
+import { redactUrlForLog } from "./safe-fetch";
 import {
-  AGENT_KINDS,
+  isAgentKind,
+  parseStoredConfig,
   sanitizeEvents,
   validateAgentConfig,
   type AgentConfig,
@@ -61,6 +63,9 @@ export function toPublicAgent(row: AgentRow) {
     events: row.events,
     config: row.config,
     hasSecret: !!row.secret,
+    // Additive: false when the stored config fails today's validation, so the
+    // dispatcher skips the channel even though it is enabled.
+    configValid: parseStoredConfig(row.kind, row.config).ok,
     lastStatus: row.lastStatus,
     lastError: row.lastError,
     lastAttemptAt: row.lastAttemptAt ? row.lastAttemptAt.toISOString() : null,
@@ -70,16 +75,30 @@ export function toPublicAgent(row: AgentRow) {
 
 // The audit row names the DESTINATION — where events are sent — so a channel
 // re-pointed at another host can be read back after the fact. Never the secret:
-// only whether it changed is recorded (guardrail 14c). Shared by the create and
-// update routes so the two audit payloads cannot drift.
+// only whether it changed is recorded (guardrail 14c). A webhook URL can carry a
+// credential of its own (`?token=`, a Discord /webhooks/{id}/{token} path), and
+// an audit row outlives the channel, so the URL is recorded redacted: host and
+// path, no query, fragment or path token. Shared by the create and update
+// routes so the two audit payloads cannot drift.
 export function destinationDetails(config: AgentConfig): Record<string, unknown> {
-  const out: Record<string, unknown> = { url: config.url };
+  const out: Record<string, unknown> = { url: auditUrl(config.url) };
   if ("headerName" in config) {
     out.headerName = config.headerName;
     out.hasTemplate = config.template !== null;
   }
   if ("topic" in config) out.topic = config.topic;
   return out;
+}
+
+function auditUrl(raw: string): string {
+  const redacted = redactUrlForLog(raw);
+  try {
+    const u = new URL(redacted);
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return redacted;
+  }
 }
 
 export type AgentInput = {
@@ -97,11 +116,10 @@ export function parseAgentInput(
   body: Record<string, unknown>,
   existing: { kind: string; name: string; enabled: boolean; events: string[]; config: unknown } | null,
 ): { ok: true; input: AgentInput } | { ok: false; error: string } {
-  const kindRaw = body.kind ?? existing?.kind;
-  if (typeof kindRaw !== "string" || !(AGENT_KINDS as readonly string[]).includes(kindRaw)) return { ok: false, error: "kind" };
+  const kind = body.kind ?? existing?.kind;
+  if (!isAgentKind(kind)) return { ok: false, error: "kind" };
   // The kind is fixed at creation: a webhook's config means nothing to ntfy.
-  if (existing && kindRaw !== existing.kind) return { ok: false, error: "kindChange" };
-  const kind = kindRaw as AgentKind;
+  if (existing && kind !== existing.kind) return { ok: false, error: "kindChange" };
 
   const nameRaw = body.name ?? existing?.name;
   const name = typeof nameRaw === "string" ? nameRaw.trim() : "";

@@ -32,6 +32,8 @@ export const BACKUP_TABLES = [
   "IssueMessage",
   "IssueGrab",
   "PushSubscription",
+  // Removed web push endpoints (hashes only); a child of User, like the row above.
+  "PushSubscriptionRemoval",
   "DeletionVote",
   "PlexLibraryItem",
   "JellyfinLibraryItem",

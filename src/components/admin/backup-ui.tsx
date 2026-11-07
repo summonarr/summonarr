@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText, AlertTriangle } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
+import { chunkedUploadErrorMessage, uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -199,7 +199,7 @@ function DbImportSection() {
     setImporting(false);
 
     if (outcome.kind === "error") {
-      setResult({ ok: false, error: outcome.error });
+      setResult({ ok: false, error: chunkedUploadErrorMessage(outcome, t) });
       return;
     }
     const data = outcome.data as {

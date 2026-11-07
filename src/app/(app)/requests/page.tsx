@@ -22,6 +22,7 @@ import { getTranslator } from "@/lib/i18n/server";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 import { redirect } from "next/navigation";
 import { commentLinkToLocate, ownRequestCommentPage, ownRequestsOrderBy } from "@/lib/request-comment-deep-link";
+import { parsePageNumber } from "@/lib/pagination";
 
 export const dynamic = "force-dynamic";
 
@@ -51,7 +52,9 @@ export default async function RequestsPage({
   // A repeated query key (?q=a&q=b) arrives as an array at runtime, and `.trim()`
   // on it would 500 the whole page (the same guard /votes carries).
   const qParam = Array.isArray(qRaw) ? qRaw[0] : qRaw;
-  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
+  // Clamped: an oversized ?page= drove `skip` past Prisma's limit and 500'd the
+  // page instead of showing the past-the-end state.
+  const page = parsePageNumber(pageParam);
   const skip = (page - 1) * PAGE_SIZE;
 
   const status = VALID_STATUSES.includes(statusParam as typeof VALID_STATUSES[number])
@@ -83,7 +86,7 @@ export default async function RequestsPage({
     if (target !== null) redirect(pageHref(target, locateId));
   }
 
-  const [requests, total, statusCountsRaw] = await Promise.all([
+  const [requests, statusCountsRaw] = await Promise.all([
     prisma.mediaRequest.findMany({
       where,
 
@@ -98,7 +101,8 @@ export default async function RequestsPage({
       skip,
       take: PAGE_SIZE,
     }),
-    prisma.mediaRequest.count({ where }),
+    // The pills' per-status counts. `where` is this filter plus the status, so
+    // the list's total comes from these too (below) — no separate count query.
     prisma.mediaRequest.groupBy({
       by: ["status"],
       where: {
@@ -113,6 +117,7 @@ export default async function RequestsPage({
     statusCountsRaw.map((r) => [r.status, r._count.status]),
   );
   const totalAllStatuses = statusCountsRaw.reduce((s, r) => s + r._count.status, 0);
+  const total = status ? (statusCounts[status] ?? 0) : totalAllStatuses;
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 

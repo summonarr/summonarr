@@ -37,17 +37,31 @@ function formatVotes(raw: string): string {
   return String(n);
 }
 
+// The class (or icon) for a score: the value of the first band whose minimum
+// the parsed score reaches, else `below`; an unparseable score gets `invalid`.
+// Every class stays a complete literal at its call site so the Tailwind scanner
+// and the colour remaps still see it (guardrails 39/42).
+function byThreshold<T>(
+  score: string,
+  parse: (s: string) => number,
+  bands: ReadonlyArray<readonly [number, T]>,
+  below: T,
+  invalid: T,
+): T {
+  const n = parse(score);
+  if (isNaN(n)) return invalid;
+  for (const [min, value] of bands) if (n >= min) return value;
+  return below;
+}
+
+const int = (s: string) => parseInt(s, 10);
+
 function rtColor(score: string): string {
-  const n = parseInt(score, 10);
-  if (isNaN(n)) return "text-zinc-400";
-  if (n >= 60) return "text-red-500";
-  return "text-amber-400";
+  return byThreshold(score, int, [[60, "text-red-500"]], "text-amber-400", "text-zinc-400");
 }
 
 function rtIcon(score: string): string {
-  const n = parseInt(score, 10);
-  if (isNaN(n)) return "🍅";
-  return n >= 60 ? "🍅" : "🫙";
+  return byThreshold(score, int, [[60, "🍅"]], "🫙", "🍅");
 }
 
 // Filled badges: yellow/orange/green/red all remap to a status token, so the
@@ -55,42 +69,41 @@ function rtIcon(score: string): string {
 // the light theme’s L .53–.55 ones — black fails 4.5:1 there).
 // Only the neutral fallback keeps foreground-coloured text on a surface.
 function metacriticBadge(score: string): string {
-  const n = parseInt(score, 10);
-  if (isNaN(n)) return "bg-zinc-700 text-zinc-100";
-  if (n >= 61) return "bg-green-600 text-[var(--ds-on-status)]";
-  if (n >= 40) return "bg-yellow-500 text-[var(--ds-on-status)]";
-  return "bg-red-600 text-[var(--ds-on-status)]";
+  return byThreshold(
+    score,
+    int,
+    [
+      [61, "bg-green-600 text-[var(--ds-on-status)]"],
+      [40, "bg-yellow-500 text-[var(--ds-on-status)]"],
+    ],
+    "bg-red-600 text-[var(--ds-on-status)]",
+    "bg-zinc-700 text-zinc-100",
+  );
 }
 
 function rtAudienceColor(score: string): string {
-  const n = parseInt(score, 10);
-  if (isNaN(n)) return "text-zinc-400";
-  if (n >= 60) return "text-green-400";
-  return "text-amber-400";
+  return byThreshold(score, int, [[60, "text-green-400"]], "text-amber-400", "text-zinc-400");
 }
 
 function traktBadge(score: string): string {
-  const n = parseInt(score, 10);
-  if (isNaN(n)) return "bg-zinc-700 text-zinc-100";
-  if (n >= 70) return "bg-red-500 text-[var(--ds-on-status)]";
-  if (n >= 50) return "bg-orange-500 text-[var(--ds-on-status)]";
-  return "bg-zinc-700 text-zinc-100";
+  return byThreshold(
+    score,
+    int,
+    [
+      [70, "bg-red-500 text-[var(--ds-on-status)]"],
+      [50, "bg-orange-500 text-[var(--ds-on-status)]"],
+    ],
+    "bg-zinc-700 text-zinc-100",
+    "bg-zinc-700 text-zinc-100",
+  );
 }
 
 function mdblistColor(score: string): string {
-  const n = parseInt(score, 10);
-  if (isNaN(n)) return "text-zinc-400";
-  if (n >= 75) return "text-emerald-400";
-  if (n >= 50) return "text-yellow-400";
-  return "text-red-400";
+  return byThreshold(score, int, [[75, "text-emerald-400"], [50, "text-yellow-400"]], "text-red-400", "text-zinc-400");
 }
 
 function letterboxdColor(score: string): string {
-  const n = parseFloat(score);
-  if (isNaN(n)) return "text-zinc-400";
-  if (n >= 3.5) return "text-emerald-400";
-  if (n >= 2.5) return "text-yellow-400";
-  return "text-red-400";
+  return byThreshold(score, parseFloat, [[3.5, "text-emerald-400"], [2.5, "text-yellow-400"]], "text-red-400", "text-zinc-400");
 }
 
 export function RatingsBar({
@@ -142,6 +155,21 @@ export function RatingsBar({
   const gap    = size === "sm" ? "gap-x-1.5 gap-y-0.5" : "gap-4";
   const iconSz = size === "sm" ? "text-[11px]" : "text-base";
 
+  // One body for the IMDb badge, linked when there is an id.
+  const imdbBody = (
+    <>
+      <span className={`font-bold ${textSm}`} style={IMDB_LABEL_STYLE}>IMDb</span>
+      <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>
+      {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
+      {!compact && imdbVotes && (
+        <span className={`text-zinc-500 ${textXs}`}>({formatVotes(imdbVotes)})</span>
+      )}
+    </>
+  );
+
+  // Compact mode drops the visible source labels below; a `title` on a div is
+  // not reliably announced, so each keeps a screen-reader name instead of
+  // reading as a bare number.
   return (
     <div className={`flex items-center flex-wrap ${gap}`}>
       {showImdb && imdbId ? (
@@ -155,21 +183,11 @@ export function RatingsBar({
           // this, opening IMDb in a new tab also pushed the card's detail page.
           onClick={(e) => e.stopPropagation()}
         >
-          <span className={`font-bold ${textSm}`} style={IMDB_LABEL_STYLE}>IMDb</span>
-          <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>
-          {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
-          {!compact && imdbVotes && (
-            <span className={`text-zinc-500 ${textXs}`}>({formatVotes(imdbVotes)})</span>
-          )}
+          {imdbBody}
         </a>
       ) : showImdb ? (
         <div className="flex items-center gap-0.5" title={t("media.ratings.imdb")}>
-          <span className={`font-bold ${textSm}`} style={IMDB_LABEL_STYLE}>IMDb</span>
-          <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>
-          {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
-          {!compact && imdbVotes && (
-            <span className={`text-zinc-500 ${textXs}`}>({formatVotes(imdbVotes)})</span>
-          )}
+          {imdbBody}
         </div>
       ) : null}
 
@@ -189,6 +207,7 @@ export function RatingsBar({
 
       {showMetacritic && metacritic && (
         <div className="flex items-center gap-0.5" title="Metacritic">
+          {compact && <span className="sr-only">Metacritic</span>}
           <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${metacriticBadge(metacritic)}`}>
             {metacritic.replace("/100", "")}
           </span>
@@ -198,6 +217,7 @@ export function RatingsBar({
 
       {showTrakt && traktRating && (
         <div className="flex items-center gap-0.5" title={t("media.ratings.trakt")}>
+          {compact && <span className="sr-only">{t("media.ratings.trakt")}</span>}
           <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${traktBadge(traktRating)}`}>
             {traktRating}
           </span>
@@ -214,7 +234,7 @@ export function RatingsBar({
 
       {showMdblist && mdblistScore && (
         <div className="flex items-center gap-0.5" title={t("media.ratings.mdblist")}>
-          {!compact && <span className={`text-zinc-500 ${textXs}`}>MDB</span>}
+          {compact ? <span className="sr-only">{t("media.ratings.mdblist")}</span> : <span className={`text-zinc-500 ${textXs}`}>MDB</span>}
           <span className={`font-semibold ${mdblistColor(mdblistScore)} ${textSm}`}>{mdblistScore}</span>
         </div>
       )}
@@ -244,7 +264,7 @@ export function RatingsBar({
 
       {showTmdb && voteAverage ? (
         <div className="flex items-center gap-0.5" title={t("media.ratings.tmdb")}>
-          {!compact && <span className={`text-zinc-500 ${textXs}`}>TMDB</span>}
+          {compact ? <span className="sr-only">{t("media.ratings.tmdb")}</span> : <span className={`text-zinc-500 ${textXs}`}>TMDB</span>}
           <span className={`font-semibold text-yellow-400 ${textSm}`}>{voteAverage.toFixed(1)}</span>
         </div>
       ) : null}

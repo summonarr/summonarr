@@ -248,6 +248,16 @@ export function stillUrl(path: string | null, size: "w185" | "w300" | "original"
   return path && path.startsWith("/") ? `${IMAGE_BASE}/${size}${path}` : null;
 }
 
+// A person's profile photo (cast grid, person page).
+export function profileUrl(path: string | null, size: "w185" | "w342" = "w185") {
+  return path && path.startsWith("/") ? `${IMAGE_BASE}/${size}${path}` : null;
+}
+
+// A watch provider's or studio's logo.
+export function logoUrl(path: string | null, size: "w92" | "w185" = "w92") {
+  return path && path.startsWith("/") ? `${IMAGE_BASE}/${size}${path}` : null;
+}
+
 // ISO code → display name in `locale` (English by default), or null when Intl
 // has no name for the code — callers put their own fallback behind `??`.
 // Intl.DisplayNames exists in both Node and the browser, but call these from

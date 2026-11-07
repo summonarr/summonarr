@@ -55,7 +55,7 @@ export { Home } from "./home";
 export { KeyRound } from "./key-round";
 export { LayoutDashboard } from "./layout-dashboard";
 export { Library } from "./library";
-export { Link } from "./link";
+export { LinkIcon } from "./link";
 export { List } from "./list";
 export { Loader2 } from "./loader2";
 export { Lock } from "./lock";

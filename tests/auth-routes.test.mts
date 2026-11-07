@@ -561,6 +561,31 @@ test("register CSRF: a browser needs a trusted Origin (403); a native X-Summonar
   assert.equal(native.headers.getSetCookie().length, 0);
 });
 
+test("register CSRF: a bare host:port AUTH_TRUSTED_ORIGIN entry is skipped — it never makes the opaque \"null\" origin trusted", async () => {
+  // `new URL("summonarr.local:3001").origin` is "null", and so is a file: page's
+  // origin. The old reader added that "null" to the allowlist; the shared one
+  // (trusted-origin.ts) skips the entry, so nothing is trusted here.
+  const savedUrl = process.env.AUTH_URL;
+  try {
+    delete process.env.AUTH_URL;
+    process.env.AUTH_TRUSTED_ORIGIN = "summonarr.local:3001";
+    const opaque = await registerPost(
+      registerReq({ email: "opaque@example.com", password: STRONG_PASSWORD }, { origin: "file:///index.html" }),
+    );
+    assert.equal(opaque.status, 403);
+    assert.deepEqual(await bodyOf(opaque), { error: "Forbidden" });
+    assert.equal(users.length, 0);
+
+    // The real origin beside the bad entry still works.
+    process.env.AUTH_TRUSTED_ORIGIN = `summonarr.local:3001,${VALID_ORIGIN}`;
+    const real = await registerPost(registerReq({ email: "real@example.com", password: STRONG_PASSWORD }));
+    assert.equal(real.status, 201);
+  } finally {
+    process.env.AUTH_URL = savedUrl;
+    delete process.env.AUTH_TRUSTED_ORIGIN;
+  }
+});
+
 test("register rejects before reading the body: maintenance (503), disabled local login (403), and the per-IP rate cap (429)", async () => {
   const validBody = { email: "gate@example.com", password: STRONG_PASSWORD };
 

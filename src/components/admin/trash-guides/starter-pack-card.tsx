@@ -27,14 +27,7 @@ import { RefreshErrorBanner } from "./banners";
 import { useCatalogRefresh, type RunError } from "./use-catalog-refresh";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
-
-// Splits a translated template on {name} placeholders and drops in nodes.
-function rich(template: string, nodes: Record<string, React.ReactNode>): React.ReactNode[] {
-  return template.split(/(\{\w+\})/).map((part, i) => {
-    const m = /^\{(\w+)\}$/.exec(part);
-    return m && m[1] in nodes ? <span key={i}>{nodes[m[1]]}</span> : part;
-  });
-}
+import { rich } from "@/components/settings/forms/rich";
 
 interface StarterPackCardProps {
   radarrConfigured: boolean;

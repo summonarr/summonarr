@@ -83,7 +83,7 @@ const discordEdits: Array<{ content?: string; embeds?: Array<Record<string, unkn
 // emitted event's `request` block — the id the Discord buttons forward — can be
 // read back.
 const AGENT_URL = "http://10.77.0.9:9/hook";
-type AgentPost = { event: string; request: { id: string | null; instance: string } | null };
+type AgentPost = { event: string; request: { id: string | null; instance: string } | null; text?: string | null };
 const agentPosts: AgentPost[] = [];
 // A Radarr the admin_approve button can push to (the requests-mutation harness's
 // responder, trimmed): lookup → root folder → quality profile → add.
@@ -354,9 +354,12 @@ const pendingPeerReads: Array<{ inTx: boolean }> = [];
 // When set, mediaRequest.create throws it (a duplicate-request race, P2002).
 let requestCreateThrows: Error | null = null;
 shadowPrismaModel(prisma, "mediaRequest", {
-  findUnique: async (args: { where: { id: string } }) => {
+  // Projects through `select` like Prisma does, so a column the handler forgets
+  // to select is missing here too.
+  findUnique: async (args: { where: { id: string }; select?: Record<string, boolean> }) => {
     const r = requestRows.find((x) => x.id === args.where.id);
-    return r ? { ...r } : null;
+    if (!r) return null;
+    return args.select ? Object.fromEntries(Object.entries(r).filter(([k]) => args.select![k] === true)) : { ...r };
   },
   updateMany: async (args: { where: { id: string; status?: string }; data: Record<string, unknown> }) => {
     rec("mediaRequest.updateMany", args);
@@ -383,10 +386,14 @@ shadowPrismaModel(prisma, "mediaRequest", {
   },
   count: async () => 0,
   groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
-  create: async (args: unknown) => {
+  create: async (args: { data: Record<string, unknown> }) => {
     rec("mediaRequest.create", args);
     if (requestCreateThrows) throw requestCreateThrows;
-    return { id: "x", createdAt: new Date() };
+    // Kept, so the chokepoint's status-guarded rollback (an auto-approve whose
+    // push failed) finds the row it created.
+    const row: RequestRow = { status: "PENDING", ...args.data, id: `x${requestRows.length}`, createdAt: new Date() };
+    requestRows.push(row);
+    return { ...row };
   },
   createMany: async () => ({ count: 0 }), update: async (args: unknown) => { rec("mediaRequest.update", args); return {}; },
   upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
@@ -1225,6 +1232,23 @@ test("admin_decline button: the outbound request.declined carries the ROW's id a
   );
 });
 
+// The button writes no note, so the requester is told the note the row already
+// holds — what the web and batch declines send for the same row.
+test("admin_decline button: the decline carries the row's stored note, like the web and batch declines", async () => {
+  seedDecisionFixture("");
+  requestRows[0].adminNote = "already in the library as the extended cut";
+  agentRows.push(agentRow("request.declined"));
+
+  const res = await post(button("admin_decline:req-1"));
+  assert.equal(res.status, 200);
+  await waitFor(() => agentPosts.length >= 1, 400);
+
+  assert.deepEqual(
+    agentPosts.map((p) => [p.event, p.request?.id, p.text]),
+    [["request.declined", "req-1", "already in the library as the extended cut"]],
+  );
+});
+
 test("admin_approve button: the outbound request.approved carries the ROW's id, never null", async () => {
   seedDecisionFixture("");
   settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
@@ -1722,7 +1746,51 @@ test("pick: an auto-approve whose push gets no definite answer (gateway 504) sta
     "no rollback to PENDING",
   );
   assert.deepEqual(agentPosts, [], "nothing for the admins to review");
-  assert.ok(errors.some((e) => e.includes("arr push outcome unknown")));
+  assert.ok(errors.some((e) => e.includes("push outcome unknown, left APPROVED")));
+});
+
+test("pick: files through the request chokepoint — no MediaRequest write, transaction or Radarr/Sonarr push of its own", async () => {
+  const { readFileSync } = await import("node:fs");
+  const code = readFileSync("src/lib/discord-interactions/components/pick.ts", "utf8")
+    .split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+  assert.match(code, /await createMediaRequest\(/);
+  for (const copy of [/mediaRequest\./, /\$transaction/, /addMovieToRadarr|addSeriesToSonarr/, /scheduleDownloadCheck/, /notifyAdminsNewRequest/]) {
+    assert.doesNotMatch(code, copy, `pick.ts holds its own copy of the pipeline: ${copy}`);
+  }
+});
+
+test("pick: a chokepoint-only rule now holds for Discord — a failed push whose row already moved on is not rolled back, re-announced or reported as failed", async () => {
+  // The chokepoint rolls a failed auto-approve back only while the row is still
+  // APPROVED, and only a row that really went back to PENDING is the admins' to
+  // review. The Discord copy used to report "an admin will review it" and alert
+  // the admins whatever its rollback found.
+  const sid = seedPick("ADMIN"); // no Radarr configured ⇒ the push throws before it is sent
+  agentRows.push(agentRow("request.created"));
+  const orig = (prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...orig,
+    // A webhook flipped the fresh row AVAILABLE before the push failed.
+    create: async (args: { data: Record<string, unknown> }) => {
+      rec("mediaRequest.create", args);
+      const row: RequestRow = { ...args.data, id: "moved-on", status: "AVAILABLE", createdAt: new Date() };
+      requestRows.push(row);
+      return { ...row, status: "APPROVED" };
+    },
+  });
+  try {
+    await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+    await waitFor(pickReplied, 400);
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(requestRows.find((r) => r.id === "moved-on")?.status, "AVAILABLE", "the CAS left the moved-on row alone");
+    assert.deepEqual(agentPosts, [], "nothing went back to PENDING, so nothing is announced");
+    const { translatorFor } = await import("../src/lib/i18n/server-locale.ts");
+    const en = translatorFor("en");
+    const description = String(discordEdits.find((e) => Array.isArray(e.embeds) && e.embeds.length > 0)?.embeds?.[0]?.description);
+    assert.ok(!description.includes(en("notify.bot.pick.arrFailed")), description);
+    assert.ok(description.includes(en("notify.bot.pick.autoApproved")), description);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", orig);
+  }
 });
 
 test("pick: an undated TMDB result is stored with releaseYear null, never the display word \"Unknown\"", async () => {

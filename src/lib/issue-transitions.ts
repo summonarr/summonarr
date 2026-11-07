@@ -49,6 +49,59 @@ export async function promoteIssueInProgress(opts: {
   return claim.count;
 }
 
+/**
+ * Close an issue for an action that fixed it — the issue dialog's fix-match,
+ * which runs as a background job, so closing no longer depends on the browser
+ * staying until the remap ends. A compare-and-swap on OPEN/IN_PROGRESS stamps
+ * resolvedAt and the resolution; only when THIS call closed it does it
+ * broadcast issue:updated, write the ISSUE_STATUS_CHANGE audit (the swallowing
+ * logAudit, after the write — guardrail 26) and announceIssueResolved, so a
+ * concurrent resolve announces once. `about` binds the close to the title the
+ * action changed: an issue about anything else is left alone.
+ *
+ * True when the issue is closed afterwards (by this call or already), false
+ * when it is gone, about another title, or the write failed. Never throws.
+ */
+export async function resolveIssueAfterAction(opts: {
+  issueId: string;
+  about: { tmdbId: number; mediaType: string };
+  resolution: string;
+  trigger: string;
+  actor: { userId: string; userName: string | null; ctx: ReturnType<typeof auditContext> };
+}): Promise<boolean> {
+  try {
+    const issue = await prisma.issue.findUnique({
+      where: { id: opts.issueId },
+      select: { id: true, status: true, reportedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true, issueType: true },
+    });
+    if (!issue || issue.tmdbId !== opts.about.tmdbId || issue.mediaType !== opts.about.mediaType) return false;
+    if (issue.status === "RESOLVED") return true;
+    const claim = await prisma.issue.updateMany({
+      where: { id: issue.id, status: { in: ["OPEN", "IN_PROGRESS"] } },
+      data: { status: "RESOLVED", resolvedAt: new Date(), resolution: opts.resolution },
+    });
+    if (claim.count === 0) {
+      // Resolved (or deleted) in between: closed is closed, whoever did it.
+      const now = await prisma.issue.findUnique({ where: { id: issue.id }, select: { status: true } });
+      return now?.status === "RESOLVED";
+    }
+    emitSSE({ type: "issue:updated", issueId: issue.id, status: "RESOLVED", userId: issue.reportedBy });
+    void logAudit({
+      userId: opts.actor.userId,
+      userName: opts.actor.userName,
+      action: "ISSUE_STATUS_CHANGE",
+      target: `issue:${issue.id}`,
+      details: { trigger: opts.trigger, title: issue.title, before: { status: issue.status }, after: { status: "RESOLVED", resolution: opts.resolution } },
+      ...opts.actor.ctx,
+    });
+    await announceIssueResolved(issue, opts.resolution, opts.actor.userId);
+    return true;
+  } catch (err) {
+    console.error("[issues] closing the issue after a fix failed:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
 export interface ResolvedIssue {
   id: string;
   reportedBy: string;

@@ -8,6 +8,7 @@
 import { useId } from "react";
 import type { MediaServerUserOption } from "./types";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { ZoneTag } from "@/components/admin/activity-ui";
 import { mediaInstanceLabel, type MediaServerService } from "@/lib/media-instances";
 
 // `distinct=users` returns `serverInstance` (additive) so the same username on
@@ -189,6 +190,7 @@ export function HistoryFilterBar({
   hasFilter,
   clearFilters,
   exportAs,
+  timeZone,
 }: {
   search: string;
   setSearch: (v: string) => void;
@@ -212,6 +214,8 @@ export function HistoryFilterBar({
   hasFilter: boolean;
   clearFilters: () => void;
   exportAs: (format: "csv" | "json") => void;
+  // The statistics zone the date pickers' days are whole days in.
+  timeZone: string;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -318,7 +322,10 @@ export function HistoryFilterBar({
         >
           {/* Each date bounds the other so the picker can't build an inverted
               range (startDate > endDate), which the API answers with an
-              unexplained "0 results". */}
+              unexplained "0 results". The dates are whole days in the
+              statistics zone (so a calendar cell's deep link lists exactly the
+              plays it counted), while the rows show local times — the tag
+              says so. */}
           <input
             type="date"
             className={dateInputClass}
@@ -349,6 +356,7 @@ export function HistoryFilterBar({
               color: toDate ? "var(--ds-fg)" : "var(--ds-fg-muted)",
             }}
           />
+          <ZoneTag zone={timeZone} title={t("adminActivity.history.zoneDatesTitle", { zone: timeZone })} />
         </div>
 
         <div style={{ flex: 1 }} />

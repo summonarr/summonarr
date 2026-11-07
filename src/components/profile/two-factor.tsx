@@ -9,9 +9,10 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
-import { translatedRelativeTime } from "./relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { encodeQr, qrToSvgPath } from "@/lib/qr";
-import { createPasskey, getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type CreationOptionsJSON, type RequestOptionsJSON } from "@/lib/client/webauthn";
+import { createPasskey, isWebAuthnCancel, isWebAuthnSupported, type CreationOptionsJSON } from "@/lib/client/webauthn";
+import { buildSecondFactor, type SecondFactorProof } from "@/lib/client/step-up";
 
 export interface TwoFactorPasskey {
   id: string;
@@ -157,11 +158,11 @@ export function TwoFactorSettings({ initial, required }: Props) {
   async function refresh() {
     const r = await call(t, "/api/profile/mfa", "GET");
     if (r.ok) {
-      const d = r.data as unknown as TwoFactorState & { passkeys: TwoFactorPasskey[] };
+      const d = r.data;
       setState({
         enabled: !!d.enabled,
         totpEnabled: !!d.totpEnabled,
-        passkeys: d.passkeys ?? [],
+        passkeys: Array.isArray(d.passkeys) ? (d.passkeys as TwoFactorPasskey[]) : [],
         recoveryCodesRemaining: Number(d.recoveryCodesRemaining ?? 0),
         webauthnAvailable: !!d.webauthnAvailable,
       });
@@ -179,28 +180,16 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   // The `secondFactor` body field for a change, or null when the user must act
   // first (an error is already shown). An account without 2FA sends nothing.
-  async function secondFactorBody(): Promise<Record<string, unknown> | null> {
+  async function secondFactorBody(): Promise<{ secondFactor?: SecondFactorProof } | null> {
     if (!state.enabled) return {};
-    const code = stepUpCode.trim();
-    if (code.length > 0) {
-      const digits = code.replace(/\s/g, "");
-      return { secondFactor: { method: /^\d{6}$/.test(digits) ? "totp" : "recovery", code } };
-    }
-    if (state.passkeys.length > 0 && state.webauthnAvailable && isWebAuthnSupported()) {
-      const ch = await call(t, "/api/profile/mfa/challenge", "POST", {});
-      if (!ch.ok) {
-        setError(ch.error);
-        return null;
-      }
-      try {
-        const credential = await getPasskeyAssertion(ch.data.publicKey as RequestOptionsJSON);
-        return { secondFactor: { method: "webauthn", credential, challengeToken: ch.data.challengeToken } };
-      } catch (err) {
-        if (!isWebAuthnCancel(err)) setError(t("profile.mfa.stepUp.passkeyFailed"));
-        return null;
-      }
-    }
-    setError(t("profile.mfa.stepUp.codeRequired"));
+    const r = await buildSecondFactor({
+      code: stepUpCode,
+      passkeyPossible: state.passkeys.length > 0 && state.webauthnAvailable,
+      t,
+      failedMessage: (status) => t("profile.mfa.error.requestFailed", { status }),
+    });
+    if ("proof" in r) return { secondFactor: r.proof };
+    if (r.error) setError(r.error);
     return null;
   }
 
@@ -215,15 +204,36 @@ export function TwoFactorSettings({ initial, required }: Props) {
     }
   }
 
-  const startTotp = () => run("totp-setup", async () => {
+  // Every change behind the step-up: the password, then (once 2FA is on) a
+  // second factor, then the request with `{ password, secondFactor? }`. The
+  // code field is cleared BEFORE the request — a code is single-use (a recovery
+  // code is consumed), so it is never resent. `precheck` refuses early with a
+  // message, before a passkey prompt is shown.
+  const stepUpRun = (
+    key: string,
+    fn: (stepUp: { password: string; secondFactor?: SecondFactorProof }) => Promise<void>,
+    precheck?: () => string | null,
+  ) => run(key, async () => {
     if (needPassword()) return;
+    const refused = precheck?.();
+    if (refused) return setError(refused);
     const sf = await secondFactorBody();
     if (!sf) return;
     setStepUpCode("");
-    const r = await call(t, "/api/profile/mfa/totp/setup", "POST", { password, ...sf });
+    await fn({ password, ...sf });
+  });
+
+  const startTotp = () => stepUpRun("totp-setup", async (stepUp) => {
+    const r = await call(t, "/api/profile/mfa/totp/setup", "POST", stepUp);
     if (!r.ok) return setError(r.error);
     setPassword("");
-    setSetup({ secret: String(r.data.secret), otpauthUri: String(r.data.otpauthUri) });
+    const { secret, otpauthUri } = r.data;
+    // A 200 without both (a proxy page, say) must not render "undefined" as
+    // the key and its QR code.
+    if (typeof secret !== "string" || typeof otpauthUri !== "string") {
+      return setError(t("profile.mfa.error.requestFailed", { status: 200 }));
+    }
+    setSetup({ secret, otpauthUri });
     setSetupCode("");
     setSecretCopied(false);
   });
@@ -238,12 +248,8 @@ export function TwoFactorSettings({ initial, required }: Props) {
     await refresh();
   });
 
-  const removeTotp = () => run("totp-remove", async () => {
-    if (needPassword()) return;
-    const sf = await secondFactorBody();
-    if (!sf) return;
-    setStepUpCode("");
-    const r = await call(t, "/api/profile/mfa/totp", "DELETE", { password, ...sf });
+  const removeTotp = () => stepUpRun("totp-remove", async (stepUp) => {
+    const r = await call(t, "/api/profile/mfa/totp", "DELETE", stepUp);
     if (!r.ok) return setError(r.error);
     setPassword("");
     setConfirmingRemove(null);
@@ -251,13 +257,8 @@ export function TwoFactorSettings({ initial, required }: Props) {
     await refresh();
   });
 
-  const addPasskey = () => run("passkey-add", async () => {
-    if (needPassword()) return;
-    if (!isWebAuthnSupported()) return setError(t("auth.mfa.error.passkeyUnsupported"));
-    const sf = await secondFactorBody();
-    if (!sf) return;
-    setStepUpCode("");
-    const opts = await call(t, "/api/profile/mfa/passkeys/options", "POST", { password, ...sf });
+  const addPasskey = () => stepUpRun("passkey-add", async (stepUp) => {
+    const opts = await call(t, "/api/profile/mfa/passkeys/options", "POST", stepUp);
     if (!opts.ok) return setError(opts.error);
     // The step-up passed; the registration below doesn't need the password.
     setPassword("");
@@ -278,26 +279,18 @@ export function TwoFactorSettings({ initial, required }: Props) {
     if (Array.isArray(r.data.recoveryCodes)) setCodes(r.data.recoveryCodes as string[]);
     setNotice(t("profile.mfa.notice.passkeyAdded"));
     await refresh();
-  });
+  }, () => (isWebAuthnSupported() ? null : t("auth.mfa.error.passkeyUnsupported")));
 
-  const renamePasskey = (id: string, name: string) => run(`rename-${id}`, async () => {
-    if (needPassword()) return;
-    const sf = await secondFactorBody();
-    if (!sf) return;
-    setStepUpCode("");
-    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "PATCH", { password, name, ...sf });
+  const renamePasskey = (id: string, name: string) => stepUpRun(`rename-${id}`, async (stepUp) => {
+    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "PATCH", { ...stepUp, name });
     if (!r.ok) return setError(r.error);
     setPassword("");
     setRenaming(null);
     await refresh();
   });
 
-  const removePasskey = (id: string) => run(`remove-${id}`, async () => {
-    if (needPassword()) return;
-    const sf = await secondFactorBody();
-    if (!sf) return;
-    setStepUpCode("");
-    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "DELETE", { password, ...sf });
+  const removePasskey = (id: string) => stepUpRun(`remove-${id}`, async (stepUp) => {
+    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "DELETE", stepUp);
     if (!r.ok) return setError(r.error);
     setPassword("");
     setConfirmingRemove(null);
@@ -305,24 +298,22 @@ export function TwoFactorSettings({ initial, required }: Props) {
     await refresh();
   });
 
-  const regenerateCodes = () => run("codes", async () => {
-    if (needPassword()) return;
-    const sf = await secondFactorBody();
-    if (!sf) return;
-    setStepUpCode("");
-    const r = await call(t, "/api/profile/mfa/recovery-codes", "POST", { password, ...sf });
+  const regenerateCodes = () => stepUpRun("codes", async (stepUp) => {
+    const r = await call(t, "/api/profile/mfa/recovery-codes", "POST", stepUp);
     if (!r.ok) return setError(r.error);
     setPassword("");
+    // The old codes are already replaced: a 200 without the new ones must say
+    // so, not silently show nothing.
+    if (!Array.isArray(r.data.recoveryCodes)) {
+      setError(t("profile.mfa.error.requestFailed", { status: 200 }));
+      return refresh();
+    }
     setCodes(r.data.recoveryCodes as string[]);
     await refresh();
   });
 
-  const disableAll = () => run("disable", async () => {
-    if (needPassword()) return;
-    const sf = await secondFactorBody();
-    if (!sf) return;
-    setStepUpCode("");
-    const r = await call(t, "/api/profile/mfa", "DELETE", { password, ...sf });
+  const disableAll = () => stepUpRun("disable", async (stepUp) => {
+    const r = await call(t, "/api/profile/mfa", "DELETE", stepUp);
     if (!r.ok) return setError(r.error);
     setPassword("");
     setConfirmDisable(false);
@@ -506,87 +497,89 @@ export function TwoFactorSettings({ initial, required }: Props) {
         <h3 className="text-sm font-medium text-zinc-100 flex items-center gap-2">
           <KeyRound className="w-4 h-4 text-zinc-400" /> {t("profile.mfa.passkey.title")}
         </h3>
-        {!state.webauthnAvailable ? (
-          <p className="text-sm text-zinc-500">{t("profile.mfa.passkey.unavailable")}</p>
-        ) : (
-          <>
-            {state.passkeys.length > 0 && (
-              <ul className="space-y-1.5">
-                {state.passkeys.map((p) => (
-                  <li
-                    key={p.id}
-                    className="flex items-center justify-between gap-3"
-                    style={{ padding: "8px 10px", background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)", borderRadius: 8 }}
+        {/* Enrolled passkeys stay listed (rename/remove need no WebAuthn — a code
+            confirms them) even when the server can't run WebAuthn any more:
+            they still count as factors, so hiding them would hide what the
+            account holds. Only adding one needs it. */}
+        {state.passkeys.length > 0 && (
+          <ul className="space-y-1.5">
+            {state.passkeys.map((p) => (
+              <li
+                key={p.id}
+                className="flex items-center justify-between gap-3"
+                style={{ padding: "8px 10px", background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)", borderRadius: 8 }}
+              >
+                {confirmingRemove?.kind === "passkey" && confirmingRemove.id === p.id ? (
+                  <div className="flex-1 min-w-0">{removeConfirmPanel}</div>
+                ) : renaming?.id === p.id ? (
+                  <form
+                    className="flex flex-1 items-center gap-2"
+                    onSubmit={(e) => { e.preventDefault(); void renamePasskey(p.id, renaming.name); }}
                   >
-                    {confirmingRemove?.kind === "passkey" && confirmingRemove.id === p.id ? (
-                      <div className="flex-1 min-w-0">{removeConfirmPanel}</div>
-                    ) : renaming?.id === p.id ? (
-                      <form
-                        className="flex flex-1 items-center gap-2"
-                        onSubmit={(e) => { e.preventDefault(); void renamePasskey(p.id, renaming.name); }}
+                    <Input
+                      aria-label={t("profile.mfa.passkey.nameLabel")}
+                      value={renaming.name}
+                      maxLength={64}
+                      onChange={(e) => setRenaming({ id: p.id, name: e.target.value })}
+                    />
+                    <Button type="submit" disabled={busy !== null}>{t("profile.common.save")}</Button>
+                    <Button type="button" variant="outline" onClick={() => setRenaming(null)}>{t("profile.common.cancel")}</Button>
+                  </form>
+                ) : (
+                  <>
+                    <div className="min-w-0">
+                      <p className="text-sm text-zinc-100 truncate">{p.name}</p>
+                      <p className="text-xs text-zinc-500">
+                        {mounted
+                          ? p.lastUsedAt
+                            ? t("profile.mfa.passkey.lastUsed", { time: formatRelativeTimeLocalized(p.lastUsedAt, locale) })
+                            : t("profile.push.added", { date: new Date(p.createdAt).toLocaleDateString(locale) })
+                          : ""}
+                        {p.backedUp ? ` · ${t("profile.mfa.passkey.synced")}` : ""}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => setRenaming({ id: p.id, name: p.name })}>
+                        {t("profile.mfa.passkey.rename")}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        aria-label={t("profile.mfa.passkey.removeNamed", { name: p.name })}
+                        title={t("profile.common.remove")}
+                        className="h-9 w-9 px-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10"
+                        disabled={busy !== null}
+                        onClick={() => setConfirmingRemove({ kind: "passkey", id: p.id })}
                       >
-                        <Input
-                          aria-label={t("profile.mfa.passkey.nameLabel")}
-                          value={renaming.name}
-                          maxLength={64}
-                          onChange={(e) => setRenaming({ id: p.id, name: e.target.value })}
-                        />
-                        <Button type="submit" disabled={busy !== null}>{t("profile.common.save")}</Button>
-                        <Button type="button" variant="outline" onClick={() => setRenaming(null)}>{t("profile.common.cancel")}</Button>
-                      </form>
-                    ) : (
-                      <>
-                        <div className="min-w-0">
-                          <p className="text-sm text-zinc-100 truncate">{p.name}</p>
-                          <p className="text-xs text-zinc-500">
-                            {mounted
-                              ? p.lastUsedAt
-                                ? t("profile.mfa.passkey.lastUsed", { time: translatedRelativeTime(p.lastUsedAt, t) })
-                                : t("profile.push.added", { date: new Date(p.createdAt).toLocaleDateString(locale) })
-                              : ""}
-                            {p.backedUp ? ` · ${t("profile.mfa.passkey.synced")}` : ""}
-                          </p>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-1.5">
-                          <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => setRenaming({ id: p.id, name: p.name })}>
-                            {t("profile.mfa.passkey.rename")}
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            aria-label={t("profile.mfa.passkey.removeNamed", { name: p.name })}
-                            title={t("profile.common.remove")}
-                            className="h-9 w-9 p-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10"
-                            disabled={busy !== null}
-                            onClick={() => setConfirmingRemove({ kind: "passkey", id: p.id })}
-                          >
-                            {busy === `remove-${p.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
-                          </Button>
-                        </div>
-                      </>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="flex flex-wrap items-end gap-2">
-              <div>
-                <label className="block text-sm text-zinc-400 mb-1" htmlFor="mfa-passkey-name">{t("profile.mfa.passkey.name")}</label>
-                <Input
-                  id="mfa-passkey-name"
-                  placeholder={t("profile.mfa.passkey.namePlaceholder")}
-                  maxLength={64}
-                  value={passkeyName}
-                  onChange={(e) => setPasskeyName(e.target.value)}
-                  className="w-56"
-                />
-              </div>
-              <Button type="button" variant="outline" disabled={busy !== null} onClick={addPasskey}>
-                {busy === "passkey-add" ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Plus className="w-4 h-4 mr-1.5" />}
-                {t("profile.mfa.passkey.add")}
-              </Button>
+                        {busy === `remove-${p.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {state.webauthnAvailable ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <div>
+              <label className="block text-sm text-zinc-400 mb-1" htmlFor="mfa-passkey-name">{t("profile.mfa.passkey.name")}</label>
+              <Input
+                id="mfa-passkey-name"
+                placeholder={t("profile.mfa.passkey.namePlaceholder")}
+                maxLength={64}
+                value={passkeyName}
+                onChange={(e) => setPasskeyName(e.target.value)}
+                className="w-56"
+              />
             </div>
-          </>
+            <Button type="button" variant="outline" disabled={busy !== null} onClick={addPasskey}>
+              {busy === "passkey-add" ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Plus className="w-4 h-4 mr-1.5" />}
+              {t("profile.mfa.passkey.add")}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-sm text-zinc-500">{t("profile.mfa.passkey.unavailable")}</p>
         )}
       </section>
 

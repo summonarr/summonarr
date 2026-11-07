@@ -9,6 +9,14 @@ import { readJsonCapped } from "@/lib/body-size";
 import { isFeatureEnabled } from "@/lib/features";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import {
+  clearPushEndpointRemovalInTx,
+  countUserPushRegistrationsInTx,
+  evictOldestForCapInTx,
+  isPushEndpointRemovedInTx,
+  lockUserPushRegistrationsInTx,
+  tombstoneRemovedPushRowsInTx,
+} from "@/lib/push-registration";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
@@ -43,11 +51,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
-  const parsed = await readJsonCapped<{ endpoint?: string; keys?: { p256dh?: string; auth?: string }; label?: string }>(req, 32768);
+  const parsed = await readJsonCapped<{ endpoint?: string; keys?: { p256dh?: string; auth?: string }; label?: string; resync?: unknown }>(req, 32768);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   const { endpoint, keys, label } = body;
+  // The bell's once-per-page-load re-send of a subscription the browser already
+  // holds (push-notifications.tsx), as opposed to the user turning push on. It
+  // may restore a row the server lost — the 6g sign-out/password wipe deletes
+  // every registration — but never one that was removed on purpose.
+  const resync = body.resync === true;
   if (!endpoint || !keys?.p256dh || !keys?.auth) {
     return NextResponse.json({ error: t("apiUser.push.fieldsRequired") }, { status: 400 });
   }
@@ -92,13 +105,6 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.push.endpointDisallowed") }, { status: 400 });
   }
 
-  const existing = await prisma.pushSubscription.findUnique({ where: { endpoint: safeEndpoint } });
-  if (existing && existing.userId !== session.user.id) {
-    return NextResponse.json({ error: t("apiUser.push.endpointTaken") }, { status: 409 });
-  }
-
-  const alreadyOwns = existing?.userId === session.user.id;
-
   const capRow = await prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } });
   const cap = parseRateLimit(capRow?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
 
@@ -112,35 +118,45 @@ export const POST = withAuth(async (req, _ctx, session) => {
     ? (sanitizeText(label).slice(0, 100) || undefined)
     : undefined;
 
-  // Cap-check + oldest-eviction + upsert all live in one transaction so two
-  // concurrent registrations can't both pass the count check and end up with
-  // the user one-over-cap. Ordering: count → maybe delete oldest → upsert.
-  await prisma.$transaction(async (tx) => {
-    if (!alreadyOwns && cap > 0) {
-      const count = await tx.pushSubscription.count({ where: { userId: session.user.id } });
-      if (count >= cap) {
-        const oldest = await tx.pushSubscription.findFirst({
-          where: { userId: session.user.id },
-          orderBy: { createdAt: "asc" },
-        });
-        if (oldest) {
-          // deleteMany (not delete().catch()): a concurrent delete of the same
-          // row makes delete() throw P2025, and catching it inside a top-level
-          // $transaction still aborts the tx (no SAVEPOINT) → the upsert below is
-          // silently rolled back and the subscription is dropped (guardrail 23).
-          // deleteMany returns count:0 on a missing row instead of throwing.
-          await tx.pushSubscription.deleteMany({ where: { id: oldest.id } });
-        }
+  // Ownership, cap and write in one transaction under the per-user lock
+  // (push-registration.ts), so two concurrent registrations can't both pass the
+  // count and leave the user one over the cap. Statements run one at a time and
+  // nothing inside is caught (guardrails 23, 23c).
+  const userId = session.user.id;
+  const outcome = await prisma.$transaction(async (tx) => {
+    await lockUserPushRegistrationsInTx(tx, userId);
+    const existing = await tx.pushSubscription.findUnique({ where: { endpoint: safeEndpoint } });
+    if (existing && existing.userId !== userId) return "taken" as const;
+    const alreadyOwns = existing !== null;
+
+    if (resync) {
+      // A row still stored is simply refreshed. A missing one comes back only if
+      // it was not removed on purpose, and never at the cost of another device.
+      if (!alreadyOwns) {
+        if (await isPushEndpointRemovedInTx(tx, userId, safeEndpoint)) return "gone" as const;
+        if (cap > 0 && (await countUserPushRegistrationsInTx(tx, userId)) >= cap) return "gone" as const;
       }
+    } else {
+      await clearPushEndpointRemovalInTx(tx, userId, safeEndpoint);
+      if (!alreadyOwns) await evictOldestForCapInTx(tx, userId, cap);
     }
 
     await tx.pushSubscription.upsert({
       where: { endpoint: safeEndpoint },
       update: { p256dh: encryptToken(p256dh), auth: encryptToken(auth), ...(sanitizedLabel !== undefined && { label: sanitizedLabel }) },
-      create: { endpoint: safeEndpoint, p256dh: encryptToken(p256dh), auth: encryptToken(auth), userId: session.user.id, label: sanitizedLabel },
+      create: { endpoint: safeEndpoint, p256dh: encryptToken(p256dh), auth: encryptToken(auth), userId, label: sanitizedLabel },
     });
+    return "ok" as const;
   });
 
+  if (outcome === "taken") {
+    return NextResponse.json({ error: t("apiUser.push.endpointTaken") }, { status: 409 });
+  }
+  if (outcome === "gone") {
+    // The client drops its browser subscription on this answer, so the bell
+    // shows "off" instead of a device the server no longer delivers to.
+    return NextResponse.json({ error: t("apiUser.push.subscriptionRemoved") }, { status: 410 });
+  }
   return NextResponse.json({ ok: true });
 });
 
@@ -155,7 +171,17 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   // by its own `endpoint`. Accept either — always scoped to the caller's userId,
   // so a user can only remove their own subscriptions.
   if (typeof body.id === "string" && body.id.length > 0) {
-    await prisma.pushSubscription.deleteMany({ where: { id: body.id, userId: session.user.id } });
+    // A removal by id comes from the device list, not from the browser itself,
+    // which still holds its subscription: tombstone it so that browser's next
+    // page-load resync can't quietly re-register it.
+    const userId = session.user.id;
+    const id = body.id;
+    await prisma.$transaction(async (tx) => {
+      await lockUserPushRegistrationsInTx(tx, userId);
+      const rows = await tx.pushSubscription.findMany({ where: { id, userId }, select: { endpoint: true, platform: true } });
+      await tx.pushSubscription.deleteMany({ where: { id, userId } });
+      await tombstoneRemovedPushRowsInTx(tx, userId, rows);
+    });
     return NextResponse.json({ ok: true });
   }
 

@@ -13,6 +13,7 @@ import { prisma } from "./prisma";
 import { mapLimit } from "./concurrency";
 import { getMovieReleaseInfo } from "./arr";
 import { getTVCalendarInfo, getTVSeasonEpisodes, tvCalendarKey } from "./tmdb";
+import { tmdbDetailsKey } from "./tmdb-cache";
 import { isFeatureEnabled } from "./features";
 import { isPurgedRow } from "./account-lifecycle";
 import { parseAuthUrl } from "./auth-url";
@@ -47,8 +48,8 @@ const MAX_ALL_SOURCE_ROWS = 5000;
 const CACHE_READ_CHUNK = 500;
 
 const movieReleaseKey = (id: number) => `movie:${id}:release-info:v2`;
-const movieDetailsKey = (id: number) => `movie:${id}:details`;
-const tvDetailsKey = (id: number) => `tv:${id}:details`;
+const movieDetailsKey = (id: number) => tmdbDetailsKey("movie", id);
+const tvDetailsKey = (id: number) => tmdbDetailsKey("tv", id);
 const tvSeasonKey = (id: number, n: number) => `tv:${id}:season:${n}`;
 
 const toMediaType = (m: string): "movie" | "tv" => (m === "MOVIE" ? "movie" : "tv");
@@ -136,19 +137,27 @@ export async function loadCalendarData(titles: readonly CalendarTitle[], w: Cale
   const movieIds = titles.filter((t) => t.mediaType === "movie").map((t) => t.tmdbId);
   const tvIds = titles.filter((t) => t.mediaType === "tv").map((t) => t.tmdbId);
 
-  const first = await readCacheBlobs([
-    ...movieIds.flatMap((id) => [movieReleaseKey(id), movieDetailsKey(id)]),
-    ...tvIds.flatMap((id) => [tvCalendarKey(id), tvDetailsKey(id)]),
+  // The small date blobs first. A full `:details` blob is read (and parsed)
+  // only as a fallback: for a movie whose release info has no primary date, a
+  // show with no usable calendar blob — not for every title on every poll.
+  const first = await readCacheBlobs([...movieIds.map(movieReleaseKey), ...tvIds.map(tvCalendarKey)]);
+  const hasPrimary = (id: number) => {
+    const info = first.get(movieReleaseKey(id));
+    return !!info && typeof info === "object" && typeof (info as { primary?: unknown }).primary === "string";
+  };
+  const fallback = await readCacheBlobs([
+    ...movieIds.filter((id) => !hasPrimary(id)).map(movieDetailsKey),
+    ...tvIds.filter((id) => !parseTvInfo(first.get(tvCalendarKey(id)))).map(tvDetailsKey),
   ]);
   for (const id of movieIds) {
-    const dates = parseMovieDates(first.get(movieReleaseKey(id)), first.get(movieDetailsKey(id)));
+    const dates = parseMovieDates(first.get(movieReleaseKey(id)), fallback.get(movieDetailsKey(id)));
     if (dates) movies.set(id, dates);
   }
   const seasonKeys: Array<{ id: number; key: string }> = [];
   for (const id of tvIds) {
     // The calendar blob (short TTL, carries the next episode's number) wins
     // over the details blob (7-day TTL, a bare next-episode date).
-    const info = parseTvInfo(first.get(tvCalendarKey(id))) ?? parseTvInfo(first.get(tvDetailsKey(id)));
+    const info = parseTvInfo(first.get(tvCalendarKey(id))) ?? parseTvInfo(fallback.get(tvDetailsKey(id)));
     if (!info) continue;
     tv.set(id, info);
     for (const n of seasonsToRead(info, w)) seasonKeys.push({ id, key: tvSeasonKey(id, n) });

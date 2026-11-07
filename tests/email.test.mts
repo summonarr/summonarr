@@ -50,9 +50,11 @@ process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-
 // SMTP-host tests can point a hostname at a blocked address.
 const DEFAULT_PUBLIC_ADDR = "93.184.216.34";
 let dnsByHost: Record<string, string> = {};
-const fakeLookup = async (host: string) => [
-  { address: dnsByHost[host] ?? DEFAULT_PUBLIC_ADDR, family: 4 },
-];
+const dnsLookups: string[] = [];
+const fakeLookup = async (host: string) => {
+  dnsLookups.push(host);
+  return [{ address: dnsByHost[host] ?? DEFAULT_PUBLIC_ADDR, family: 4 }];
+};
 (dns as { lookup: unknown }).lookup = fakeLookup;
 if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
   throw new Error("could not stub dns.lookup — aborting before a real DNS query can leave the process");
@@ -193,6 +195,7 @@ beforeEach(() => {
   warns.length = 0;
   errors.length = 0;
   dnsByHost = {};
+  dnsLookups.length = 0;
   delete process.env.AUTH_URL;
   respond = () =>
     new Response(JSON.stringify({ id: "email_ok" }), {
@@ -674,4 +677,60 @@ test("smtp backend: SSRF and port gates fire before any socket (and the resend p
   await assert.rejects(() => sendTestEmail("admin@example.com"), /Invalid SMTP port: banana/);
 
   assert.equal(fetchCalls.length, 0); // resend transport never involved
+});
+
+test("smtp backend: an admin fan-out resolves the SMTP host ONCE and connects once per recipient", async () => {
+  configureResend({ emailBackend: undefined, resendApiKey: undefined, smtpHost: "smtp.mail.test" });
+  userRows = [adminUser("a@example.com"), adminUser("b@example.com", { locale: "es" }), adminUser("c@example.com")];
+  // Every connect is refused, so nothing is sent — what is pinned is the work
+  // done before it: one validated resolution shared by every recipient (and
+  // both language groups), each connect aimed at that validated address.
+  const connects: string[] = [];
+  const guard = (net as unknown as { connect: unknown }).connect;
+  (net as unknown as { connect: unknown }).connect = (opts: { host: string }) => {
+    connects.push(opts.host);
+    throw new Error("connection refused (test)");
+  };
+  try {
+    await notifyAdminsNewRequest({ title: "Dune", mediaType: "MOVIE", requestedBy: "Paul", note: null });
+  } finally {
+    (net as unknown as { connect: unknown }).connect = guard;
+  }
+  assert.deepEqual(dnsLookups.filter((h) => h === "smtp.mail.test"), ["smtp.mail.test"]);
+  assert.deepEqual(connects, [DEFAULT_PUBLIC_ADDR, DEFAULT_PUBLIC_ADDR, DEFAULT_PUBLIC_ADDR]);
+  assert.equal(errors.filter((e) => e.includes("[email] Failed to send new request notification")).length, 1);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("admin recipients sharing one address (differing only in case) get ONE email", async () => {
+  configureResend();
+  userRows = [
+    adminUser("login-a@example.com", { notificationEmail: "Ops@Example.com" }),
+    { email: "login-b@example.com", notificationEmail: "ops@example.com", role: "USER", permissions: Permission.MANAGE_REQUESTS },
+    adminUser("other@example.com"),
+  ];
+  await notifyAdminsNewRequest({ title: "Dune", mediaType: "MOVIE", requestedBy: "Paul", note: null });
+  // The first row's spelling is the one kept.
+  assert.deepEqual(sentEmails().map((e) => e.to).sort(), ["Ops@Example.com", "other@example.com"]);
+});
+
+test("user-supplied text in the subheading and details is escaped exactly once", async () => {
+  configureResend();
+  const hostile = "<b>x</b>&";
+  const escaped = "&lt;b&gt;x&lt;/b&gt;&amp;";
+  userRows = [adminUser("alpha@example.com")];
+  await notifyAdminsIssueMessageEmail({ issueTitle: hostile, userName: hostile, body: "hi", issueId: "i1" });
+  await notifyUserRequestAvailableEmail({ toEmail: "u@example.com", title: hostile, mediaType: "MOVIE" });
+  const [admin, user] = sentEmails().map((e) => e.html);
+  for (const html of [admin, user]) {
+    assert.equal(html.includes("<b>x</b>"), false, "no raw markup from user data");
+    assert.equal(html.includes("&amp;lt;"), false, "nothing escaped twice");
+    assert.equal(html.includes("&amp;amp;"), false, "nothing escaped twice");
+  }
+  // Admin: the subheading names the user, and the details carry title and user.
+  const subheading = /<p style="margin:0 0 20px[^"]*">([\s\S]*?)<\/p>/.exec(admin)?.[1] ?? "";
+  assert.ok(subheading.includes(escaped), subheading);
+  assert.equal(admin.split(`>${escaped}</td>`).length - 1, 2, "both detail values are escaped once");
+  // User: the title rides inside <strong> in the subheading.
+  assert.ok(user.includes(`<strong style="color:#fafafa">${escaped}</strong>`));
 });

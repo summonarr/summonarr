@@ -122,6 +122,7 @@
   "personal.stats.noActivityDescription": "Assim que você reproduzir algo no servidor, suas estatísticas aparecerão aqui.",
   "personal.stats.totalPlays": "Total de reproduções",
   "personal.stats.watchTime": "Tempo assistido",
+  "personal.stats.watchTimeValue": "{hours} h",
   "personal.stats.lastActive": "Última atividade",
   "personal.stats.avgSession": "Sessão média",
   "personal.stats.calendar": "Atividade em 365 dias",

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { cache } from "react";
 import { notFound } from "next/navigation";
 import { requireAppSession } from "@/lib/require-app-session";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 import { getEnrichedPerson } from "@/lib/person";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { isFeatureEnabled } from "@/lib/features";
@@ -23,8 +24,10 @@ export const dynamic = "force-dynamic";
 // callers see the same outcome.
 const loadPerson = cache(async (id: string) => {
   const session = await requireAppSession();
-  const personId = Number(id);
-  if (!Number.isFinite(personId) || personId <= 0) notFound();
+  // Canonical digits only, like the movie/TV pages: Number() let "1.5" and
+  // "1e3" through to TMDB and rendered people at non-canonical URLs.
+  const personId = parseTmdbIdParam(id);
+  if (personId === null || !isTmdbIdInRange(personId)) notFound();
 
   const person = await getEnrichedPerson(personId, session).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);

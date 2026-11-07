@@ -29,7 +29,6 @@ export function WatchlistGrid({
   cap?: number;
 }) {
   const [items, setItems] = useState(initialItems);
-  const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const t = useT();
   const locale = useLocale();
@@ -54,7 +53,6 @@ export function WatchlistGrid({
 
   async function remove(it: WatchlistGridItem) {
     const key = `${it.tmdbId}:${it.mediaType}`;
-    setRemoving(key);
     setError(null);
     setItems((cur) => cur.filter((x) => `${x.tmdbId}:${x.mediaType}` !== key)); // optimistic
     // Roll back only THIS item — restoring a stale whole-list snapshot would
@@ -81,8 +79,6 @@ export function WatchlistGrid({
       if (!res.ok) restore();
     } catch {
       restore();
-    } finally {
-      setRemoving(null);
     }
   }
 
@@ -169,7 +165,9 @@ export function WatchlistGrid({
                 style={{ aspectRatio: "2 / 3", borderRadius: 8, background: "var(--ds-bg-3)" }}
               >
                 {poster ? (
-                  <Image src={poster} alt={it.title} fill className="object-cover" sizes="140px" />
+                  // Decorative: the title below is the link's label, so a named
+                  // poster read the title twice.
+                  <Image src={poster} alt="" fill className="object-cover" sizes="140px" />
                 ) : (
                   <div className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
                     {it.mediaType === "MOVIE" ? <Film style={{ width: 28, height: 28 }} /> : <Tv2 style={{ width: 28, height: 28 }} />}
@@ -188,7 +186,6 @@ export function WatchlistGrid({
             <button
               type="button"
               onClick={() => remove(it)}
-              disabled={removing === key}
               aria-label={t("personal.watchlist.removeAria", { title: it.title })}
               title={t("personal.watchlist.remove")}
               className="ds-hover-tint absolute"
@@ -204,7 +201,6 @@ export function WatchlistGrid({
                 background: "color-mix(in oklab, var(--ds-bg) 70%, transparent)",
                 color: "var(--ds-fg)",
                 border: "1px solid var(--ds-border)",
-                cursor: removing === key ? "progress" : undefined,
               }}
             >
               <X style={{ width: 14, height: 14 }} />

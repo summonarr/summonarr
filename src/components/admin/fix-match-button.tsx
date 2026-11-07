@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { Check } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
@@ -56,6 +57,9 @@ interface ModalProps {
   // "plex:<slug>"/"jellyfin:<slug>" for a named server, empty for the default one
   // — surfaced so the admin can see WHICH server this modal is about to rewrite.
   instanceLabel: string;
+  // Plex mode: applies the candidate the admin picked. A row click only PICKS
+  // it; the footer's Apply sends it, so a misclick while scrolling the list
+  // never rematches the item.
   onSelect:      (guid: string) => void;
   // Jellyfin mode only: fires the single-target apply from the confirm footer.
   onConfirm:     () => void;
@@ -74,6 +78,8 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
   } = data;
   const t = useT();
   const tmdbPoster = posterUrl(targetPosterPath, "w342");
+  // Plex: the candidate picked in the list, applied from the footer.
+  const [pickedGuid, setPickedGuid] = useState<string | null>(null);
 
   const resolvedArrTmdbId = arrTmdbId ?? arrConfirmedTmdbId;
 
@@ -116,7 +122,9 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
               {(targetReleaseDate ?? targetYear) && (
                 <span className="text-sm text-zinc-400">{targetReleaseDate?.slice(0, 10) ?? targetYear}</span>
               )}
-              {targetRuntime && (
+              {/* TMDB answers runtime 0 for many unreleased titles: a bare
+                  `0 &&` would render the digit. */}
+              {targetRuntime != null && targetRuntime > 0 && (
                 <span className="text-sm text-zinc-500">{t("adminQueue.fixMatch.minutes", { minutes: targetRuntime })}</span>
               )}
               {targetVoteAverage != null && targetVoteAverage > 0 && (
@@ -224,7 +232,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
             <p className="px-6 py-8 text-sm text-zinc-500 text-center">{t("adminQueue.fixMatch.noCandidates")}</p>
           ) : (
             candidates.map((c) => (
-              <CandidateRow key={c.guid} candidate={c} onSelect={onSelect} disabled={applying}
+              <CandidateRow key={c.guid} candidate={c} onPick={setPickedGuid} picked={c.guid === pickedGuid} disabled={applying}
                 targetImdbId={targetImdbId} targetRuntime={targetRuntime} targetGenres={targetGenres}
                 arrTmdbId={resolvedArrTmdbId} serverInstance={data.serverInstance} />
             ))
@@ -259,18 +267,16 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
           >
             {applying ? t("adminQueue.fixMatch.hide") : t("shared.common.cancel")}
           </DialogClose>
-          {server === "jellyfin" && (
-            <button
-              onClick={onConfirm}
-              disabled={applying}
-              className="text-sm px-4 py-2 rounded border font-medium transition-colors
-                bg-orange-500/10 border-orange-600/30 text-orange-400
-                hover:bg-orange-500/20 hover:border-orange-500/50
-                disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {applying ? t("adminQueue.fixMatch.applying") : t("adminQueue.fixMatch.applyMatch")}
-            </button>
-          )}
+          <button
+            onClick={server === "jellyfin" ? onConfirm : () => { if (pickedGuid) onSelect(pickedGuid); }}
+            disabled={applying || (server === "plex" && pickedGuid === null)}
+            className="text-sm px-4 py-2 rounded border font-medium transition-colors
+              bg-orange-500/10 border-orange-600/30 text-orange-400
+              hover:bg-orange-500/20 hover:border-orange-500/50
+              disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {applying ? t("adminQueue.fixMatch.applying") : t("adminQueue.fixMatch.applyMatch")}
+          </button>
         </div>
         </DialogPopup>
       </DialogPortal>
@@ -279,10 +285,11 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
 }
 
 function CandidateRow({
-  candidate, onSelect, disabled, targetImdbId, targetRuntime, targetGenres, arrTmdbId, serverInstance,
+  candidate, onPick, picked, disabled, targetImdbId, targetRuntime, targetGenres, arrTmdbId, serverInstance,
 }: {
   candidate:      PlexCandidate;
-  onSelect:       (guid: string) => void;
+  onPick:         (guid: string) => void;
+  picked:         boolean;
   disabled:       boolean;
   targetImdbId:   string;
   targetRuntime:  number | null;
@@ -305,14 +312,17 @@ function CandidateRow({
   const effectiveLevel: CandidateMatch = arrMatch ? "exact" : candidate.matchLevel;
   const style    = LEVEL_STYLES[effectiveLevel];
   const isSuggested = candidate.suggested || arrMatch;
+  const hasTargetRuntime = targetRuntime != null && targetRuntime > 0;
 
   return (
     <button
-      onClick={() => onSelect(candidate.guid)}
+      onClick={() => onPick(candidate.guid)}
       disabled={disabled}
+      aria-pressed={picked}
       className={`w-full text-left px-5 py-3.5 flex items-start gap-4 transition-colors
         disabled:opacity-50 disabled:cursor-not-allowed
         ${style.border} ${style.bg}`}
+      style={picked ? { boxShadow: "inset 0 0 0 2px var(--ds-accent-ring)" } : undefined}
     >
       <div className="flex-shrink-0 w-14 h-[84px] rounded overflow-hidden bg-zinc-800 flex items-center justify-center mt-0.5">
         {thumbSrc ? (
@@ -351,10 +361,10 @@ function CandidateRow({
         </div>
 
         <div className="flex items-center gap-3 mt-1 flex-wrap">
-          {candidate.tmdbRuntime && (
-            <span className={`text-xs ${targetRuntime && Math.abs(candidate.tmdbRuntime - targetRuntime) <= 5 ? "text-green-500" : "text-zinc-500"}`}>
+          {candidate.tmdbRuntime != null && candidate.tmdbRuntime > 0 && (
+            <span className={`text-xs ${hasTargetRuntime && Math.abs(candidate.tmdbRuntime - targetRuntime) <= 5 ? "text-green-500" : "text-zinc-500"}`}>
               {t("adminQueue.fixMatch.minutes", { minutes: candidate.tmdbRuntime })}
-              {targetRuntime && ` (${candidate.tmdbRuntime > targetRuntime ? "+" : ""}${candidate.tmdbRuntime - targetRuntime})`}
+              {hasTargetRuntime ? ` (${candidate.tmdbRuntime > targetRuntime ? "+" : ""}${candidate.tmdbRuntime - targetRuntime})` : null}
             </span>
           )}
           {candidate.tmdbVoteAvg != null && candidate.tmdbVoteAvg > 0 && (
@@ -395,7 +405,9 @@ function CandidateRow({
         )}
       </div>
 
-      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">{t("adminQueue.fixMatch.apply")}</div>
+      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">
+        {picked ? <Check aria-hidden className="w-4 h-4 text-[var(--ds-accent-text)]" /> : t("adminQueue.fixMatch.select")}
+      </div>
     </button>
   );
 }
@@ -495,8 +507,20 @@ export function FixMatchButton({
     }
   }
 
+  // The row can outlive the refresh (no re-sync yet, or a partial remap whose
+  // failed copies stay on the old row — guardrail 37), so the settled states
+  // offer the way back to the button, like the error state does.
+  const dismiss = (
+    <button onClick={reset} className="text-[11px] text-zinc-500 hover:text-zinc-300 text-left">{t("shared.common.dismiss")}</button>
+  );
+
   if (phase === "success") {
-    return <span className="text-[10px] text-green-400 font-medium">{t("adminQueue.fixMatch.fixedResync")}</span>;
+    return (
+      <div className="flex flex-col gap-0.5">
+        <span className="text-[10px] text-green-400 font-medium">{t("adminQueue.fixMatch.fixedResync")}</span>
+        {dismiss}
+      </div>
+    );
   }
 
   if (phase === "conflated") {
@@ -509,6 +533,7 @@ export function FixMatchButton({
           {server === "plex" ? t("adminQueue.fixMatch.dbUpdatedPlex") : t("adminQueue.fixMatch.dbUpdatedNote")}
         </span>
         <span className="text-[9px] text-zinc-500 leading-tight max-w-[200px]">{errorMsg}</span>
+        {dismiss}
       </div>
     );
   }
@@ -555,7 +580,7 @@ export function FixMatchButton({
         {phase === "error" && (
           <>
             <span className="text-[11px] text-red-400 leading-tight">{errorMsg}</span>
-            <button onClick={reset} className="text-[11px] text-zinc-500 hover:text-zinc-300 text-left">{t("shared.common.dismiss")}</button>
+            {dismiss}
           </>
         )}
       </div>

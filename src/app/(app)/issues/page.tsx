@@ -1,7 +1,7 @@
 import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
-import { Suspense } from "react";
+import { Suspense, type ReactNode } from "react";
 import { DesktopIssueThread } from "@/components/issues/desktop-issue-thread";
 import {
   IssueDetailMobileDrawer,
@@ -20,6 +20,7 @@ import { ISSUE_STATUS_LABEL_KEY, ISSUE_STATUS_TONE, ISSUE_TYPE_LABEL_KEY, issueD
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { parsePageNumber } from "@/lib/pagination";
 
 export const dynamic = "force-dynamic";
 
@@ -45,7 +46,7 @@ function scopeLabelFor(
 export default async function IssuesPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string; selected?: string | string[]; status?: string; type?: string; q?: string | string[] }>;
+  searchParams: Promise<{ page?: string | string[]; selected?: string | string[]; status?: string; type?: string; q?: string | string[] }>;
 }) {
   await requireFeature("feature.page.issues");
   const session = await requireAppSession();
@@ -65,7 +66,9 @@ export default async function IssuesPage({
   // 500 the page, and an array `id` is a Prisma validation error. Take the first.
   const selectedId = Array.isArray(selectedRaw) ? selectedRaw[0] : selectedRaw;
   const qParam = Array.isArray(qRaw) ? qRaw[0] : qRaw;
-  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
+  // Clamped like every paged list (pagination.ts): a huge ?page= made skip a
+  // number Postgres refuses, and an array ?page= is handled the same way.
+  const page = parsePageNumber(pageParam);
   const skip = (page - 1) * PAGE_SIZE;
 
   const status = VALID_ISSUE_STATUSES.includes(statusParam as typeof VALID_ISSUE_STATUSES[number])
@@ -146,6 +149,41 @@ export default async function IssuesPage({
       ? t("personal.issues.countOfTotal", { count: total, total: totalAllStatuses })
       : t("personal.issues.count", { count: total });
 
+  const selectedScopeLabel = selectedIssue ? scopeLabelFor(selectedIssue, t) : null;
+
+  // Shown when this page of the list is empty. Keyed on the paged slice, not
+  // `total` (same as /requests): `?page=9` with 3 issues has total=3 and
+  // issues=[], and the pager is hidden when totalPages <= 1, so a past-the-end
+  // page rendered an empty list with no way back.
+  const emptyState = (
+    <EmptyState
+      icon={MessageSquare}
+      title={
+        total > 0
+          ? t("personal.common.nothingOnPage")
+          : hasFilters
+            ? t("personal.issues.emptyFilteredTitle")
+            : t("personal.issues.emptyTitle")
+      }
+      description={
+        total > 0
+          ? t("personal.issues.emptyPageDescription")
+          : hasFilters
+            ? t("personal.issues.emptyFilteredDescription")
+            : t("personal.issues.emptyDescription")
+      }
+      // A filter that matches nothing gets an in-page way out: every
+      // param (status/type/q, plus page and selection) dropped.
+      cta={
+        total > 0
+          ? { href: buildHref({ page: 1, selected: "" }), label: t("personal.common.backToFirst") }
+          : hasFilters
+            ? { href: "/issues", label: t("browse.clearFilters") }
+            : undefined
+      }
+    />
+  );
+
   return (
     <div className="ds-page-enter">
       <LiveRefresh
@@ -201,43 +239,18 @@ export default async function IssuesPage({
         </div>
       )}
 
-      {issues.length === 0 ? (
-        // Key on the paged slice, not `total` (same as /requests): `?page=9`
-        // with 3 issues has total=3 and issues=[], and the pager is hidden when
-        // totalPages <= 1, so a past-the-end page rendered an empty list with
-        // no way back.
-        <EmptyState
-          icon={MessageSquare}
-          title={
-            total > 0
-              ? t("personal.common.nothingOnPage")
-              : hasFilters
-                ? t("personal.issues.emptyFilteredTitle")
-                : t("personal.issues.emptyTitle")
-          }
-          description={
-            total > 0
-              ? t("personal.issues.emptyPageDescription")
-              : hasFilters
-                ? t("personal.issues.emptyFilteredDescription")
-                : t("personal.issues.emptyDescription")
-          }
-          // A filter that matches nothing gets an in-page way out: every
-          // param (status/type/q, plus page and selection) dropped.
-          cta={
-            total > 0
-              ? { href: buildHref({ page: 1, selected: "" }), label: t("personal.common.backToFirst") }
-              : hasFilters
-                ? { href: "/issues", label: t("browse.clearFilters") }
-                : undefined
-          }
-        />
+      {/* The grid (and its desktop pane) also renders over an empty page when
+          an issue is selected: a filter or search that matches nothing keeps
+          `selected`, and the phone drawer showed that issue while desktop
+          showed only the empty state. */}
+      {issues.length === 0 && !selectedIssue ? (
+        emptyState
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
           <div className="min-w-0">
+            {issues.length === 0 && emptyState}
             <div className="flex flex-col" style={{ gap: 8 }}>
               {issues.map((issue) => {
-                const poster = posterUrl(issue.posterPath, "w342");
                 const scopeLabel = scopeLabelFor(issue, t);
                 const isSelected = issue.id === selectedId;
 
@@ -262,39 +275,11 @@ export default async function IssuesPage({
                     <Link
                       href={issueHref(issue.id)}
                       scroll={false}
+                      aria-current={isSelected ? "true" : undefined}
                       className="flex items-start transition-colors hover:bg-[var(--ds-bg-3)]"
                       style={{ gap: 14, padding: 14 }}
                     >
-                      <div
-                        className="relative shrink-0 overflow-hidden"
-                        style={{
-                          width: 44,
-                          aspectRatio: "2 / 3",
-                          borderRadius: 4,
-                          background: "var(--ds-bg-3)",
-                        }}
-                      >
-                        {poster ? (
-                          <Image
-                            src={poster}
-                            alt={issue.title}
-                            fill
-                            className="object-cover"
-                            sizes="44px"
-                          />
-                        ) : (
-                          <div
-                            className="absolute inset-0 flex items-center justify-center"
-                            style={{ color: "var(--ds-fg-subtle)" }}
-                          >
-                            {issue.mediaType === "MOVIE" ? (
-                              <Film style={{ width: 16, height: 16 }} />
-                            ) : (
-                              <Tv2 style={{ width: 16, height: 16 }} />
-                            )}
-                          </div>
-                        )}
-                      </div>
+                      <IssuePoster posterPath={issue.posterPath} title={issue.title} mediaType={issue.mediaType} size={44} iconSize={16} />
 
                       <div className="flex-1 min-w-0">
                         <p
@@ -330,37 +315,11 @@ export default async function IssuesPage({
                             {dateFormat.format(new Date(issue.updatedAt))}
                           </span>
                         </div>
-                        {issue.note && (
-                          <p
-                            // Clamped in the list row (a 1000-char note is otherwise a
-                            // ~17-line row); keeps its line breaks like the pane/drawer.
-                            className="line-clamp-3 whitespace-pre-wrap"
-                            style={{
-                              marginTop: 8,
-                              padding: "6px 10px",
-                              borderRadius: 4,
-                              background: "var(--ds-bg-1)",
-                              borderLeft:
-                                "2px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
-                              fontSize: 11.5,
-                              color: "var(--ds-fg-muted)",
-                            }}
-                          >
-                            {issue.note}
-                          </p>
-                        )}
+                        {issue.note && <IssueNote note={issue.note} compact />}
                         {issue.resolution && (
-                          <p
-                            className="italic"
-                            style={{
-                              marginTop: 6,
-                              fontSize: 11.5,
-                              color:
-                                "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
-                            }}
-                          >
+                          <IssueResolution compact>
                             {t("personal.issues.resolution", { text: issue.resolution })}
-                          </p>
+                          </IssueResolution>
                         )}
                         {issue._count.messages > 0 && (
                           <p
@@ -397,9 +356,11 @@ export default async function IssuesPage({
               })}
             </div>
 
-            <Suspense>
-              <PaginationBar currentPage={page} totalPages={totalPages} />
-            </Suspense>
+            {issues.length > 0 && (
+              <Suspense>
+                <PaginationBar currentPage={page} totalPages={totalPages} />
+              </Suspense>
+            )}
           </div>
 
           <aside className="hidden xl:block sticky top-6 h-[calc(100dvh-52px-3rem)]">
@@ -424,42 +385,7 @@ export default async function IssuesPage({
                   }}
                 >
                   <div className="flex items-start" style={{ gap: 14 }}>
-                    <div
-                      className="relative shrink-0 overflow-hidden"
-                      style={{
-                        width: 64,
-                        aspectRatio: "2 / 3",
-                        borderRadius: 4,
-                        background: "var(--ds-bg-3)",
-                      }}
-                    >
-                      {(() => {
-                        const poster = posterUrl(
-                          selectedIssue.posterPath,
-                          "w342",
-                        );
-                        return poster ? (
-                          <Image
-                            src={poster}
-                            alt={selectedIssue.title}
-                            fill
-                            className="object-cover"
-                            sizes="64px"
-                          />
-                        ) : (
-                          <div
-                            className="absolute inset-0 flex items-center justify-center"
-                            style={{ color: "var(--ds-fg-subtle)" }}
-                          >
-                            {selectedIssue.mediaType === "MOVIE" ? (
-                              <Film style={{ width: 20, height: 20 }} />
-                            ) : (
-                              <Tv2 style={{ width: 20, height: 20 }} />
-                            )}
-                          </div>
-                        );
-                      })()}
-                    </div>
+                    <IssuePoster posterPath={selectedIssue.posterPath} title={selectedIssue.title} mediaType={selectedIssue.mediaType} size={64} iconSize={20} />
                     <div className="flex-1 min-w-0">
                       <p
                         className="font-semibold"
@@ -477,10 +403,7 @@ export default async function IssuesPage({
                         <Chip>
                           {typeLabel(selectedIssue.issueType)}
                         </Chip>
-                        {(() => {
-                          const label = scopeLabelFor(selectedIssue, t);
-                          return label ? <Chip>{label}</Chip> : null;
-                        })()}
+                        {selectedScopeLabel && <Chip>{selectedScopeLabel}</Chip>}
                       </div>
                       <p
                         className="ds-mono"
@@ -496,35 +419,11 @@ export default async function IssuesPage({
                       </p>
                     </div>
                   </div>
-                  {selectedIssue.note && (
-                    <p
-                      className="whitespace-pre-wrap"
-                      style={{
-                        marginTop: 12,
-                        padding: "8px 12px",
-                        borderRadius: 4,
-                        background: "var(--ds-bg-1)",
-                        borderLeft:
-                          "2px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
-                        fontSize: 12,
-                        color: "var(--ds-fg-muted)",
-                      }}
-                    >
-                      {selectedIssue.note}
-                    </p>
-                  )}
+                  {selectedIssue.note && <IssueNote note={selectedIssue.note} />}
                   {selectedIssue.resolution && (
-                    <p
-                      className="italic"
-                      style={{
-                        marginTop: 8,
-                        fontSize: 12,
-                        color:
-                          "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
-                      }}
-                    >
+                    <IssueResolution>
                       {t("personal.issues.resolution", { text: selectedIssue.resolution })}
-                    </p>
+                    </IssueResolution>
                   )}
                 </div>
                 <DesktopIssueThread key={selectedIssue.id} issueId={selectedIssue.id} />
@@ -564,5 +463,93 @@ export default async function IssuesPage({
         closeHref={buildHref({ selected: "" })}
       />
     </div>
+  );
+}
+
+// The poster (or a film/TV glyph) beside an issue, in the list row and the pane.
+function IssuePoster({
+  posterPath,
+  title,
+  mediaType,
+  size,
+  iconSize,
+}: {
+  posterPath: string | null;
+  title: string;
+  mediaType: string;
+  size: number;
+  iconSize: number;
+}) {
+  const poster = posterUrl(posterPath, "w342");
+  return (
+    <div
+      className="relative shrink-0 overflow-hidden"
+      style={{
+        width: size,
+        aspectRatio: "2 / 3",
+        borderRadius: 4,
+        background: "var(--ds-bg-3)",
+      }}
+    >
+      {poster ? (
+        <Image
+          src={poster}
+          alt={title}
+          fill
+          className="object-cover"
+          sizes={`${size}px`}
+        />
+      ) : (
+        <div
+          className="absolute inset-0 flex items-center justify-center"
+          style={{ color: "var(--ds-fg-subtle)" }}
+        >
+          {mediaType === "MOVIE" ? (
+            <Film style={{ width: iconSize, height: iconSize }} />
+          ) : (
+            <Tv2 style={{ width: iconSize, height: iconSize }} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The reporter's note. `compact` is the list row's: clamped (a 1000-char note
+// is otherwise a ~17-line row); both keep its line breaks like the drawer.
+function IssueNote({ note, compact = false }: { note: string; compact?: boolean }) {
+  return (
+    <p
+      className={compact ? "line-clamp-3 whitespace-pre-wrap" : "whitespace-pre-wrap"}
+      style={{
+        marginTop: compact ? 8 : 12,
+        padding: compact ? "6px 10px" : "8px 12px",
+        borderRadius: 4,
+        background: "var(--ds-bg-1)",
+        borderLeft:
+          "2px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
+        fontSize: compact ? 11.5 : 12,
+        color: "var(--ds-fg-muted)",
+      }}
+    >
+      {note}
+    </p>
+  );
+}
+
+// The admin's resolution line (already translated), in the row or the pane.
+function IssueResolution({ compact = false, children }: { compact?: boolean; children: ReactNode }) {
+  return (
+    <p
+      className="italic"
+      style={{
+        marginTop: compact ? 6 : 8,
+        fontSize: compact ? 11.5 : 12,
+        color:
+          "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
+      }}
+    >
+      {children}
+    </p>
   );
 }

@@ -3,6 +3,7 @@ import {
   buildOidcAuthorization,
   isOidcConfigured,
   NATIVE_OIDC_CALLBACK_SCHEME,
+  oidcLoginErrorRedirect,
   serializeOidcStateCookie,
   signOidcStateCookie,
 } from "@/lib/oidc";
@@ -12,26 +13,12 @@ import { safeInternalPath } from "@/lib/safe-url";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
-// Subpath deployments: prefix in-app targets exactly like ../callback/route.ts
-// does — `new URL("/login", "https://host/request")` drops the base path.
-const basePath = process.env.BASE_PATH ?? "";
-
 // This route is reached by a TOP-LEVEL navigation (login-form sets
-// window.location.href), so a JSON error body renders raw in the browser tab
-// with no way back. A web caller's failures therefore redirect to
-// /login?error=<code> exactly like the callback's do (login-form maps the code
-// to a message); a NATIVE caller keeps the JSON status it can read. Fails
-// closed to JSON when AUTH_URL is unset rather than deriving the base from an
-// attacker-influenceable request Host — same rule as the callback.
+// window.location.href), so a web caller's failures redirect to
+// /login?error=<code> exactly like the callback's do; a NATIVE caller keeps
+// the JSON status it can read. No flow cookie exists yet to clear.
 function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
-  const base = process.env.AUTH_URL;
-  if (!base) {
-    const t = translatorForRequest(req);
-    return NextResponse.json({ error: t("apiAuth.common.authUrlMissing") }, { status: 500 });
-  }
-  const url = new URL(`${basePath}/login`, base);
-  url.searchParams.set("error", code);
-  return NextResponse.redirect(url.toString());
+  return oidcLoginErrorRedirect(req, code);
 }
 
 function getRedirectUri(base: string): string {
@@ -88,7 +75,10 @@ export async function GET(req: NextRequest) {
       : loginErrorRedirect(req, "oidc_unavailable");
   }
 
-  const cookieValue = await signOidcStateCookie(auth.state);
+  // The web form's "remember me" rides in the signed state to the callback.
+  // Never for a native flow: its session never expires either way (6c).
+  const rememberMe = !isNative && req.nextUrl.searchParams.get("rememberMe") === "1";
+  const cookieValue = await signOidcStateCookie(rememberMe ? { ...auth.state, rememberMe: true } : auth.state);
 
   if (isNative) {
     // No Set-Cookie: the cookie would be dead weight here (wrong jar) and the

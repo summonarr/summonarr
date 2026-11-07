@@ -43,6 +43,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 
 type AgentRow = { id: string; kind: string; name: string; enabled: boolean; events: string[]; config: unknown; secret: string | null };
 let agents: AgentRow[] = [];
@@ -175,11 +176,21 @@ test("feature flag off ⇒ nothing is read and nothing is sent", async () => {
   assert.equal(agentReads, 0);
 });
 
-test("a stored config that no longer validates is skipped, not sent", async () => {
+test("a stored config that no longer validates is skipped, not sent — and warned about once, not on every load", async () => {
+  resetLogDedup();
   agents = [{ id: "bad", kind: "ntfy", name: "bad", enabled: true, events: ["request.available"], config: { url: "https://n.example/", topic: "has space" }, secret: null }];
   emitNotificationEvent(AVAILABLE);
   await settle();
+  // A second dispatch past the cache (the 30s TTL in production) reads the row again.
+  invalidateAgentCache();
+  emitNotificationEvent(AVAILABLE);
+  await settle();
+  assert.equal(agentReads, 2);
   assert.equal(calls.length, 0);
+  const skipped = warns.filter((w) => w.includes("[notify-agents]"));
+  assert.equal(skipped.length, 1, `expected one warning across two loads, got ${JSON.stringify(skipped)}`);
+  assert.match(skipped[0], /"bad" \(ntfy\) stored config no longer validates \(topic\)/);
+  assert.equal(updates.length, 0, "the skip writes nothing onto the row");
 });
 
 test("a 4xx is a config error: recorded as failed, warned once, never retried", async () => {
@@ -224,6 +235,35 @@ test("a 5xx is retried at 30s / 2m / 10m, then given up and recorded once", asyn
     await settle();
     assert.equal(calls.length, 4, "three retries, then stop");
     assert.deepEqual(updates.map((u) => u.data.lastStatus), ["failed"]);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("every event gets its own delivery id, and a retry re-sends the SAME id in the body and the Idempotency-Key header", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    let n = 0;
+    respond = () => (n++ === 0 ? new Response("", { status: 503 }) : new Response(null, { status: 200 }));
+    agents = [{ id: "a", kind: "webhook", name: "hook", enabled: true, events: ["request.available"], config: { url: "https://a.example/" }, secret: null }];
+    emitNotificationEvent(AVAILABLE);
+    await settle();
+    mock.timers.tick(30_000);
+    await settle();
+    assert.equal(calls.length, 2);
+    const [first, retry] = calls.map((c) => ({ body: JSON.parse(c.body) as { id: unknown }, header: c.headers.get("idempotency-key") }));
+    assert.equal(typeof first.body.id, "string");
+    assert.match(first.body.id as string, /^[0-9a-f-]{36}$/);
+    assert.equal(retry.body.id, first.body.id, "a retry must be recognisable as the same delivery");
+    assert.equal(first.header, first.body.id);
+    assert.equal(retry.header, first.body.id);
+    // Two events in one batch share a timestamp, never an id.
+    calls.length = 0;
+    emitNotificationEvents([AVAILABLE, { ...AVAILABLE, request: { id: "r2", instance: "" } }]);
+    await settle();
+    const ids = calls.map((c) => (JSON.parse(c.body) as { id: string }).id);
+    assert.equal(ids.length, 2);
+    assert.notEqual(ids[0], ids[1]);
   } finally {
     mock.timers.reset();
   }
@@ -543,13 +583,15 @@ test("every 'now available' sync path goes through fanOutAvailableWinners — no
   // The channel modules fanOutAvailableWinners itself composes. A sync route that
   // imports ANY of them (aliased or not), or emits to the outbound channels
   // itself, has re-listed a channel at the call site (guardrail 14c). Matching
-  // the import side closes the alias hole a call-paren regex leaves open.
-  const CHANNEL_MODULES = ["discord-notify", "push", "email", "in-app-notify", "notify-agents"];
+  // the import side closes the alias hole a call-paren regex leaves open. The
+  // hub writes inbox rows itself (one createMany of notification-data rows), so
+  // in-app-notify, the single-row writer, is only on the forbidden side.
+  const CHANNEL_MODULES = ["discord-notify", "push", "email", "notification-data", "notify-agents"];
   const hub = read("src/lib/request-notifications.ts");
   for (const m of CHANNEL_MODULES) {
     assert.match(hub, new RegExp(`from "\\./${m}"`), `the hub no longer imports ./${m} — the channel list above has rotted`);
   }
-  const channelImport = new RegExp(`\\blib/(${CHANNEL_MODULES.join("|")})(\\.ts)?["']`);
+  const channelImport = new RegExp(`\\blib/(${[...CHANNEL_MODULES, "in-app-notify"].join("|")})(\\.ts)?["']`);
   for (const p of ["src/app/api/sync/route.ts", "src/app/api/sync/plex/route.ts", "src/app/api/sync/jellyfin/route.ts"]) {
     const src = read(p);
     assert.match(src, /fanOutAvailableWinners\(/, p);

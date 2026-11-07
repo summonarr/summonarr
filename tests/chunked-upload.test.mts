@@ -21,7 +21,9 @@ import {
   clearSession,
 } from "../src/lib/import-session.ts";
 import { MAX_CIPHERTEXT_BYTES } from "../src/lib/backup-import.ts";
-import { DEFAULT_CHUNK_SIZE, uploadInChunks } from "../src/lib/chunked-upload.ts";
+import { DEFAULT_CHUNK_SIZE, chunkedUploadErrorMessage, uploadInChunks } from "../src/lib/chunked-upload.ts";
+import { createTranslator } from "../src/lib/i18n/translate.ts";
+import { CATALOGS } from "../src/lib/i18n/catalogs.ts";
 import type { ChunkedUploadProgress } from "../src/lib/chunked-upload.ts";
 
 // backup-import transitively loads prisma + token-crypto; both read env
@@ -528,14 +530,14 @@ test("an HTTP error surfaces the server's error string and fires the DELETE canc
     endpoint: "/api/x",
     chunkSize: 4,
   });
-  assert.deepEqual(outcome, { kind: "error", status: 413, error: "too big" });
+  assert.deepEqual(outcome, { kind: "error", status: 413, code: "server", error: "too big" });
   assert.deepEqual(events, ["POST:0", "POST:1", "DELETE"]); // chunk 2 never sent
   const cancel = calls[calls.length - 1];
   assert.equal(cancel.method, "DELETE");
   assert.equal(cancel.headers["X-Upload-Id"], calls[0].headers["X-Upload-Id"]);
 });
 
-test("an HTTP error without a server error string falls back to the chunk-position message", async () => {
+test("an HTTP error without a server error string falls back to the chunkFailed code with the chunk position", async () => {
   const events: string[] = [];
   scriptFetch(events, () => jsonResponse(500, {}));
   const outcome = await uploadInChunks({
@@ -543,10 +545,10 @@ test("an HTTP error without a server error string falls back to the chunk-positi
     endpoint: "/api/x",
     chunkSize: 4,
   });
-  assert.deepEqual(outcome, { kind: "error", status: 500, error: "Chunk 1/3 failed" });
+  assert.deepEqual(outcome, { kind: "error", status: 500, code: "chunkFailed", chunk: 1, total: 3 });
 });
 
-test("a non-JSON response (auth-gate HTML, or no content-type) aborts with the redirect explanation", async () => {
+test("a non-JSON response (auth-gate HTML, or no content-type) aborts with the nonJson code", async () => {
   for (const contentType of ["text/html; charset=utf-8", null]) {
     const events: string[] = [];
     scriptFetch(events, () => jsonResponse(200, {}, { contentType }));
@@ -554,8 +556,8 @@ test("a non-JSON response (auth-gate HTML, or no content-type) aborts with the r
     assert.equal(outcome.kind, "error");
     if (outcome.kind === "error") {
       assert.equal(outcome.status, 200); // fetch followed the redirect to a 200 page
-      assert.match(outcome.error, /non-JSON response/);
-      assert.match(outcome.error, /\/api\/x/);
+      assert.equal(outcome.code, "nonJson");
+      assert.equal(outcome.error, undefined, "no English prose: the caller translates the code");
     }
     assert.equal(events[events.length - 1], "DELETE");
   }
@@ -573,21 +575,17 @@ test("all chunks accepted but no complete flag → error with null status, plus 
   const events: string[] = [];
   scriptFetch(events, () => jsonResponse(200, { ok: true, received: 1 }));
   const outcome = await uploadInChunks({ file: new File(["x"], "a"), endpoint: "/api/x" });
-  assert.deepEqual(outcome, {
-    kind: "error",
-    status: null,
-    error: "Upload finished without a server-side completion.",
-  });
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "noCompletion" });
   assert.deepEqual(events, ["POST:0", "DELETE"]);
 });
 
-test("a thrown network error becomes an error outcome with the message, and still cancels", async () => {
+test("a thrown network error becomes a network-coded error outcome (no raw message), and still cancels", async () => {
   const events: string[] = [];
   scriptFetch(events, () => {
     throw new Error("boom: connection reset");
   });
   const outcome = await uploadInChunks({ file: new File(["x"], "a"), endpoint: "/api/x" });
-  assert.deepEqual(outcome, { kind: "error", status: null, error: "boom: connection reset" });
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "network" });
   assert.deepEqual(events, ["POST:0", "DELETE"]);
 });
 
@@ -601,11 +599,7 @@ test("an empty file sends zero chunks and reports no-completion (pins current be
     endpoint: "/api/x",
     onProgress: progressRecorder(events),
   });
-  assert.deepEqual(outcome, {
-    kind: "error",
-    status: null,
-    error: "Upload finished without a server-side completion.",
-  });
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "noCompletion" });
   assert.deepEqual(events, ["progress:upload:0/0", "DELETE"]);
   assert.equal(calls.length, 1); // only the cancel DELETE, no POSTs
 });
@@ -667,7 +661,7 @@ test("a proxy's 502 page on a non-final chunk is retried; a JSON error is not", 
     chunkSize: 4,
     retryDelaysMs: NO_WAIT,
   });
-  assert.deepEqual(r, { kind: "error", status: 503, error: "Backup is not configured." });
+  assert.deepEqual(r, { kind: "error", status: 503, code: "server", error: "Backup is not configured." });
   assert.deepEqual(refused, ["POST:0", "DELETE"]);
 });
 
@@ -705,7 +699,7 @@ test("a 409 that is a real ordering error still fails the upload", async () => {
     chunkSize: 4,
     retryDelaysMs: NO_WAIT,
   });
-  assert.deepEqual(outcome, { kind: "error", status: 409, error: "Out-of-order chunk. Next expected index: 3." });
+  assert.deepEqual(outcome, { kind: "error", status: 409, code: "server", error: "Out-of-order chunk. Next expected index: 3." });
   assert.deepEqual(events, ["POST:0", "POST:0", "DELETE"], "the retry's 409 ends the upload; chunk 1 is never sent");
 });
 
@@ -749,7 +743,7 @@ test("retries are bounded: a chunk that keeps failing gives up and cancels", asy
     chunkSize: 4,
     retryDelaysMs: NO_WAIT,
   });
-  assert.deepEqual(outcome, { kind: "error", status: null, error: "network error" });
+  assert.deepEqual(outcome, { kind: "error", status: null, code: "network" });
   assert.deepEqual(events, ["POST:0", "POST:0", "POST:0", "POST:0", "DELETE"]);
 });
 
@@ -801,6 +795,7 @@ test("aborting the caller's signal mid-upload stops it, cancels the server sessi
     retryDelaysMs: NO_WAIT,
   });
   assert.equal(outcome.kind, "error");
+  if (outcome.kind === "error") assert.equal(outcome.code, "cancelled");
   assert.deepEqual(events, ["POST:0", "DELETE"], "no further chunk is sent after the abort");
 });
 
@@ -826,4 +821,40 @@ test("the caller's abort reaches the chunk request in flight", async () => {
     { index: "0", abortedDuringRequest: false },
     { index: "1", abortedDuringRequest: true },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// chunked-upload: error outcomes are codes the caller translates
+// ---------------------------------------------------------------------------
+
+test("a gateway page still failing after the retries is the chunkFailed code with its position and status", async () => {
+  const events: string[] = [];
+  scriptFetch(events, () => jsonResponse(502, {}, { contentType: "text/html" }));
+  const outcome = await uploadInChunks({
+    file: new File(["01234567"], "dump.enc"),
+    endpoint: "/api/x",
+    chunkSize: 4,
+    retryDelaysMs: NO_WAIT,
+  });
+  assert.deepEqual(outcome, { kind: "error", status: 502, code: "chunkFailed", chunk: 1, total: 2 });
+});
+
+test("chunkedUploadErrorMessage translates each code, and shows the server's own text as-is", () => {
+  const de = createTranslator("de", CATALOGS.de, CATALOGS.en);
+  const en = createTranslator("en", CATALOGS.en, CATALOGS.en);
+  for (const code of ["chunkFailed", "nonJson", "noCompletion", "network", "cancelled"] as const) {
+    const outcome = { kind: "error" as const, status: 502, code, chunk: 2, total: 5 };
+    const english = chunkedUploadErrorMessage(outcome, en);
+    const german = chunkedUploadErrorMessage(outcome, de);
+    assert.ok(!english.startsWith("shared."), `${code}: the key must resolve, got ${english}`);
+    assert.notEqual(german, english, `${code}: a German admin must not see English`);
+  }
+  assert.match(
+    chunkedUploadErrorMessage({ kind: "error", status: 502, code: "chunkFailed", chunk: 2, total: 5 }, en),
+    /2.*5.*502/,
+  );
+  assert.equal(
+    chunkedUploadErrorMessage({ kind: "error", status: 503, code: "server", error: "Backup ist nicht eingerichtet." }, en),
+    "Backup ist nicht eingerichtet.",
+  );
 });

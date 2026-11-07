@@ -19,14 +19,25 @@ test("RequestButton treats `requested` as live and resets when tmdbId changes", 
   assert.match(body, /canRequest && \(/);
 });
 
-test("Request4kButton and RequestInstanceButton treat `requested` as live", () => {
-  for (const file of [
-    "src/components/media/request-4k-button.tsx",
-    "src/components/media/request-instance-button.tsx",
-  ]) {
-    const body = src(file);
-    assert.match(body, /seenTmdbId !== tmdbId/, file);
-    assert.match(body, /state === "requested" \|\| requested/, file);
+test("Request4kButton and RequestInstanceButton share one request flow that treats `requested` as live", () => {
+  // Both are thin wrappers over VariantRequestButton: only the POST extras and
+  // the wording differ, so the flow (and its fixes) can't drift between them.
+  const shared = src("src/components/media/variant-request-button.tsx");
+  assert.match(shared, /seenTmdbId !== tmdbId/);
+  assert.match(shared, /state === "requested" \|\| requested/);
+  // A 429 shows the Retry-After hint, as RequestButton's does.
+  assert.match(shared, /setMsg\(rateLimitMessage\(res, t\) \?\? data\.error \?\? t\("request\.somethingWrong"\)\)/);
+  assert.match(shared, /postMediaRequest\(\{ tmdbId, mediaType, \.\.\.extras \}, requestToken\)/);
+
+  const fourK = src("src/components/media/request-4k-button.tsx");
+  assert.match(fourK, /<VariantRequestButton\b/);
+  // The API keeps the is4k shorthand for the 4K instance (guardrail 32).
+  assert.match(fourK, /extras=\{\{ is4k: true \}\}/);
+  const named = src("src/components/media/request-instance-button.tsx");
+  assert.match(named, /<VariantRequestButton\b/);
+  assert.match(named, /extras=\{\{ arrInstance: instance \}\}/);
+  for (const [file, body] of [["request-4k-button", fourK], ["request-instance-button", named]] as const) {
+    assert.doesNotMatch(body, /useState|postMediaRequest/, `${file}: a private copy of the request flow is back`);
   }
 });
 
@@ -58,20 +69,52 @@ test("HideButton and VoteDeleteButton reset when tmdbId changes", () => {
   assert.match(vote, /alreadyVoted \? "voted" : "idle"/);
 });
 
+test("VoteActions resyncs `voted` from the live prop and rolls a failed unvote back to voted", () => {
+  // The /votes rows are keyed by title, so a router.refresh() reuses the
+  // instance: a state seeded once from userVoted ignored a vote cast elsewhere.
+  const body = src("src/components/votes/vote-actions.tsx");
+  assert.match(body, /const voted = override \?\? userVoted;/);
+  assert.match(body, /if \(userVoted !== seenUserVoted && !loading\) \{\s*setSeenUserVoted\(userVoted\);\s*setOverride\(null\);/);
+  assert.doesNotMatch(body, /useState\(userVoted\);\s*const \[dismissed/, "voted must not be a one-time copy of the prop");
+  const rollbacks = body.match(/setOverride\(true\)/g) ?? [];
+  assert.equal(rollbacks.length, 2, "both the HTTP-error and network-error paths roll back to the pre-click state");
+});
+
+test("VoteDeleteButton: unvote shows the rate-limit hint, a vote clears its reason, and focus survives the state change", () => {
+  const body = src("src/components/votes/vote-delete-button.tsx");
+  assert.match(body, /rateLimitMessage\(res, t\) \?\? t\("request\.vote\.removeFailed"\)/);
+  assert.match(body, /setState\("voted"\);\s*setReason\(""\);\s*router\.refresh\(\)/, "a recorded vote clears the reason");
+  assert.match(body, /if \(e\.key === "Escape"\) closeReason\(\)/);
+  // The loading button is the SAME <button> as idle/voted: `disabled` dropped
+  // its focus to <body> on every vote and unvote.
+  const loading = body.slice(body.indexOf('displayState === "loading"'));
+  const button = loading.slice(loading.indexOf("<DetailActionButton"), loading.indexOf("</DetailActionButton>"));
+  assert.doesNotMatch(button, /\sdisabled\b/);
+  assert.match(button, /aria-disabled/);
+});
+
 test("movie and TV detail pages key action buttons and gate HD Request on canRequest", () => {
   const movie = src("src/app/(app)/movie/[id]/page.tsx");
   const tv = src("src/app/(app)/tv/[id]/page.tsx");
   assert.match(movie, /canRequestMovies = canRequest\(session\.user\.permissions, "MOVIE", false\)/);
-  assert.match(movie, /canRequest=\{canRequestMovies\}/);
-  assert.match(movie, /<RequestButton\n\s+key=\{media\.id\}/);
-  assert.match(movie, /key=\{`watchlist-\$\{media\.id\}`\}/);
-  assert.match(movie, /key=\{`\$\{media\.id\}:\$\{t\.slug\}`\}/);
-
+  assert.match(movie, /<DetailActions\n\s+media=\{media\}\n\s+mediaType="MOVIE"\n\s+state=\{state\}\n\s+canRequest=\{canRequestMovies\}/);
   assert.match(tv, /canRequestTv = canRequest\(session\.user\.permissions, "TV", false\)/);
-  assert.match(tv, /canRequest=\{canRequestTv\}/);
-  assert.match(tv, /<RequestButton\n\s+key=\{media\.id\}/);
-  assert.match(tv, /key=\{`watchlist-\$\{media\.id\}`\}/);
-  assert.match(tv, /key=\{`\$\{media\.id\}:\$\{t\.slug\}`\}/);
+  assert.match(tv, /<DetailActions\n\s+media=\{media\}\n\s+mediaType="TV"\n\s+state=\{state\}\n\s+canRequest=\{canRequestTv\}/);
+
+  // Both pages render the one action row, which keys every button on the title.
+  const row = src("src/components/media/detail-actions.tsx");
+  assert.match(row, /<RequestButton\n\s+key=\{media\.id\}/);
+  assert.match(row, /canRequest=\{canRequest\}/);
+  assert.match(row, /key=\{`4k-\$\{media\.id\}`\}/);
+  assert.match(row, /key=\{`watchlist-\$\{media\.id\}`\}/);
+  assert.match(row, /key=\{`hide-\$\{media\.id\}`\}/);
+  assert.match(row, /key=\{`vote-\$\{media\.id\}`\}/);
+  assert.match(row, /key=\{`\$\{media\.id\}:\$\{target\.slug\}`\}/);
+  // The map callback is `target`, never `t`: `t` is the translator here.
+  assert.doesNotMatch(row, /\.map\(\(t\) =>/);
+  for (const [name, body] of [["movie", movie], ["tv", tv]] as const) {
+    assert.doesNotMatch(body, /<RequestButton\b/, `${name}: an inline copy of the action row is back`);
+  }
 });
 
 test("MediaCard hides the HD Request overlay when canRequest is false", () => {
@@ -95,5 +138,33 @@ test("Hidden and Watchlist grids do not empty-state a drained capped list", () =
     assert.ok(cappedIdx < emptyIdx, `${file}: capped-empty must win over EmptyState`);
     assert.match(body, /router\.refresh\(\)/, file);
     assert.match(body, /personal\.common\.reload/, file);
+  }
+});
+
+test("RequestButton drops a View-request state when `requested` goes true → false", () => {
+  // State was seeded from `requested` at mount only; a request declined or
+  // deleted elsewhere kept "View request" until a remount.
+  const body = src("src/components/media/request-button.tsx");
+  const block = /const \[prevRequested, setPrevRequested\] = useState\(!!requested\);\n\s*if \(!titleChanged && prevRequested !== !!requested\) \{([\s\S]*?)\n  \}/.exec(body);
+  assert.ok(block, "the requested-prop reconcile block is missing");
+  assert.match(block[1], /setPrevRequested\(!!requested\)/);
+  assert.match(block[1], /if \(!requested && \(state === "duplicate" \|\| state === "requested"\)\) setState\("idle"\)/);
+});
+
+test("every client request POST goes through postMediaRequest (token fetch failure + expired page token)", () => {
+  // A page-minted token expires after one to two hours; the token-less paths
+  // used to post `_token: undefined` when the token fetch failed. Both are
+  // handled once, in src/lib/client/media-request.ts (tests/media-request-client.test.mts).
+  for (const file of [
+    "src/components/media/media-card.tsx",
+    "src/components/media/request-button.tsx",
+    // Request4kButton and RequestInstanceButton post through this one.
+    "src/components/media/variant-request-button.tsx",
+    "src/components/admin/issue-fix-match-button.tsx",
+  ]) {
+    const body = src(file);
+    assert.match(body, /await postMediaRequest\(/, file);
+    assert.doesNotMatch(body, /_token:/, `${file}: builds its own request body with a token`);
+    assert.doesNotMatch(body, /\/api\/requests\/token/, `${file}: fetches its own token`);
   }
 });

@@ -12,7 +12,7 @@ import {
   type TmdbMedia,
 } from "@/lib/tmdb";
 import type { CastMember } from "@/lib/tmdb-types";
-import { isTmdbIdInRange } from "@/lib/tmdb-id";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -52,9 +52,10 @@ export const GET = withAuth(async (
   }
 
   const { type, tmdbId: rawId } = await params;
-  const tmdbId = parseInt(rawId, 10);
+  // Canonical digits only: parseInt served "550abc" and "550.9" as movie 550.
+  const tmdbId = parseTmdbIdParam(rawId);
 
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  if (tmdbId === null) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
   // INT4 ceiling shared with tv-availability and the season route: the
@@ -66,13 +67,13 @@ export const GET = withAuth(async (
     return NextResponse.json({ error: t("apiUser.media.typeInvalid") }, { status: 400 });
   }
 
-  // Scoped to this page's backend (web-page parity): a movie page must not
-  // surface 4K state when only the Sonarr 4K instance is configured, and
-  // vice-versa.
-  const show4k = await getShow4kVisibility(session, type);
-
   try {
-    const [detail, cast, suggestions] = await Promise.all([
+    const [show4k, detail, cast, suggestions] = await Promise.all([
+      // Scoped to this page's backend (web-page parity): a movie page must not
+      // surface 4K state when only the Sonarr 4K instance is configured, and
+      // vice-versa. Inside the try like every other read, so a settings-read
+      // failure is the localized 502, not a bare framework 500.
+      getShow4kVisibility(session, type),
       type === "movie" ? getMovieDetails(tmdbId) : getTVDetails(tmdbId),
       // Cast is best-effort, exactly as the web detail pages treat it
       // (`getMovieCredits(id).catch(() => [])`): the credits helpers have no

@@ -11,9 +11,22 @@ import {
   fmtBitrate,
   fmtTimestamp,
 } from "@/components/admin/activity-ui";
+import { episodeLabel } from "@/lib/episode-label";
 import { fmtMarkerOffset } from "./helpers";
 import type { HistoryRow } from "./types";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+
+// The panel's three action links (play, title, user).
+const linkStyle: React.CSSProperties = {
+  fontSize: 11.5,
+  padding: "5px 11px",
+  borderRadius: 6,
+  background: "var(--ds-bg-3)",
+  border: "1px solid var(--ds-border)",
+  color: "var(--ds-fg)",
+  textDecoration: "none",
+  whiteSpace: "nowrap",
+};
 
 export function DetailRow({
   play,
@@ -68,28 +81,26 @@ export function DetailRow({
     [t("adminActivity.field.audioDecision"), play.audioDecision ?? "—"],
   ];
 
-  // Network metadata. Plex-only — Jellyfin rows leave these null. Suppress
-  // the cells entirely when there's nothing to show rather than emit a row
-  // of dashes that pads the panel for no reason.
-  if (play.location || play.secure != null || play.relayed != null || play.bandwidth != null) {
-    if (play.location) {
-      details.push([t("adminActivity.field.connection"), play.location.toUpperCase()]);
-    }
-    if (play.secure != null) {
-      details.push([t("adminActivity.field.secure"), play.secure ? "TLS" : "HTTP"]);
-    }
-    if (play.relayed) {
-      details.push([t("adminActivity.field.relay"), t("adminActivity.detail.viaPlexTv")]);
-    }
-    if (play.bandwidth != null) {
-      // Plex reports bandwidth in kbps; surface as Mbps for parity with the
-      // rest of the panel.
-      const mbps = play.bandwidth / 1000;
-      details.push([
-        t("adminActivity.field.sessionBandwidth"),
-        `${mbps.toLocaleString(locale, { maximumFractionDigits: 1 })} Mbps`,
-      ]);
-    }
+  // Network metadata. Plex-only — Jellyfin rows leave these null. Each cell
+  // is suppressed when there's nothing to show rather than emit a row of
+  // dashes that pads the panel for no reason.
+  if (play.location) {
+    details.push([t("adminActivity.field.connection"), play.location.toUpperCase()]);
+  }
+  if (play.secure != null) {
+    details.push([t("adminActivity.field.secure"), play.secure ? "TLS" : "HTTP"]);
+  }
+  if (play.relayed) {
+    details.push([t("adminActivity.field.relay"), t("adminActivity.detail.viaPlexTv")]);
+  }
+  if (play.bandwidth != null) {
+    // Plex reports bandwidth in kbps; surface as Mbps for parity with the
+    // rest of the panel.
+    const mbps = play.bandwidth / 1000;
+    details.push([
+      t("adminActivity.field.sessionBandwidth"),
+      `${mbps.toLocaleString(locale, { maximumFractionDigits: 1 })} Mbps`,
+    ]);
   }
 
   // Intro/credits markers (Plex includeMarkers=1). Same suppression rule.
@@ -112,12 +123,11 @@ export function DetailRow({
     ]);
   }
 
-  if (play.mediaType === "TV" && play.seasonNumber != null) {
+  const episode = play.mediaType === "TV" ? episodeLabel(play.seasonNumber, play.episodeNumber) : null;
+  if (episode) {
     details.push([
       t("adminActivity.field.episode"),
-      `S${String(play.seasonNumber).padStart(2, "0")} · E${String(
-        play.episodeNumber ?? 0,
-      ).padStart(2, "0")}${play.episodeTitle ? ` — ${play.episodeTitle}` : ""}`,
+      `${episode}${play.episodeTitle ? ` — ${play.episodeTitle}` : ""}`,
     ]);
   }
   return (
@@ -188,48 +198,21 @@ export function DetailRow({
               stands for. */}
           <Link
             href={`/admin/activity/play/${play.id}`}
-            style={{
-              fontSize: 11.5,
-              padding: "5px 11px",
-              borderRadius: 6,
-              background: "var(--ds-bg-3)",
-              border: "1px solid var(--ds-border)",
-              color: "var(--ds-fg)",
-              textDecoration: "none",
-              whiteSpace: "nowrap",
-            }}
+            style={linkStyle}
           >
             {t("adminActivity.detail.openPlay")}
           </Link>
           {play.tmdbId && (
             <Link
               href={`/admin/activity/media/${play.tmdbId}${play.mediaType ? `?type=${play.mediaType}` : ""}`}
-              style={{
-                fontSize: 11.5,
-                padding: "5px 11px",
-                borderRadius: 6,
-                background: "var(--ds-bg-3)",
-                border: "1px solid var(--ds-border)",
-                color: "var(--ds-fg)",
-                textDecoration: "none",
-                whiteSpace: "nowrap",
-              }}
+              style={linkStyle}
             >
               {t("adminActivity.detail.viewTitleActivity")}
             </Link>
           )}
           <Link
             href={`/admin/activity/user/${play.mediaServerUserId}`}
-            style={{
-              fontSize: 11.5,
-              padding: "5px 11px",
-              borderRadius: 6,
-              background: "var(--ds-bg-3)",
-              border: "1px solid var(--ds-border)",
-              color: "var(--ds-fg)",
-              textDecoration: "none",
-              whiteSpace: "nowrap",
-            }}
+            style={linkStyle}
           >
             {t("adminActivity.detail.userActivity")}
           </Link>

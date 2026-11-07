@@ -4,6 +4,7 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
 import { OpenApiViewer } from "@/components/admin/openapi-viewer";
 import { getTranslator } from "@/lib/i18n/server";
+import { getSessionCookieName } from "@/lib/session-cookie";
 import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
@@ -32,7 +33,9 @@ export default async function ApiDocsPage() {
           borderRadius: 8,
         }}
       >
-        <OpenApiViewer />
+        {/* The server's real cookie name (it follows AUTH_URL, not the browser's
+            protocol), so a copied curl command authenticates. */}
+        <OpenApiViewer sessionCookieName={getSessionCookieName()} />
       </div>
     </div>
   );

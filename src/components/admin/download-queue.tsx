@@ -62,7 +62,8 @@ import { QueueImportDialog } from "@/components/admin/queue-import-dialog";
 import { ArrTitleManager } from "@/components/admin/arr-title/title-manager";
 import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { COLUMNS, DEFAULT_HIDDEN, QueueTable, rowKey, useHiddenColumns, useQueueTableView, type QueueRowActions } from "@/components/admin/queue-table";
-import { readError, useQueueData, type Service } from "@/components/admin/use-queue-data";
+import { useQueueData, type Service } from "@/components/admin/use-queue-data";
+import { apiErrorText, readApiError } from "@/lib/client/api-error";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import {
@@ -226,7 +227,7 @@ export function DownloadQueue({
         body: JSON.stringify({ service: row.service, instance: row.instance, ids: row.ids }),
       });
       if (!res.ok) {
-        setActionError(await readError(res, t("adminManage.queue.grab.failed")));
+        setActionError(await readApiError(res, t("adminManage.queue.grab.failed")));
         return;
       }
       setNotice(t("adminManage.queue.grab.done", { title: row.mediaTitle || row.title }));
@@ -245,9 +246,9 @@ export function DownloadQueue({
     setRecheckFailed(null);
     try {
       const res = await fetch(withBasePath("/api/admin/queue/recheck"), { method: "POST" });
-      const data = (await res.json().catch(() => null)) as { instances?: number; errors?: unknown[]; error?: string } | null;
+      const data = (await res.json().catch(() => null)) as { instances?: number; errors?: unknown[] } | null;
       if (!res.ok) {
-        setActionError(data?.error ?? t("adminManage.queue.recheck.failed"));
+        setActionError(apiErrorText(data, t("adminManage.queue.recheck.failed")));
         return;
       }
       const outcome = recheckOutcome(data);
@@ -614,7 +615,7 @@ function RemoveQueueDialog({
         }),
       });
       if (!res.ok) {
-        setRemoveError(await readError(res, t("adminManage.queue.remove.failed")));
+        setRemoveError(await readApiError(res, t("adminManage.queue.remove.failed")));
         return;
       }
       onRemoved(removing, removeAction);

@@ -26,7 +26,11 @@
 //     unparseable body counts `failed` — a TMDB outage must not report as a
 //     successful warm — without throwing out of the page loop;
 //   - cross-source dedup on tmdbId:mediaType and the LIBRARY_PAGE_SIZE page
-//     buffer (a >500-item walk is processed in two flushes).
+//     buffer (a >500-item walk is processed in two flushes);
+//   - parity with the details path: for the same TMDB body the prewarm and
+//     getMovieDetails/getTVDetails store the SAME `:details` blob (one builder,
+//     buildDetailsMedia), undated titles and a missing production_countries
+//     included.
 //
 // Sibling ownership: tests/library-iterator.test.mts owns the iterator's
 // paging contracts (this file only feeds it in-memory library rows);
@@ -64,6 +68,10 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { LIBRARY_PAGE_SIZE } = await import("../src/lib/library-iterator.ts");
 const { prewarmLibraryCache } = await import("../src/lib/tmdb-prewarm.ts");
+const { getMovieDetails, getTVDetails } = await import("../src/lib/tmdb.ts");
+
+// No MDBList/OMDb key: the details path's ratings tiers stay off the wire.
+shadowPrismaModel(prisma, "setting", { findUnique: async () => null });
 
 // ── in-memory library delegates (cursor-aware findMany) ─────────────────────
 // Minimal faithful model of the where/orderBy/cursor/skip/take subset the
@@ -602,4 +610,58 @@ test("cross-source dedup on tmdbId:mediaType and the 500-item page buffer: a 521
   assert.equal(freshnessCalls[0].keys[0], "movie:1:details");
   assert.ok(freshnessCalls[1].keys.includes("tv:5:details"));
   assert.ok(freshnessCalls[1].keys.includes("tv:5:details:missing"));
+});
+
+// ── parity with the details path ────────────────────────────────────────────
+
+test("the prewarm and the details path store the same :details blob for the same TMDB body", async () => {
+  const movieBody = {
+    id: 801, title: "Parity Film", original_title: "Film de parité", overview: "o",
+    poster_path: "/p.jpg", backdrop_path: null, release_date: "", vote_average: 6.1, vote_count: 40,
+    genres: [{ id: 18, name: "Drama" }], production_companies: [{ id: 1, name: "Studio" }],
+    origin_country: ["JP"], // and no production_countries
+    spoken_languages: [{ iso_639_1: "ja", english_name: "Japanese" }], original_language: "ja",
+    tagline: "", status: "Released", runtime: 101, homepage: "", budget: 0, revenue: 0,
+    keywords: { keywords: [{ id: 5, name: "kw" }] }, "watch/providers": { results: {} },
+    external_ids: { imdb_id: "tt0000801" },
+    release_dates: { results: [{ iso_3166_1: "US", release_dates: [{ certification: "PG", type: 3 }] }] },
+    videos: { results: [] }, belongs_to_collection: { id: 9, name: "Parity Collection" },
+  };
+  const tvBody = {
+    id: 802, name: "Parity Show", overview: "", poster_path: null, backdrop_path: null,
+    first_air_date: "", last_air_date: null, vote_average: 0, vote_count: 0,
+    networks: [{ id: 3, name: "Net" }], production_countries: [], origin_country: ["KR"],
+    episode_run_time: [45], number_of_seasons: 1, number_of_episodes: 2, in_production: true, type: "Scripted",
+    next_episode_to_air: { air_date: "2030-01-01" },
+    seasons: [{ season_number: 0, episode_count: 3 }, { season_number: 1, episode_count: 2, air_date: null, poster_path: null, name: "Season 1", overview: "" }],
+    content_ratings: { results: [{ iso_3166_1: "US", rating: "TV-14" }] },
+    external_ids: { imdb_id: "tt0000802", tvdb_id: 99 },
+    "watch/providers": { results: { US: { flatrate: [{ provider_id: 8, provider_name: "Stream", logo_path: null }] } } },
+    videos: { results: [{ key: "k", site: "YouTube", type: "Trailer", official: true }] },
+  };
+  respond = (url) => {
+    if (url.pathname === "/3/movie/801") return jsonResponse(movieBody);
+    if (url.pathname === "/3/tv/802") return jsonResponse(tvBody);
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+
+  tables.plex = [{ tmdbId: 801, mediaType: "MOVIE" }, { tmdbId: 802, mediaType: "TV" }];
+  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 2, backfilled: 0, skipped: 0, failed: 0 });
+  const prewarmed = (key: string) => JSON.parse(cacheRows.get(key)!.data) as Record<string, unknown>;
+  const fromPrewarm = { movie: prewarmed("movie:801:details"), tv: prewarmed("tv:802:details") };
+
+  cacheRows.clear();
+  await getMovieDetails(801);
+  await getTVDetails(802);
+  assert.deepEqual(prewarmed("movie:801:details"), fromPrewarm.movie);
+  assert.deepEqual(prewarmed("tv:802:details"), fromPrewarm.tv);
+
+  // The conventions both writers now share.
+  assert.equal(fromPrewarm.movie.releaseDate, null, "an undated title stores null, not \"\"");
+  assert.equal(fromPrewarm.movie.releaseYear, null);
+  assert.deepEqual(fromPrewarm.movie.originCountryCodes, ["JP"], "a movie falls back to origin_country");
+  assert.equal("tagline" in fromPrewarm.movie, false, "absent data stays absent");
+  assert.equal(fromPrewarm.movie.imdbId, "tt0000801");
+  assert.equal(fromPrewarm.tv.tvdbId, 99);
+  assert.deepEqual(fromPrewarm.tv.originCountryCodes, ["KR"]);
 });

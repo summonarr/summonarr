@@ -1,31 +1,35 @@
 import { after } from "next/server";
-import { emitNotificationEvent } from "@/lib/notify-agents";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr, arrWriteOutcomeUnknown, listQualityProfiles, type AddProgress } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
-import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
-import { scheduleDownloadCheck } from "@/lib/download-check";
-import { notifyAdminsNewRequest } from "@/lib/email";
-import { notifyAdminsNewRequestPush } from "@/lib/push";
-import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
+import { DOWNLOAD_CHECK_DELAY_MS, scheduleDownloadCheck } from "@/lib/download-check";
 import { sanitizeForLog, sanitizeOptional } from "@/lib/sanitize";
-import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPermission, Permission } from "@/lib/permissions";
+import { canAutoApproveInstance, parseInstanceGrants, hasPermission, Permission } from "@/lib/permissions";
 import { getArrInstancesWithConfigured } from "@/lib/arr-instance-registry";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
-import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
-import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, quotaUsageWhere, type ResolvedQuota } from "@/lib/quota";
+import { translateQuotaWindow } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { isBlacklisted } from "@/lib/blacklist";
-import { exceedsCap } from "@/lib/content-rating";
-import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { greenlitPeerStatuses } from "@/lib/request-mirror";
 import { dropStaleDeclined, restoreThread } from "@/lib/request-comment-carry";
+import {
+  QuotaExceededError,
+  alertAdminsNewRequest,
+  assertQuotaInTx,
+  blockedByRatingCap,
+  detailsLoader,
+  enforcedQuota,
+  hasEarlierPending,
+  quotaUsed,
+  resolveTargetInstance,
+  type AfterResponse,
+} from "@/lib/request-policy";
 
 // The request chokepoint — everything POST /api/requests does once the caller is
 // authenticated, rate-limited and its body validated: instance resolution and
@@ -39,8 +43,10 @@ import { dropStaleDeclined, restoreThread } from "@/lib/request-comment-carry";
 // than a second copy of it. The route maps the result onto its unchanged HTTP
 // responses; tests/requests-route.test.mts pins that wire contract.
 //
-// Must run inside a request scope: the pending branch schedules the admin notify
-// with after(). Both callers are route handlers.
+// Must run inside a request scope unless the caller passes its own
+// `afterResponse`: the pending branch schedules the admin notify with after().
+// The route and the auto-request are route handlers; the Discord picker, which
+// has already answered Discord, runs the alerts itself.
 
 // The Setting keys and User columns a request decision reads — one read serves
 // the route's own pre-body gates (rate limit, Discord link) and this module.
@@ -101,7 +107,15 @@ export type CreateMediaRequestFailure =
 export type CreateMediaRequestBranch = "auto-approve" | "pending" | "mirror-approved";
 
 export type CreateMediaRequestResult =
-  | { ok: false; status: number; error: string; reason: CreateMediaRequestFailure }
+  | {
+      ok: false;
+      status: number;
+      error: string;
+      reason: CreateMediaRequestFailure;
+      // The window that ran out, on a "quota" refusal — for a caller that words
+      // its own reply (the Discord picker).
+      quota?: { limit: number; windowLabel: string };
+    }
   | { ok: true; kind: "already-available"; title: string }
   | {
       ok: true;
@@ -129,43 +143,33 @@ export interface CreateMediaRequestInput {
   qualityProfileId?: number;
 }
 
+// What only some callers need. The web route and the auto-request pass none.
+export interface CreateMediaRequestOptions {
+  // Where the admin alerts run once the response is sent. Default after(), which
+  // needs a request scope; the Discord picker, already answered, runs them itself.
+  afterResponse?: AfterResponse;
+  // An auto-approve grant on top of the requester's permission (a Discord
+  // auto-approve role). Never takes one away.
+  autoApprove?: boolean;
+  // The title's TMDB metadata when the caller already holds it from a
+  // server-side TMDB read (the Discord search results), so it is not re-fetched.
+  // Never a client-supplied value: the web route always verifies.
+  meta?: { title: string; posterPath: string | null; releaseYear: string | null };
+}
+
 function fail(status: number, error: string, reason: CreateMediaRequestFailure): CreateMediaRequestResult {
   return { ok: false, status, error, reason };
 }
 
-/**
- * The admin "new request" alert for one PENDING request: the outbound channels
- * (through emitNotificationEvent, guardrail 14c) plus the admin email, push and
- * Discord notifiers, after the response (after()). Must run in a request scope.
- * `excludeUserId` is the account that acted, which needs no alert about it.
- */
-export function alertAdminsNewRequest(r: {
-  requestId: string;
-  tmdbId: number;
-  mediaType: "MOVIE" | "TV";
-  instance: string;
-  title: string;
-  posterPath: string | null;
-  releaseYear: string | null;
-  requestedBy: string;
-  note: string | null;
-  excludeUserId: string;
-}): void {
-  after(async () => {
-    emitNotificationEvent({
-      event: "request.created",
-      media: { type: r.mediaType, tmdbId: r.tmdbId, title: r.title, year: r.releaseYear, posterPath: r.posterPath },
-      request: { id: r.requestId, instance: r.instance },
-      actor: { name: r.requestedBy },
-      text: r.note,
-    });
-    await Promise.allSettled([
-      notifyAdminsNewRequest({ title: r.title, mediaType: r.mediaType, requestedBy: r.requestedBy, note: r.note, posterPath: r.posterPath, tmdbId: r.tmdbId, releaseYear: r.releaseYear, excludeUserId: r.excludeUserId }),
-      notifyAdminsNewRequestPush({ title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId, requestedBy: r.requestedBy, requestId: r.requestId, excludeUserId: r.excludeUserId }),
-      notifyAdminsNewRequestDiscord({ requestId: r.requestId, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId, requestedBy: r.requestedBy, note: r.note, posterPath: r.posterPath }),
-    ]);
-  });
-}
+// Re-exported for imports from before it moved to request-policy.ts.
+export { alertAdminsNewRequest };
+
+// What the create transaction committed: nothing (the title is already here), or
+// the row it created and on which branch. `announce`: a pending row that is the
+// first PENDING request for the title, so the admins are alerted.
+type CreateTxResult =
+  | { kind: "available" }
+  | { kind: "created"; branch: CreateMediaRequestBranch; request: MediaRequest; announce: boolean };
 
 export async function createMediaRequest(
   session: SummonarrSession,
@@ -175,114 +179,47 @@ export async function createMediaRequest(
   // (translatorForRequest), the auto-request the user's. Only that text is
   // translated; `reason` and `status` are the machine-readable half.
   t: Translator = translatorFor(instanceDefaultLocale()),
+  opts: CreateMediaRequestOptions = {},
 ): Promise<CreateMediaRequestResult> {
   const { settings, userRecord } = ctx;
   const body = input;
   const { tmdbId, mediaType, note } = input;
 
   // The TMDB details, read at most once: auto-routing and the content-rating cap
-  // both want them. A failure is not kept, so the second caller retries exactly
-  // as it did when each site fetched on its own.
-  let detailsPromise: Promise<TmdbMedia> | null = null;
-  const loadDetails = (): Promise<TmdbMedia> =>
-    (detailsPromise ??= (mediaType === "MOVIE" ? getMovieDetails(tmdbId) : getTVDetails(tmdbId)).catch((err: unknown) => {
-      detailsPromise = null;
-      throw err;
-    }));
+  // both want them.
+  const loadDetails = detailsLoader(tmdbId, mediaType);
 
-  // Resolve which Radarr/Sonarr instance this request targets. Precedence:
-  //   explicit `arrInstance` slug (validated) > legacy `is4k:true` (→ "4k") >
-  //   auto-route by TMDB metadata (anime/genre/language rules) > default instance ("").
+  // Resolve which Radarr/Sonarr instance this request targets, and whether the
+  // requester may use it (guardrail 32). One registry read + one batched
+  // connection probe serve every branch: explicit-slug validation needs the FULL
+  // list, auto-routing the configured subset.
   const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
-  // One registry read + one batched connection probe serve every branch below:
-  // explicit-slug validation needs the FULL list, auto-routing the configured subset.
   const { all: instances, configured: configuredSlugs } = await getArrInstancesWithConfigured(service);
-  const rawInstance = typeof body.arrInstance === "string" ? body.arrInstance.trim() : undefined;
-
-  let instanceSlug: string;
-  if (rawInstance !== undefined) {
-    // Explicit target (including "" for the default). Validated against the registry below.
-    instanceSlug = rawInstance;
-  } else if (body.is4k === true) {
-    // Legacy 4K button / native clients — shorthand for the "4k" instance.
-    instanceSlug = "4k";
-  } else {
-    // No explicit target — auto-route. Only pay the TMDB details fetch when at least
-    // one REGISTERED non-default instance carries an autoRoute rule; otherwise default.
-    // (Configured-ness is applied below, over the same already-read list.)
-    const autoCandidates = instances.filter((i) => i.slug !== "" && i.autoRoute);
-    if (autoCandidates.length === 0) {
-      instanceSlug = "";
-    } else {
-      let routable: RoutableMedia = { genreIds: [], originalLanguage: null, originCountries: [] };
-      try {
-        const detail = await loadDetails();
-        routable = {
-          genreIds: detail.genreList?.map((g) => g.id) ?? [],
-          originalLanguage: detail.originalLanguage ?? null,
-          // ISO codes from the normalized details (populated since the
-          // originCountryCodes field landed; older cached rows lack it and
-          // degrade to [] — exactly the previous behavior — until TTL refresh).
-          originCountries: detail.originCountryCodes ?? [],
-        };
-      } catch {
-        // TMDB details unavailable ⇒ fall back to the default instance.
-      }
-      // Route only over configured instances so we never auto-select an unconfigured
-      // target — the subset of the list already read above, no second registry read.
-      const configured = instances.filter((i) => configuredSlugs.has(i.slug));
-      instanceSlug = routeMediaToSlug(configured, routable);
-    }
+  const grants = parseInstanceGrants(userRecord?.instanceGrants);
+  const target = await resolveTargetInstance({
+    instances,
+    configured: configuredSlugs,
+    arrInstance: body.arrInstance,
+    is4k: body.is4k,
+    loadDetails,
+    perms: session.user.permissions,
+    grants,
+    mediaType,
+    request4kAll: settings.request4kAll === "true",
+  });
+  if (!target.ok) {
+    if (target.reason === "forbidden") return fail(403, t("apiUser.create.forbidden"), "forbidden");
+    return target.instanceName !== undefined
+      ? fail(400, t("apiUser.create.instanceNotConfigured", { name: target.instanceName }), "instance-unavailable")
+      : fail(400, t("apiUser.create.instanceUnavailable"), "instance-unavailable");
   }
-
+  const instance = target.instance;
+  const instanceSlug = instance.slug;
   // Whether the client explicitly targeted an instance (arrInstance or the legacy
   // is4k flag) vs. the server auto-routing it. Matters for the quality-profile
   // override below: an explicit target means the client knew which instance's
   // profile list it picked from; an auto-route means it didn't.
-  const instanceExplicit = rawInstance !== undefined || body.is4k === true;
-
-  let instance = instances.find((i) => i.slug === instanceSlug);
-  if (!instance) {
-    return fail(400, t("apiUser.create.instanceUnavailable"), "instance-unavailable");
-  }
-  // A non-default instance must have a configured connection (url + apiKey). The default
-  // instance ("") is always allowed — a request with no arr configured simply stays pending.
-  if (instanceSlug !== "" && !configuredSlugs.has(instanceSlug)) {
-    return fail(400, t("apiUser.create.instanceNotConfigured", { name: instance.name }), "instance-unavailable");
-  }
-
-  // Capability gate — the permission bitmask is authoritative (admins pass via the ADMIN
-  // superbit). The default instance is open to any base requester; "4k" gates on the
-  // REQUEST_4K* bits / request4kAll toggle; named instances gate on serverAll or a
-  // per-user instance grant.
-  const grants = parseInstanceGrants(userRecord?.instanceGrants);
-  if (!canRequestInstance(session.user.permissions, instance, grants, mediaType, settings.request4kAll === "true")) {
-    // An EXPLICITLY targeted instance the user can't access is a hard 403. An
-    // AUTO-ROUTED one falls back to the default instance instead: a base requester is
-    // never blocked by a server-side routing decision (the default is open to any
-    // requester, and an admin still reviews the resulting request). Auto-routing only
-    // ever selects a CONFIGURED instance, so the default fallback is always valid.
-    // Mirrors the Discord (interactions) and bulk request paths.
-    if (instanceExplicit) {
-      return fail(403, t("apiUser.create.forbidden"), "forbidden");
-    }
-    const defaultInstance = instances.find((i) => i.slug === "");
-    // Re-check against the DEFAULT instance before falling back. canRequestInstance
-    // gates on the base REQUEST/REQUEST_{MOVIE,TV} bit FIRST (permissions.ts) — a user
-    // who lacks it fails for EVERY instance, default included. Without this re-check a
-    // request-revoked user could bypass the base capability entirely by omitting the
-    // instance target: the auto-route sends them to a named instance they can't access,
-    // and the unconditional default fallback then created the request anyway. The
-    // fallback exists only for a *base requester* who merely lacks a NAMED-instance grant.
-    if (
-      !defaultInstance ||
-      !canRequestInstance(session.user.permissions, defaultInstance, grants, mediaType, settings.request4kAll === "true")
-    ) {
-      return fail(403, t("apiUser.create.forbidden"), "forbidden");
-    }
-    instanceSlug = "";
-    instance = defaultInstance;
-  }
+  const instanceExplicit = target.explicit;
 
   // Advanced request option: an explicit quality profile is honored only for
   // REQUEST_ADVANCED holders (ADMIN passes via the superbit) and is validated
@@ -328,30 +265,16 @@ export async function createMediaRequest(
   // Per-media-type quota. QUOTA_UNLIMITED (and ADMIN) bypass; otherwise resolve
   // the per-user override → global Settings window and pre-check before the
   // (more expensive) TMDB verification below. Re-checked inside the tx.
-  const quotaApplies = !hasPermission(session.user.permissions, Permission.QUOTA_UNLIMITED);
-  let resolvedQuota: ResolvedQuota | null = null;
-  let enforceQuota = false;
-  if (quotaApplies) {
-    resolvedQuota = resolveUserQuota(
-      mediaType,
-      {
-        movieQuotaLimit: userRecord?.movieQuotaLimit ?? null,
-        movieQuotaDays: userRecord?.movieQuotaDays ?? null,
-        tvQuotaLimit: userRecord?.tvQuotaLimit ?? null,
-        tvQuotaDays: userRecord?.tvQuotaDays ?? null,
-      },
-      parseQuotaLimit(settings.quotaLimit),
-      settings.quotaPeriod ?? "week",
-    );
-    enforceQuota = resolvedQuota.limit > 0;
-    if (enforceQuota) {
-      const preCount = await prisma.mediaRequest.count({
-        where: quotaUsageWhere(session.user.id, mediaType, resolvedQuota.since),
-      });
-      if (preCount >= resolvedQuota.limit) {
-        return fail(429, t("apiUser.create.quota", { limit: resolvedQuota.limit, window: translateQuotaWindow(t, resolvedQuota.windowLabel) }), "quota");
-      }
-    }
+  const quota = enforcedQuota(session.user.permissions, mediaType, userRecord, settings);
+  const quotaRefusal = (rq: { limit: number; windowLabel: string }): CreateMediaRequestResult => ({
+    ok: false,
+    status: 429,
+    error: t("apiUser.create.quota", { limit: rq.limit, window: translateQuotaWindow(t, rq.windowLabel) }),
+    reason: "quota",
+    quota: { limit: rq.limit, windowLabel: rq.windowLabel },
+  });
+  if (quota && (await quotaUsed(prisma, session.user.id, mediaType, quota)) >= quota.limit) {
+    return quotaRefusal(quota);
   }
 
   if (note !== undefined && (typeof note !== "string" || note.length > 500)) {
@@ -359,15 +282,18 @@ export async function createMediaRequest(
   }
   const sanitizedNote = sanitizeOptional(note);
 
-  let verified: Awaited<ReturnType<typeof resolveMediaMeta>> = null;
-  try {
-    verified = await resolveMediaMeta(tmdbId, mediaType);
-  } catch {
-    return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
-  }
+  let verified: { title: string; posterPath: string | null; releaseYear: string | null } | null = opts.meta ?? null;
   if (!verified) {
-    return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
+    try {
+      verified = await resolveMediaMeta(tmdbId, mediaType);
+    } catch {
+      return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
+    }
+    if (!verified) {
+      return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
+    }
   }
+  const meta = verified;
 
   // Blacklist gate — an admin-blocked title can never be requested. This is the
   // authoritative block (discovery hiding is best-effort UX) and must run before
@@ -379,17 +305,8 @@ export async function createMediaRequest(
   // Parental control — block a request whose US certification exceeds the user's
   // cap. Only capped, non-admin users pay the (cached) certification fetch;
   // unknown/unrated titles are allowed (see content-rating.ts).
-  if (userRecord?.maxContentRating && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-    let cert: string | undefined;
-    try {
-      const detail = await loadDetails();
-      cert = detail.certification;
-    } catch {
-      cert = undefined;
-    }
-    if (exceedsCap(cert, userRecord.maxContentRating)) {
-      return fail(403, t("apiUser.create.ratingCap"), "rating-cap");
-    }
+  if (await blockedByRatingCap(session.user.permissions, userRecord?.maxContentRating, loadDetails)) {
+    return fail(403, t("apiUser.create.ratingCap"), "rating-cap");
   }
 
   const existing = await prisma.mediaRequest.findFirst({
@@ -417,7 +334,7 @@ export async function createMediaRequest(
     }
   }
 
-  const isAutoApprove = canAutoApproveInstance(session.user.permissions, instance, grants, mediaType);
+  const isAutoApprove = opts.autoApprove === true || canAutoApproveInstance(session.user.permissions, instance, grants, mediaType);
 
   // Default-instance request: a Plex/Jellyfin library hit OR the default *arr-available
   // cache counts as already-here. An instance with skipLibraryCheck (4K/opt-in) ignores
@@ -452,32 +369,21 @@ export async function createMediaRequest(
   // (skipped for skipLibraryCheck instances, same reasoning as Plex above).
   const alreadyAvailable = !!plexItem || !!jellyfinItem || arrAvailable;
 
-  const baseData = { tmdbId, mediaType, arrInstance: instanceSlug, qualityProfileId: chosenQualityProfileId ?? null, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
+  const baseData = { tmdbId, mediaType, arrInstance: instanceSlug, qualityProfileId: chosenQualityProfileId ?? null, title: meta.title, posterPath: meta.posterPath, releaseYear: meta.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
 
-  let createdRequest: MediaRequest | null = null;
-  let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
-  // Whether the pending row alerts the admins — decided inside the tx (below).
-  let announcePending = false;
-
+  let committed: CreateTxResult;
   try {
     // Serializable + P2034 retry: concurrent creates at the quota boundary conflict
     // on the count+create and Postgres aborts one; without the retry that's a 500
-    // instead of the correct 429/409. (bulk/route.ts wraps its tx the same way.)
-    await runWithSerializableRetry(() => prisma.$transaction(async (tx) => {
-      announcePending = false; // the callback re-runs on a P2034 retry
-
-      // Re-check quota inside the transaction to prevent races on concurrent requests
-      if (enforceQuota && resolvedQuota) {
-        const count = await tx.mediaRequest.count({
-          where: quotaUsageWhere(session.user.id, mediaType, resolvedQuota.since),
-        });
-        if (count >= resolvedQuota.limit) {
-          throw new Error("QUOTA_EXCEEDED");
-        }
-      }
+    // instead of the correct 429/409. (request-bulk.ts wraps its tx the same way.)
+    // The callback re-runs on a retry, so everything it decides is in what it returns.
+    committed = await runWithSerializableRetry(() => prisma.$transaction(async (tx): Promise<CreateTxResult> => {
+      // Re-check quota inside the transaction to prevent races on concurrent
+      // requests. A full window throws, rolling the transaction back (guardrail 23).
+      if (quota) await assertQuotaInTx(tx, session.user.id, mediaType, quota);
 
       if (alreadyAvailable) {
-        return;
+        return { kind: "available" };
       }
 
       // Clear the stale DECLINED row only now that a create is guaranteed to follow, in
@@ -503,17 +409,16 @@ export async function createMediaRequest(
         // mirror-approved branches. The no-op upsert update let two concurrent
         // auto-approvals BOTH "succeed" and both fire ARR side effects + a 201/SSE
         // for the same row (guardrail 23).
-        createdRequest = await tx.mediaRequest.create({
+        const request = await tx.mediaRequest.create({
           // pendingNotifyAt arms the orchestrator's 90s "download pending / awaiting
           // release" backstop (sync/route.ts overdue scan only looks at rows with it set).
           // Web auto-approve previously had no backstop — unlike admin PATCH approve
           // (requests/[id]/route.ts) — so a stuck request never got a follow-up notification.
           // approvedAt: auto-approve is an approval (MediaRequest.approvedAt).
-          data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) },
+          data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + DOWNLOAD_CHECK_DELAY_MS) },
         });
-        await restoreThread(tx, createdRequest.id, carried);
-        createdBranch = "auto-approve";
-        return;
+        await restoreThread(tx, request.id, carried);
+        return { kind: "created", branch: "auto-approve", request, announce: false };
       }
 
       // If another request for this exact title (+ same instance) is already
@@ -542,7 +447,7 @@ export async function createMediaRequest(
       });
       if (greenlit) {
         const mirrorStatus = greenlit.status;
-        createdRequest = await tx.mediaRequest.create({
+        const request = await tx.mediaRequest.create({
           data: {
             ...baseData,
             status: mirrorStatus,
@@ -552,9 +457,8 @@ export async function createMediaRequest(
             ...(mirrorStatus === "AVAILABLE" ? { availableAt: new Date() } : {}),
           },
         });
-        await restoreThread(tx, createdRequest.id, carried);
-        createdBranch = "mirror-approved";
-        return;
+        await restoreThread(tx, request.id, carried);
+        return { kind: "created", branch: "mirror-approved", request, announce: false };
       }
 
       // Only the first PENDING request for (tmdbId, mediaType, instance) alerts the
@@ -567,14 +471,13 @@ export async function createMediaRequest(
         where: { tmdbId, mediaType, arrInstance: instanceSlug, status: "PENDING" },
         select: { id: true },
       });
-      createdRequest = await tx.mediaRequest.create({ data: baseData });
-      await restoreThread(tx, createdRequest.id, carried);
-      createdBranch = "pending";
-      announcePending = !pendingPeer;
+      const request = await tx.mediaRequest.create({ data: baseData });
+      await restoreThread(tx, request.id, carried);
+      return { kind: "created", branch: "pending", request, announce: !pendingPeer };
     }, { isolationLevel: "Serializable" }));
   } catch (err) {
-    if (err instanceof Error && err.message === "QUOTA_EXCEEDED") {
-      return fail(429, t("apiUser.create.quota", { limit: resolvedQuota?.limit ?? 0, window: translateQuotaWindow(t, resolvedQuota?.windowLabel) }), "quota");
+    if (err instanceof QuotaExceededError) {
+      return quotaRefusal(err);
     }
 
     if (isPrismaErrorCode(err, "P2002")) {
@@ -583,21 +486,17 @@ export async function createMediaRequest(
     throw err;
   }
 
-  if (alreadyAvailable && !createdRequest) {
-    return { ok: true, kind: "already-available", title: verified.title };
+  if (committed.kind === "available") {
+    return { ok: true, kind: "already-available", title: meta.title };
   }
 
-  if (!createdRequest || !createdBranch) {
-    throw new Error("Unexpected: request was not created");
-  }
-
-  const request = createdRequest as MediaRequest;
+  const { request, branch: createdBranch } = committed;
+  const afterResponse = opts.afterResponse ?? after;
 
   // Admin fan-out for a row that ends up PENDING. Shared by the normal pending branch
   // below and the auto-approve rollback — a failed ARR push leaves a PENDING request that
   // otherwise reached admins through no out-of-band channel at all (the earlier
   // request:new SSE only lands for admins with the web app already open).
-  const meta = verified;
   const announceToAdmins = () =>
     alertAdminsNewRequest({
       requestId: request.id,
@@ -610,31 +509,17 @@ export async function createMediaRequest(
       requestedBy: session.user.name ?? session.user.email ?? session.user.id,
       note: sanitizedNote ?? null,
       excludeUserId: session.user.id,
-    });
+    }, afterResponse);
 
   // The auto-approve rollback turns a committed row PENDING after the fact, so its
   // dedupe can only be a post-commit read: alert unless an EARLIER pending request
-  // for (tmdbId, mediaType, arrInstance) exists, ordered by (createdAt, id). A
-  // failed read alerts anyway — a duplicate alert is cheaper than a lost one, and
-  // the row is already committed, so a throw here would answer 500 for a request
-  // that exists (and its retry 409).
+  // for (tmdbId, mediaType, arrInstance) exists. A failed read alerts anyway — a
+  // duplicate alert is cheaper than a lost one, and the row is already committed,
+  // so a throw here would answer 500 for a request that exists (and its retry 409).
   const announceRolledBackToAdmins = async () => {
-    let earlierPending: { id: string } | null = null;
+    let earlierPending = false;
     try {
-      earlierPending = await prisma.mediaRequest.findFirst({
-        where: {
-          tmdbId,
-          mediaType,
-          arrInstance: instanceSlug,
-          status: "PENDING",
-          id: { not: request.id },
-          OR: [
-            { createdAt: { lt: request.createdAt } },
-            { createdAt: request.createdAt, id: { lt: request.id } },
-          ],
-        },
-        select: { id: true },
-      });
+      earlierPending = await hasEarlierPending({ id: request.id, createdAt: request.createdAt, tmdbId, mediaType, arrInstance: instanceSlug });
     } catch (err) {
       console.error(`[requests] earlier-pending check failed, alerting anyway: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
     }
@@ -756,6 +641,6 @@ export async function createMediaRequest(
 
   emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
 
-  if (announcePending) announceToAdmins();
+  if (committed.announce) announceToAdmins();
   return { ok: true, kind: "created", branch: createdBranch, pushFailed: false, pushOutcomeUnknown: false, request };
 }

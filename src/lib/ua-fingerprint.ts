@@ -65,28 +65,78 @@ export function serializeFingerprint(fp: UaFingerprint): string {
 // The fingerprint now feeds the device label (fingerprintToLabel) and the
 // informational fingerprint claim on the session, and nothing else.
 
+const BROWSER_LABELS: Readonly<Record<string, string>> = {
+  chrome: "Chrome",
+  firefox: "Firefox",
+  safari: "Safari",
+  edge: "Edge",
+  opera: "Opera",
+  yandex: "Yandex Browser",
+  samsung: "Samsung Internet",
+  ie: "Internet Explorer",
+  unknown: "Unknown Browser",
+};
+
+function osLabel(os: string, device: UaFingerprint["device"]): string | undefined {
+  switch (os) {
+    case "windows": return "Windows";
+    case "macos": return "macOS";
+    case "linux": return "Linux";
+    case "chromeos": return "Chrome OS";
+    case "ios": return device === "tablet" ? "iPad" : "iPhone";
+    case "android": return device === "tablet" ? "Android Tablet" : "Android";
+    case "unknown": return "Unknown OS";
+    default: return undefined;
+  }
+}
+
+// The English text stored in AuthSession.deviceLabel. It stays English on
+// purpose: native clients read it from /api/sessions as-is. The web renders it
+// through localizeDeviceLabel instead.
 export function fingerprintToLabel(fp: UaFingerprint): string {
-  const browserLabel: Record<string, string> = {
-    chrome: "Chrome",
-    firefox: "Firefox",
-    safari: "Safari",
-    edge: "Edge",
-    opera: "Opera",
-    yandex: "Yandex Browser",
-    samsung: "Samsung Internet",
-    ie: "Internet Explorer",
-    unknown: "Unknown Browser",
-  };
+  return `${BROWSER_LABELS[fp.browser] ?? "Browser"} on ${osLabel(fp.os, fp.device) ?? "Unknown"}`;
+}
 
-  const osLabel: Record<string, string> = {
-    windows: "Windows",
-    macos: "macOS",
-    linux: "Linux",
-    chromeos: "Chrome OS",
-    ios: fp.device === "tablet" ? "iPad" : "iPhone",
-    android: fp.device === "tablet" ? "Android Tablet" : "Android",
-    unknown: "Unknown OS",
-  };
+// The label the machine-session route stores for its API-only sessions.
+const MACHINE_SESSION_LABEL = "Machine (API)";
 
-  return `${browserLabel[fp.browser] ?? "Browser"} on ${osLabel[fp.os] ?? "Unknown"}`;
+type LabelParts = { browser: string; os: string; tablet: boolean };
+
+// Every label fingerprintToLabel can write, mapped back to its parts. Built
+// from the same tables, so the two can't drift.
+const LABEL_PARTS: ReadonlyMap<string, LabelParts> = (() => {
+  const out = new Map<string, LabelParts>();
+  for (const browser of Object.keys(BROWSER_LABELS)) {
+    for (const os of ["windows", "macos", "linux", "chromeos", "ios", "android", "unknown"]) {
+      for (const device of ["desktop", "tablet"] as const) {
+        const tablet = device === "tablet" && (os === "ios" || os === "android");
+        out.set(fingerprintToLabel({ browser, os, device }), { browser, os, tablet });
+      }
+    }
+  }
+  return out;
+})();
+
+// Minimal translator shape (i18n/translate.ts's Translator), kept local so this
+// module stays import-free.
+type Translate = (key: string, vars?: Readonly<Record<string, string | number>>) => string;
+
+// A stored device label in the viewer's language. Browser and OS names are
+// product names and stay as they are; the joining phrase and the "unknown" and
+// "tablet" words are translated. A label this module did not write (or null)
+// comes back unchanged, so nothing is ever shown worse than it is stored.
+export function localizeDeviceLabel(label: string | null, t: Translate): string | null {
+  if (label === null) return null;
+  if (label === MACHINE_SESSION_LABEL) return t("profile.sessions.label.machine");
+  const parts = LABEL_PARTS.get(label);
+  if (!parts) return label;
+  const browser = parts.browser === "unknown"
+    ? t("profile.sessions.label.unknownBrowser")
+    : BROWSER_LABELS[parts.browser];
+  const os = parts.os === "unknown"
+    ? t("profile.sessions.label.unknownOs")
+    : parts.os === "android" && parts.tablet
+      ? t("profile.sessions.label.androidTablet")
+      : osLabel(parts.os, parts.tablet ? "tablet" : "desktop") ?? label;
+  return t("profile.sessions.label.browserOnOs", { browser, os });
 }

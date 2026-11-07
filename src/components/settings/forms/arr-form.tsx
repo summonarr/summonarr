@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,7 +8,7 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { CheckCircle, XCircle, Loader2, RefreshCw, Download } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus, LoadStatus } from "./shared";
+import { useSettingsSave, type SaveStatus, type LoadStatus } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 import { MINIMUM_AVAILABILITY_OPTIONS, type ArrOptions } from "../arr-options";
 
@@ -73,14 +73,14 @@ export function ArrForm({
   const [languageProfileId, setLanguageProfileId] = useState(initialLanguageProfileId);
   const [options,           setOptions]           = useState<ArrOptions | null>(null);
   const [optionsStatus,     setOptionsStatus]     = useState<LoadStatus>("idle");
-  const [optionsSaveStatus, setOptionsSaveStatus] = useState<SaveStatus>("idle");
-  const [optionsSaveError,  setOptionsSaveError]  = useState("");
-  // Only the "Saved" tick on Save Defaults fades; an error stays until the
-  // next edit or save. Ref'd so a second save cancels the first save's timer
-  // (which could otherwise reset "saving" to "idle" mid-flight) and unmount
-  // clears it.
-  const optionsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (optionsSaveTimer.current) clearTimeout(optionsSaveTimer.current); }, []);
+  // Save Defaults: only its "Saved" tick fades; an error stays until the next
+  // edit or save, and an edit during a save keeps it locked (useSettingsSave).
+  const {
+    status: optionsSaveStatus,
+    message: optionsSaveError,
+    save: saveOptions,
+    edited: optionsEdited,
+  } = useSettingsSave();
 
   const fetchOptions = useCallback(async () => {
     setOptionsStatus("loading");
@@ -142,33 +142,14 @@ export function ArrForm({
 
   async function handleSaveOptions(e: React.FormEvent) {
     e.preventDefault();
-    if (optionsSaveTimer.current) clearTimeout(optionsSaveTimer.current);
-    setOptionsSaveStatus("saving");
-    setOptionsSaveError("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          [folderKey]: rootFolder,
-          [profileKey]: qualityProfileId,
-          // Sending "" clears the saved value, so new adds stop including the
-          // field and Radarr/Sonarr fall back to their own default.
-          ...(service === "radarr" ? { [minAvailKey]: minimumAvailability } : {}),
-          ...(service === "sonarr" && options?.languageProfiles?.length ? { [langKey]: languageProfileId } : {}),
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setOptionsSaveStatus("ok");
-        optionsSaveTimer.current = setTimeout(() => setOptionsSaveStatus("idle"), 3000);
-      } else {
-        setOptionsSaveError(data.error ?? "");
-        setOptionsSaveStatus("error");
-      }
-    } catch {
-      setOptionsSaveStatus("error");
-    }
+    await saveOptions({
+      [folderKey]: rootFolder,
+      [profileKey]: qualityProfileId,
+      // Sending "" clears the saved value, so new adds stop including the
+      // field and Radarr/Sonarr fall back to their own default.
+      ...(service === "radarr" ? { [minAvailKey]: minimumAvailability } : {}),
+      ...(service === "sonarr" && options?.languageProfiles?.length ? { [langKey]: languageProfileId } : {}),
+    });
   }
 
   return (
@@ -252,7 +233,7 @@ export function ArrForm({
                     compact
                     id={`${idPrefix}-folder`}
                     value={rootFolder}
-                    onChange={(e) => { setRootFolder(e.target.value); setOptionsSaveStatus("idle"); }}
+                    onChange={(e) => { setRootFolder(e.target.value); optionsEdited(); }}
                   >
                     <option value="">{t("settings.form.arr.selectRootFolder")}</option>
                     {/* If the saved folder no longer exists on the server, the
@@ -273,7 +254,7 @@ export function ArrForm({
                     compact
                     id={`${idPrefix}-profile`}
                     value={qualityProfileId}
-                    onChange={(e) => { setQualityProfileId(e.target.value); setOptionsSaveStatus("idle"); }}
+                    onChange={(e) => { setQualityProfileId(e.target.value); optionsEdited(); }}
                   >
                     <option value="">{t("settings.form.arr.selectQualityProfile")}</option>
                     {qualityProfileId && !options.qualityProfiles.some((p) => String(p.id) === qualityProfileId) && (
@@ -292,7 +273,7 @@ export function ArrForm({
                       compact
                       id={`${idPrefix}-min-availability`}
                       value={minimumAvailability}
-                      onChange={(e) => { setMinimumAvailability(e.target.value); setOptionsSaveStatus("idle"); }}
+                      onChange={(e) => { setMinimumAvailability(e.target.value); optionsEdited(); }}
                     >
                       <option value="">{t("settings.form.arr.serviceDefault", { service: label })}</option>
                       {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
@@ -314,7 +295,7 @@ export function ArrForm({
                       compact
                       id={`${idPrefix}-language-profile`}
                       value={languageProfileId}
-                      onChange={(e) => { setLanguageProfileId(e.target.value); setOptionsSaveStatus("idle"); }}
+                      onChange={(e) => { setLanguageProfileId(e.target.value); optionsEdited(); }}
                     >
                       <option value="">{t("settings.form.arr.serviceDefault", { service: label })}</option>
                       {languageProfileId && !options.languageProfiles!.some((p) => String(p.id) === languageProfileId) && (

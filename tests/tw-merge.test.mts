@@ -43,6 +43,26 @@ test("trailing-! important flag is its own class space", () => {
   assert.equal(twMerge("p-2! p-4!"), "p-4!");
 });
 
+test("the leading-! important form is the same class space as the trailing one", () => {
+  assert.equal(twMerge("!h-[30px] !h-8"), "!h-8");
+  assert.equal(twMerge("!h-8 h-10"), "!h-8 h-10");
+  assert.equal(twMerge("!p-2 p-4!"), "p-4!");
+  assert.equal(twMerge("hover:!p-2 hover:p-4!"), "hover:p-4!");
+});
+
+test("compound and arbitrary variants are parsed, so a same-variant override merges", () => {
+  assert.equal(twMerge("has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-end]:pr-4"), "has-data-[icon=inline-end]:pr-4");
+  assert.equal(twMerge("group-data-[size=sm]/card:px-3 group-data-[size=sm]/card:px-4"), "group-data-[size=sm]/card:px-4");
+  assert.equal(twMerge("active:not-aria-[haspopup]:translate-y-px active:not-aria-[haspopup]:translate-y-0"), "active:not-aria-[haspopup]:translate-y-0");
+  assert.equal(twMerge("*:data-[slot=avatar]:ring-2 *:data-[slot=avatar]:ring-4"), "*:data-[slot=avatar]:ring-4");
+  assert.equal(twMerge("@md:flex @md:hidden"), "@md:hidden");
+  assert.equal(twMerge("supports-[display:grid]:grid supports-[display:grid]:flex"), "supports-[display:grid]:flex");
+  // Different variants still never conflict, and a colon inside an arbitrary
+  // value never starts a variant.
+  assert.equal(twMerge("has-data-[icon=inline-end]:pr-2 pr-4"), "has-data-[icon=inline-end]:pr-2 pr-4");
+  assert.equal(twMerge("bg-[url(https://x.test/a.png)] bg-none"), "bg-none");
+});
+
 test("border width and border color are separate groups", () => {
   assert.equal(twMerge("border border-2"), "border-2");
   assert.equal(twMerge("border-2 border-red-500"), "border-2 border-red-500");
@@ -594,6 +614,24 @@ test("gradient stops split colour from position, per stop", () => {
   assert.equal(twMerge("to-zinc-900 to-50%"), "to-zinc-900 to-50%");
   // The direction utility is a separate group again.
   assert.equal(twMerge("bg-linear-to-r from-zinc-900"), "bg-linear-to-r from-zinc-900");
+  // An arbitrary value is a position only when position-shaped, exactly as
+  // Tailwind types it; any other bracket/paren value is the stop's colour.
+  assert.equal(twMerge("from-[#123456] from-10%"), "from-[#123456] from-10%");
+  assert.equal(twMerge("from-[10%] from-20%"), "from-20%");
+  assert.equal(twMerge("via-[2rem] via-30%"), "via-30%");
+  assert.equal(twMerge("to-(length:--x) to-90%"), "to-90%");
+  assert.equal(twMerge("from-[var(--ds-accent)] from-red-500"), "from-red-500");
+  assert.equal(twMerge("to-(--x) to-50%"), "to-(--x) to-50%");
+});
+
+test("arbitrary background images are images, not background colours", () => {
+  assert.equal(twMerge("bg-[url(/a.png)] bg-zinc-900"), "bg-[url(/a.png)] bg-zinc-900");
+  assert.equal(twMerge("bg-[url(/a.png)] bg-none"), "bg-none");
+  assert.equal(twMerge("bg-(image:--x) bg-red-500"), "bg-(image:--x) bg-red-500");
+  assert.equal(twMerge("bg-linear-to-r bg-[radial-gradient(red,blue)]"), "bg-[radial-gradient(red,blue)]");
+  assert.equal(matchGroup("bg-[repeating-linear-gradient(red,blue)]"), "bg-image");
+  // A plain arbitrary colour is still the colour.
+  assert.equal(twMerge("bg-[#111] bg-zinc-900"), "bg-zinc-900");
 });
 
 test("backdrop filters are one group per filter function, never a single backdrop group", () => {
@@ -645,15 +683,18 @@ test("shadow size and shadow color are separate groups (regression: color entry 
   assert.equal(twMerge("shadow-inner shadow-red-500"), "shadow-inner shadow-red-500");
 });
 
-test("PIN: the grid shorthand does not evict a preceding col-start/col-end", () => {
+test("PIN: a shorthand does not evict a preceding longhand (col-span/col-start, p/px, …)", () => {
   // Real tailwind-merge models one-directional CONFLICTS between groups:
   // col-span-* sets the grid-column shorthand, so it overrides an earlier
   // col-start-*/col-end-*. This merger has no cross-group conflict mechanism —
-  // groups only ever collapse within themselves — so both survive. The failure
-  // mode is conservative (a redundant class, never a dropped one), which is why
-  // splitting the three properties apart is still the right trade.
+  // groups only ever collapse within themselves — so both survive. The kept
+  // longhand is NOT redundant: Tailwind emits every shorthand before its
+  // longhands, so the longhand wins whatever the class order. Callers override
+  // a longhand with the same longhand (`px-0` over a Button's `px-2.5`).
   assert.equal(twMerge("col-start-1 col-span-2"), "col-start-1 col-span-2");
   assert.equal(twMerge("row-end-3 row-span-2"), "row-end-3 row-span-2");
+  assert.equal(twMerge("px-2.5 p-0"), "px-2.5 p-0");
+  assert.equal(twMerge("px-2.5 px-0"), "px-0");
 });
 
 test("PIN: an arbitrary text value is a size only when length-shaped (Tailwind infers the same)", () => {
@@ -676,13 +717,12 @@ test("PIN: modifier ORDER forms distinct class spaces", () => {
   assert.equal(twMerge("hover:dark:p-2 dark:hover:p-4"), "hover:dark:p-2 dark:hover:p-4");
 });
 
-test("PERF PIN: the group scan runs ONCE per token, not once per pass (review 2026-09 f132)", () => {
-  // twMerge makes two passes over the tokens (fill lastIdx, then emit). The
-  // merge key includes groupOf(base), a linear first-match scan over the GROUPS
-  // regex table with no memo, and the emit pass used to recompute the identical
-  // key — doubling the regex work on the cn() hot path. matchGroup is the only
-  // `RegExp#test` call site in the module (parseToken uses `.match`), so counting
-  // prototype `test` invocations measures exactly the group-scan work.
+test("PERF PIN: each distinct utility is classified once and repeats hit the memo; matchGroup stays un-memoised", () => {
+  // The merge key includes groupOf(base), a linear first-match scan over the
+  // GROUPS regex table, on the cn() hot path. groupOf memoises per utility, and
+  // the emit pass reuses the key instead of recomputing it. matchGroup is the
+  // only `RegExp#test` call site in the module (token parsing uses no regex),
+  // so counting prototype `test` invocations measures exactly the scan work.
   const nativeTest = RegExp.prototype.test;
   let calls = 0;
   RegExp.prototype.test = function (this: RegExp, s: string) {
@@ -690,26 +730,38 @@ test("PERF PIN: the group scan runs ONCE per token, not once per pass (review 20
     return nativeTest.call(this, s);
   };
   try {
-    // An unmatched class pays the FULL table on every scan, so a doubled scan
-    // shows up as a doubled count here regardless of table size.
+    // An unmatched class pays the FULL table on every scan.
     const unmatched = "zz-not-a-tailwind-class";
     assert.equal(matchGroup(unmatched), null, "fixture must miss every group");
     calls = 0;
     matchGroup(unmatched);
     const fullTable = calls;
     assert.ok(fullTable > 0);
-
-    // Three tokens, all unmatched: exactly three full-table scans, not six.
+    // matchGroup itself is never memoised: the auditor needs its null answer.
     calls = 0;
-    assert.equal(twMerge(`${unmatched} ${unmatched}-2 hover:${unmatched}`), `${unmatched} ${unmatched}-2 hover:${unmatched}`);
-    assert.equal(calls, 3 * fullTable, "each token is classified exactly once per twMerge call");
+    assert.equal(matchGroup(unmatched), null);
+    assert.equal(calls, fullTable);
 
-    // Mixed input: the unmatched token costs one full scan and the two `p-*`
-    // tokens match early, so the total sits under two full tables. A second
-    // classification pass would spend 2 × full on the unmatched token alone.
+    // Utilities unique to this test, so the memo starts cold for them: each
+    // distinct utility costs one full scan, however many tokens carry it.
+    const a = "zz-perf-pin-a";
+    const b = "zz-perf-pin-b";
     calls = 0;
-    assert.equal(twMerge(`p-2 ${unmatched} p-4`), `${unmatched} p-4`);
-    assert.ok(calls > fullTable, "the unmatched token alone costs a full scan");
+    assert.equal(twMerge(`${a} ${b} hover:${a}`), `${a} ${b} hover:${a}`);
+    assert.equal(calls, 2 * fullTable, "two distinct utilities, two scans");
+
+    // The same tokens again: no regex work at all.
+    calls = 0;
+    assert.equal(twMerge(`${a} ${b} hover:${a}`), `${a} ${b} hover:${a}`);
+    assert.equal(calls, 0, "a repeated utility is answered from the memo");
+
+    // Mixed input: the fresh unmatched token costs one full scan and the two
+    // `p-*` tokens match early (or are memoised), so the total sits under two
+    // full tables. A second classification pass would cost 2 × full alone.
+    const c = "zz-perf-pin-c";
+    calls = 0;
+    assert.equal(twMerge(`p-2 ${c} p-4`), `${c} p-4`);
+    assert.ok(calls >= fullTable, "the unmatched token alone costs a full scan");
     assert.ok(calls < 2 * fullTable, `expected < ${2 * fullTable} regex tests, saw ${calls}`);
   } finally {
     RegExp.prototype.test = nativeTest;

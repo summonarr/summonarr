@@ -16,6 +16,7 @@
   "request.requestTv": "Richiedi la serie TV",
   "request.qualityProfile": "Profilo di qualità",
   "request.serverDefaultQuality": "Qualità predefinita del server",
+  "request.profilesLoadFailed": "Impossibile caricare i profili di qualità — verrà usata la qualità predefinita del server",
   "request.availableOn": "Disponibile su {server}",
   "request.alreadyAvailable": "Già disponibile",
   "request.queued": "In coda",
@@ -29,6 +30,7 @@
   "request.usersLoadFailed": "Impossibile caricare gli utenti — riprova",
   "request.selectUserLabel": "Seleziona un utente per cui richiedere",
   "request.loadingUsers": "Caricamento degli utenti…",
+  "request.noEligibleUsers": "Nessun utente per cui puoi fare una richiesta",
   "request.selectUser": "Seleziona un utente…",
   "request.requestForUser": "Richiedi per un utente",
   "request.submitting": "Invio in corso…",
@@ -88,6 +90,7 @@
   "request.report.submit": "Invia segnalazione",
   "request.collection.partial": "Richiesti {created} su {total} — {reason}",
   "request.collection.done": "Richiesti {created} su {total}",
+  "request.collection.doneSkipped": "Richiesti {created} su {total} — {skipped} non possono essere richiesti",
   "request.collection.networkErrorLower": "errore di rete, riprova",
   "request.collection.requested": "Richiesti",
   "request.collection.requestAll": "Richiedi tutti ({count})"

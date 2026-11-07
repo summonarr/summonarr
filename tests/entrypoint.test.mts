@@ -266,8 +266,10 @@ test("the schedule table: one row per job, short-cadence jobs in their own loop,
   const settings = read("src/app/(app)/settings/page.tsx");
   for (const j of rows) {
     assert.ok(compose.includes(`${j.intervalVar}: "\${${j.intervalVar}:-${j.def}}"`), `compose default for ${j.intervalVar}`);
-    const s = settings.match(new RegExp(`formatInterval\\(t, process\\.env\\.${j.intervalVar}, "(\\d+)"\\)`));
-    if (s) assert.equal(s[1], j.def, `Settings page default for ${j.intervalVar}`);
+    // The System tab's CRON_JOBS table lists every job, with its interval var and default.
+    const s = settings.match(new RegExp(`envVar: "${j.intervalVar}", defaultSeconds: "(\\d+)"`));
+    assert.ok(s, `the System tab lists ${j.label} (${j.intervalVar})`);
+    assert.equal(s[1], j.def, `Settings page default for ${j.intervalVar}`);
   }
 });
 

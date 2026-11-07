@@ -9,6 +9,10 @@
 process.env.TOKEN_ENCRYPTION_KEY ??= "ab".repeat(32);
 process.env.NEXTAUTH_SECRET ??= "db-suite-secret-0123456789abcdef0123";
 process.env.TRUST_PROXY ??= "true";
+// The play-history statistics bucket in the server process's zone when no
+// statsTimeZone is stored (stats-time-zone.ts), and the suite's expected days
+// and hours are UTC ones: pin it, so a developer's own TZ can't move them.
+process.env.TZ = "UTC";
 
 const url = process.env.DATABASE_URL ?? "";
 let dbName = "";

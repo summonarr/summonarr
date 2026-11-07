@@ -23,6 +23,7 @@ import {
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { Library } from "@/components/icons";
+import { tmdbDetailsKey } from "@/lib/tmdb-cache";
 import {
   DEFAULT_MEDIA_INSTANCE,
   isValidMediaInstanceSlug,
@@ -119,7 +120,7 @@ async function enrichItems(
   // (consistent with poster-cache.ts; only costs extra reads for poster-less titles).
   const misses = items.filter((i) => cacheMap.get(`${i.tmdbId}:${i.mediaType}`)?.posterPath == null);
   if (misses.length) {
-    const cacheKeys = misses.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
+    const cacheKeys = misses.map((i) => tmdbDetailsKey(i.mediaType, i.tmdbId));
     const cacheRows = await prisma.tmdbCache.findMany({
       where: { key: { in: cacheKeys } },
       select: { key: true, data: true },
@@ -399,7 +400,7 @@ export default async function LibraryDiffPage({
   const libraryDetailKeys = (() => {
     const seen = new Set<string>();
     for (const i of [...plexItems, ...jellyfinItems]) {
-      seen.add(i.mediaType === "MOVIE" ? `movie:${i.tmdbId}:details` : `tv:${i.tmdbId}:details`);
+      seen.add(tmdbDetailsKey(i.mediaType, i.tmdbId));
     }
     return [...seen];
   })();

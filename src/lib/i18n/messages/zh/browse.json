@@ -119,6 +119,8 @@
   "browse.forYou.rebuild.failed": "重建失败（HTTP {status}）",
   "browse.forYou.rebuild.done_one": "已重建 {updated} / {count} 个推荐栏",
   "browse.forYou.rebuild.done_other": "已重建 {updated} / {count} 个推荐栏",
+  "browse.forYou.rebuild.partial_one": "已重建 {updated} / {count} 个推荐栏，{failed} 个失败",
+  "browse.forYou.rebuild.partial_other": "已重建 {updated} / {count} 个推荐栏，{failed} 个失败",
   "browse.forYou.rebuild.label": "重建推荐",
   "browse.forYou.rebuild.labelWait": "重建推荐——请等待 {seconds} 秒",
   "browse.forYou.rebuild.wait": "请等待 {seconds} 秒",

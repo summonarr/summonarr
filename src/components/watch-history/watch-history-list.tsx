@@ -18,17 +18,14 @@ import { EmptyState, FilterBar, type FilterSegment } from "@/components/ui/desig
 import { Button } from "@/components/ui/button";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { formatDurationHM } from "@/lib/format-duration";
+import { episodeLabel } from "@/lib/episode-label";
+import { mediaHref } from "@/lib/media-href";
 import type { MyWatchHistoryItem, MyWatchHistoryPage } from "@/lib/my-watch-history";
 
 function episodeLine(item: MyWatchHistoryItem): string | null {
-  if (item.mediaType !== "TV" || item.seasonNumber == null) return null;
-  const se = `S${String(item.seasonNumber).padStart(2, "0")} · E${String(item.episodeNumber ?? 0).padStart(2, "0")}`;
+  const se = item.mediaType === "TV" ? episodeLabel(item.seasonNumber, item.episodeNumber) : null;
+  if (!se) return null;
   return item.episodeTitle ? `${se} · ${item.episodeTitle}` : se;
-}
-
-function mediaHref(item: MyWatchHistoryItem): string | null {
-  if (item.tmdbId == null || item.mediaType == null) return null;
-  return item.mediaType === "TV" ? `/tv/${item.tmdbId}` : `/movie/${item.tmdbId}`;
 }
 
 type TypeFilter = "" | "MOVIE" | "TV";
@@ -70,6 +67,8 @@ export function WatchHistoryList({
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
+  // Bumped by the Retry button after a failed filter refetch.
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 350);
@@ -96,6 +95,11 @@ export function WatchHistoryList({
     filterGen.current += 1;
     setRefreshing(true);
     setLoadFailed(false);
+    // The previous query's Load more state belongs to it: its error must not
+    // sit under the new results, and its in-flight request (dropped by the
+    // generation check) must not keep the new button disabled.
+    setLoadError(null);
+    setLoadingMore(false);
     // Drop the cursor for the duration of the refetch. The generation counter
     // cannot cover this on its own: it is bumped synchronously HERE, while
     // nextCursor is state that only updates when the refetch resolves. In that
@@ -124,11 +128,15 @@ export function WatchHistoryList({
       .catch((err) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error("[watch-history]", err);
+        // Don't leave the previous filter's rows on screen under the new
+        // segment or search as if they matched it; the error offers a retry.
+        setItems([]);
+        setTotal(0);
         setLoadFailed(true);
         setRefreshing(false);
       });
     return () => ac.abort();
-  }, [typeFilter, debouncedSearch]);
+  }, [typeFilter, debouncedSearch, reloadKey]);
 
   async function loadMore() {
     if (!nextCursor) return;
@@ -162,7 +170,9 @@ export function WatchHistoryList({
       // current one.
       if (filterGen.current === myGen) setLoadError(t("personal.common.loadMoreError"));
     } finally {
-      setLoadingMore(false);
+      // A superseded request leaves the flag to the current query (the
+      // refresh effect already cleared it).
+      if (filterGen.current === myGen) setLoadingMore(false);
     }
   }
 
@@ -217,13 +227,16 @@ export function WatchHistoryList({
         }
       />
 
-      {loadFailed && (
-        <p className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)", margin: "0 0 10px" }}>
-          {t("personal.history.loadFailed")}
-        </p>
-      )}
-
-      {items.length === 0 ? (
+      {loadFailed ? (
+        <div role="alert" className="flex flex-col items-center" style={{ gap: 10, padding: "24px 0" }}>
+          <p className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}>
+            {t("personal.history.loadFailed")}
+          </p>
+          <Button variant="outline" size="sm" onClick={() => setReloadKey((k) => k + 1)} disabled={refreshing}>
+            {t("shared.common.retry")}
+          </Button>
+        </div>
+      ) : items.length === 0 ? (
         <EmptyState
           icon={Clock}
           title={filtersActive ? t("personal.history.noMatchTitle") : t("personal.history.emptyTitle")}
@@ -239,11 +252,11 @@ export function WatchHistoryList({
           style={{ gap: 8, opacity: refreshing ? 0.6 : 1, transition: "opacity 120ms" }}
         >
           {items.map((item) => {
-            const href = mediaHref(item);
+            const href = mediaHref(item.tmdbId, item.mediaType);
             const episode = episodeLine(item);
             // Consolidated entries: progress and the duration figure reflect
             // the whole group's play time, not just the latest session.
-            const groupSeconds = item.totalPlaySeconds ?? item.playDuration;
+            const groupSeconds = item.totalPlaySeconds;
             const pct =
               item.duration > 0
                 ? Math.min(100, Math.round((groupSeconds / item.duration) * 100))
@@ -297,10 +310,10 @@ export function WatchHistoryList({
                         {item.year}
                       </span>
                     )}
-                    {(item.playCount ?? 1) > 1 && (
+                    {item.playCount > 1 && (
                       <span
                         className="ds-mono"
-                        title={t("personal.history.watchedTimes", { count: item.playCount ?? 1 })}
+                        title={t("personal.history.watchedTimes", { count: item.playCount })}
                         style={{
                           fontSize: 9.5,
                           fontWeight: 400,

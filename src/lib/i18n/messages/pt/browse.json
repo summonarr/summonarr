@@ -119,6 +119,8 @@
   "browse.forYou.rebuild.failed": "Falha na reconstrução (HTTP {status})",
   "browse.forYou.rebuild.done_one": "{updated} de {count} prateleira reconstruída",
   "browse.forYou.rebuild.done_other": "{updated} de {count} prateleiras reconstruídas",
+  "browse.forYou.rebuild.partial_one": "{updated} de {count} prateleira reconstruída; {failed} com falha",
+  "browse.forYou.rebuild.partial_other": "{updated} de {count} prateleiras reconstruídas; {failed} com falha",
   "browse.forYou.rebuild.label": "Reconstruir sugestões",
   "browse.forYou.rebuild.labelWait": "Reconstruir sugestões — aguarde {seconds} s",
   "browse.forYou.rebuild.wait": "Aguarde {seconds} s",

@@ -16,6 +16,19 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // Default = dry run (counts + a five-row sample); `?execute=true` applies. Idempotent — the WHERE
 // clause excludes rows that don't need clamping, so re-runs are a no-op.
 
+// The session's wall-clock span, the ceiling a play can't exceed.
+const WALL_CLOCK = `EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int`;
+// The clamped playDuration — what the UPDATE writes and what the dry run previews.
+const CLAMPED_PLAY = `LEAST("playDuration", ${WALL_CLOCK})`;
+// The clamped play as a percentage of the runtime (callers guard duration > 0).
+const CLAMPED_PCT = `(${CLAMPED_PLAY}::float / duration::float * 100)`;
+// The rows that need clamping. ONE definition for the dry-run count, its sample
+// and the UPDATE: the confirm gate compares the operator's echoed count with the
+// live count, which only means something while both read the same rows (they
+// drifted once — see the watched CASE below).
+const CANDIDATE_WHERE = `"playDuration" > ${WALL_CLOCK}
+       AND "stoppedAt" > "startedAt"`;
+
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const execute = req.nextUrl.searchParams.get("execute") === "true";
@@ -35,26 +48,32 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     }
   }
 
-  const [counts, sample] = await Promise.all([
-    prisma.$queryRawUnsafe<{
-      total_rows: bigint;
-      candidate_rows: bigint;
-      watched_flips: bigint;
-    }[]>(
-      `SELECT
-         (SELECT COUNT(*)::bigint FROM "PlayHistory") AS total_rows,
-         COUNT(*)::bigint AS candidate_rows,
-         COUNT(*) FILTER (
-           WHERE watched = true
-             AND duration > 0
-             AND (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) < $1
-         )::bigint AS watched_flips
-       FROM "PlayHistory"
-       WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
-         AND "stoppedAt" > "startedAt"`,
-      threshold,
-    ),
-    prisma.$queryRawUnsafe<{
+  const counts = await prisma.$queryRawUnsafe<{
+    total_rows: bigint;
+    candidate_rows: bigint;
+    watched_flips: bigint;
+  }[]>(
+    `SELECT
+       (SELECT COUNT(*)::bigint FROM "PlayHistory") AS total_rows,
+       COUNT(*)::bigint AS candidate_rows,
+       COUNT(*) FILTER (
+         WHERE watched = true
+           AND duration > 0
+           AND ${CLAMPED_PCT} < $1
+       )::bigint AS watched_flips
+     FROM "PlayHistory"
+     WHERE ${CANDIDATE_WHERE}`,
+    threshold,
+  );
+
+  const totalRows = Number(counts[0]?.total_rows ?? 0);
+  const affectedRows = Number(counts[0]?.candidate_rows ?? 0);
+  const watchedFlippedToFalse = Number(counts[0]?.watched_flips ?? 0);
+
+  if (!execute) {
+    // The preview sample is read on the dry run only; the execute path needs
+    // just the live count for its confirmation gate.
+    const sample = await prisma.$queryRawUnsafe<{
       id: string;
       title: string;
       duration: number;
@@ -68,39 +87,30 @@ export const POST = withAdmin(async (req, _ctx, session) => {
          title,
          duration,
          "playDuration" AS play_duration_old,
-         LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int) AS play_duration_new,
+         ${CLAMPED_PLAY} AS play_duration_new,
          watched AS watched_old,
          (
            CASE
              WHEN duration > 0
-             THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
+             THEN ${CLAMPED_PCT} >= $1
              ELSE watched
            END
          ) AS watched_new
        FROM "PlayHistory"
-       WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
-         AND "stoppedAt" > "startedAt"
+       WHERE ${CANDIDATE_WHERE}
        ORDER BY "startedAt" DESC
        LIMIT 5`,
       threshold,
-    ),
-  ]);
-
-  const totalRows = Number(counts[0]?.total_rows ?? 0);
-  const affectedRows = Number(counts[0]?.candidate_rows ?? 0);
-  const watchedFlippedToFalse = Number(counts[0]?.watched_flips ?? 0);
-
-  const sampleSerialized = sample.map((c) => ({
-    id: c.id,
-    title: c.title,
-    duration: Number(c.duration),
-    playDurationOld: Number(c.play_duration_old),
-    playDurationNew: Number(c.play_duration_new),
-    watchedOld: c.watched_old,
-    watchedNew: c.watched_new,
-  }));
-
-  if (!execute) {
+    );
+    const sampleSerialized = sample.map((c) => ({
+      id: c.id,
+      title: c.title,
+      duration: Number(c.duration),
+      playDurationOld: Number(c.play_duration_old),
+      playDurationNew: Number(c.play_duration_new),
+      watchedOld: c.watched_old,
+      watchedNew: c.watched_new,
+    }));
     return NextResponse.json({
       dryRun: true,
       threshold,
@@ -127,25 +137,25 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     );
   }
 
+  // Static SQL fragments only (the constants above); the threshold stays bound.
   const updated = await prisma.$executeRawUnsafe(
     `UPDATE "PlayHistory" SET
-       "playDuration" = LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int),
+       "playDuration" = ${CLAMPED_PLAY},
        "pausedDuration" = GREATEST(
          0,
-         EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
-           - LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)
+         ${WALL_CLOCK}
+           - ${CLAMPED_PLAY}
        ),
        "watched" = CASE
          WHEN duration > 0
-         THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
+         THEN ${CLAMPED_PCT} >= $1
          -- A row with no known runtime cannot be re-judged, so its flag is left as
          -- is: the dry-run's watched_flips FILTER requires duration > 0, and an
          -- ELSE false here flipped rows that count never saw, so the reported
          -- watchedFlippedToFalse under-stated what the write did.
          ELSE "watched"
        END
-     WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
-       AND "stoppedAt" > "startedAt"`,
+     WHERE ${CANDIDATE_WHERE}`,
     threshold,
   );
 

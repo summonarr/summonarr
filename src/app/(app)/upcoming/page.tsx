@@ -5,6 +5,7 @@ import { getUpcomingMovies, getUpcomingTV, type TmdbMedia } from "@/lib/tmdb";
 import { MediaCard } from "@/components/media/media-card";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { prisma } from "@/lib/prisma";
+import { upcomingCutoffDate } from "@/lib/format-release-date";
 import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { requireAppSession } from "@/lib/require-app-session";
@@ -17,6 +18,8 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { AlertTriangle, Calendar } from "@/components/icons";
 import Link from "next/link";
 import { getTranslator } from "@/lib/i18n/server";
+import { parsePageNumber } from "@/lib/pagination";
+import { first, type PageSearchParams } from "@/lib/search-params";
 import { canRequest } from "@/lib/permissions";
 
 // One screenful, matching POPULAR_PER_PAGE. See the note at the slice below for
@@ -25,7 +28,7 @@ const UPCOMING_PER_PAGE = 40;
 
 // Reads still-fresh (within 49h) not-yet-released titles from the UpcomingCacheItem table.
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = upcomingCutoffDate();
   const rows = await prisma.upcomingCacheItem.findMany({
     where: {
       cachedAt: { gt: new Date(Date.now() - 49 * 60 * 60 * 1000) },
@@ -56,7 +59,7 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function UpcomingPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.page.upcoming");
   const [sp, session, plexEnabled, jellyfinEnabled, calendarEnabled, t] = await Promise.all([
@@ -67,7 +70,7 @@ export default async function UpcomingPage({
     isFeatureEnabled("feature.integration.calendar"),
     getTranslator(),
   ]);
-  const hideAvailable = sp.hideAvailable === "1";
+  const hideAvailable = first(sp.hideAvailable) === "1";
   // Integration flags passed explicitly — they default to TRUE when omitted.
   const { showPlex, showJellyfin } = getBadgeVisibility(session, {
     plex: plexEnabled,
@@ -78,7 +81,7 @@ export default async function UpcomingPage({
   const raw: TmdbMedia[] = [];
   let loadFailed = false;
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = upcomingCutoffDate();
 
     let all = await getUpcomingFromCache();
     const hasMovies = all.some((m) => m.mediaType === "movie");
@@ -136,7 +139,7 @@ export default async function UpcomingPage({
   const totalPages = Math.max(1, Math.ceil(items.length / UPCOMING_PER_PAGE));
   // Clamped, not trusted: ?page=99 (or a page that shrank when the user turned
   // on Hide Available) lands on the last real page instead of an empty grid.
-  const page = Math.min(totalPages, Math.max(1, parseInt(sp.page ?? "1", 10) || 1));
+  const page = Math.min(totalPages, parsePageNumber(sp.page));
   const pageItems = items.slice((page - 1) * UPCOMING_PER_PAGE, page * UPCOMING_PER_PAGE);
 
   return (

@@ -6,9 +6,6 @@ import { useRouter } from "next/navigation";
 import {
   Film,
   Tv2,
-  PlayCircle,
-  MonitorPlay,
-  Clock,
   CheckCircle,
   Loader2,
   Plus,
@@ -18,10 +15,12 @@ import {
 } from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { RatingsBar } from "@/components/media/ratings-bar";
+import { AvailabilityChips } from "@/components/media/availability-chips";
+import { mergeRatings } from "@/components/media/ratings-merge";
 import { cn } from "@/lib/utils";
 import { useState, useEffect, memo } from "react";
 import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
-import { withBasePath } from "@/lib/base-path";
+import { postMediaRequest } from "@/lib/client/media-request";
 import { useToast } from "@/components/ui/toast";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -108,13 +107,14 @@ function MediaCardImpl({
   const uiReqState = titleChanged ? "idle" : reqState;
   const isRequested = !!media.requestedByMe || uiReqState === "requested";
   const blacklisted = !!media.blacklisted;
+  // "Ghost" bubble: the title is already available, already requested by this
+  // viewer, or blocked — the bubble opens the detail page instead of requesting.
+  const ghost = isAvailable || isRequested || blacklisted;
   // Hide the Request overlay when the viewer cannot request this type. Keep
   // View / Blocked / in-flight confirm — "already requested" is not the CTA.
   const showRequestOverlay =
     canRequest ||
-    isAvailable ||
-    isRequested ||
-    blacklisted ||
+    ghost ||
     uiReqState === "confirm" ||
     uiReqState === "loading" ||
     uiReqState === "error";
@@ -136,18 +136,11 @@ function MediaCardImpl({
     setReqState("loading");
     try {
       const mt = media.mediaType === "movie" ? "MOVIE" : "TV";
-      let token = requestToken;
-      if (!token) {
-        const tokenRes = await fetch(
-          withBasePath(`/api/requests/token?tmdbId=${media.id}&mediaType=${mt}`),
-        );
-        if (tokenRes.ok) token = (await tokenRes.json()).token;
-      }
-      const res = await fetch(withBasePath("/api/requests"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tmdbId: media.id, mediaType: mt, _token: token }),
-      });
+      // Fetches a token when no prop carries one, and refreshes a prop token
+      // (person pages mint it at render) that expired while the tab sat open.
+      // A failed token fetch comes back as its own non-ok answer and lands in
+      // the error branch below without posting anything.
+      const res = await postMediaRequest({ tmdbId: media.id, mediaType: mt }, requestToken);
       if (res.ok) {
         const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
         if (body?.alreadyAvailable) {
@@ -186,7 +179,7 @@ function MediaCardImpl({
       onClick(media);
       return;
     }
-    if (isAvailable || isRequested || blacklisted) {
+    if (ghost) {
       router.push(detailPath);
     } else if (!canRequest) {
       return;
@@ -201,49 +194,6 @@ function MediaCardImpl({
     e.stopPropagation();
     setReqState("idle");
   }
-
-  // Accessible names for the overlay controls: each card's buttons read as
-  // "Request <title>" rather than a page full of identical "Request"s.
-  const bubbleLabel = () => {
-    if (isAvailable || isRequested) return t("media.card.viewLabel", { title: media.title });
-    // The button navigates (router.push), so name the action, not a status.
-    if (blacklisted) return t("media.card.viewBlockedLabel", { title: media.title });
-    if (uiReqState === "loading") return t("media.card.requestingLabel", { title: media.title });
-    if (uiReqState === "error") return t("media.card.retryLabel", { title: media.title });
-    return t("media.card.requestLabel", { title: media.title });
-  };
-
-  // Over a poster the scrim is black and the overlay text white — an image is
-  // always dark-compatible. With no poster the placeholder is a flat surface
-  // that is near-white in light mode, so the gradient (a black smear there) is
-  // dropped and the translucent-white ghost button reads off the theme instead.
-  const onPoster = !!poster;
-  const overlayFg = onPoster ? "#fff" : "var(--ds-fg)";
-  const overlayGhostBg = onPoster ? "rgba(255,255,255,0.14)" : "var(--ds-bg-2)";
-  const overlayCancelBg = onPoster ? "rgba(255,255,255,0.12)" : "var(--ds-bg-2)";
-  const overlayGhostBorder = onPoster
-    ? "1px solid rgba(255,255,255,0.28)"
-    : "1px solid var(--ds-border)";
-
-  const bubbleContent = () => {
-    if (isAvailable) return <span>{t("media.card.view")}</span>;
-    if (isRequested) return <span>{t("media.card.view")}</span>;
-    if (blacklisted)
-      return (
-        <span className="flex items-center gap-1">
-          <Ban className="w-3.5 h-3.5" />
-          {t("media.card.blocked")}
-        </span>
-      );
-    if (uiReqState === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
-    if (uiReqState === "error") return <span>{t("media.card.retry")}</span>;
-    return (
-      <span className="flex items-center gap-1">
-        <Plus className="w-3.5 h-3.5" />
-        {t("media.card.request")}
-      </span>
-    );
-  };
 
   // The card is a plain <div>, NOT a <button> and NOT role="button": it
   // contains nested interactive controls (Request/Confirm/Cancel/View, the
@@ -297,258 +247,29 @@ function MediaCardImpl({
 
         {/* Hover / confirm overlay */}
         {showRequestOverlay && (
-        <div
-          className={cn(
-            "absolute inset-0 flex items-end justify-center pointer-events-none transition-opacity",
-            uiReqState === "confirm"
-              ? "opacity-100"
-              : "opacity-0 group-hover:opacity-100 focus-within:opacity-100",
-          )}
-          style={{
-            background: onPoster
-              ? "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.72) 100%)"
-              : "none",
-            padding: 10,
-          }}
-        >
-          {uiReqState === "confirm" ? (
-            <div className="pointer-events-auto flex flex-col items-center gap-2 px-3 pb-2">
-              <span
-                className="text-center leading-tight font-semibold"
-                style={{ fontSize: 11, color: overlayFg }}
-              >
-                {t("media.card.confirmPrompt")}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleBubbleClick}
-                  type="button"
-                  aria-label={t("media.card.confirmLabel", { title: media.title })}
-                  className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: 999,
-                    background: "var(--ds-accent)",
-                    color: "var(--ds-accent-fg)",
-                    fontSize: 11,
-                    border: 0,
-                  }}
-                >
-                  <Check className="w-3 h-3" />
-                  {t("media.card.confirm")}
-                </button>
-                <button
-                  onClick={cancelConfirm}
-                  type="button"
-                  aria-label={t("media.card.cancelLabel", { title: media.title })}
-                  className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: 999,
-                    background: overlayCancelBg,
-                    color: overlayFg,
-                    fontSize: 11,
-                    border: overlayGhostBorder,
-                  }}
-                >
-                  <X className="w-3 h-3" />
-                  {t("media.card.cancel")}
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={handleBubbleClick}
-              type="button"
-              aria-label={bubbleLabel()}
-              // Clickable only while the overlay is revealed. The overlay is
-              // opacity-0 until hover/focus, and a transparent-but-live button
-              // swallowed touch taps on the poster's bottom-centre (no hover
-              // on touch to reveal it first — Tailwind gates group-hover on
-              // `(hover: hover)`), opening a request prompt nobody saw.
-              // Keyboard focus is unaffected by pointer-events.
-              className="ds-tap pointer-events-none group-hover:pointer-events-auto group-focus-within:pointer-events-auto inline-flex items-center gap-1.5 font-semibold transition-colors"
-              style={{
-                padding: "5px 12px",
-                borderRadius: 999,
-                background:
-                  isAvailable || isRequested || blacklisted
-                    ? overlayGhostBg
-                    : "var(--ds-accent)",
-                color:
-                  isAvailable || isRequested || blacklisted
-                    ? overlayFg
-                    : "var(--ds-accent-fg)",
-                border:
-                  isAvailable || isRequested || blacklisted
-                    ? overlayGhostBorder
-                    : "0",
-                fontSize: 12,
-              }}
-            >
-              {bubbleContent()}
-            </button>
-          )}
-        </div>
+          <RequestOverlay
+            title={media.title}
+            uiReqState={uiReqState}
+            isAvailable={isAvailable}
+            isRequested={isRequested}
+            blacklisted={blacklisted}
+            ghost={ghost}
+            onPoster={!!poster}
+            onBubble={handleBubbleClick}
+            onCancel={cancelConfirm}
+          />
         )}
 
-        {/* Top-left: availability chips. `data-media-chips` lets a caller that
-            puts its own overlay in this corner shift them clear — /popular's
-            rank badge sits at exactly these coordinates (top-1.5/left-1.5 is
-            6px, the same inset it uses) and, being z-10, covered the Plex
-            glyph on every ranked card. See .ds-ranked-card in globals.css.
-            An overlayAction shares this corner too and rides at the END of
-            the stack, so the chips keep the corner and the control follows
-            whatever is above it (or takes the corner when there are none). */}
-        <div
-          data-media-chips
-          className="absolute top-1.5 left-1.5 flex flex-col gap-1"
-        >
-          {showPlex && media.plexAvailable && (
-            <span
-              className="ds-chip ds-chip-plex"
-              style={{ paddingLeft: 5, paddingRight: 6 }}
-            >
-              <PlayCircle style={{ width: 9, height: 9 }} />
-              Plex
-            </span>
-          )}
-          {showJellyfin && media.jellyfinAvailable && (
-            <span
-              className="ds-chip ds-chip-jellyfin"
-              style={{ paddingLeft: 5, paddingRight: 6 }}
-            >
-              <MonitorPlay style={{ width: 9, height: 9 }} />
-              Jellyfin
-            </span>
-          )}
-          {/* 4K chips — arr4k* are only populated when the viewer has 4K access (enrichment gate) */}
-          {media.arr4kAvailable && (
-            <span
-              className="ds-chip"
-              style={{
-                paddingLeft: 5,
-                paddingRight: 6,
-                background: "var(--ds-accent-soft)",
-                color: "var(--ds-accent-text)",
-                border: "1px solid var(--ds-accent-ring)",
-              }}
-            >
-              <CheckCircle style={{ width: 9, height: 9 }} />
-              4K
-            </span>
-          )}
-          {!isAvailable && media.arrPending && (
-            <span
-              className="ds-chip ds-chip-pending"
-              style={{ paddingLeft: 5, paddingRight: 6 }}
-            >
-              <Clock style={{ width: 9, height: 9 }} />
-              {t("media.badge.queued")}
-            </span>
-          )}
-          {!media.arr4kAvailable && media.arr4kPending && (
-            <span
-              className="ds-chip ds-chip-pending"
-              style={{ paddingLeft: 5, paddingRight: 6 }}
-            >
-              <Clock style={{ width: 9, height: 9 }} />
-              {t("media.badge.queued4k")}
-            </span>
-          )}
-          {/* Caller-supplied action (e.g. /for-you's "not interested").
-              Fades in with hover like the request overlay, but stays visible
-              while focused so it is reachable by keyboard and always present
-              on any device without hover. Keyed on (hover: none), NOT a width:
-              an iPad in landscape is wider than any breakpoint and still has
-              no hover, so a width gate left the control transparent but
-              tappable there. mt-0.5 keeps its 5px hit-area outset clear of
-              the chip above. */}
-          {overlayAction && (
-            <div className="mt-0.5 self-start opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
-              {overlayAction}
-            </div>
-          )}
-        </div>
-
-        {/* Bottom-left: request state — "Requested" (a pending request, anyone's)
-            and "Blocked" (admin blacklist, which never touches the request rows,
-            so both can hold at once). One stack like the top-left chips, so they
-            no longer paint on top of each other at the same corner.
-            pointer-events-none: the chip sat over the revealed bubble's corner
-            on ordinary card widths and a click there bubbled to the card (→ the
-            detail page) instead of the bubble. It fades whenever the overlay is
-            revealed for the same reason — the two share the poster's bottom
-            edge — and stays hidden while the confirm prompt is up. */}
-        {!isAvailable &&
-          ((media.requested || uiReqState === "requested") || (!isRequested && blacklisted)) && (
-          <div
-            className={cn(
-              "absolute bottom-1.5 left-1.5 flex flex-col items-start gap-1 pointer-events-none transition-opacity",
-              uiReqState === "confirm"
-                ? "opacity-0"
-                : "group-hover:opacity-0 group-focus-within:opacity-0",
-            )}
-          >
-            {(media.requested || uiReqState === "requested") && (
-              <span
-                className="ds-chip ds-chip-accent"
-                style={{ paddingLeft: 5, paddingRight: 6 }}
-              >
-                <CheckCircle style={{ width: 9, height: 9 }} />
-                {t("media.badge.requested")}
-              </span>
-            )}
-            {!isRequested && blacklisted && (
-              <span
-                className="ds-chip"
-                style={{
-                  paddingLeft: 5,
-                  paddingRight: 6,
-                  background: "color-mix(in oklab, var(--ds-bg-inset) 80%, transparent)",
-                  color: "var(--ds-fg-muted)",
-                  border: "1px solid var(--ds-border)",
-                }}
-              >
-                <Ban style={{ width: 9, height: 9 }} />
-                {t("media.card.blocked")}
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Top-right: TMDB community score (at-a-glance). Detailed ratings live in the RatingsBar below. */}
-        {media.voteAverage > 0 && (
-          <div
-            className="ds-mono absolute top-1.5 right-1.5 inline-flex items-center gap-1"
-            style={{
-              fontSize: 10.5,
-              fontWeight: 600,
-              padding: "2px 6px",
-              borderRadius: 4,
-              background:
-                "color-mix(in oklab, var(--ds-bg-inset) 80%, transparent)",
-              backdropFilter: "blur(6px)",
-              border: "1px solid var(--ds-border)",
-              color: "var(--ds-fg)",
-            }}
-          >
-            <span
-              aria-hidden="true"
-              style={{
-                fontSize: 9,
-                lineHeight: 1,
-                color: "var(--ds-warning)",
-              }}
-            >
-              ★
-            </span>
-            {/* Brand name, not a catalog string. Without it the badge read as a
-                bare "7.8" between the poster alt and the chips. */}
-            <span className="sr-only">TMDB </span>
-            {media.voteAverage.toFixed(1)}
-          </div>
-        )}
+        <CardBadges
+          media={media}
+          showPlex={showPlex}
+          showJellyfin={showJellyfin}
+          isAvailable={isAvailable}
+          isRequested={isRequested}
+          blacklisted={blacklisted}
+          uiReqState={uiReqState}
+          overlayAction={overlayAction}
+        />
       </div>
 
       {/* Card body */}
@@ -613,17 +334,7 @@ function MediaCardImpl({
           className={size === "md" ? "flex flex-col gap-1 mt-auto" : "min-h-[34px] flex items-start mt-auto"}
         >
           <RatingsBar
-            imdbRating={liveRatings?.imdbRating ?? media.imdbRating}
-            imdbId={liveRatings?.imdbId ?? media.imdbId}
-            imdbVotes={liveRatings?.imdbVotes ?? media.imdbVotes}
-            rottenTomatoes={liveRatings?.rottenTomatoes ?? media.rottenTomatoes}
-            rtAudienceScore={liveRatings?.rtAudienceScore ?? media.rtAudienceScore}
-            metacritic={liveRatings?.metacritic ?? media.metacritic}
-            traktRating={liveRatings?.traktRating ?? media.traktRating}
-            letterboxdRating={liveRatings?.letterboxdRating ?? media.letterboxdRating}
-            mdblistScore={liveRatings?.mdblistScore ?? media.mdblistScore}
-            malRating={liveRatings?.malRating ?? media.malRating}
-            rogerEbertRating={liveRatings?.rogerEbertRating ?? media.rogerEbertRating}
+            {...mergeRatings(media, liveRatings)}
             voteAverage={media.voteAverage}
             size="sm"
             compact={size !== "md"}
@@ -631,6 +342,301 @@ function MediaCardImpl({
         </div>
       </div>
     </div>
+  );
+}
+
+// The poster's hover / confirm overlay: the request bubble, or the confirm
+// prompt once it was clicked. Only rendered while MediaCard's
+// showRequestOverlay holds.
+function RequestOverlay({
+  title,
+  uiReqState,
+  isAvailable,
+  isRequested,
+  blacklisted,
+  ghost,
+  onPoster,
+  onBubble,
+  onCancel,
+}: {
+  title: string;
+  uiReqState: RequestState;
+  isAvailable: boolean;
+  isRequested: boolean;
+  blacklisted: boolean;
+  ghost: boolean;
+  onPoster: boolean;
+  onBubble: (e: React.MouseEvent) => void;
+  onCancel: (e: React.MouseEvent) => void;
+}) {
+  const t = useT();
+
+  // Accessible names for the overlay controls: each card's buttons read as
+  // "Request <title>" rather than a page full of identical "Request"s.
+  const bubbleLabel = () => {
+    if (isAvailable || isRequested) return t("media.card.viewLabel", { title });
+    // The button navigates (router.push), so name the action, not a status.
+    if (blacklisted) return t("media.card.viewBlockedLabel", { title });
+    if (uiReqState === "loading") return t("media.card.requestingLabel", { title });
+    if (uiReqState === "error") return t("media.card.retryLabel", { title });
+    return t("media.card.requestLabel", { title });
+  };
+
+  // Over a poster the scrim is black and the overlay text white — an image is
+  // always dark-compatible. With no poster the placeholder is a flat surface
+  // that is near-white in light mode, so the gradient (a black smear there) is
+  // dropped and the translucent-white ghost button reads off the theme instead.
+  const overlayFg = onPoster ? "#fff" : "var(--ds-fg)";
+  const overlayGhostBg = onPoster ? "rgba(255,255,255,0.14)" : "var(--ds-bg-2)";
+  const overlayCancelBg = onPoster ? "rgba(255,255,255,0.12)" : "var(--ds-bg-2)";
+  const overlayGhostBorder = onPoster
+    ? "1px solid rgba(255,255,255,0.28)"
+    : "1px solid var(--ds-border)";
+
+  const bubbleContent = () => {
+    if (isAvailable) return <span>{t("media.card.view")}</span>;
+    if (isRequested) return <span>{t("media.card.view")}</span>;
+    if (blacklisted)
+      return (
+        <span className="flex items-center gap-1">
+          <Ban className="w-3.5 h-3.5" />
+          {t("media.card.blocked")}
+        </span>
+      );
+    if (uiReqState === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
+    if (uiReqState === "error") return <span>{t("media.card.retry")}</span>;
+    return (
+      <span className="flex items-center gap-1">
+        <Plus className="w-3.5 h-3.5" />
+        {t("media.card.request")}
+      </span>
+    );
+  };
+
+  return (
+    <div
+      className={cn(
+        "absolute inset-0 flex items-end justify-center pointer-events-none transition-opacity",
+        uiReqState === "confirm"
+          ? "opacity-100"
+          : "opacity-0 group-hover:opacity-100 focus-within:opacity-100",
+      )}
+      style={{
+        background: onPoster
+          ? "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.72) 100%)"
+          : "none",
+        padding: 10,
+      }}
+    >
+      {uiReqState === "confirm" ? (
+        <div className="pointer-events-auto flex flex-col items-center gap-2 px-3 pb-2">
+          <span
+            className="text-center leading-tight font-semibold"
+            style={{ fontSize: 11, color: overlayFg }}
+          >
+            {t("media.card.confirmPrompt")}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onBubble}
+              type="button"
+              aria-label={t("media.card.confirmLabel", { title })}
+              className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
+              style={{
+                padding: "4px 10px",
+                borderRadius: 999,
+                background: "var(--ds-accent)",
+                color: "var(--ds-accent-fg)",
+                fontSize: 11,
+                border: 0,
+              }}
+            >
+              <Check className="w-3 h-3" />
+              {t("media.card.confirm")}
+            </button>
+            <button
+              onClick={onCancel}
+              type="button"
+              aria-label={t("media.card.cancelLabel", { title })}
+              className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
+              style={{
+                padding: "4px 10px",
+                borderRadius: 999,
+                background: overlayCancelBg,
+                color: overlayFg,
+                fontSize: 11,
+                border: overlayGhostBorder,
+              }}
+            >
+              <X className="w-3 h-3" />
+              {t("media.card.cancel")}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={onBubble}
+          type="button"
+          aria-label={bubbleLabel()}
+          // Clickable only while the overlay is revealed. The overlay is
+          // opacity-0 until hover/focus, and a transparent-but-live button
+          // swallowed touch taps on the poster's bottom-centre (no hover
+          // on touch to reveal it first — Tailwind gates group-hover on
+          // `(hover: hover)`), opening a request prompt nobody saw.
+          // Keyboard focus is unaffected by pointer-events.
+          className="ds-tap pointer-events-none group-hover:pointer-events-auto group-focus-within:pointer-events-auto inline-flex items-center gap-1.5 font-semibold transition-colors"
+          style={{
+            padding: "5px 12px",
+            borderRadius: 999,
+            background: ghost ? overlayGhostBg : "var(--ds-accent)",
+            color: ghost ? overlayFg : "var(--ds-accent-fg)",
+            border: ghost ? overlayGhostBorder : "0",
+            fontSize: 12,
+          }}
+        >
+          {bubbleContent()}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// The poster's corner badges: availability chips (+ the caller's overlay
+// action) top-left, request state bottom-left, the TMDB score top-right.
+function CardBadges({
+  media,
+  showPlex,
+  showJellyfin,
+  isAvailable,
+  isRequested,
+  blacklisted,
+  uiReqState,
+  overlayAction,
+}: {
+  media: TmdbMedia;
+  showPlex: boolean;
+  showJellyfin: boolean;
+  isAvailable: boolean;
+  isRequested: boolean;
+  blacklisted: boolean;
+  uiReqState: RequestState;
+  overlayAction?: React.ReactNode;
+}) {
+  const t = useT();
+  return (
+    <>
+      {/* Top-left: availability chips. `data-media-chips` lets a caller that
+          puts its own overlay in this corner shift them clear — /popular's
+          rank badge sits at exactly these coordinates (top-1.5/left-1.5 is
+          6px, the same inset it uses) and, being z-10, covered the Plex
+          glyph on every ranked card. See .ds-ranked-card in globals.css.
+          An overlayAction shares this corner too and rides at the END of
+          the stack, so the chips keep the corner and the control follows
+          whatever is above it (or takes the corner when there are none). */}
+      <div
+        data-media-chips
+        className="absolute top-1.5 left-1.5 flex flex-col gap-1"
+      >
+        <AvailabilityChips
+          media={media}
+          showPlex={showPlex}
+          showJellyfin={showJellyfin}
+          isAvailable={isAvailable}
+        />
+        {/* Caller-supplied action (e.g. /for-you's "not interested").
+            Fades in with hover like the request overlay, but stays visible
+            while focused so it is reachable by keyboard and always present
+            on any device without hover. Keyed on (hover: none), NOT a width:
+            an iPad in landscape is wider than any breakpoint and still has
+            no hover, so a width gate left the control transparent but
+            tappable there. mt-0.5 keeps its 5px hit-area outset clear of
+            the chip above. */}
+        {overlayAction && (
+          <div className="mt-0.5 self-start opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+            {overlayAction}
+          </div>
+        )}
+      </div>
+
+      {/* Bottom-left: request state — "Requested" (a pending request, anyone's)
+          and "Blocked" (admin blacklist, which never touches the request rows,
+          so both can hold at once). One stack like the top-left chips, so they
+          no longer paint on top of each other at the same corner.
+          pointer-events-none: the chip sat over the revealed bubble's corner
+          on ordinary card widths and a click there bubbled to the card (→ the
+          detail page) instead of the bubble. It fades whenever the overlay is
+          revealed for the same reason — the two share the poster's bottom
+          edge — and stays hidden while the confirm prompt is up. */}
+      {!isAvailable &&
+        ((media.requested || uiReqState === "requested") || (!isRequested && blacklisted)) && (
+        <div
+          className={cn(
+            "absolute bottom-1.5 left-1.5 flex flex-col items-start gap-1 pointer-events-none transition-opacity",
+            uiReqState === "confirm"
+              ? "opacity-0"
+              : "group-hover:opacity-0 group-focus-within:opacity-0",
+          )}
+        >
+          {(media.requested || uiReqState === "requested") && (
+            <span
+              className="ds-chip ds-chip-accent"
+              style={{ paddingLeft: 5, paddingRight: 6 }}
+            >
+              <CheckCircle style={{ width: 9, height: 9 }} />
+              {t("media.badge.requested")}
+            </span>
+          )}
+          {!isRequested && blacklisted && (
+            <span
+              className="ds-chip"
+              style={{
+                paddingLeft: 5,
+                paddingRight: 6,
+                background: "color-mix(in oklab, var(--ds-bg-inset) 80%, transparent)",
+                color: "var(--ds-fg-muted)",
+                border: "1px solid var(--ds-border)",
+              }}
+            >
+              <Ban style={{ width: 9, height: 9 }} />
+              {t("media.card.blocked")}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Top-right: TMDB community score (at-a-glance). Detailed ratings live in the RatingsBar below. */}
+      {media.voteAverage > 0 && (
+        <div
+          className="ds-mono absolute top-1.5 right-1.5 inline-flex items-center gap-1"
+          style={{
+            fontSize: 10.5,
+            fontWeight: 600,
+            padding: "2px 6px",
+            borderRadius: 4,
+            background:
+              "color-mix(in oklab, var(--ds-bg-inset) 80%, transparent)",
+            backdropFilter: "blur(6px)",
+            border: "1px solid var(--ds-border)",
+            color: "var(--ds-fg)",
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              fontSize: 9,
+              lineHeight: 1,
+              color: "var(--ds-warning)",
+            }}
+          >
+            ★
+          </span>
+          {/* Brand name, not a catalog string. Without it the badge read as a
+              bare "7.8" between the poster alt and the chips. */}
+          <span className="sr-only">TMDB </span>
+          {media.voteAverage.toFixed(1)}
+        </div>
+      )}
+    </>
   );
 }
 

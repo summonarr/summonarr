@@ -4,7 +4,10 @@ import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useMinuteTick } from "@/hooks/use-minute-tick";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { RECENT_PLAYS_PAGE_SIZE } from "@/lib/activity-constants";
+import { formatSeasonEpisode } from "@/lib/episode-label";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { formatDurationHM } from "@/lib/format-duration";
 import {
@@ -12,9 +15,9 @@ import {
   Avatar,
   MethodPill,
   ProgressTrack,
+  SourceDot,
   fmtBitrate,
   methodLabel,
-  sourceDotColor,
 } from "@/components/admin/activity-ui";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Button } from "@/components/ui/button";
@@ -167,10 +170,13 @@ export function ActivityRecentPlays({
   const [plays, setPlays] = useState<RecentPlay[]>(initialPlays);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [hasMore, setHasMore] = useState(initialPlays.length >= 20);
+  const [hasMore, setHasMore] = useState(initialPlays.length >= RECENT_PLAYS_PAGE_SIZE);
   const [page, setPage] = useState(1);
   const [loadError, setLoadError] = useState(false);
   const mounted = useHasMounted();
+  // Re-renders once a minute so the "Started" relative times keep up on a page
+  // left open (they are mounted-gated below, guardrail 16).
+  useMinuteTick();
   const t = useT();
   const locale = useLocale();
 
@@ -188,12 +194,27 @@ export function ActivityRecentPlays({
   // sends new props but keeps this component (and its useState) alive, so we
   // copy the fresh `plays` prop into state here. Same pattern as
   // browse-grid.tsx and audit-log-table.tsx.
+  //
+  // On page 1 the fresh page replaces the list. Past it, replacing would throw
+  // away the rows loaded with "Load more", so the plays not already listed are
+  // merged in, in the server's own order (startedAt desc, id desc), and page and
+  // hasMore stay as they are: a later page that repeats a row is deduped there.
   useEffect(() => {
-    // Only while still on page 1: otherwise every finished stream would throw
-    // away the rows the user loaded with "Load more".
-    if (page !== 1) return;
-    setPlays(initialPlays);
-    setHasMore(initialPlays.length >= 20);
+    if (page === 1) {
+      setPlays(initialPlays);
+      setHasMore(initialPlays.length >= RECENT_PLAYS_PAGE_SIZE);
+      return;
+    }
+    setPlays((prev) => {
+      const seen = new Set(prev.map((p) => p.id));
+      const fresh = initialPlays.filter((p) => !seen.has(p.id));
+      if (fresh.length === 0) return prev;
+      return [...fresh, ...prev].sort((a, b) =>
+        a.startedAt !== b.startedAt
+          ? a.startedAt < b.startedAt ? 1 : -1
+          : a.id < b.id ? 1 : a.id > b.id ? -1 : 0,
+      );
+    });
   }, [initialPlays, page]);
 
   const loadMore = async () => {
@@ -203,11 +224,11 @@ export function ActivityRecentPlays({
       const nextPage = page + 1;
       const filterParams = new URLSearchParams();
       filterParams.set("page", String(nextPage));
-      filterParams.set("limit", "20");
-      // Page 1 came from the server as 20 plain PlayHistory rows. The API
-      // normally groups related rows (referenceId chains) together, which would
-      // make "page 2" start at the wrong place and skip rows, so ask for
-      // ungrouped rows to match page 1.
+      filterParams.set("limit", String(RECENT_PLAYS_PAGE_SIZE));
+      // Page 1 came from the server as RECENT_PLAYS_PAGE_SIZE plain PlayHistory
+      // rows. The API normally groups related rows (referenceId chains)
+      // together, which would make "page 2" start at the wrong place and skip
+      // rows, so ask for ungrouped rows to match page 1.
       filterParams.set("ungrouped", "true");
       if (source) filterParams.set("source", source);
       if (mediaType) filterParams.set("mediaType", mediaType);
@@ -263,7 +284,7 @@ export function ActivityRecentPlays({
         return [...prev, ...items.filter((p) => !seen.has(p.id))];
       });
       setPage(nextPage);
-      setHasMore(items.length >= 20);
+      setHasMore(items.length >= RECENT_PLAYS_PAGE_SIZE);
     } catch (err) {
       // onClick does not await loadMore, so a network error must be caught
       // here or it becomes an unhandled promise rejection.
@@ -349,11 +370,15 @@ export function ActivityRecentPlays({
             >
               <thead>
                 <tr style={{ background: "var(--ds-bg-1)" }}>
+                  {/* The chevron and progress columns have no visible
+                      heading; a screen reader still gets a name for each. */}
                   <th
                     scope="col"
                     className="ds-mono uppercase"
                     style={{ ...TH, width: 26 }}
-                  />
+                  >
+                    <span className="sr-only">{t("adminActivity.field.details")}</span>
+                  </th>
                   {[
                     t("adminActivity.field.user"),
                     t("adminActivity.field.title"),
@@ -361,22 +386,18 @@ export function ActivityRecentPlays({
                     t("adminActivity.field.duration"),
                     t("adminActivity.field.stream"),
                     t("adminActivity.field.quality"),
-                    "",
-                  ].map(
-                    (h, i) => (
-                      <th
-                        key={i}
-                        scope="col"
-                        className="ds-mono uppercase"
-                        style={{
-                          ...TH,
-                          textAlign: h === "" ? "right" : "left",
-                        }}
-                      >
-                        {h}
-                      </th>
-                    ),
-                  )}
+                  ].map((h, i) => (
+                    <th key={i} scope="col" className="ds-mono uppercase" style={TH}>
+                      {h}
+                    </th>
+                  ))}
+                  <th
+                    scope="col"
+                    className="ds-mono uppercase"
+                    style={{ ...TH, textAlign: "right" }}
+                  >
+                    <span className="sr-only">{t("adminActivity.field.progress")}</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -402,16 +423,9 @@ export function ActivityRecentPlays({
                     p.tmdbId && p.mediaType
                       ? `/admin/activity/media/${p.tmdbId}?type=${p.mediaType}`
                       : null;
+                  // An unknown season/episode is dropped, never "S00 · E00".
                   const sub = isTV
-                    ? [
-                        p.seasonNumber != null
-                          ? `S${String(p.seasonNumber).padStart(2, "0")}`
-                          : null,
-                        p.episodeNumber != null
-                          ? `E${String(p.episodeNumber).padStart(2, "0")}`
-                          : null,
-                        p.episodeTitle,
-                      ]
+                    ? [formatSeasonEpisode(p.seasonNumber, p.episodeNumber), p.episodeTitle]
                         .filter(Boolean)
                         .join(" · ")
                     : t("adminActivity.common.movie");
@@ -465,14 +479,7 @@ export function ActivityRecentPlays({
                               size={20}
                             />
                             <span>{p.username}</span>
-                            <span
-                              style={{
-                                width: 4,
-                                height: 4,
-                                borderRadius: 999,
-                                background: sourceDotColor(p.source),
-                              }}
-                            />
+                            <SourceDot source={p.source} size={4} />
                             {/* Instance slug for a named server. Rendered only
                                 when non-empty — "" is both the default server
                                 and every pre-multi-server row, which must stay

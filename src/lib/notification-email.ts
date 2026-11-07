@@ -1,6 +1,5 @@
 import "server-only";
-
-const SYNTHETIC_EMAIL_SUFFIXES = ["@jellyfin.local", "@discord.local"] as const;
+import { isReservedEmailDomain } from "@/lib/reserved-email";
 
 /**
  * Resolves the address to use for outgoing email notifications for a given user row.
@@ -12,9 +11,10 @@ const SYNTHETIC_EMAIL_SUFFIXES = ["@jellyfin.local", "@discord.local"] as const;
  *      provider already guaranteed a real email address on signup (credentials/Plex/OIDC)
  *      but whose notificationEmail hasn't been backfilled yet.
  *
- * Synthetic identities (`jellyfin-<id>@jellyfin.local`, `discord_<id>@discord.local`)
- * are never used — they are placeholders for the unique constraint on `User.email`,
- * not delivery addresses. Handing them to SMTP would hard-bounce.
+ * Synthetic identities (`jellyfin-<id>@jellyfin.local`, `discord_<id>@discord.local`,
+ * a purged account's `deleted-<id>@deleted.invalid`) are never used — they are
+ * placeholders for the unique constraint on `User.email`, not delivery addresses
+ * (the one list lives in reserved-email.ts). Handing them to SMTP would hard-bounce.
  *
  * Returns `null` when there is no deliverable address, signalling the caller to skip
  * sending. This is the correct behaviour for Jellyfin/Discord users who haven't set one yet.
@@ -26,7 +26,6 @@ export function resolveUserNotificationEmail(user: {
   if (user.notificationEmail && user.notificationEmail.trim() !== "") {
     return user.notificationEmail;
   }
-  const lowered = user.email.toLowerCase();
-  if (SYNTHETIC_EMAIL_SUFFIXES.some((suffix) => lowered.endsWith(suffix))) return null;
+  if (isReservedEmailDomain(user.email)) return null;
   return user.email || null;
 }

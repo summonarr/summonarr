@@ -1,12 +1,13 @@
 import { authActive } from "@/lib/auth";
 import { prisma, getSettingDecryptFailures } from "@/lib/prisma";
-import { Prisma } from "@/generated/prisma";
-import { parseCronLastRun, parseCronRunHistory, countCronRunsSince, CRON_RUN_HISTORY_LIMIT } from "@/lib/cron-auth";
+import { parseCronLastRun, parseCronRunHistory, countCronRunsSince, CRON_RUN_HISTORY_LIMIT } from "@/lib/cron-history";
 import { redirect } from "next/navigation";
+import { first, type PageSearchParams } from "@/lib/search-params";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { countPlexServerMembers } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
+import { readDbCounts, type DbCounts } from "@/lib/settings-db-counts";
 import { PageHeader } from "@/components/ui/design";
 import { NotificationAgentsManager } from "@/components/settings/notification-agents-manager";
 import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton, AuditRetentionForm } from "@/components/settings/settings-ui";
@@ -39,9 +40,12 @@ import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { ArrWatchForm } from "@/components/settings/forms/arr-watch-form";
 import { ARR_WATCH_DISK_LOW_PERCENT_KEY, parseDiskLowPercent } from "@/lib/arr-watch";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
+import type { Locale } from "@/lib/i18n/locales";
 import type { Translator } from "@/lib/i18n/translate";
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
+import { siteBaseUrl } from "@/lib/site-base-url";
 import { LocalDateTime } from "@/components/local-date-time";
+import { STATS_TIME_ZONE_KEY, processTimeZone } from "@/lib/stats-time-zone";
 
 // Labels and groups are catalog keys, translated at render (never at module
 // load — the locale is per request).
@@ -173,8 +177,8 @@ const ALL_KEYS = [
   "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kLanguageProfileId", "sonarr4kWebhookSecret", "sonarr4kExternalUrl",
   "request4kAll",
   // plexAdminToken is read here for the system tab's Plex share count.
-  "plexAdminEmail", "plexServerUrl", "plexAdminToken", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
-  "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
+  "plexAdminEmail", "plexServerUrl", "plexAdminToken", "plexLibraries", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
+  "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
   "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
   "motdEnabled", "motdTitle", "motdBody",
   "siteTitle", "siteUrl",
@@ -194,7 +198,7 @@ const ALL_KEYS = [
   "enableMachineSession", "machineSessionAllowedIps",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
   "concurrentStreamLimit", "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
-  "playHistoryPollingInterval", "playHistoryRetentionDays",
+  "playHistoryPollingInterval", "playHistoryRetentionDays", STATS_TIME_ZONE_KEY,
   "watchGradeGraceDays", "watchGradeWindowDays", "watchGradeTvPercent", "watchGradeOtherViewers",
   "watchGradeBandA", "watchGradeBandB", "watchGradeBandC", "watchGradeBandD", "watchGradeMinRequests",
   "omdbApiKey", "mdblistApiKey", MDBLIST_PLAN_SETTING_KEY, "traktClientId", "traktClientSecret", "ratingsHiddenSources",
@@ -222,16 +226,81 @@ const EMPTY_MDBLIST_USAGE = {
 
 const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "features", "system"];
 
+// Every scheduled job the System tab lists, once: the run-ledger target its
+// last run and runs/h are read under, the endpoint its Run button POSTs to, and
+// the interval env var with the container's default (docker-entrypoint.sh's
+// _CRON_JOBS). Catalog keys are written out whole so the unused-key scan sees
+// them.
+const CRON_JOBS: ReadonlyArray<{
+  target: string;
+  nameKey: string;
+  descriptionKey: string;
+  endpoint: string;
+  envVar: string;
+  defaultSeconds: string;
+}> = [
+  { target: "sync:full", nameKey: "settings.cron.job.librarySync.name", descriptionKey: "settings.cron.job.librarySync.description", endpoint: "/api/sync", envVar: "SYNC_INTERVAL", defaultSeconds: "3600" },
+  { target: "upcoming-cache", nameKey: "settings.cron.job.upcomingSync.name", descriptionKey: "settings.cron.job.upcomingSync.description", endpoint: "/api/sync/upcoming", envVar: "UPCOMING_SYNC_INTERVAL", defaultSeconds: "86400" },
+  { target: "ratings-sync", nameKey: "settings.cron.job.ratingsSync.name", descriptionKey: "settings.cron.job.ratingsSync.description", endpoint: "/api/sync/ratings", envVar: "RATINGS_SYNC_INTERVAL", defaultSeconds: "86400" },
+  { target: "list-cache", nameKey: "settings.cron.job.warmListCache.name", descriptionKey: "settings.cron.job.warmListCache.description", endpoint: "/api/cron/warm-list-cache", envVar: "LIST_CACHE_SYNC_INTERVAL", defaultSeconds: "21600" },
+  { target: "activity", nameKey: "settings.cron.job.warmActivity.name", descriptionKey: "settings.cron.job.warmActivity.description", endpoint: "/api/cron/warm-activity", envVar: "WARM_ACTIVITY_INTERVAL", defaultSeconds: "1800" },
+  { target: "mdblist", nameKey: "settings.cron.job.warmMdblist.name", descriptionKey: "settings.cron.job.warmMdblist.description", endpoint: "/api/cron/warm-mdblist", envVar: "WARM_MDBLIST_INTERVAL", defaultSeconds: "86400" },
+  { target: "omdb", nameKey: "settings.cron.job.warmOmdb.name", descriptionKey: "settings.cron.job.warmOmdb.description", endpoint: "/api/cron/warm-omdb", envVar: "WARM_OMDB_INTERVAL", defaultSeconds: "86400" },
+  { target: "recommendations", nameKey: "settings.cron.job.warmRecommendations.name", descriptionKey: "settings.cron.job.warmRecommendations.description", endpoint: "/api/cron/warm-recommendations", envVar: "WARM_RECOMMENDATIONS_INTERVAL", defaultSeconds: "43200" },
+  // Distinct from Admin -> Library's "Warm library cache" button, which
+  // POSTs /api/admin/library-warm: that one runs the metadata walk ALONE,
+  // records no cron run, and so never appears in this table. This row is
+  // the only browser trigger that also builds the suggestion graph.
+  { target: "library", nameKey: "settings.cron.job.warmLibrary.name", descriptionKey: "settings.cron.job.warmLibrary.description", endpoint: "/api/cron/warm-library", envVar: "WARM_LIBRARY_INTERVAL", defaultSeconds: "86400" },
+  { target: "auth-sessions:purge-expired", nameKey: "settings.cron.job.purgeSessions.name", descriptionKey: "settings.cron.job.purgeSessions.description", endpoint: "/api/cron/purge-auth-sessions", envVar: "PURGE_SESSIONS_INTERVAL", defaultSeconds: "86400" },
+  { target: "notifications:purge", nameKey: "settings.cron.job.purgeNotifications.name", descriptionKey: "settings.cron.job.purgeNotifications.description", endpoint: "/api/cron/purge-notifications", envVar: "PURGE_NOTIFICATIONS_INTERVAL", defaultSeconds: "86400" },
+  { target: "audit-log:pii-scrub", nameKey: "settings.cron.job.scrubAuditPii.name", descriptionKey: "settings.cron.job.scrubAuditPii.description", endpoint: "/api/cron/scrub-audit-pii", envVar: "SCRUB_AUDIT_PII_INTERVAL", defaultSeconds: "86400" },
+  { target: "trash-sync", nameKey: "settings.cron.job.trashSync.name", descriptionKey: "settings.cron.job.trashSync.description", endpoint: "/api/cron/trash-sync", envVar: "TRASH_SYNC_INTERVAL", defaultSeconds: "86400" },
+  { target: "plex-watchlist", nameKey: "settings.cron.job.plexWatchlist.name", descriptionKey: "settings.cron.job.plexWatchlist.description", endpoint: "/api/cron/sync-plex-watchlists", envVar: "PLEX_WATCHLIST_SYNC_INTERVAL", defaultSeconds: "1800" },
+  { target: "trakt", nameKey: "settings.cron.job.trakt.name", descriptionKey: "settings.cron.job.trakt.description", endpoint: "/api/cron/sync-trakt", envVar: "TRAKT_SYNC_INTERVAL", defaultSeconds: "1800" },
+  { target: "upstream-watch", nameKey: "settings.cron.job.upstreamWatch.name", descriptionKey: "settings.cron.job.upstreamWatch.description", endpoint: "/api/cron/refresh-upstream-watch", envVar: "UPSTREAM_WATCH_SYNC_INTERVAL", defaultSeconds: "86400" },
+  { target: "watch-sync", nameKey: "settings.cron.job.watchSync.name", descriptionKey: "settings.cron.job.watchSync.description", endpoint: "/api/cron/watch-sync", envVar: "WATCH_SYNC_INTERVAL", defaultSeconds: "300" },
+  { target: "arr-watch", nameKey: "settings.cron.job.arrWatch.name", descriptionKey: "settings.cron.job.arrWatch.description", endpoint: "/api/cron/arr-watch", envVar: "ARR_WATCH_INTERVAL", defaultSeconds: "900" },
+  { target: "arr-snapshots", nameKey: "settings.cron.job.arrSnapshots.name", descriptionKey: "settings.cron.job.arrSnapshots.description", endpoint: "/api/cron/refresh-arr-snapshots", envVar: "ARR_SNAPSHOT_INTERVAL", defaultSeconds: "300" },
+  // Not a container cron of its own: the orchestrator runs the same pass every
+  // sync, so it shares the library sync's interval.
+  { target: "download-policies", nameKey: "settings.cron.job.downloadPolicy.name", descriptionKey: "settings.cron.job.downloadPolicy.description", endpoint: "/api/cron/sync-download-policies", envVar: "SYNC_INTERVAL", defaultSeconds: "3600" },
+];
+
+// One metric group's tiles. Values arrive formatted, so toLocaleString runs
+// here on the server in the page's locale; `dim` greys a value that means
+// "nothing yet".
+function MetricGrid({ items, className }: { items: Array<{ label: string; value: ReactNode; dim?: boolean }>; className?: string }) {
+  return (
+    <div className={className ? `grid grid-cols-2 sm:grid-cols-4 gap-2 ${className}` : "grid grid-cols-2 sm:grid-cols-4 gap-2"}>
+      {items.map(({ label, value, dim }) => (
+        <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
+          <p className="text-xs text-zinc-500 mb-1">{label}</p>
+          <p className={`text-xl font-semibold tabular-nums ${dim ? "text-zinc-500" : "text-zinc-100"}`}>{value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// The "Current shares" tile's value: awaited behind its own <Suspense>, because
+// the live Plex/Jellyfin calls behind it can take up to ~30s against an
+// unreachable plex.tv and must not hold the rest of the System tab.
+async function CurrentSharesValue({ count, locale }: { count: Promise<number | null>; locale: Locale }) {
+  const n = await count;
+  return <>{n !== null ? n.toLocaleString(locale) : "—"}</>;
+}
+
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   const [sp, session] = await Promise.all([searchParams, authActive()]);
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
-  const rawTab = sp.tab as TabId | undefined;
+  const rawTab = first(sp.tab) as TabId | undefined;
   const tab: TabId = rawTab && VALID_TABS.includes(rawTab) ? rawTab : "site";
 
   const rows = await prisma.setting.findMany({ where: { key: { in: [...ALL_KEYS] } } });
@@ -272,177 +341,63 @@ export default async function SettingsPage({
   // (guardrail 36).
   const syncServers = tab === "system" ? await configuredLibrarySyncServers() : [];
 
-  const baseUrl = cfg.siteUrl?.replace(/\/$/, "") ?? process.env.AUTH_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
+  // The copyable webhook URLs' root: a cleared Site URL ("") falls through to
+  // AUTH_URL, and BASE_PATH is on the end so a sub-path install's URLs resolve.
+  // The token itself never reaches the page (the copy button fetches it).
+  const baseUrl = siteBaseUrl(cfg.siteUrl, process.env.AUTH_URL, process.env.BASE_PATH);
 
-  let metrics: {
-    totalRequests: number; pendingRequests: number; approvedRequests: number;
-    availableRequests: number; declinedRequests: number; movieRequests: number; tvRequests: number;
-    totalUsers: number; adminUsers: number; issueAdminUsers: number; discordLinkedUsers: number;
-    totalIssues: number; openIssues: number; inProgressIssues: number; resolvedIssues: number;
-    plexItems: number; jellyfinItems: number; plexTvShows: number; jellyfinTvShows: number;
-    plexShowsWithEps: number; jellyfinShowsWithEps: number;
+  let metrics: (DbCounts & {
     uniqueLibraryItems: number;
-    tmdbCacheEntries: number; omdbCacheEntries: number;
-    upcomingItems: number; episodeCacheEntries: number; radarrWanted: number; radarrAvailable: number; sonarrWanted: number; sonarrAvailable: number;
-    deletionVotes: number;
-    tmdbCoreEntries: number; tmdbCoreMovies: number; tmdbCoreTv: number;
-    playHistoryEntries: number; mediaServerUsers: number; discordCacheEntries: number;
-    currentShares: number | null;
+    currentShares: Promise<number | null>;
     cronJobs: CronJobInfo[];
-  } | null = null;
+  }) | null = null;
 
   if (tab === "system") {
-    const [
-      totalRequests, pendingRequests, approvedRequests, availableRequests, declinedRequests,
-      movieRequests, tvRequests,
-      totalUsers, adminUsers, issueAdminUsers, discordLinkedUsers,
-      totalIssues, openIssues, inProgressIssues, resolvedIssues,
-      plexItems, jellyfinItems, plexTvShows, jellyfinTvShows,
-      plexShowsWithEps, jellyfinShowsWithEps,
-      tmdbCacheEntries, omdbCacheEntries, upcomingItems, episodeCacheEntries,
-      radarrWanted, radarrAvailable, sonarrWanted, sonarrAvailable, deletionVotes,
-      tmdbCoreEntries, tmdbCoreMovies, tmdbCoreTv,
-      playHistoryEntries, mediaServerUsers, discordCacheEntries,
-      uniqueLibraryItems,
-    ] = await Promise.all([
-      prisma.mediaRequest.count(),
-      prisma.mediaRequest.count({ where: { status: "PENDING" } }),
-      prisma.mediaRequest.count({ where: { status: "APPROVED" } }),
-      prisma.mediaRequest.count({ where: { status: "AVAILABLE" } }),
-      prisma.mediaRequest.count({ where: { status: "DECLINED" } }),
-      prisma.mediaRequest.count({ where: { mediaType: "MOVIE" } }),
-      prisma.mediaRequest.count({ where: { mediaType: "TV" } }),
-      prisma.user.count(),
-      prisma.user.count({ where: { role: "ADMIN" } }),
-      prisma.user.count({ where: { role: "ISSUE_ADMIN" } }),
-      prisma.user.count({ where: { NOT: { discordId: null } } }),
-      prisma.issue.count(),
-      prisma.issue.count({ where: { status: "OPEN" } }),
-      prisma.issue.count({ where: { status: "IN_PROGRESS" } }),
-      prisma.issue.count({ where: { status: "RESOLVED" } }),
-      prisma.plexLibraryItem.count(),
-      prisma.jellyfinLibraryItem.count(),
-
-      // TV COVERAGE: both halves must come from the SAME population or the
-      // ratio is meaningless — this pair used to read 1,798 / 1,796 because the
-      // numerator counted DISTINCT tmdbId in TVEpisodeCache while the
-      // denominator was a raw row count on the library table. Two ways they
-      // drifted: the library tables are keyed [tmdbId, mediaType,
-      // serverInstance] so a title on two servers counted twice, and
-      // TVEpisodeCache has no serverInstance column and is only rewritten when
-      // every configured instance's fetch succeeds (guardrail 35), so it lags
-      // and retains rows for titles the library no longer holds.
-      //
-      // Denominator: DISTINCT shows in the library. Numerator: those of them
-      // that actually have episode rows. The EXISTS makes covered ≤ total by
-      // construction, so a stale episode-cache row can never push it over 100%.
-      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`SELECT COUNT(DISTINCT "tmdbId")::bigint AS count FROM "PlexLibraryItem" WHERE "mediaType" = 'TV'`).then((r) => Number(r[0].count)),
-      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`SELECT COUNT(DISTINCT "tmdbId")::bigint AS count FROM "JellyfinLibraryItem" WHERE "mediaType" = 'TV'`).then((r) => Number(r[0].count)),
-
-      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`
-        SELECT COUNT(DISTINCT p."tmdbId")::bigint AS count
-        FROM "PlexLibraryItem" p
-        WHERE p."mediaType" = 'TV'
-          AND EXISTS (SELECT 1 FROM "TVEpisodeCache" e WHERE e."tmdbId" = p."tmdbId" AND e.source = 'plex')
-      `).then((r) => Number(r[0].count)),
-      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`
-        SELECT COUNT(DISTINCT j."tmdbId")::bigint AS count
-        FROM "JellyfinLibraryItem" j
-        WHERE j."mediaType" = 'TV'
-          AND EXISTS (SELECT 1 FROM "TVEpisodeCache" e WHERE e."tmdbId" = j."tmdbId" AND e.source = 'jellyfin')
-      `).then((r) => Number(r[0].count)),
-      prisma.tmdbCache.count({ where: { key: { not: { startsWith: "omdb:" } } } }),
-      prisma.tmdbCache.count({ where: { key: { startsWith: "omdb:" } } }),
-      prisma.upcomingCacheItem.count(),
-      prisma.tVEpisodeCache.count(),
-      prisma.radarrWantedItem.count(),
-      prisma.radarrAvailableItem.count(),
-      prisma.sonarrWantedItem.count(),
-      prisma.sonarrAvailableItem.count(),
-      prisma.deletionVote.count(),
-      prisma.tmdbMediaCore.count(),
-      prisma.tmdbMediaCore.count({ where: { mediaType: "MOVIE" } }),
-      prisma.tmdbMediaCore.count({ where: { mediaType: "TV" } }),
-      prisma.playHistory.count(),
-      prisma.mediaServerUser.count(),
-      prisma.discordSearchCache.count({ where: { expiresAt: { gt: new Date() } } }),
-
-      countUniqueLibraryItems(),
-    ]);
-
+    // Started first so it overlaps the database reads, and awaited only inside
+    // the tile's <Suspense> (CurrentSharesValue): live server calls must not
+    // hold the tab. An unconfigured server is never asked (guardrail 36).
     // plexAdminToken / jellyfinUrl / jellyfinApiKey are all in ALL_KEYS, so `cfg`
     // already holds the decrypted values (the prisma extension decrypts findMany
     // rows exactly as it does findUnique) — no second read needed.
-    let currentShares: number | null = null;
-    const shareCounts = await Promise.allSettled([
+    const currentShares = Promise.allSettled([
       // This server's members (owner + the friends it is shared with), not
-      // every plex.tv friend of the admin account.
+      // every plex.tv friend of the admin account; null when the server or
+      // plex.tv can't answer, so the tile shows "—" rather than a wrong count.
       cfg.plexServerUrl && cfg.plexAdminToken
         ? countPlexServerMembers(cfg.plexAdminToken, cfg.plexServerUrl)
         : Promise.resolve(null),
       cfg.jellyfinUrl && cfg.jellyfinApiKey
         ? getJellyfinUserCount(cfg.jellyfinUrl, cfg.jellyfinApiKey)
         : Promise.resolve(null),
-    ]);
-    const plexCount = shareCounts[0].status === "fulfilled" ? shareCounts[0].value : null;
-    const jfCount   = shareCounts[1].status === "fulfilled" ? shareCounts[1].value : null;
-    if (plexCount !== null || jfCount !== null) {
-      currentShares = (plexCount ?? 0) + (jfCount ?? 0);
-    }
+    ]).then(([plex, jellyfin]) => {
+      const plexCount = plex.status === "fulfilled" ? plex.value : null;
+      const jfCount = jellyfin.status === "fulfilled" ? jellyfin.value : null;
+      return plexCount === null && jfCount === null ? null : (plexCount ?? 0) + (jfCount ?? 0);
+    });
 
-    const cronTargets = [
-      "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
-      "activity", "mdblist", "omdb", "recommendations", "library", "audit-log:pii-scrub", "auth-sessions:purge-expired",
-      "trash-sync", "download-policies", "plex-watchlist", "trakt", "upstream-watch", "watch-sync", "arr-watch", "arr-snapshots",
-    ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
     // (admin- or cron-triggered). Several warm jobs deliberately skip the
     // audit log on cron to avoid flooding, so reading the audit table alone
     // showed stale "Last Run" values for those jobs.
+    const cronTargets = CRON_JOBS.map((job) => job.target);
     const settingKeys = cronTargets.map((t) => `cron:lastRun:${t}`);
-    const [lastRunSettings, lastRuns] = await Promise.all([
+    const [counts, uniqueLibraryItems, lastRunSettings] = await Promise.all([
+      readDbCounts(new Date()),
+      countUniqueLibraryItems(),
       prisma.setting.findMany({
         where: { key: { in: settingKeys } },
         select: { key: true, value: true },
       }),
-      // One index-bounded LIMIT-1 read per target (`@@index([target])`), NOT a
-      // single `distinct: ["target"]` query: Prisma's query compiler implements
-      // `distinct` client-side, so that shape transferred EVERY audit row for
-      // these targets (the orchestrator writes one per run, kept for 365 days)
-      // into Node on each System-tab render just to keep one per target.
-      Promise.all(
-        cronTargets.map((target) =>
-          prisma.auditLog.findFirst({
-            where: { target },
-            orderBy: { createdAt: "desc" },
-            select: { target: true, createdAt: true, details: true },
-          }),
-        ),
-      ),
     ]);
+
     const lastRunMap = new Map<string, { createdAt: Date; details: string | null }>();
     // Bounded run history, Setting-rows only — the audit-log fallback below has
     // no equivalent, so a target that only ever reported there stays null and
     // the table simply omits a rate for it rather than showing a wrong one.
     const historyMap = new Map<string, ReturnType<typeof parseCronRunHistory>>();
     for (const s of lastRunSettings) {
-      historyMap.set(s.key.replace(/^cron:lastRun:/, ""), parseCronRunHistory(s.value));
-    }
-    // Read the clock ONCE, here on the server, and pass the resulting counts to
-    // the client component as plain numbers (guardrail 16) — the cron table is
-    // a "use client" component, so a clock read on its side of the boundary
-    // would be the hydration bug that guardrail exists to prevent.
-    // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
-    const oneHourAgoMs = Date.now() - 60 * 60 * 1000;
-    // The audit log is the fallback for jobs that only ever logged there
-    // (e.g. upcoming-cache, trash-sync). Once a job has a Setting row, the
-    // loop after this one overwrites the fallback with it.
-    for (const r of lastRuns) {
-      if (!r) continue;
-      lastRunMap.set(r.target, { createdAt: r.createdAt, details: r.details });
-    }
-    for (const s of lastRunSettings) {
       const target = s.key.replace(/^cron:lastRun:/, "");
+      historyMap.set(target, parseCronRunHistory(s.value));
       const parsed = parseCronLastRun(s.value);
       if (!parsed) continue;
       // parseCronLastRun passes `at` through verbatim (its tests pin that), so a
@@ -457,17 +412,37 @@ export default async function SettingsPage({
       });
     }
 
+    // The audit log is the fallback for a job with no usable ledger row (one
+    // that has not run since the ledger existed), so it is asked only for those.
+    // One index-bounded LIMIT-1 read per target (`@@index([target])`), NOT a
+    // single `distinct: ["target"]` query: Prisma's query compiler implements
+    // `distinct` client-side, so that shape transferred EVERY audit row for
+    // these targets (the orchestrator writes one per run, kept for 365 days)
+    // into Node on each System-tab render just to keep one per target.
+    const unrecorded = cronTargets.filter((target) => !lastRunMap.has(target));
+    const lastRuns = await Promise.all(
+      unrecorded.map((target) =>
+        prisma.auditLog.findFirst({
+          where: { target },
+          orderBy: { createdAt: "desc" },
+          select: { target: true, createdAt: true, details: true },
+        }),
+      ),
+    );
+    for (const r of lastRuns) {
+      if (!r) continue;
+      lastRunMap.set(r.target, { createdAt: r.createdAt, details: r.details });
+    }
+
+    // Read the clock ONCE, here on the server, and pass the resulting counts to
+    // the client component as plain numbers (guardrail 16) — the cron table is
+    // a "use client" component, so a clock read on its side of the boundary
+    // would be the hydration bug that guardrail exists to prevent.
+    // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
+    const oneHourAgoMs = Date.now() - 60 * 60 * 1000;
+
     metrics = {
-      totalRequests, pendingRequests, approvedRequests, availableRequests, declinedRequests,
-      movieRequests, tvRequests,
-      totalUsers, adminUsers, issueAdminUsers, discordLinkedUsers,
-      totalIssues, openIssues, inProgressIssues, resolvedIssues,
-      plexItems, jellyfinItems, plexTvShows, jellyfinTvShows,
-      plexShowsWithEps, jellyfinShowsWithEps,
-      tmdbCacheEntries, omdbCacheEntries,
-      upcomingItems, episodeCacheEntries, radarrWanted, radarrAvailable, sonarrWanted, sonarrAvailable, deletionVotes,
-      tmdbCoreEntries, tmdbCoreMovies, tmdbCoreTv,
-      playHistoryEntries, mediaServerUsers, discordCacheEntries,
+      ...counts,
       uniqueLibraryItems,
       currentShares,
       cronJobs: buildCronJobs(lastRunMap, historyMap, oneHourAgoMs),
@@ -507,31 +482,13 @@ export default async function SettingsPage({
       return { lastRun: row.createdAt.toISOString(), lastDuration: durationMs, lastStatus, runsLastHour, runsLastHourCapped };
     }
 
-    return [
-      { name: t("settings.cron.job.librarySync.name"), description: t("settings.cron.job.librarySync.description"), endpoint: "/api/sync", interval: formatInterval(t, process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("sync:full") },
-      { name: t("settings.cron.job.upcomingSync.name"), description: t("settings.cron.job.upcomingSync.description"), endpoint: "/api/sync/upcoming", interval: formatInterval(t, process.env.UPCOMING_SYNC_INTERVAL, "86400"), ...lastRunInfo("upcoming-cache") },
-      { name: t("settings.cron.job.ratingsSync.name"), description: t("settings.cron.job.ratingsSync.description"), endpoint: "/api/sync/ratings", interval: formatInterval(t, process.env.RATINGS_SYNC_INTERVAL, "86400"), ...lastRunInfo("ratings-sync") },
-      { name: t("settings.cron.job.warmListCache.name"), description: t("settings.cron.job.warmListCache.description"), endpoint: "/api/cron/warm-list-cache", interval: formatInterval(t, process.env.LIST_CACHE_SYNC_INTERVAL, "21600"), ...lastRunInfo("list-cache") },
-      { name: t("settings.cron.job.warmActivity.name"), description: t("settings.cron.job.warmActivity.description"), endpoint: "/api/cron/warm-activity", interval: formatInterval(t, process.env.WARM_ACTIVITY_INTERVAL, "1800"), ...lastRunInfo("activity") },
-      { name: t("settings.cron.job.warmMdblist.name"), description: t("settings.cron.job.warmMdblist.description"), endpoint: "/api/cron/warm-mdblist", interval: formatInterval(t, process.env.WARM_MDBLIST_INTERVAL, "86400"), ...lastRunInfo("mdblist") },
-      { name: t("settings.cron.job.warmOmdb.name"), description: t("settings.cron.job.warmOmdb.description"), endpoint: "/api/cron/warm-omdb", interval: formatInterval(t, process.env.WARM_OMDB_INTERVAL, "86400"), ...lastRunInfo("omdb") },
-      { name: t("settings.cron.job.warmRecommendations.name"), description: t("settings.cron.job.warmRecommendations.description"), endpoint: "/api/cron/warm-recommendations", interval: formatInterval(t, process.env.WARM_RECOMMENDATIONS_INTERVAL, "43200"), ...lastRunInfo("recommendations") },
-      // Distinct from Admin -> Library's "Warm library cache" button, which
-      // POSTs /api/admin/library-warm: that one runs the metadata walk ALONE,
-      // records no cron run, and so never appears in this table. This row is
-      // the only browser trigger that also builds the suggestion graph.
-      { name: t("settings.cron.job.warmLibrary.name"), description: t("settings.cron.job.warmLibrary.description"), endpoint: "/api/cron/warm-library", interval: formatInterval(t, process.env.WARM_LIBRARY_INTERVAL, "86400"), ...lastRunInfo("library") },
-      { name: t("settings.cron.job.purgeSessions.name"), description: t("settings.cron.job.purgeSessions.description"), endpoint: "/api/cron/purge-auth-sessions", interval: formatInterval(t, process.env.PURGE_SESSIONS_INTERVAL, "86400"), ...lastRunInfo("auth-sessions:purge-expired") },
-      { name: t("settings.cron.job.scrubAuditPii.name"), description: t("settings.cron.job.scrubAuditPii.description"), endpoint: "/api/cron/scrub-audit-pii", interval: formatInterval(t, process.env.SCRUB_AUDIT_PII_INTERVAL, "86400"), ...lastRunInfo("audit-log:pii-scrub") },
-      { name: t("settings.cron.job.trashSync.name"), description: t("settings.cron.job.trashSync.description"), endpoint: "/api/cron/trash-sync", interval: formatInterval(t, process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
-      { name: t("settings.cron.job.plexWatchlist.name"), description: t("settings.cron.job.plexWatchlist.description"), endpoint: "/api/cron/sync-plex-watchlists", interval: formatInterval(t, process.env.PLEX_WATCHLIST_SYNC_INTERVAL, "1800"), ...lastRunInfo("plex-watchlist") },
-      { name: t("settings.cron.job.trakt.name"), description: t("settings.cron.job.trakt.description"), endpoint: "/api/cron/sync-trakt", interval: formatInterval(t, process.env.TRAKT_SYNC_INTERVAL, "1800"), ...lastRunInfo("trakt") },
-      { name: t("settings.cron.job.upstreamWatch.name"), description: t("settings.cron.job.upstreamWatch.description"), endpoint: "/api/cron/refresh-upstream-watch", interval: formatInterval(t, process.env.UPSTREAM_WATCH_SYNC_INTERVAL, "86400"), ...lastRunInfo("upstream-watch") },
-      { name: t("settings.cron.job.watchSync.name"), description: t("settings.cron.job.watchSync.description"), endpoint: "/api/cron/watch-sync", interval: formatInterval(t, process.env.WATCH_SYNC_INTERVAL, "300"), ...lastRunInfo("watch-sync") },
-      { name: t("settings.cron.job.arrWatch.name"), description: t("settings.cron.job.arrWatch.description"), endpoint: "/api/cron/arr-watch", interval: formatInterval(t, process.env.ARR_WATCH_INTERVAL, "900"), ...lastRunInfo("arr-watch") },
-      { name: t("settings.cron.job.arrSnapshots.name"), description: t("settings.cron.job.arrSnapshots.description"), endpoint: "/api/cron/refresh-arr-snapshots", interval: formatInterval(t, process.env.ARR_SNAPSHOT_INTERVAL, "300"), ...lastRunInfo("arr-snapshots") },
-      { name: t("settings.cron.job.downloadPolicy.name"), description: t("settings.cron.job.downloadPolicy.description"), endpoint: "/api/cron/sync-download-policies", interval: formatInterval(t, process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("download-policies") },
-    ];
+    return CRON_JOBS.map((job) => ({
+      name: t(job.nameKey),
+      description: t(job.descriptionKey),
+      endpoint: job.endpoint,
+      interval: formatInterval(t, process.env[job.envVar], job.defaultSeconds),
+      ...lastRunInfo(job.target),
+    }));
   }
 
   return (
@@ -751,7 +708,7 @@ export default async function SettingsPage({
                 initialEmail={cfg.plexAdminEmail ?? ""}
                 initialServerUrl={cfg.plexServerUrl ?? ""}
                 initialPlexLibraries={cfg.plexLibraries ?? ""}
-                siteUrl={cfg.siteUrl ?? process.env.AUTH_URL ?? ""}
+                siteUrl={cfg.siteUrl || process.env.AUTH_URL || ""}
               />
             </SettingsCard>
 
@@ -829,6 +786,9 @@ export default async function SettingsPage({
                 initialPollingInterval={cfg.playHistoryPollingInterval ?? "5"}
                 initialRetentionDays={cfg.playHistoryRetentionDays ?? "0"}
                 initialConcurrentStreamLimit={cfg.concurrentStreamLimit ?? "0"}
+                initialStatsTimeZone={cfg.statsTimeZone ?? ""}
+                // What a blank zone means: the server process's own (TZ).
+                defaultStatsTimeZone={processTimeZone()}
               />
             </SettingsCard>
 
@@ -1151,56 +1111,41 @@ export default async function SettingsPage({
 
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.requests.heading")}</h3>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {[
-                    { label: t("settings.metrics.total"),     value: metrics.totalRequests },
-                    { label: t("settings.metrics.pending"),   value: metrics.pendingRequests },
-                    { label: t("settings.metrics.approved"),  value: metrics.approvedRequests },
-                    { label: t("settings.metrics.available"), value: metrics.availableRequests },
-                    { label: t("settings.metrics.declined"),  value: metrics.declinedRequests },
-                    { label: t("settings.metrics.movies"),    value: metrics.movieRequests },
-                    { label: t("settings.metrics.tvShows"),  value: metrics.tvRequests },
-                  ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
-                      <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString(locale)}</p>
-                    </div>
-                  ))}
-                </div>
+                <MetricGrid
+                  items={[
+                    { label: t("settings.metrics.total"),     value: metrics.totalRequests.toLocaleString(locale) },
+                    { label: t("settings.metrics.pending"),   value: metrics.pendingRequests.toLocaleString(locale) },
+                    { label: t("settings.metrics.approved"),  value: metrics.approvedRequests.toLocaleString(locale) },
+                    { label: t("settings.metrics.available"), value: metrics.availableRequests.toLocaleString(locale) },
+                    { label: t("settings.metrics.declined"),  value: metrics.declinedRequests.toLocaleString(locale) },
+                    { label: t("settings.metrics.movies"),    value: metrics.movieRequests.toLocaleString(locale) },
+                    { label: t("settings.metrics.tvShows"),  value: metrics.tvRequests.toLocaleString(locale) },
+                  ]}
+                />
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.users.heading")}</h3>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {[
-                    { label: t("settings.metrics.total"),          value: metrics.totalUsers },
-                    { label: t("settings.metrics.admins"),         value: metrics.adminUsers },
-                    { label: t("settings.metrics.issueAdmins"),   value: metrics.issueAdminUsers },
-                    { label: t("settings.metrics.discordLinked"), value: metrics.discordLinkedUsers },
-                  ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
-                      <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString(locale)}</p>
-                    </div>
-                  ))}
-                </div>
+                <MetricGrid
+                  items={[
+                    { label: t("settings.metrics.total"),          value: metrics.totalUsers.toLocaleString(locale) },
+                    { label: t("settings.metrics.admins"),         value: metrics.adminUsers.toLocaleString(locale) },
+                    { label: t("settings.metrics.issueAdmins"),   value: metrics.issueAdminUsers.toLocaleString(locale) },
+                    { label: t("settings.metrics.discordLinked"), value: metrics.discordLinkedUsers.toLocaleString(locale) },
+                  ]}
+                />
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.issues.heading")}</h3>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {[
-                    { label: t("settings.metrics.total"),       value: metrics.totalIssues },
-                    { label: t("settings.metrics.open"),        value: metrics.openIssues },
-                    { label: t("settings.metrics.inProgress"), value: metrics.inProgressIssues },
-                    { label: t("settings.metrics.resolved"),    value: metrics.resolvedIssues },
-                  ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
-                      <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString(locale)}</p>
-                    </div>
-                  ))}
-                </div>
+                <MetricGrid
+                  items={[
+                    { label: t("settings.metrics.total"),       value: metrics.totalIssues.toLocaleString(locale) },
+                    { label: t("settings.metrics.open"),        value: metrics.openIssues.toLocaleString(locale) },
+                    { label: t("settings.metrics.inProgress"), value: metrics.inProgressIssues.toLocaleString(locale) },
+                    { label: t("settings.metrics.resolved"),    value: metrics.resolvedIssues.toLocaleString(locale) },
+                  ]}
+                />
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
@@ -1213,8 +1158,8 @@ export default async function SettingsPage({
                     <ActivityWarmButton />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {[
+                <MetricGrid
+                  items={[
                     { label: t("settings.metrics.plexItems"),           value: metrics.plexItems.toLocaleString(locale) },
                     { label: t("settings.metrics.jellyfinItems"),        value: metrics.jellyfinItems.toLocaleString(locale) },
                     { label: t("settings.metrics.tvEpisodes"),           value: metrics.episodeCacheEntries.toLocaleString(locale) },
@@ -1228,13 +1173,8 @@ export default async function SettingsPage({
                     { label: t("settings.metrics.sonarrWanted"),         value: metrics.sonarrWanted.toLocaleString(locale) },
                     { label: t("settings.metrics.sonarrAvailable"),      value: metrics.sonarrAvailable.toLocaleString(locale) },
                     { label: t("settings.metrics.deletionVotes"),        value: metrics.deletionVotes.toLocaleString(locale) },
-                  ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
-                      <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value}</p>
-                    </div>
-                  ))}
-                </div>
+                  ]}
+                />
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
@@ -1242,8 +1182,9 @@ export default async function SettingsPage({
                 <p className="text-xs text-zinc-500 mb-3">
                   {t("settings.metrics.tmdbCore.description")}
                 </p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
-                  {(() => {
+                <MetricGrid
+                  className="mb-4"
+                  items={(() => {
                     const total = metrics.tmdbCoreEntries;
 
                     const libTotal = metrics.uniqueLibraryItems;
@@ -1253,32 +1194,29 @@ export default async function SettingsPage({
                       { label: t("settings.metrics.movies"),           value: metrics.tmdbCoreMovies.toLocaleString(locale) },
                       { label: t("settings.metrics.tvShows"),         value: metrics.tmdbCoreTv.toLocaleString(locale) },
                       { label: t("settings.metrics.libraryCoverage"), value: libTotal > 0 ? `~${coveragePct}%` : "—", dim: total === 0 },
-                    ].map(({ label, value, dim }) => (
-                      <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
-                        <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                        <p className={`text-xl font-semibold tabular-nums ${dim ? "text-zinc-500" : "text-zinc-100"}`}>{value}</p>
-                      </div>
-                    ));
+                    ];
                   })()}
-                </div>
+                />
                 <MasterDbFillButton servers={syncServers} />
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.playHistory.heading")}</h3>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {[
+                <MetricGrid
+                  items={[
                     { label: t("settings.metrics.recordedSessions"),  value: metrics.playHistoryEntries.toLocaleString(locale) },
                     { label: t("settings.metrics.mediaServerUsers"), value: metrics.mediaServerUsers.toLocaleString(locale) },
-                    { label: t("settings.metrics.currentShares"),     value: metrics.currentShares !== null ? metrics.currentShares.toLocaleString(locale) : "—" },
+                    {
+                      label: t("settings.metrics.currentShares"),
+                      value: (
+                        <Suspense fallback="…">
+                          <CurrentSharesValue count={metrics.currentShares} locale={locale} />
+                        </Suspense>
+                      ),
+                    },
                     { label: t("settings.metrics.discordSearchCache"), value: metrics.discordCacheEntries.toLocaleString(locale) },
-                  ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
-                      <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value}</p>
-                    </div>
-                  ))}
-                </div>
+                  ]}
+                />
               </div>
 
             </div>

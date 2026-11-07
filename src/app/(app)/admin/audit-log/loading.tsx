@@ -8,13 +8,13 @@
 // appear once a group is selected, so the default landing has none) → the
 // filter row (two date inputs + two 30px text inputs) → the table card with a
 // ~40px header and 44px rows.
-import { Bar, ControlRow, SKELETON_CARD, SKELETON_FILL, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, ControlRow, SKELETON_CARD, SKELETON_FILL, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 const ROWS = 8;
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
 
       <div className="space-y-3 mb-4">
@@ -57,6 +57,6 @@ export default function Loading() {
           </div>
         ))}
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

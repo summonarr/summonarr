@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { MessageSquare } from "@/components/icons";
-import { IssueThread } from "@/components/issues/issue-thread";
+import { MobileIssueThread } from "@/components/issues/desktop-issue-thread";
 import { useT } from "@/components/i18n/i18n-provider";
 
 interface IssueCardShellProps {
@@ -58,10 +58,11 @@ export function IssueCardShell({ issueId, messageCount, initialOpen = false, chi
         </button>
       </div>
 
-      {/* Mobile-only expandable thread panel */}
+      {/* Mobile-only expandable thread panel. Mounted below xl only: CSS alone
+          left a second thread (its fetch and live reloads) beside the pane's. */}
       {threadOpen && (
         <div className="xl:hidden">
-          <IssueThread key={issueId} issueId={issueId} />
+          <MobileIssueThread issueId={issueId} />
         </div>
       )}
     </div>

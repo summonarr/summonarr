@@ -2,20 +2,13 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import {
-  Film,
-  Tv2,
-  PlayCircle,
-  MonitorPlay,
-  Clock,
-  CheckCircle,
-  Play,
-  ChevronRight,
-} from "@/components/icons";
+import { Fragment, useEffect, useState } from "react";
+import { Film, Tv2, Play, ChevronRight } from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { safeExternalHref } from "@/lib/safe-url";
 import { RatingsBar } from "@/components/media/ratings-bar";
+import { AvailabilityChips } from "@/components/media/availability-chips";
+import { mergeRatings } from "@/components/media/ratings-merge";
 import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -78,6 +71,13 @@ export function DiscoverHero({
     (media.trailerKey
       ? `https://www.youtube.com/watch?v=${media.trailerKey}`
       : null);
+  // Only the parts present, so the line never starts with a stray separator.
+  const metaParts = [
+    media.releaseYear || null,
+    media.certification || null,
+    media.runtime ? t("media.runtimeMinutes", { minutes: media.runtime }) : null,
+    media.mediaType === "movie" ? t("media.type.movie") : t("media.type.tv"),
+  ].filter((part): part is string => !!part);
 
   return (
     <section
@@ -144,69 +144,14 @@ export function DiscoverHero({
       >
         <div className="flex flex-wrap items-center" style={{ gap: 6 }}>
           <span className="ds-chip ds-chip-accent">{label ?? t("media.hero.trendingFirst")}</span>
-          {showPlex && media.plexAvailable && (
-            <span
-              className="ds-chip ds-chip-plex"
-              style={{ paddingLeft: 5, paddingRight: 6 }}
-            >
-              <PlayCircle style={{ width: 9, height: 9 }} />
-              Plex
-            </span>
-          )}
-          {showJellyfin && media.jellyfinAvailable && (
-            <span
-              className="ds-chip ds-chip-jellyfin"
-              style={{ paddingLeft: 5, paddingRight: 6 }}
-            >
-              <MonitorPlay style={{ width: 9, height: 9 }} />
-              Jellyfin
-            </span>
-          )}
-          {!isAvailable &&
-            media.arrPending && (
-              <span
-                className="ds-chip ds-chip-pending"
-                style={{ paddingLeft: 5, paddingRight: 6 }}
-              >
-                <Clock style={{ width: 9, height: 9 }} />
-                {t("media.badge.queued")}
-              </span>
-            )}
-          {/* 4K chips — arr4k* are only populated when the viewer has 4K access (enrichment gate) */}
-          {media.arr4kAvailable && (
-            <span
-              className="ds-chip"
-              style={{
-                paddingLeft: 5,
-                paddingRight: 6,
-                background: "var(--ds-accent-soft)",
-                color: "var(--ds-accent-text)",
-                border: "1px solid var(--ds-accent-ring)",
-              }}
-            >
-              <CheckCircle style={{ width: 9, height: 9 }} />
-              4K
-            </span>
-          )}
-          {!media.arr4kAvailable && media.arr4kPending && (
-            <span
-              className="ds-chip ds-chip-pending"
-              style={{ paddingLeft: 5, paddingRight: 6 }}
-            >
-              <Clock style={{ width: 9, height: 9 }} />
-              {t("media.badge.queued4k")}
-            </span>
-          )}
-          {!isAvailable &&
-            media.requested && (
-              <span
-                className="ds-chip ds-chip-accent"
-                style={{ paddingLeft: 5, paddingRight: 6 }}
-              >
-                <CheckCircle style={{ width: 9, height: 9 }} />
-                {t("media.badge.requested")}
-              </span>
-            )}
+          <AvailabilityChips
+            media={media}
+            showPlex={showPlex}
+            showJellyfin={showJellyfin}
+            isAvailable={isAvailable}
+            queuedBefore4k
+            showRequested
+          />
         </div>
 
         {/* 24px (20px on phones) — under the 22px page h1, which this used to
@@ -230,41 +175,17 @@ export function DiscoverHero({
           className="ds-mono flex items-center flex-wrap"
           style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 8 }}
         >
-          {media.releaseYear && <span>{media.releaseYear}</span>}
-          {media.certification && (
-            <>
-              <span>·</span>
-              <span>{media.certification}</span>
-            </>
-          )}
-          {media.runtime ? (
-            <>
-              <span>·</span>
-              <span>{t("media.runtimeMinutes", { minutes: media.runtime })}</span>
-            </>
-          ) : null}
-          <span>·</span>
-          <span>{media.mediaType === "movie" ? t("media.type.movie") : t("media.type.tv")}</span>
+          {metaParts.map((part, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: a fixed, ordered list of parts
+            <Fragment key={i}>
+              {i > 0 && <span aria-hidden="true">·</span>}
+              <span>{part}</span>
+            </Fragment>
+          ))}
         </div>
 
         <RatingsBar
-          imdbRating={liveRatings?.imdbRating ?? media.imdbRating}
-          imdbId={liveRatings?.imdbId ?? media.imdbId}
-          imdbVotes={liveRatings?.imdbVotes ?? media.imdbVotes}
-          rottenTomatoes={liveRatings?.rottenTomatoes ?? media.rottenTomatoes}
-          rtAudienceScore={
-            liveRatings?.rtAudienceScore ?? media.rtAudienceScore
-          }
-          metacritic={liveRatings?.metacritic ?? media.metacritic}
-          traktRating={liveRatings?.traktRating ?? media.traktRating}
-          letterboxdRating={
-            liveRatings?.letterboxdRating ?? media.letterboxdRating
-          }
-          mdblistScore={liveRatings?.mdblistScore ?? media.mdblistScore}
-          malRating={liveRatings?.malRating ?? media.malRating}
-          rogerEbertRating={
-            liveRatings?.rogerEbertRating ?? media.rogerEbertRating
-          }
+          {...mergeRatings(media, liveRatings)}
           voteAverage={media.voteAverage}
           size="sm"
         />

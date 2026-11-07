@@ -1,10 +1,12 @@
 import "server-only";
+import { createHash } from "node:crypto";
 import { prisma } from "./prisma";
 import { getCacheStale, setCache, libraryDetailsTtl } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { tmdbAuth } from "./tmdb-auth";
 import { processSingleton } from "./process-singleton";
+import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 
 const OMDB_BASE = "https://www.omdbapi.com";
 const OMDB_FETCH_TIMEOUT_MS = 10_000;
@@ -111,13 +113,79 @@ function isOmdbQuotaErrorMessage(msg: string | undefined): boolean {
   return m.includes("limit") || m.includes("quota");
 }
 
+// ── Rejected key ───────────────────────────────────────────────────────────
+// OMDb's "Invalid API key!" (HTTP 401, or 200 with Response=False) must not
+// trip the hour-long lockout above. But with nothing at all, every cold title
+// on every page view paid a TMDB external_ids call plus a failing OMDb call and
+// logged two error lines: up to 200 of each per ratings batch.
+//
+// So the KEY is remembered instead. While the stored key is the one OMDb
+// refused, fetchAndCacheOmdbForTmdb answers transient without any network. A
+// changed key is a different value, so it is tried at once (within getApiKey's
+// 30s memo); a successful Settings → Test clears it; and the same key is tried
+// again after REJECTED_KEY_RETRY_MS, because a new OMDb key answers "Invalid
+// API key!" until its owner clicks the activation email. Process-wide
+// (guardrail 27a). Logged once per key (guardrail 7b).
+const REJECTED_KEY_RETRY_MS = 60 * 60 * 1000;
+const REJECTED_KEY_WARN_KEY = "omdb:rejected-key";
+const rejectedKey = processSingleton<{ key: string | null; until: number }>(
+  "omdb:rejected-key",
+  () => ({ key: null, until: 0 }),
+);
+
+function isOmdbInvalidKeyMessage(msg: string | undefined): boolean {
+  return !!msg && msg.toLowerCase().includes("invalid api key");
+}
+
+function isKeyRejected(apiKey: string): boolean {
+  return rejectedKey.key === apiKey && Date.now() < rejectedKey.until;
+}
+
+// The key itself never reaches the log or the dedup map: a short digest tells
+// one rejected key from the next.
+function keyFingerprint(apiKey: string): string {
+  return createHash("sha256").update(apiKey).digest("hex").slice(0, 12);
+}
+
+function noteKeyRejected(apiKey: string): void {
+  rejectedKey.key = apiKey;
+  rejectedKey.until = Date.now() + REJECTED_KEY_RETRY_MS;
+  warnOnChange(
+    REJECTED_KEY_WARN_KEY,
+    keyFingerprint(apiKey),
+    "[omdb] OMDb refused the API key (\"Invalid API key!\") — no OMDb ratings until the key is changed or Settings → Test succeeds; the same key is retried hourly",
+  );
+}
+
+// OMDb answered with this key: whatever it refused before, it takes it now.
+function noteKeyAccepted(apiKey: string): void {
+  if (rejectedKey.key !== apiKey) return;
+  rejectedKey.key = null;
+  rejectedKey.until = 0;
+  forgetWarnOnChange(REJECTED_KEY_WARN_KEY);
+}
+
+// The rejected-key error: transient like any other (never negative-cached), but
+// not logged per title — noteKeyRejected has said it once.
+class OmdbKeyRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OmdbKeyRejectedError";
+  }
+}
+
 // Sentinel stored in the cache to distinguish "item not in OMDB" from "never fetched" so we don't
 // re-query OMDB on every page load for titles it genuinely doesn't know about.
 const NOT_FOUND_SENTINEL = { _notFound: true } as const;
 
 // In-memory dedup prevents concurrent requests from spawning multiple background revalidations for
-// the same cache key during a single request burst.
-const revalidating = new Set<string>();
+// the same cache key during a single request burst. Process-wide (guardrail 27a).
+const revalidating = processSingleton("omdb:revalidating", () => new Set<string>());
+
+// The one name of a title's OMDb ratings row in TmdbCache.
+export function omdbCacheKey(mediaType: "movie" | "tv", tmdbId: number): string {
+  return `omdb:tmdb:${mediaType}:${tmdbId}`;
+}
 
 export interface OmdbRatings {
   imdbId: string | null;
@@ -134,25 +202,29 @@ export interface OmdbRatings {
 // Prisma pool per request. Cache the resolved value for a short window, and
 // coalesce concurrent cold reads into one query, so a key change still
 // propagates within seconds. Pass { fresh: true } to bypass the cache (admin
-// connection test, where stale-by-up-to-TTL would be confusing).
+// connection test, where stale-by-up-to-TTL would be confusing). Process-wide
+// (guardrail 27a).
 const API_KEY_TTL_MS = 30_000;
-let apiKeyCache: { value: string | null; at: number } | null = null;
-let apiKeyInflight: Promise<string | null> | null = null;
+const apiKeyMemo = processSingleton<{
+  cache: { value: string | null; at: number } | null;
+  inflight: Promise<string | null> | null;
+}>("omdb:api-key", () => ({ cache: null, inflight: null }));
 
 async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null> {
-  if (!opts.fresh && apiKeyCache && Date.now() - apiKeyCache.at < API_KEY_TTL_MS) {
-    return apiKeyCache.value;
+  const memo = apiKeyMemo.cache;
+  if (!opts.fresh && memo && Date.now() - memo.at < API_KEY_TTL_MS) {
+    return memo.value;
   }
-  if (!opts.fresh && apiKeyInflight) return apiKeyInflight;
+  if (!opts.fresh && apiKeyMemo.inflight) return apiKeyMemo.inflight;
   const p = (async () => {
     const row = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
     const value = row?.value.trim() || null;
-    apiKeyCache = { value, at: Date.now() };
+    apiKeyMemo.cache = { value, at: Date.now() };
     return value;
   })();
   if (!opts.fresh) {
-    apiKeyInflight = p;
-    p.finally(() => { apiKeyInflight = null; }).catch(() => {});
+    apiKeyMemo.inflight = p;
+    p.finally(() => { apiKeyMemo.inflight = null; }).catch(() => {});
   }
   return p;
 }
@@ -190,10 +262,14 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
         // (see isOmdbTransientError) — parse the body defensively and run the SAME
         // quota discrimination as the 200-path, or real daily exhaustion never
         // trips the lockout and every quota defense keyed off it stays inert.
-        // Invalid-key deliberately still doesn't lock (see isOmdbQuotaErrorMessage).
+        // Invalid-key deliberately still doesn't lock (see isOmdbQuotaErrorMessage);
+        // it latches the key instead (see noteKeyRejected).
         const body = (await res.json().catch(() => null)) as { Error?: string } | null;
         if (body && isOmdbQuotaErrorMessage(body.Error)) {
           tripQuotaLockout(`HTTP ${res.status} "${body.Error}" for ${imdbId}`);
+        } else if (body && isOmdbInvalidKeyMessage(body.Error)) {
+          noteKeyRejected(apiKey);
+          throw new OmdbKeyRejectedError(`OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
         }
       }
       // Transient upstream failure (5xx/429/401/etc.) — throw so the caller does
@@ -222,10 +298,19 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
         tripQuotaLockout(`${data.Error} for ${imdbId}`);
       }
       if (isOmdbTransientError(data.Error)) {
-        throw new Error(`OMDB transient error for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(data.Error ?? "")}`);
+        const message = `OMDB transient error for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(data.Error ?? "")}`;
+        if (!isOmdbQuotaErrorMessage(data.Error) && isOmdbInvalidKeyMessage(data.Error)) {
+          noteKeyRejected(apiKey);
+          throw new OmdbKeyRejectedError(message);
+        }
+        throw new Error(message);
       }
+      // A genuine not-found: OMDb took the key.
+      noteKeyAccepted(apiKey);
       return null;
     }
+
+    noteKeyAccepted(apiKey);
 
     const rt = data.Ratings?.find((r) => r.Source === "Rotten Tomatoes")?.Value ?? null;
     const mc = data.Metascore && data.Metascore !== "N/A" ? `${data.Metascore}/100` : null;
@@ -240,7 +325,9 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
   } catch (err) {
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
     if (isTransportFailure(err)) noteTransportFailure(reason);
-    console.error(`[omdb] fetch failed for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(reason)}`);
+    if (!(err instanceof OmdbKeyRejectedError)) {
+      console.error(`[omdb] fetch failed for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(reason)}`);
+    }
     // Every failure here (network/timeout/SSRF, or a transient error thrown
     // above) propagates, so fetchAndCacheOmdbForTmdb's catch returns without
     // negative-caching a title that may exist.
@@ -248,9 +335,10 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
   }
 }
 
-// Admin connection test. Intentionally ignores the quota lockout (and bypasses the key
-// cache via { fresh: true }) so a recovered or replaced key can be verified immediately
-// instead of waiting out the remainder of the 1h suspension.
+// Admin connection test. Intentionally ignores the quota lockout and the rejected-key
+// latch (and bypasses the key cache via { fresh: true }) so a recovered or replaced key
+// can be verified immediately instead of waiting out the remainder of a suspension. A
+// pass clears the latch for that key.
 export async function testOmdbConnection(): Promise<string> {
   const apiKey = await getApiKey({ fresh: true });
   if (!apiKey) throw new Error("No OMDB API key configured");
@@ -264,6 +352,7 @@ export async function testOmdbConnection(): Promise<string> {
 
   const data = await res.json() as { Response: string; Title?: string; Error?: string };
   if (data.Response !== "True") throw new Error(data.Error ?? "OMDB API key invalid");
+  noteKeyAccepted(apiKey);
   return data.Title ?? "OK";
 }
 
@@ -320,10 +409,10 @@ async function resolveImdbIdViaTmdb(tmdbId: number, mediaType: "movie" | "tv"): 
 export async function fetchAndCacheOmdbForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
-  cacheKey: string,
   releaseDate?: string | null,
   knownImdbId?: string | null,
 ): Promise<OmdbResult> {
+  const cacheKey = omdbCacheKey(mediaType, tmdbId);
   const apiKey = await getApiKey();
   if (!apiKey) return { found: false, keyConfigured: false };
 
@@ -332,6 +421,10 @@ export async function fetchAndCacheOmdbForTmdb(
   // `transient` ensures no caller negative-caches the miss.
   if (isOmdbQuotaLocked()) {
     return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
+  }
+  // The stored key is one OMDb refused (see noteKeyRejected): nothing to ask.
+  if (isKeyRejected(apiKey)) {
+    return { found: false, keyConfigured: true, transient: true };
   }
 
   try {
@@ -386,7 +479,10 @@ export async function fetchAndCacheOmdbForTmdb(
     const msg = err instanceof SafeFetchError
       ? `${err.reason}: ${err.message}`
       : err instanceof Error ? err.message : String(err);
-    console.error(`[omdb] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(msg)}`);
+    // A refused key was logged once already, not once per title.
+    if (!(err instanceof OmdbKeyRejectedError)) {
+      console.error(`[omdb] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(msg)}`);
+    }
     // A transient OMDB/TMDB failure (5xx, network/timeout, quota/auth) reaches here as a
     // throw — do NOT negative-cache it; the caller must avoid pinning a null result.
     return { found: false, keyConfigured: true, transient: true };
@@ -397,8 +493,8 @@ export async function fetchAndCacheOmdbForTmdb(
 // (mediaType, tmdbId) reuse the existing promise instead of fanning out a herd
 // of upstream requests when the cache is cold. The pre-existing `revalidating`
 // Set only covered the SWR-revalidation path, leaving cold-miss susceptible to
-// a stampede when many pages load simultaneously.
-const inflightCold = new Map<string, Promise<OmdbResult>>();
+// a stampede when many pages load simultaneously. Process-wide (guardrail 27a).
+const inflightCold = processSingleton("omdb:inflight-cold", () => new Map<string, Promise<OmdbResult>>());
 
 // Public entry: cache-first (stale-while-revalidate) OMDB ratings lookup keyed by TMDB id,
 // coalescing concurrent cold misses into one upstream fetch. `knownImdbId` (optional —
@@ -440,20 +536,19 @@ async function readOmdbForTmdb(
   knownImdbId: string | null | undefined,
   awaitRefresh: boolean,
 ): Promise<OmdbResult> {
-  const cacheKey = `omdb:tmdb:${mediaType}:${tmdbId}`;
+  const cacheKey = omdbCacheKey(mediaType, tmdbId);
   const { value: cached, isStale } = await getCacheStale<OmdbRatings | typeof NOT_FOUND_SENTINEL>(cacheKey);
 
   if (cached !== null) {
     if (isStale) {
-      const revalKey = `omdb:tmdb:${mediaType}:${tmdbId}`;
-      if (!revalidating.has(revalKey)) {
-        revalidating.add(revalKey);
+      if (!revalidating.has(cacheKey)) {
+        revalidating.add(cacheKey);
         // A found-shape stale row carries the imdbId it was fetched with — reuse
         // it so the background refresh skips the TMDB external_ids round-trip
         // (the remap self-heal in fetchAndCacheOmdbForTmdb covers a stale id).
         const storedImdbId = "_notFound" in cached ? null : cached.imdbId;
-        const refresh = fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate, storedImdbId).catch(() => {}).finally(() => {
-          revalidating.delete(revalKey);
+        const refresh = fetchAndCacheOmdbForTmdb(tmdbId, mediaType, releaseDate, storedImdbId).catch(() => {}).finally(() => {
+          revalidating.delete(cacheKey);
         });
         if (awaitRefresh) await refresh;
       }
@@ -467,7 +562,7 @@ async function readOmdbForTmdb(
 
   const existing = inflightCold.get(cacheKey);
   if (existing) return existing;
-  const p = fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate, knownImdbId)
+  const p = fetchAndCacheOmdbForTmdb(tmdbId, mediaType, releaseDate, knownImdbId)
     .finally(() => inflightCold.delete(cacheKey));
   inflightCold.set(cacheKey, p);
   return p;

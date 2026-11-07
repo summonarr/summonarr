@@ -45,10 +45,22 @@ function AvatarImage({
   className,
   onLoad,
   onError,
+  alt,
+  ref: callerRef,
   ...props
 }: React.ComponentProps<"img">) {
   const { status, setStatus } = useAvatarContext("AvatarImage")
   const ref = React.useRef<HTMLImageElement>(null)
+  // A caller's ref is merged in, never spread over the internal one: the
+  // `.complete` check below reads `ref`, and a replaced ref would read null.
+  const setRefs = React.useCallback(
+    (node: HTMLImageElement | null) => {
+      ref.current = node
+      if (typeof callerRef === "function") callerRef(node)
+      else if (callerRef) callerRef.current = node
+    },
+    [callerRef]
+  )
 
   // On error the <img> unmounts, so it can never fire another load event.
   // Without this reset a new, valid src (e.g. a refreshed Plex thumb) would
@@ -60,8 +72,8 @@ function AvatarImage({
 
   // A cached image in the server HTML can finish loading before React attaches
   // onLoad during hydration, and React does not replay that event. The status
-  // would then stay "idle" forever, leaving the image and the initials squashed
-  // side by side. Checking `.complete` on mount catches that early load.
+  // would then stay "idle" forever, leaving the initials rendered under the
+  // image. Checking `.complete` on mount catches that early load.
   React.useEffect(() => {
     const img = ref.current
     if (!img || !img.complete) return
@@ -69,14 +81,18 @@ function AvatarImage({
   }, [setStatus])
 
   if (status === "error") return null
+  // `absolute inset-0` stacks the image OVER the fallback instead of beside it
+  // in the root's flex row: while it loads ("idle") the initials show whole
+  // underneath, rather than both squashed to half width.
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      ref={ref}
+      {...props}
+      ref={setRefs}
       data-slot="avatar-image"
-      alt={props.alt ?? ""}
+      alt={alt ?? ""}
       className={cn(
-        "aspect-square size-full rounded-full object-cover",
+        "absolute inset-0 aspect-square size-full rounded-full object-cover",
         className
       )}
       onLoad={(e) => {
@@ -87,7 +103,6 @@ function AvatarImage({
         setStatus("error")
         onError?.(e)
       }}
-      {...props}
     />
   )
 }

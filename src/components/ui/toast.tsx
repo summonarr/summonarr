@@ -1,8 +1,9 @@
 "use client";
 
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Check, AlertTriangle, Bell, X } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
+import { pushCapped } from "@/components/ui/toast-queue";
 
 type ToastVariant = "success" | "error" | "info";
 /** One inline button (e.g. "Undo"). Clicking it runs `onClick` and dismisses
@@ -86,11 +87,26 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const toast = useCallback(
     ({ title, variant = "info", action }: ToastInput) => {
       const id = ++idRef.current;
-      setToasts((cur) => [...cur, { id, title, variant, action }]);
+      setToasts((cur) => {
+        const { kept, evicted } = pushCapped(cur, { id, title, variant, action });
+        // clearTimer is idempotent, so a re-run of this updater is harmless.
+        for (const old of evicted) clearTimer(old);
+        return kept;
+      });
       startTimer(id, variant, !!action);
     },
-    [startTimer],
+    [startTimer, clearTimer],
   );
+
+  // The provider sits at the root and normally never unmounts; if it does,
+  // no pending dismiss may fire into it.
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      for (const handle of timers.values()) clearTimeout(handle);
+      timers.clear();
+    };
+  }, []);
 
   // Memoized so consumers don't re-render every time the toast list changes.
   const value = useMemo(() => ({ toast }), [toast]);
@@ -98,8 +114,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      {/* One live region on the container; the items carry only a role. Nesting
-          aria-live on both made screen readers announce each toast twice.
+      {/* ONE live region: the container. The items carry no role, because
+          role="alert"/"status" are live regions themselves (assertive/polite)
+          and a region nested in another can be announced twice. Kept on the
+          persistent container rather than per item: a polite region that is
+          inserted already holding its text is often not announced at all.
           Below lg the fixed bottom tab bar (mobile-nav.tsx, ≥64px tall) covers
           the bottom-right corner, so the anchor clears it there and drops back
           to 16px once the bar is hidden. */}
@@ -111,7 +130,6 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map((t) => (
           <div
             key={t.id}
-            role={t.variant === "error" ? "alert" : "status"}
             onPointerEnter={() => clearTimer(t.id)}
             onPointerLeave={(e) => {
               if (!e.currentTarget.contains(document.activeElement)) startTimer(t.id, t.variant, !!t.action);

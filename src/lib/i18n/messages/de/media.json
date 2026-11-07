@@ -82,5 +82,6 @@
   "media.filter.certAny": "Jede Freigabe",
   "media.filter.certUpTo": "Bis {rating}",
   "media.filter.studio": "Studio",
-  "media.filter.network": "Sender"
+  "media.filter.network": "Sender",
+  "media.filter.serviceChip": "Dienst {id}"
 }

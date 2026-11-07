@@ -95,11 +95,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
 export const DELETE = withAuth(async (req, _ctx, session) => {
   // A revoke is the one write that must stay open during maintenance too (like
   // push unsubscribe): it only ever removes a credential.
-  await prisma.user.updateMany({
-    where: { id: session.user.id },
+  const { count } = await prisma.user.updateMany({
+    where: { id: session.user.id, calendarTokenHash: { not: null } },
     data: { calendarTokenHash: null, calendarTokenCreatedAt: null },
   });
-  void logAudit({
+  // Idempotent: revoking when no feed exists answers the same, but audits
+  // nothing — there was no credential to remove.
+  if (count > 0) void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? "unknown",
     action: "SETTINGS_CHANGE",

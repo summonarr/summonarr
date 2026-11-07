@@ -4,9 +4,14 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { composeWhere, parsePlayHistoryFilters, PLAY_METHODS } from "@/lib/play-history-filters";
-import { SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
+import {
+  composeWhere,
+  invalidDateParam,
+  normalizePlayHistoryFilters,
+  playHistoryFilterFragments,
+} from "@/lib/play-history-filters";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
 import { bitrateToKbps } from "@/lib/bitrate";
 
 export const dynamic = "force-dynamic";
@@ -55,7 +60,7 @@ interface ExportRow {
   stoppedAt: Date;
   duration: number;
   playDuration: number;
-  pausedDuration: number | null;
+  pausedDuration: number;
   watched: boolean;
   platform: string | null;
   player: string | null;
@@ -98,36 +103,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: t("apiUser.common.forbidden") }, { status: 403 });
   }
 
-  // Keyed on the session user ALONE. getClientIp falls back to a hash of the
-  // User-Agent whenever TRUST_PROXY is not "true" — the default docker deployment —
-  // so folding it in let one admin session mint a fresh bucket per UA string and
-  // multiply its own allowance on a bulk PII export. A caller-controlled component can
-  // only ever widen a limit, never tighten it.
-  if (!checkRateLimit(`ph-export:${session.user.id}`, 5, 3_600_000)) {
-    return NextResponse.json({ error: t("apiUser.playHistory.exportRateLimited") }, { status: 429 });
-  }
-
   const params = request.nextUrl.searchParams;
   const format = params.get("format") === "json" ? "json" : "csv";
-
-  const source = params.get("source");
-  const mediaType = params.get("mediaType");
-  const watched = params.get("watched");
-  const userId = params.get("userId");
-  const tmdbId = params.get("tmdbId");
-  const playMethod = params.get("playMethod");
-  const platform = params.get("platform");
-  const startDate = params.get("startDate");
-  const endDate = params.get("endDate");
-  const search = (params.get("search")?.trim() ?? "").slice(0, SEARCH_TERM_MAX_LEN);
 
   // Reject unparseable dates with a 400 BEFORE the audit write below — an
   // Invalid Date fed into the query throws an uncaught 500, and the paper-trail
   // row must not record an export that never ran.
-  for (const [name, value] of [["startDate", startDate], ["endDate", endDate]] as const) {
-    if (value && isNaN(new Date(value).getTime())) {
-      return NextResponse.json({ error: t("apiUser.playHistory.invalidDate", { name }) }, { status: 400 });
-    }
+  const badDate = invalidDateParam(params);
+  if (badDate) {
+    return NextResponse.json({ error: t("apiUser.playHistory.invalidDate", { name: badDate }) }, { status: 400 });
   }
 
   // Raw fragments, not a Prisma `where`, and shared with the list route the
@@ -136,7 +120,20 @@ export async function GET(request: NextRequest) {
   // ESCAPE clause, so a term carrying a `%`/`_` could only be made safe there
   // by stripping the character, which silently exported the wrong rows (a
   // `john_doe` export searched for `johndoe`). See src/lib/play-history-filters.ts.
-  const { whereSql, binds, nextBindIndex } = composeWhere(parsePlayHistoryFilters(params));
+  const filters = normalizePlayHistoryFilters(params, await getStatsTimeZone());
+  const { whereSql, binds, nextBindIndex } = composeWhere(playHistoryFilterFragments(filters));
+
+  // AFTER parameter validation on purpose, as in the audit-log export: a hit is
+  // recorded on every call, so a mistyped date used to spend one of the five
+  // hourly exports on a 400. Still before the audit write, so a throttled request
+  // leaves no paper trail. Keyed on the session user ALONE: getClientIp falls back
+  // to a hash of the User-Agent whenever TRUST_PROXY is not "true" — the default
+  // docker deployment — so folding it in let one admin session mint a fresh bucket
+  // per UA string and multiply its own allowance on a bulk PII export. A
+  // caller-controlled component can only ever widen a limit, never tighten it.
+  if (!checkRateLimit(`ph-export:${session.user.id}`, 5, 3_600_000)) {
+    return NextResponse.json({ error: t("apiUser.playHistory.exportRateLimited") }, { status: 429 });
+  }
 
   // Play-history export streams up to MAX_EXPORT_ROWS of viewer PII (titles,
   // usernames, devices, IP-correlated rows). Record a paper-trail row so the
@@ -155,20 +152,25 @@ export async function GET(request: NextRequest) {
       kind: "play-history",
       format,
       maxRows: MAX_EXPORT_ROWS,
+      // The VALIDATED values, not the raw params: an unrecognized source,
+      // mediaType, watched or tmdbId never narrows the query (`source=plexx`
+      // exports every row), so logging the raw string would record a scope the
+      // export did not actually have. The dates are logged as sent: they were
+      // validated above, and every accepted one narrows.
       filters: {
-        source: source ?? null,
-        mediaType: mediaType ?? null,
-        watched: watched ?? null,
-        userId: userId ?? null,
-        tmdbId: tmdbId ?? null,
-        // The VALIDATED value, not the raw param — an unrecognized playMethod
-        // never narrows the query, so logging it would record a scope the
-        // export did not actually have.
-        playMethod: playMethod && PLAY_METHODS.includes(playMethod) ? playMethod : null,
-        platform: platform ?? null,
-        startDate: startDate ?? null,
-        endDate: endDate ?? null,
-        search: search || null,
+        source: filters.source,
+        mediaType: filters.mediaType,
+        watched: filters.watched,
+        userId: filters.userId,
+        tmdbId: filters.tmdbId,
+        playMethod: filters.playMethod,
+        platform: filters.platform,
+        startDate: params.get("startDate") || null,
+        endDate: params.get("endDate") || null,
+        fromDay: filters.fromDay,
+        toDay: filters.toDay,
+        ...(filters.fromDay || filters.toDay ? { timeZone: filters.timeZone } : {}),
+        search: filters.search,
       },
     },
     ipAddress: ctx.ipAddress,
@@ -238,95 +240,101 @@ export async function GET(request: NextRequest) {
 
   const encoder = new TextEncoder();
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        // The column headers are deliberately fixed English identifiers (machine-
-        // readable, stable across locales); only the prose notice below is localized.
-        controller.enqueue(encoder.encode(UTF8_BOM + headers.join(",") + "\n"));
+  // Writing through a TransformStream makes `await writer.write(...)` wait for
+  // the consumer (the readable side buffers nothing ahead), so pages are read
+  // only as fast as the client downloads them. Producing inside a
+  // ReadableStream's start() could not: enqueue never blocks, so every page was
+  // queried and queued however slowly the client read, and a cancelled download
+  // kept querying until an enqueue threw. A cancel now rejects the pending write
+  // and the loop stops there.
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const write = (text: string) => writer.write(encoder.encode(text));
 
-        // Keyset cursor over (startedAt, id) DESC — the same predicate Prisma's
-        // `cursor` + `skip: 1` compiled to, written out because the filters are
-        // now raw fragments. The expanded OR form (rather than a row
-        // comparison) mirrors src/lib/my-watch-history.ts, which avoids relying
-        // on Postgres inferring parameter types inside a row constructor.
-        let cursor: { startedAt: Date; id: string } | null = null;
-        let emitted = 0;
+  void (async () => {
+    try {
+      // The column headers are deliberately fixed English identifiers (machine-
+      // readable, stable across locales); only the prose notice below is localized.
+      await write(UTF8_BOM + headers.join(",") + "\n");
 
-        while (emitted < MAX_EXPORT_ROWS) {
-          const remaining = MAX_EXPORT_ROWS - emitted;
-          const take = Math.min(PAGE_SIZE, remaining);
+      // Keyset cursor over (startedAt, id) DESC — the same predicate Prisma's
+      // `cursor` + `skip: 1` compiled to, written out because the filters are
+      // now raw fragments. The expanded OR form (rather than a row
+      // comparison) mirrors src/lib/my-watch-history.ts, which avoids relying
+      // on Postgres inferring parameter types inside a row constructor.
+      let cursor: { startedAt: Date; id: string } | null = null;
+      let emitted = 0;
 
-          const pageBinds: unknown[] = [...binds];
-          let cursorSql = "";
-          if (cursor) {
-            cursorSql =
-              ` AND (h."startedAt" < $${nextBindIndex}` +
-              ` OR (h."startedAt" = $${nextBindIndex} AND h."id" < $${nextBindIndex + 1}))`;
-            pageBinds.push(cursor.startedAt, cursor.id);
-          }
-          // Derived from the array so it can't drift from what was pushed —
-          // nextBindIndex when there's no cursor, nextBindIndex + 2 with one.
-          const limitBind = pageBinds.length + 1;
-          pageBinds.push(take);
+      while (emitted < MAX_EXPORT_ROWS) {
+        const remaining = MAX_EXPORT_ROWS - emitted;
+        const take = Math.min(PAGE_SIZE, remaining);
 
-          const page = await prisma.$queryRawUnsafe<ExportRow[]>(
-            `
-              SELECT ${EXPORT_SELECT}, msu."username" AS username
-              FROM "PlayHistory" h
-              LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
-              WHERE 1=1 ${whereSql}${cursorSql}
-              ORDER BY h."startedAt" DESC, h."id" DESC
-              LIMIT $${limitBind}
-            `,
-            ...pageBinds,
-          );
+        const pageBinds: unknown[] = [...binds];
+        let cursorSql = "";
+        if (cursor) {
+          cursorSql =
+            ` AND (h."startedAt" < $${nextBindIndex}` +
+            ` OR (h."startedAt" = $${nextBindIndex} AND h."id" < $${nextBindIndex + 1}))`;
+          pageBinds.push(cursor.startedAt, cursor.id);
+        }
+        // Derived from the array so it can't drift from what was pushed —
+        // nextBindIndex when there's no cursor, nextBindIndex + 2 with one.
+        const limitBind = pageBinds.length + 1;
+        pageBinds.push(take);
 
-          if (page.length === 0) break;
-          for (const r of page) {
-            const line = [
-              escapeCSV(r.title), escapeCSV(r.mediaType), escapeCSV(r.year),
-              escapeCSV(r.seasonNumber), escapeCSV(r.episodeNumber), escapeCSV(r.episodeTitle),
-              escapeCSV(r.username), escapeCSV(r.source),
-              escapeCSV(r.startedAt.toISOString()), escapeCSV(r.stoppedAt.toISOString()),
-              escapeCSV(r.duration), escapeCSV(r.playDuration), escapeCSV(r.pausedDuration),
-              escapeCSV(r.watched), escapeCSV(r.platform), escapeCSV(r.player),
-              escapeCSV(r.device), escapeCSV(r.playMethod),
-              escapeCSV(r.videoCodec), escapeCSV(r.audioCodec), escapeCSV(r.resolution),
-              escapeCSV(exportBitrateKbps(r)), escapeCSV(r.videoDecision), escapeCSV(r.audioDecision),
-              escapeCSV(r.container),
-            ].join(",");
-            controller.enqueue(encoder.encode(line + "\n"));
-          }
+        const page = await prisma.$queryRawUnsafe<ExportRow[]>(
+          `
+            SELECT ${EXPORT_SELECT}, msu."username" AS username
+            FROM "PlayHistory" h
+            LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
+            WHERE 1=1 ${whereSql}${cursorSql}
+            ORDER BY h."startedAt" DESC, h."id" DESC
+            LIMIT $${limitBind}
+          `,
+          ...pageBinds,
+        );
 
-          emitted += page.length;
-          const last = page[page.length - 1];
-          cursor = { startedAt: last.startedAt, id: last.id };
-
-          if (page.length < take) break;
+        if (page.length === 0) break;
+        for (const r of page) {
+          const line = [
+            escapeCSV(r.title), escapeCSV(r.mediaType), escapeCSV(r.year),
+            escapeCSV(r.seasonNumber), escapeCSV(r.episodeNumber), escapeCSV(r.episodeTitle),
+            escapeCSV(r.username), escapeCSV(r.source),
+            escapeCSV(r.startedAt.toISOString()), escapeCSV(r.stoppedAt.toISOString()),
+            escapeCSV(r.duration), escapeCSV(r.playDuration), escapeCSV(r.pausedDuration),
+            escapeCSV(r.watched), escapeCSV(r.platform), escapeCSV(r.player),
+            escapeCSV(r.device), escapeCSV(r.playMethod),
+            escapeCSV(r.videoCodec), escapeCSV(r.audioCodec), escapeCSV(r.resolution),
+            escapeCSV(exportBitrateKbps(r)), escapeCSV(r.videoDecision), escapeCSV(r.audioDecision),
+            escapeCSV(r.container),
+          ].join(",");
+          await write(line + "\n");
         }
 
-        if (emitted >= MAX_EXPORT_ROWS) {
-          // CSV has no comment syntax, so this trailing notice IS a data record to
-          // every parser — escapeCSV keeps it a single well-formed field instead of
-          // a raw fragment that splits the row. The remedy has to be the date
-          // filters: this route reads no `cursor` param, so the notice previously
-          // pointed at a knob that does not exist.
-          controller.enqueue(
-            encoder.encode(
-              escapeCSV(t("apiUser.playHistory.exportTruncated", { max: MAX_EXPORT_ROWS })) + "\n",
-            )
-          );
-        }
+        emitted += page.length;
+        const last = page[page.length - 1];
+        cursor = { startedAt: last.startedAt, id: last.id };
 
-        controller.close();
-      } catch (err) {
-        controller.error(err);
+        if (page.length < take) break;
       }
-    },
-  });
 
-  return new Response(stream, {
+      if (emitted >= MAX_EXPORT_ROWS) {
+        // CSV has no comment syntax, so this trailing notice IS a data record to
+        // every parser — escapeCSV keeps it a single well-formed field instead of
+        // a raw fragment that splits the row. The remedy has to be the date
+        // filters: this route reads no `cursor` param, so the notice previously
+        // pointed at a knob that does not exist.
+        await write(escapeCSV(t("apiUser.playHistory.exportTruncated", { max: MAX_EXPORT_ROWS })) + "\n");
+      }
+
+      await writer.close().catch(() => { /* consumer already gone */ });
+    } catch (err) {
+      // A cancelled download rejects the pending write: nothing to report.
+      await writer.abort(err).catch(() => { /* consumer already gone */ });
+    }
+  })();
+
+  return new Response(readable, {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="play-history-${timestamp}.csv"`,

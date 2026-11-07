@@ -16,7 +16,7 @@
 // Every row uses the page's own responsive classes (resp-grid-2/3 reflow at
 // 1180 / 899 / 639 in globals.css) so the streamed page lands on the same grid.
 import type { ReactNode } from "react";
-import { Bar, SKELETON_CARD } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 // ActivityCard stand-in: radius 10, the card hairline, a fixed height.
 function Card({ h }: { h: number }) {
@@ -82,7 +82,7 @@ function HeaderStatsSkeleton() {
 
 export function TitleDetailSkeleton() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <DetailHeaderSkeleton leading="poster" childRow={32} right={<HeaderStatsSkeleton />} />
       <div style={{ marginBottom: 22 }}>
         <Card h={200} />
@@ -103,13 +103,13 @@ export function TitleDetailSkeleton() {
         <Card h={180} />
       </div>
       <Card h={320} />
-    </div>
+    </SkeletonRoot>
   );
 }
 
 export function UserDetailSkeleton() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <DetailHeaderSkeleton leading="avatar" />
       <div
         className="resp-grid-3"
@@ -131,13 +131,13 @@ export function UserDetailSkeleton() {
         <Card h={200} />
         <Card h={200} />
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }
 
 export function PlayDetailSkeleton() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <DetailHeaderSkeleton leading="poster" childRow={16} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         {Array.from({ length: 3 }).map((_, i) => (
@@ -147,6 +147,6 @@ export function PlayDetailSkeleton() {
       <div className="flex justify-end">
         <Bar w={92} h={30} r={8} style={SKELETON_CARD} />
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

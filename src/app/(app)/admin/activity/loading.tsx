@@ -11,7 +11,7 @@
 // card (~200px; TranscodePressure returns null when empty, so no stand-in) →
 // the ONE recent-plays table card (header row + table), not loose rows. The
 // History tab is its own segment (history/) with a table-shaped loading.tsx.
-import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 import {
   ActivityCardSkeleton,
   ActivityTableCardSkeleton,
@@ -21,7 +21,7 @@ import {
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle right />
       <ActivityTabsSkeleton filters />
 
@@ -60,6 +60,6 @@ export default function Loading() {
 
       {/* ActivityRecentPlays: ONE table card — header row, hairline, rows. */}
       <ActivityTableCardSkeleton rows={6} />
-    </div>
+    </SkeletonRoot>
   );
 }

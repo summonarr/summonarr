@@ -155,6 +155,11 @@ shadowPrismaModel(prisma, "user", {
     const u = usersById.get(args.where.id);
     return u ? { ...u } : null;
   },
+  // The admin notify fan-out's push channel reads the active users first and
+  // keeps the permission holders (push.ts), then reads their devices — none
+  // here, so it still stops before any network call.
+  findMany: async () =>
+    [...usersById].filter(([, u]) => u.deactivatedAt === null).map(([id, u]) => ({ id, ...u })),
   update: async () => ({}),
 });
 
@@ -527,6 +532,18 @@ test("an INT4-overflowing tmdbId is a 400 on POST /api/votes and DELETE /api/vot
   const admin = await mintSession({ role: "ADMIN" });
   const dismissed = await dismiss(admin.token, "2147483648", "MOVIE");
   assert.equal(dismissed.status, 400);
+  assert.equal(opsOf("deletionVote.deleteMany").length, 0);
+});
+
+// parseInt read "550abc" and "1.5" as 550 and 1, so one title answered under
+// paths that weren't its own. Only the canonical spelling is a tmdbId.
+test("DELETE /api/votes/[tmdbId] takes only a canonical id: a suffix, a fraction or a leading zero is a 400", async () => {
+  const { token } = await mintSession();
+  const admin = await mintSession({ role: "ADMIN" });
+  for (const raw of ["550abc", "1.5", "0550", "1e3"]) {
+    assert.equal((await del(token, raw, "MOVIE")).status, 400, raw);
+    assert.equal((await dismiss(admin.token, raw, "MOVIE")).status, 400, raw);
+  }
   assert.equal(opsOf("deletionVote.deleteMany").length, 0);
 });
 
@@ -927,13 +944,21 @@ test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to 
   );
   assert.equal(res.status, 200);
   // The PAGED call carries skip/take; the voted-titles read (the total and the
-  // guardrail-35 scope) runs first and carries neither.
-  const paged = opsOf("deletionVote.groupBy").find((o) => (o.args as { skip?: number }).skip !== undefined)!.args as {
+  // guardrail-35 scope) runs first and carries neither. That read is what mine=1
+  // and q= scope: under the votes sort the paged call then counts EVERY voter's
+  // rows on those titles, so it carries neither filter itself.
+  const voted = opsOf("deletionVote.groupBy").find((o) => (o.args as { skip?: number }).skip === undefined)!.args as {
     where: { userId?: string; title?: { contains: string; mode: string } };
+  };
+  assert.equal(voted.where.userId, userId, "mine=1 must scope the voted-titles read to the caller");
+  assert.deepEqual(voted.where.title, { contains: "matrix", mode: "insensitive" });
+  const paged = opsOf("deletionVote.groupBy").find((o) => (o.args as { skip?: number }).skip !== undefined)!.args as {
+    where: { userId?: string; title?: unknown; OR?: unknown };
     orderBy: unknown;
   };
-  assert.equal(paged.where.userId, userId, "mine=1 must scope the group query to the caller");
-  assert.deepEqual(paged.where.title, { contains: "matrix", mode: "insensitive" });
+  assert.equal(paged.where.userId, undefined, "the by-count page must not count only the caller's own row");
+  assert.equal(paged.where.title, undefined);
+  assert.deepEqual(paged.where.OR, [], "no voted title selects nothing");
   // The whole group key is a deliberate secondary sort, not incidental: groups tied
   // on _count (most titles sit at 1-2 votes) otherwise have no total order, so page=1
   // and page=2 can return them in different sequences and OFFSET paging duplicates one
@@ -949,6 +974,87 @@ test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to 
   const body = (await res.json()) as { items: unknown[]; total: number };
   assert.deepEqual(body.items, []);
   assert.equal(body.total, 0);
+});
+
+// Under mine=1 the caller holds exactly one row per title
+// (@@unique([tmdbId, mediaType, userId])), so a caller-scoped groupBy ties every
+// group at _count 1 and "most votes" fell through to tmdbId order, while the
+// badge showed the real totals. A small groupBy that honours where/orderBy/skip
+// stands in for Postgres here, so the ORDER is what is asserted.
+type VoteRow = { tmdbId: number; mediaType: "MOVIE" | "TV"; userId: string; createdAt: Date };
+type KeyIn = { mediaType: string; tmdbId: { in: number[] } };
+function voteRowMatches(r: VoteRow, w: Record<string, unknown>): boolean {
+  const inKeys = (keys: KeyIn[]) => keys.some((k) => k.mediaType === r.mediaType && k.tmdbId.in.includes(r.tmdbId));
+  if (typeof w.userId === "string" && r.userId !== w.userId) return false;
+  if (w.OR && !inKeys(w.OR as KeyIn[])) return false;
+  if (w.NOT && inKeys((w.NOT as { OR: KeyIn[] }).OR)) return false;
+  if (w.AND && !(w.AND as Record<string, unknown>[]).every((x) => voteRowMatches(r, x))) return false;
+  return true;
+}
+function groupVoteRows(rows: VoteRow[], args: { where?: Record<string, unknown>; orderBy?: Array<Record<string, unknown>>; skip?: number; take?: number }) {
+  const groups = new Map<string, { tmdbId: number; mediaType: string; _count: { id: number }; _max: { createdAt: Date } }>();
+  for (const r of rows.filter((x) => voteRowMatches(x, args.where ?? {}))) {
+    const k = `${r.mediaType}:${r.tmdbId}`;
+    const g = groups.get(k) ?? { tmdbId: r.tmdbId, mediaType: r.mediaType, _count: { id: 0 }, _max: { createdAt: r.createdAt } };
+    g._count.id++;
+    if (r.createdAt > g._max.createdAt) g._max.createdAt = r.createdAt;
+    groups.set(k, g);
+  }
+  const keyOf = (g: { tmdbId: number; mediaType: string; _count: { id: number }; _max: { createdAt: Date } }, o: Record<string, unknown>): [number | string, string] => {
+    if (o._count) return [g._count.id, (o._count as { id: string }).id];
+    if (o._max) return [g._max.createdAt.getTime(), (o._max as { createdAt: string }).createdAt];
+    if (o.tmdbId) return [g.tmdbId, o.tmdbId as string];
+    return [g.mediaType, o.mediaType as string];
+  };
+  const sorted = [...groups.values()].sort((a, b) => {
+    for (const o of args.orderBy ?? []) {
+      const [x, dir] = keyOf(a, o);
+      const [y] = keyOf(b, o);
+      if (x !== y) return (x < y ? -1 : 1) * (dir === "desc" ? -1 : 1);
+    }
+    return 0;
+  });
+  return args.skip === undefined ? sorted : sorted.slice(args.skip, args.skip + (args.take ?? sorted.length));
+}
+
+test("GET ?mine=1 sorted by votes orders the caller's titles by their REAL vote totals", async () => {
+  const { userId, token } = await mintSession();
+  const rows: VoteRow[] = [
+    { tmdbId: 101, mediaType: "MOVIE", userId, createdAt: new Date("2026-01-03T00:00:00Z") },
+    { tmdbId: 202, mediaType: "MOVIE", userId, createdAt: new Date("2026-01-01T00:00:00Z") },
+    { tmdbId: 202, mediaType: "MOVIE", userId: "other-a", createdAt: new Date("2026-01-02T00:00:00Z") },
+    { tmdbId: 202, mediaType: "MOVIE", userId: "other-b", createdAt: new Date("2026-01-02T00:00:00Z") },
+    // Not the caller's title: never on their list, however many votes it holds.
+    { tmdbId: 303, mediaType: "MOVIE", userId: "other-a", createdAt: new Date("2026-01-02T00:00:00Z") },
+  ];
+  repRows = [
+    { tmdbId: 101, mediaType: "MOVIE", title: "One Vote", posterPath: null },
+    { tmdbId: 202, mediaType: "MOVIE", title: "Three Votes", posterPath: null },
+  ];
+  userVoteRows = [
+    { tmdbId: 101, mediaType: "MOVIE", id: "v-101", reason: null },
+    { tmdbId: 202, mediaType: "MOVIE", id: "v-202", reason: null },
+  ];
+  const stockGroupBy = deletionVoteModel.groupBy;
+  deletionVoteModel.groupBy = (async (args: Parameters<typeof groupVoteRows>[1]) => {
+    rec("deletionVote.groupBy", args);
+    return groupVoteRows(rows, args);
+  }) as typeof deletionVoteModel.groupBy;
+  try {
+    const res = await inScope(() =>
+      listVotes(votesReq(token, { method: "GET", query: "?mine=1&sort=votes" }), undefined),
+    );
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { items: Array<{ tmdbId: number; voteCount: number; userVoted: boolean }>; total: number };
+    assert.deepEqual(
+      body.items.map((i) => [i.tmdbId, i.voteCount, i.userVoted]),
+      [[202, 3, true], [101, 1, true]],
+      "the 3-vote title must lead, with its real total",
+    );
+    assert.equal(body.total, 2);
+  } finally {
+    deletionVoteModel.groupBy = stockGroupBy;
+  }
 });
 
 test("GET ?sort=recent orders by newest vote and carries the same full-group-key tiebreaker", async () => {

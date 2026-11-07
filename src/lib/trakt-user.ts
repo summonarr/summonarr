@@ -7,6 +7,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { canAutoRequest } from "@/lib/permissions";
 import {
   WATCHLIST_AUTO_REQUEST_FEATURE_KEY,
@@ -254,22 +255,48 @@ async function refreshTraktToken(cfg: TraktOAuthConfig, account: TraktAccountRow
   }
   const tokens = parseTraktTokenResponse(await res.json());
   if (!tokens) throw new Error("Trakt token refresh returned an unusable body");
-  // Raw tokens — the Prisma extension encrypts both on update (guardrail 7a).
-  // Written together: Trakt rotates the refresh token, so the old one is dead.
-  await prisma.account.update({
-    where: { id: account.id },
-    data: {
-      access_token: tokens.accessToken,
-      refresh_token: tokens.refreshToken,
-      expires_at: tokens.expiresAt,
-      ...(tokens.tokenType ? { token_type: tokens.tokenType } : {}),
-      ...(tokens.scope !== null ? { scope: tokens.scope } : {}),
-    },
-  });
+  await storeRotatedTokens(account.id, tokens);
   account.access_token = tokens.accessToken;
   account.refresh_token = tokens.refreshToken;
   account.expires_at = tokens.expiresAt;
   return tokens.accessToken;
+}
+
+// Pauses before each retry of the rotated-token write.
+export const TOKEN_WRITE_RETRY_DELAYS_MS = [250, 1_000] as const;
+
+// Store a refresh's rotated tokens. Trakt has already rotated the grant, so the
+// old refresh token is dead: if this write is lost, the next run sends the dead
+// one, Trakt answers invalid_grant, and the connection AND its history are
+// deleted (guardrail 34c) for what was a passing database fault. So the write
+// is retried. Not on P2025: the account row is gone (a disconnect or a
+// reconnect replaced it), and there is nothing left to store the tokens on.
+async function storeRotatedTokens(accountId: string, tokens: TraktTokenSet): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // Raw tokens — the Prisma extension encrypts both on update (guardrail 7a).
+      // Written together: Trakt rotates the refresh token, so the old one is dead.
+      await prisma.account.update({
+        where: { id: accountId },
+        data: {
+          access_token: tokens.accessToken,
+          refresh_token: tokens.refreshToken,
+          expires_at: tokens.expiresAt,
+          ...(tokens.tokenType ? { token_type: tokens.tokenType } : {}),
+          ...(tokens.scope !== null ? { scope: tokens.scope } : {}),
+        },
+      });
+      return;
+    } catch (err) {
+      if (isPrismaErrorCode(err, "P2025")) throw err;
+      if (attempt >= TOKEN_WRITE_RETRY_DELAYS_MS.length) {
+        // The run's per-user error line names the user; this names the stakes.
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new Error(`Trakt rotated the grant but storing it failed ${attempt + 1} times — the next refresh will be refused: ${reason}`);
+      }
+      await new Promise((r) => setTimeout(r, TOKEN_WRITE_RETRY_DELAYS_MS[attempt]));
+    }
+  }
 }
 
 // A Trakt client bound to one user's grant: refreshes ahead of expiry, and once
@@ -495,12 +522,19 @@ async function fetchRatings(client: TraktUserClient): Promise<TraktRatingRow[]> 
 // and ratings. Full replace in one transaction (guardrail 4): an unwatch or an
 // unrate on Trakt drops the row.
 //
-// The history read takes seconds, and the user may switch the history off or
-// disconnect meanwhile — both of which delete these rows. So the transaction
-// LOCKS the connection row (FOR UPDATE: the toggle's update and the disconnect's
-// delete wait for it) and re-checks that the history is still wanted and the
-// grant still exists before writing. Returns false (nothing written) otherwise.
-async function replaceTraktHistory(userId: string, rows: TraktWatchedRow[], ratings: TraktRatingRow[]): Promise<boolean> {
+// The history read takes seconds, and the user may switch the history off,
+// disconnect, or reconnect a DIFFERENT Trakt account meanwhile — all of which
+// delete these rows. So the transaction LOCKS the connection row (FOR UPDATE:
+// the toggle's update and the disconnect's delete wait for it) and re-checks
+// that the history is still wanted and that the grant it was read with
+// (`accountId`) is still the user's before writing. Returns false (nothing
+// written) otherwise.
+async function replaceTraktHistory(
+  userId: string,
+  accountId: string,
+  rows: TraktWatchedRow[],
+  ratings: TraktRatingRow[],
+): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
       // One Prisma.sql value, never a tagged template with a fragment (23a).
@@ -508,7 +542,9 @@ async function replaceTraktHistory(userId: string, rows: TraktWatchedRow[], rati
         Prisma.sql`SELECT "historySeeds" FROM "TraktConnection" WHERE "userId" = ${userId} FOR UPDATE`,
       );
       if (locked[0]?.historySeeds !== true) return false;
-      const grant = await tx.account.findFirst({ where: { userId, provider: "trakt" }, select: { id: true } });
+      // The SAME grant: a reconnect swaps in another account's row, and the
+      // history read here belongs to the old one.
+      const grant = await tx.account.findFirst({ where: { id: accountId, userId, provider: "trakt" }, select: { id: true } });
       if (!grant) return false;
       await tx.traktWatchedItem.deleteMany({ where: { userId } });
       await batchCreateMany(
@@ -857,7 +893,7 @@ export async function syncTraktUsers(opts: { signal?: AbortSignal } = {}): Promi
           const ratings = await fetchRatings(client);
           // False: switched off or disconnected mid-read — nothing written, and
           // the bookkeeping below must not claim an import either.
-          if (await replaceTraktHistory(row.userId, history, ratings)) {
+          if (await replaceTraktHistory(row.userId, account.id, history, ratings)) {
             historyActivityAt = stamp;
             historyImportedAt = new Date();
             result.historyImported++;
@@ -865,9 +901,11 @@ export async function syncTraktUsers(opts: { signal?: AbortSignal } = {}): Promi
         }
       }
       // updateMany: a user who disconnected mid-run has no row left, and that
-      // is not a run error.
+      // is not a run error. Only while the grant this run used is still theirs:
+      // a reconnect mid-run reset these stamps for the new account, and writing
+      // the old account's back would hold off its first import for hours.
       await prisma.traktConnection.updateMany({
-        where: { userId: row.userId },
+        where: { userId: row.userId, user: { accounts: { some: { id: account.id, provider: "trakt" } } } },
         data: { syncedAt: new Date(), status: "ok", historyActivityAt, historyImportedAt },
       });
       forgetWarnOnChange(CLIENT_REJECTED_WARN_KEY);

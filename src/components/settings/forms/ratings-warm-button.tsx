@@ -11,60 +11,52 @@ export function RatingsWarmButton() {
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [results, setResults] = useState<{ omdb?: string; mdblist?: string } | null>(null);
 
-  // Resets the button 10s after a run. A newer run cancels the previous timer,
-  // or it could flip "loading" to "idle" and re-enable the buttons mid-run.
+  // Clears a successful run's result 10s after it lands. An error stays put,
+  // with its error styling, until the next run: resetting only the status left
+  // the failure text on screen as a neutral status line. A newer run cancels the
+  // previous timer, or it could flip "loading" to "idle" mid-run.
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
-  type MdblistWarmData = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; error?: string };
+  type WarmData = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; error?: string };
+
+  // One source's line: its own error, or its counts. A rejected fetch (network
+  // failure) or a reply that isn't JSON (e.g. a reverse proxy's timeout page on
+  // a long warm) is an error for THAT source only — the other source's real
+  // outcome is still shown.
+  async function sourceLine(settled: PromiseSettledResult<Response>): Promise<{ text: string; ok: boolean }> {
+    if (settled.status === "rejected") return { text: t("settings.form.common.requestFailed"), ok: false };
+    const res = settled.value;
+    const data: WarmData = await res.json().catch(() => ({ error: t("settings.form.common.requestFailedHttp", { status: res.status }) }));
+    if (data.error) return { text: data.error, ok: false };
+    if (!res.ok) return { text: t("settings.form.common.requestFailedHttp", { status: res.status }), ok: false };
+    return {
+      text: (data.purged ?? 0) > 0
+        ? t("settings.form.ratingsWarm.summaryPurged", { fetched: data.fetched ?? 0, skipped: data.skipped ?? 0, purged: data.purged ?? 0 })
+        : t("settings.form.ratingsWarm.summary", { fetched: data.fetched ?? 0, skipped: data.skipped ?? 0 }),
+      ok: true,
+    };
+  }
 
   async function runWarm(force: boolean) {
     if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("loading");
     setResults(null);
-    try {
-      const [omdbRes, mdblistRes] = await Promise.all([
-        fetch(withBasePath("/api/admin/omdb-warm"), { method: "POST" }),
-        fetch(withBasePath("/api/admin/mdblist-warm"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ force }),
-        }),
-      ]);
-
-      // A reply that isn't JSON (e.g. a reverse proxy's timeout page on a long
-      // warm) becomes an error line for that source instead of throwing.
-      const omdbData: { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } =
-        await omdbRes.json().catch(() => ({ error: t("settings.form.common.requestFailedHttp", { status: omdbRes.status }) }));
-      const mdblistData: MdblistWarmData =
-        await mdblistRes.json().catch(() => ({ error: t("settings.form.common.requestFailedHttp", { status: mdblistRes.status }) }));
-
-      const omdbErr    = omdbData.error;
-      const mdblistErr = mdblistData.error;
-
-      const mdblistSummary = mdblistErr
-        ?? ((mdblistData.purged ?? 0) > 0
-          ? t("settings.form.ratingsWarm.summaryPurged", { fetched: mdblistData.fetched ?? 0, skipped: mdblistData.skipped ?? 0, purged: mdblistData.purged ?? 0 })
-          : t("settings.form.ratingsWarm.summary", { fetched: mdblistData.fetched ?? 0, skipped: mdblistData.skipped ?? 0 }));
-
-      if (omdbErr || mdblistErr) {
-        setStatus("error");
-        setResults({
-          omdb: omdbErr ?? t("settings.form.ratingsWarm.summary", { fetched: omdbData.fetched ?? 0, skipped: omdbData.skipped ?? 0 }),
-          mdblist: mdblistSummary,
-        });
-      } else {
-        setStatus("done");
-        setResults({
-          omdb: t("settings.form.ratingsWarm.summary", { fetched: omdbData.fetched ?? 0, skipped: omdbData.skipped ?? 0 }),
-          mdblist: mdblistSummary,
-        });
-      }
-    } catch {
-      setStatus("error");
-      setResults({ omdb: t("settings.form.common.requestFailed") });
-    }
-    resetTimer.current = setTimeout(() => setStatus("idle"), 10000);
+    // allSettled, not all: one source's network failure must not blank the
+    // other source's result.
+    const [omdbSettled, mdblistSettled] = await Promise.allSettled([
+      fetch(withBasePath("/api/admin/omdb-warm"), { method: "POST" }),
+      fetch(withBasePath("/api/admin/mdblist-warm"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force }),
+      }),
+    ]);
+    const [omdb, mdblist] = await Promise.all([sourceLine(omdbSettled), sourceLine(mdblistSettled)]);
+    const allOk = omdb.ok && mdblist.ok;
+    setStatus(allOk ? "done" : "error");
+    setResults({ omdb: omdb.text, mdblist: mdblist.text });
+    if (allOk) resetTimer.current = setTimeout(() => { setStatus("idle"); setResults(null); }, 10000);
   }
 
   return (

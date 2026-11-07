@@ -5,15 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { LogOut, Bell, GitFork, type IconComponent } from "@/components/icons";
-
-async function signOutAndRedirect(callbackUrl: string) {
-  try {
-    await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
-  } catch {
-    // Best-effort: redirect to the login page even if the request failed.
-  }
-  window.location.href = withBasePath(callbackUrl);
-}
+import { signOutAndRedirect } from "@/components/auth/sign-out";
 import {
   userNavItems,
   getVisibleAdminItems,

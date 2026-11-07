@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
 import { rateLimitMessage } from "@/lib/client/rate-limit";
-import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type RequestOptionsJSON } from "@/lib/client/webauthn";
+import { buildSecondFactor, type SecondFactorProof } from "@/lib/client/step-up";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { ChangePasswordSecondFactor } from "@/components/profile/change-password";
 
@@ -44,39 +44,16 @@ export function DeleteAccount({
 
   // The `secondFactor` body field, or null when the user must act first (an
   // error is already shown).
-  async function secondFactorProof(): Promise<Record<string, unknown> | null> {
-    const code = stepUpCode.trim();
-    if (code.length > 0) {
-      const digits = code.replace(/\s/g, "");
-      return { method: /^\d{6}$/.test(digits) ? "totp" : "recovery", code };
-    }
-    if (passkeyPossible && isWebAuthnSupported()) {
-      let res: Response;
-      let data: { error?: string; publicKey?: unknown; challengeToken?: unknown };
-      try {
-        res = await fetch(withBasePath("/api/profile/mfa/challenge"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-        data = await res.json().catch(() => ({}));
-      } catch {
-        setError(t("auth.login.error.network"));
-        return null;
-      }
-      if (!res.ok) {
-        setError(rateLimitMessage(res, t) ?? data.error ?? t("profile.close.error.failed"));
-        return null;
-      }
-      try {
-        const credential = await getPasskeyAssertion(data.publicKey as RequestOptionsJSON);
-        return { method: "webauthn", credential, challengeToken: data.challengeToken };
-      } catch (err) {
-        if (!isWebAuthnCancel(err)) setError(t("profile.mfa.stepUp.passkeyFailed"));
-        return null;
-      }
-    }
-    setError(t("profile.mfa.stepUp.codeRequired"));
+  async function secondFactorProof(): Promise<SecondFactorProof | null> {
+    // The one client second-factor builder every profile step-up uses.
+    const r = await buildSecondFactor({
+      code: stepUpCode,
+      passkeyPossible,
+      t,
+      failedMessage: () => t("profile.close.error.failed"),
+    });
+    if ("proof" in r) return r.proof;
+    if (r.error) setError(r.error);
     return null;
   }
   // The word the user types is translated (a French user is not asked to type

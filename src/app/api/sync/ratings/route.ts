@@ -2,10 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
 import { fetchUnifiedRatings, hasAnyMdblistRating, type UnifiedRatingsResult } from "@/lib/omdb-availability";
-import { fetchMdblistBatch, isMdblistQuotaLocked, revalidateMdblistForTmdb, type MdblistRatings } from "@/lib/mdblist";
-import { revalidateOmdbForTmdb, type OmdbRatings } from "@/lib/omdb";
+import { fetchMdblistBatch, isMdblistQuotaLocked, mdblistCacheKey, revalidateMdblistForTmdb, type MdblistRatings } from "@/lib/mdblist";
+import { omdbCacheKey, revalidateOmdbForTmdb, type OmdbRatings } from "@/lib/omdb";
 import { getCacheStaleMany } from "@/lib/tmdb-cache";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, RATINGS_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -16,8 +16,10 @@ const BATCH = 5;
 // A cron: MDBList stops it at the reserve the plan setting keeps for pages.
 const BACKGROUND = { background: true } as const;
 
-const mdblistKeyFor = (m: TmdbMedia) => `mdblist:tmdb:${m.mediaType}:${m.id}`;
-const omdbKeyFor = (m: TmdbMedia) => `omdb:tmdb:${m.mediaType}:${m.id}`;
+// The one key builder each ratings cache uses, so this cron reads the rows the
+// pages and the batch route write.
+const mdblistKeyFor = (m: TmdbMedia) => mdblistCacheKey(m.mediaType, m.id);
+const omdbKeyFor = (m: TmdbMedia) => omdbCacheKey(m.mediaType, m.id);
 
 type CachedRatingsRow = { value: MdblistRatings | OmdbRatings | { _notFound: true }; isStale: boolean };
 
@@ -118,7 +120,7 @@ export async function POST(request: NextRequest) {
   }
 
   return withCronRunRecording("ratings-sync", () => withAdvisoryLock(
-    2008,
+    RATINGS_SYNC_LOCK_ID,
     async (signal) => {
       const startTime = Date.now();
 

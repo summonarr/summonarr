@@ -4,11 +4,11 @@
 // mb 16) — then rows: padding 14, gap 14, a 44×66 poster, title + source/meta
 // lines and the right-aligned when / duration / progress column (~96px per
 // row, 8px apart).
-import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <div>
         <div className="flex items-center flex-wrap" style={{ gap: 8, marginBottom: 16 }}>
@@ -42,6 +42,6 @@ export default function Loading() {
           ))}
         </div>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

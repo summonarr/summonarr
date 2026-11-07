@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { useDelayed } from "@/hooks/use-delayed";
 import { useT } from "@/components/i18n/i18n-provider";
 import { AlertTriangle } from "@/components/icons";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,28 @@ import { Bar } from "@/components/loading/poster-grid-skeleton";
 // card with overflow:hidden, so its ring has to sit inside the edge to be seen.
 const FOCUS_RING = "outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]";
 const FOCUS_RING_INSET = `${FOCUS_RING} focus-visible:ring-inset`;
+
+// "Parameters" / "Request body" / "Responses" headings inside an operation panel.
+const SECTION_HEADING: CSSProperties = {
+  fontWeight: 600,
+  color: "var(--ds-fg)",
+  marginBottom: "0.3rem",
+};
+const SECTION: CSSProperties = { marginBottom: "0.7rem" };
+
+// The request-body example and the revealed curl command.
+const CODE_BLOCK: CSSProperties = {
+  margin: 0,
+  padding: "0.5rem 0.6rem",
+  background: "var(--ds-bg)",
+  border: "1px solid var(--ds-border)",
+  borderRadius: "var(--ds-r-sm)",
+  color: "var(--ds-fg-muted)",
+  fontSize: 12,
+  overflowX: "auto",
+};
+
+const COPY_FEEDBACK_MS = 2000;
 
 // aria-controls needs an id; the "<method> <path>" key is unique per operation
 // and stable across filtering, so it is sanitised into one here.
@@ -44,11 +67,13 @@ interface MediaContent {
   schema?: SchemaObject;
 }
 
+type Security = Record<string, string[]>[];
+
 interface Operation {
   tags?: string[];
   summary?: string;
   description?: string;
-  security?: Record<string, string[]>[];
+  security?: Security;
   parameters?: Parameter[];
   requestBody?: { required?: boolean; content?: Record<string, MediaContent> };
   responses?: Record<string, { description?: string; content?: Record<string, MediaContent> }>;
@@ -60,7 +85,7 @@ interface OpenApiSpec {
   tags?: { name: string; description?: string }[];
   paths: Record<string, Record<string, Operation>>;
   components?: { schemas?: Record<string, SchemaObject> };
-  security?: Record<string, string[]>[];
+  security?: Security;
 }
 
 const METHODS = ["get", "post", "put", "patch", "delete"] as const;
@@ -75,6 +100,7 @@ const METHOD_COLOR: Record<string, string> = {
 
 const SECURITY_LABEL_KEY: Record<string, string> = {
   session: "adminManage.apiDocs.security.session",
+  sessionBearer: "adminManage.apiDocs.security.sessionBearer",
   cronSecret: "adminManage.apiDocs.security.cronSecret",
 };
 
@@ -153,6 +179,44 @@ function statusColor(code: string): string {
   return "var(--ds-fg-subtle)";
 }
 
+/**
+ * The "Copy as curl" command. `serverUrl` is the spec's own server url, which
+ * already carries BASE_PATH (the spec route applies it), so it is used as-is —
+ * prefixing it again would double the base path. `cookieName` is the server's
+ * real session cookie name (getSessionCookieName(), passed down by the page): it
+ * follows AUTH_URL, which the browser's own protocol only approximates. The
+ * command stays on the cookie transport — a web session token is refused as a
+ * Bearer (guardrail 6h).
+ */
+function curlCommand(args: {
+  origin: string;
+  serverUrl: string;
+  method: string;
+  path: string;
+  op: Operation;
+  security: Security;
+  schemas: Record<string, SchemaObject>;
+  cookieName: string;
+}): string {
+  const { origin, serverUrl, method, path, op, security, schemas, cookieName } = args;
+  // Substitute {id}-style path params with an uppercase placeholder the user
+  // replaces, rather than leaving the literal brace syntax in the URL.
+  const resolvedPath = path.replace(/\{(\w+)\}/g, (_, name: string) => name.toUpperCase());
+  const query = (op.parameters ?? [])
+    .filter((p) => p.in === "query")
+    .map((p) => `${p.name}=`)
+    .join("&");
+  const url = `${origin}${serverUrl}${resolvedPath}${query ? `?${query}` : ""}`;
+  const lines = [`curl -X ${method.toUpperCase()} '${url}'`];
+  if (security.length > 0) lines.push(`  --cookie '${cookieName}=YOUR_SESSION_TOKEN'`);
+  const bodySchema = op.requestBody?.content?.["application/json"]?.schema;
+  if (bodySchema) {
+    lines.push(`  -H 'Content-Type: application/json'`);
+    lines.push(`  -d '${JSON.stringify(exampleValue(bodySchema, schemas))}'`);
+  }
+  return lines.join(" \\\n");
+}
+
 interface FlatOp {
   key: string;
   method: string;
@@ -160,7 +224,200 @@ interface FlatOp {
   op: Operation;
 }
 
-export function OpenApiViewer() {
+function ParameterList({ parameters }: { parameters: Parameter[] }) {
+  const t = useT();
+  return (
+    <div style={SECTION}>
+      <div style={SECTION_HEADING}>{t("adminManage.apiDocs.parameters")}</div>
+      {parameters.map((p) => (
+        <div key={`${p.in}:${p.name}`} style={{ color: "var(--ds-fg-muted)", padding: "0.1rem 0" }}>
+          <code style={{ color: "var(--ds-fg)" }}>{p.name}</code>{" "}
+          <span style={{ color: "var(--ds-fg-subtle)" }}>({p.in})</span>{" "}
+          {typeLabel(p.schema)}
+          {p.required && <span style={{ color: "var(--ds-danger)" }}> · {t("adminManage.apiDocs.required")}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RequestBodyExample({
+  requestBody,
+  schemas,
+}: {
+  requestBody: NonNullable<Operation["requestBody"]>;
+  schemas: Record<string, SchemaObject>;
+}) {
+  const t = useT();
+  return (
+    <div style={SECTION}>
+      <div style={SECTION_HEADING}>
+        {t("adminManage.apiDocs.requestBody")}
+        {requestBody.required && <span style={{ color: "var(--ds-danger)" }}> · {t("adminManage.apiDocs.required")}</span>}
+      </div>
+      <pre style={CODE_BLOCK}>
+        {JSON.stringify(exampleValue(requestBody.content?.["application/json"]?.schema, schemas), null, 2)}
+      </pre>
+    </div>
+  );
+}
+
+function ResponseList({ responses }: { responses: NonNullable<Operation["responses"]> }) {
+  const t = useT();
+  return (
+    <div style={SECTION}>
+      <div style={SECTION_HEADING}>{t("adminManage.apiDocs.responses")}</div>
+      {Object.entries(responses).map(([code, resp]) => (
+        <div key={code} style={{ color: "var(--ds-fg-muted)", padding: "0.1rem 0" }}>
+          <span style={{ color: statusColor(code), fontWeight: 600 }}>{code}</span> {resp.description}
+          {resp.content?.["application/json"]?.schema && (
+            <span style={{ color: "var(--ds-fg-subtle)" }}> → {typeLabel(resp.content["application/json"].schema)}</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function OperationPanel({
+  op,
+  panelId,
+  opLabel,
+  schemas,
+  securityLabel,
+  copied,
+  revealedCommand,
+  onCopy,
+}: {
+  op: Operation;
+  panelId: string;
+  opLabel: string;
+  schemas: Record<string, SchemaObject>;
+  securityLabel: string;
+  copied: boolean;
+  revealedCommand: string | null;
+  onCopy: () => void;
+}) {
+  const t = useT();
+  return (
+    <div
+      id={panelId}
+      role="region"
+      aria-label={opLabel}
+      style={{ padding: "0.75rem 0.9rem", borderTop: "1px solid var(--ds-border)", fontSize: 13 }}
+    >
+      <div style={{ marginBottom: "0.6rem", color: "var(--ds-fg-muted)" }}>
+        <strong style={{ color: "var(--ds-fg)" }}>{t("adminManage.apiDocs.auth")}</strong> {securityLabel}
+      </div>
+
+      {op.description && <p style={{ color: "var(--ds-fg-muted)", marginBottom: "0.6rem" }}>{op.description}</p>}
+
+      {op.parameters && op.parameters.length > 0 && <ParameterList parameters={op.parameters} />}
+
+      {op.requestBody && <RequestBodyExample requestBody={op.requestBody} schemas={schemas} />}
+
+      <ResponseList responses={op.responses ?? {}} />
+
+      <button
+        type="button"
+        onClick={onCopy}
+        className={FOCUS_RING}
+        style={{
+          fontSize: 12,
+          padding: "0.3rem 0.7rem",
+          background: "var(--ds-accent-soft)",
+          color: "var(--ds-accent-text)",
+          border: "1px solid var(--ds-accent-ring)",
+          borderRadius: "var(--ds-r-sm)",
+        }}
+      >
+        {copied ? t("adminManage.apiDocs.copied") : t("adminManage.apiDocs.copyCurl")}
+      </button>
+
+      {revealedCommand !== null && (
+        <div style={{ marginTop: "0.5rem" }}>
+          <p style={{ color: "var(--ds-warning)", fontSize: 12, margin: "0 0 0.3rem" }}>
+            {t("adminManage.apiDocs.clipboardUnavailable")}
+          </p>
+          <pre style={{ ...CODE_BLOCK, userSelect: "text" }}>{revealedCommand}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OperationRow({
+  method,
+  path,
+  summary,
+  isOpen,
+  panelId,
+  onToggle,
+  children,
+}: {
+  method: string;
+  path: string;
+  summary: string | undefined;
+  isOpen: boolean;
+  panelId: string;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  const color = METHOD_COLOR[method] ?? "var(--ds-fg-subtle)";
+  return (
+    <div
+      style={{
+        border: "1px solid var(--ds-border)",
+        borderRadius: "var(--ds-r-md)",
+        background: "var(--ds-bg-inset)",
+        overflow: "hidden",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={isOpen}
+        aria-controls={panelId}
+        className={FOCUS_RING_INSET}
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "0.6rem",
+          width: "100%",
+          padding: "0.5rem 0.7rem",
+          background: "transparent",
+          border: "none",
+          textAlign: "left",
+        }}
+      >
+        <span
+          style={{
+            flexShrink: 0,
+            width: 62,
+            textAlign: "center",
+            fontSize: 11,
+            fontWeight: 700,
+            textTransform: "uppercase",
+            color,
+            background: `color-mix(in oklab, ${color} 16%, transparent)`,
+            borderRadius: "var(--ds-r-sm)",
+            padding: "0.2rem 0",
+          }}
+        >
+          {method}
+        </span>
+        <code style={{ fontSize: 13, color: "var(--ds-fg)", minWidth: 0, overflowWrap: "anywhere" }}>{path}</code>
+        <span style={{ fontSize: 12, color: "var(--ds-fg-muted)", marginLeft: "auto", textAlign: "right" }}>
+          {summary}
+        </span>
+      </button>
+      {isOpen && children}
+    </div>
+  );
+}
+
+export function OpenApiViewer({ sessionCookieName }: { sessionCookieName: string }) {
   const t = useT();
   const [spec, setSpec] = useState<OpenApiSpec | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -170,6 +427,10 @@ export function OpenApiViewer() {
   const [revealed, setRevealed] = useState<{ key: string; command: string } | null>(null);
   // Bumped by Retry; the effect below re-runs the fetch for the new value.
   const [attempt, setAttempt] = useState(0);
+  // One reset slot for the "Copied!" label: a second copy replaces the first
+  // copy's pending reset (so it can't clear the new label early), and an
+  // unmount cancels it.
+  const clearCopiedLater = useDelayed();
 
   const retry = () => {
     setError(null);
@@ -252,7 +513,7 @@ export function OpenApiViewer() {
 
   const schemas = spec.components?.schemas ?? {};
   const globalSecurity = spec.security ?? [];
-  const serverUrl = spec.servers?.[0]?.url ?? "/api";
+  const serverUrl = spec.servers?.[0]?.url ?? withBasePath("/api");
 
   const securityLabel = (op: Operation): string => {
     const sec = op.security ?? globalSecurity;
@@ -261,48 +522,29 @@ export function OpenApiViewer() {
     return schemes.map((s) => (SECURITY_LABEL_KEY[s] ? t(SECURITY_LABEL_KEY[s]) : s)).join(t("adminManage.apiDocs.or"));
   };
 
-  const copyCurl = async (method: string, path: string, op: Operation) => {
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    // Substitute {id}-style path params with an uppercase placeholder the user
-    // replaces, rather than leaving the literal brace syntax in the URL.
-    const resolvedPath = path.replace(/\{(\w+)\}/g, (_, name: string) => name.toUpperCase());
-    const query = (op.parameters ?? [])
-      .filter((p) => p.in === "query")
-      .map((p) => `${p.name}=`)
-      .join("&");
-    // The spec's server url is the bare "/api" — Next serves the routes only under
-    // BASE_PATH, so the prefix has to be applied here or every copied command 404s
-    // on a subpath deployment.
-    const url = `${origin}${withBasePath(serverUrl)}${resolvedPath}${query ? `?${query}` : ""}`;
-    const lines = [`curl -X ${method.toUpperCase()} '${url}'`];
-    const sec = op.security ?? globalSecurity;
-    if (sec.length > 0) {
-      // The `__Host-` prefix only applies over HTTPS; an HTTP (dev) instance
-      // carries the unprefixed cookie name, matching getSessionCookieName().
-      const cookieName =
-        typeof window !== "undefined" && window.location.protocol !== "https:"
-          ? "summonarr-session"
-          : "__Host-summonarr-session";
-      lines.push(`  --cookie '${cookieName}=YOUR_SESSION_TOKEN'`);
-    }
-    const bodySchema = op.requestBody?.content?.["application/json"]?.schema;
-    if (bodySchema) {
-      const example = exampleValue(bodySchema, schemas);
-      lines.push(`  -H 'Content-Type: application/json'`);
-      lines.push(`  -d '${JSON.stringify(example)}'`);
-    }
-    const command = lines.join(" \\\n");
-    const key = `${method} ${path}`;
+  const copyCurl = async (key: string, method: string, path: string, op: Operation) => {
+    const command = curlCommand({
+      origin: typeof window !== "undefined" ? window.location.origin : "",
+      serverUrl,
+      method,
+      path,
+      op,
+      security: op.security ?? globalSecurity,
+      schemas,
+      cookieName: sessionCookieName,
+    });
     // navigator.clipboard exists only in a secure context, so it is absent on the
-    // supported http:// LAN deployment the cookie-name branch above anticipates —
-    // an unguarded write throws a TypeError straight out of the click handler.
+    // supported http:// LAN deployment — an unguarded write throws a TypeError
+    // straight out of the click handler.
     try {
       if (!navigator.clipboard) throw new Error("clipboard unavailable");
       await navigator.clipboard.writeText(command);
       setRevealed(null);
       setCopiedKey(key);
-      window.setTimeout(() => setCopiedKey(null), 2000);
+      // Clears only this copy's label, never one a later copy set.
+      clearCopiedLater(() => setCopiedKey((k) => (k === key ? null : k)), COPY_FEEDBACK_MS);
     } catch {
+      clearCopiedLater.cancel();
       setCopiedKey(null);
       setRevealed({ key, command });
     }
@@ -391,225 +633,28 @@ export function OpenApiViewer() {
             )}
             <div style={{ display: "flex", flexDirection: "column", gap: "0.35rem" }}>
               {entries.map(({ key, method, path, op }) => {
-                const isOpen = expanded.has(key);
-                const color = METHOD_COLOR[method] ?? "var(--ds-fg-subtle)";
                 const panelId = panelIdFor(key);
-                const opLabel = `${method.toUpperCase()} ${path}`;
                 return (
-                  <div
+                  <OperationRow
                     key={key}
-                    style={{
-                      border: "1px solid var(--ds-border)",
-                      borderRadius: "var(--ds-r-md)",
-                      background: "var(--ds-bg-inset)",
-                      overflow: "hidden",
-                    }}
+                    method={method}
+                    path={path}
+                    summary={op.summary}
+                    isOpen={expanded.has(key)}
+                    panelId={panelId}
+                    onToggle={() => toggle(key)}
                   >
-                    <button
-                      type="button"
-                      onClick={() => toggle(key)}
-                      aria-expanded={isOpen}
-                      aria-controls={panelId}
-                      className={FOCUS_RING_INSET}
-                      style={{
-                        display: "flex",
-                        flexWrap: "wrap",
-                        alignItems: "center",
-                        gap: "0.6rem",
-                        width: "100%",
-                        padding: "0.5rem 0.7rem",
-                        background: "transparent",
-                        border: "none",
-                        textAlign: "left",
-                      }}
-                    >
-                      <span
-                        style={{
-                          flexShrink: 0,
-                          width: 62,
-                          textAlign: "center",
-                          fontSize: 11,
-                          fontWeight: 700,
-                          textTransform: "uppercase",
-                          color,
-                          background: `color-mix(in oklab, ${color} 16%, transparent)`,
-                          borderRadius: "var(--ds-r-sm)",
-                          padding: "0.2rem 0",
-                        }}
-                      >
-                        {method}
-                      </span>
-                      <code style={{ fontSize: 13, color: "var(--ds-fg)", minWidth: 0, overflowWrap: "anywhere" }}>{path}</code>
-                      <span
-                        style={{
-                          fontSize: 12,
-                          color: "var(--ds-fg-muted)",
-                          marginLeft: "auto",
-                          textAlign: "right",
-                        }}
-                      >
-                        {op.summary}
-                      </span>
-                    </button>
-
-                    {isOpen && (
-                      <div
-                        id={panelId}
-                        role="region"
-                        aria-label={opLabel}
-                        style={{
-                          padding: "0.75rem 0.9rem",
-                          borderTop: "1px solid var(--ds-border)",
-                          fontSize: 13,
-                        }}
-                      >
-                        <div style={{ marginBottom: "0.6rem", color: "var(--ds-fg-muted)" }}>
-                          <strong style={{ color: "var(--ds-fg)" }}>{t("adminManage.apiDocs.auth")}</strong>{" "}
-                          {securityLabel(op)}
-                        </div>
-
-                        {op.description && (
-                          <p style={{ color: "var(--ds-fg-muted)", marginBottom: "0.6rem" }}>
-                            {op.description}
-                          </p>
-                        )}
-
-                        {op.parameters && op.parameters.length > 0 && (
-                          <div style={{ marginBottom: "0.7rem" }}>
-                            <div
-                              style={{
-                                fontWeight: 600,
-                                color: "var(--ds-fg)",
-                                marginBottom: "0.3rem",
-                              }}
-                            >
-                              {t("adminManage.apiDocs.parameters")}
-                            </div>
-                            {op.parameters.map((p) => (
-                              <div
-                                key={`${p.in}:${p.name}`}
-                                style={{ color: "var(--ds-fg-muted)", padding: "0.1rem 0" }}
-                              >
-                                <code style={{ color: "var(--ds-fg)" }}>{p.name}</code>{" "}
-                                <span style={{ color: "var(--ds-fg-subtle)" }}>({p.in})</span>{" "}
-                                {typeLabel(p.schema)}
-                                {p.required && (
-                                  <span style={{ color: "var(--ds-danger)" }}> · {t("adminManage.apiDocs.required")}</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {op.requestBody && (
-                          <div style={{ marginBottom: "0.7rem" }}>
-                            <div
-                              style={{
-                                fontWeight: 600,
-                                color: "var(--ds-fg)",
-                                marginBottom: "0.3rem",
-                              }}
-                            >
-                              {t("adminManage.apiDocs.requestBody")}
-                              {op.requestBody.required && (
-                                <span style={{ color: "var(--ds-danger)" }}> · {t("adminManage.apiDocs.required")}</span>
-                              )}
-                            </div>
-                            <pre
-                              style={{
-                                margin: 0,
-                                padding: "0.5rem 0.6rem",
-                                background: "var(--ds-bg)",
-                                border: "1px solid var(--ds-border)",
-                                borderRadius: "var(--ds-r-sm)",
-                                color: "var(--ds-fg-muted)",
-                                fontSize: 12,
-                                overflowX: "auto",
-                              }}
-                            >
-                              {JSON.stringify(
-                                exampleValue(
-                                  op.requestBody.content?.["application/json"]?.schema,
-                                  schemas,
-                                ),
-                                null,
-                                2,
-                              )}
-                            </pre>
-                          </div>
-                        )}
-
-                        <div style={{ marginBottom: "0.7rem" }}>
-                          <div
-                            style={{
-                              fontWeight: 600,
-                              color: "var(--ds-fg)",
-                              marginBottom: "0.3rem",
-                            }}
-                          >
-                            {t("adminManage.apiDocs.responses")}
-                          </div>
-                          {Object.entries(op.responses ?? {}).map(([code, resp]) => (
-                            <div
-                              key={code}
-                              style={{ color: "var(--ds-fg-muted)", padding: "0.1rem 0" }}
-                            >
-                              <span style={{ color: statusColor(code), fontWeight: 600 }}>
-                                {code}
-                              </span>{" "}
-                              {resp.description}
-                              {resp.content?.["application/json"]?.schema && (
-                                <span style={{ color: "var(--ds-fg-subtle)" }}>
-                                  {" "}
-                                  →{" "}
-                                  {typeLabel(resp.content["application/json"].schema)}
-                                </span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => void copyCurl(method, path, op)}
-                          className={FOCUS_RING}
-                          style={{
-                            fontSize: 12,
-                            padding: "0.3rem 0.7rem",
-                            background: "var(--ds-accent-soft)",
-                            color: "var(--ds-accent-text)",
-                            border: "1px solid var(--ds-accent-ring)",
-                            borderRadius: "var(--ds-r-sm)",
-                          }}
-                        >
-                          {copiedKey === key ? t("adminManage.apiDocs.copied") : t("adminManage.apiDocs.copyCurl")}
-                        </button>
-
-                        {revealed?.key === key && (
-                          <div style={{ marginTop: "0.5rem" }}>
-                            <p style={{ color: "var(--ds-warning)", fontSize: 12, margin: "0 0 0.3rem" }}>
-                              {t("adminManage.apiDocs.clipboardUnavailable")}
-                            </p>
-                            <pre
-                              style={{
-                                margin: 0,
-                                padding: "0.5rem 0.6rem",
-                                background: "var(--ds-bg)",
-                                border: "1px solid var(--ds-border)",
-                                borderRadius: "var(--ds-r-sm)",
-                                color: "var(--ds-fg-muted)",
-                                fontSize: 12,
-                                overflowX: "auto",
-                                userSelect: "text",
-                              }}
-                            >
-                              {revealed.command}
-                            </pre>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                    <OperationPanel
+                      op={op}
+                      panelId={panelId}
+                      opLabel={`${method.toUpperCase()} ${path}`}
+                      schemas={schemas}
+                      securityLabel={securityLabel(op)}
+                      copied={copiedKey === key}
+                      revealedCommand={revealed?.key === key ? revealed.command : null}
+                      onCopy={() => void copyCurl(key, method, path, op)}
+                    />
+                  </OperationRow>
                 );
               })}
             </div>

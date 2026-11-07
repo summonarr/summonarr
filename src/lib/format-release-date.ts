@@ -13,3 +13,18 @@ export function formatReleaseDate(value: string | null | undefined, locale: stri
   if (Number.isNaN(date.getTime())) return null;
   return date.toLocaleDateString(locale, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
+
+// How far the Upcoming lists' "today" trails the UTC clock. TMDB release dates
+// are bare local dates and the server runs in UTC (the image sets no TZ), so
+// cutting at the UTC date dropped a title releasing TODAY from Upcoming every
+// evening west of UTC — from about 4–8pm across the Americas. Trailing by 12
+// hours keeps a same-day release listed through the evening there; the cost is
+// that a title lingers until noon UTC the day after its release.
+export const UPCOMING_CUTOFF_LAG_MS = 12 * 60 * 60 * 1000;
+
+// The earliest release date ("YYYY-MM-DD") the Upcoming page and GET
+// /api/upcoming still list. One helper so the page and the route keep
+// returning the same list. Server-side only in practice (it reads the clock).
+export function upcomingCutoffDate(now: number = Date.now()): string {
+  return new Date(now - UPCOMING_CUTOFF_LAG_MS).toISOString().slice(0, 10);
+}

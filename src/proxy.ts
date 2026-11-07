@@ -12,6 +12,11 @@ import { verifyAndRefreshSession } from "@/lib/session-refresh";
 import { verifySessionJwt } from "@/lib/session-jwt";
 import { parseAuthUrl } from "@/lib/auth-url";
 import {
+  configuredTrustedOrigins,
+  isTrustedOrigin,
+  requestOrigin,
+} from "@/lib/trusted-origin";
+import {
   parseBearerToken,
   hasNativeClientHeader,
   NATIVE_CLIENT_HEADER,
@@ -30,36 +35,11 @@ import {
 
 const trustProxy = process.env.TRUST_PROXY === "true";
 
-// Only an http(s) URL yields a usable origin. `new URL("summonarr.local:3001")`
-// does NOT throw — it parses as scheme `summonarr.local:` with path `3001` and
-// reports `.origin === "null"` — so a try/catch alone silently trusted the
-// literal string "null" (which a browser sends as `Origin: null` for
-// sandboxed-iframe and cross-origin-redirected POSTs) and never trusted the
-// host the operator meant. Same predicate as cron-auth.ts's
-// parseTrustedOriginEntry (kept inline: proxy.ts must stay import-light) and
-// as the boot warning in instrumentation.ts.
-function parseTrustedOrigin(raw: string | undefined): string | null {
-  const trimmed = raw?.trim();
-  if (!trimmed) return null;
-  try {
-    const u = new URL(trimmed);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-    if (u.origin === "null") return null;
-    return u.origin;
-  } catch {
-    return null;
-  }
-}
-
+// AUTH_URL + AUTH_TRUSTED_ORIGIN, read once at module load (the rules live in
+// trusted-origin.ts, shared with cron-auth.ts and the register route). Empty ⇒
+// only a request's own origin is trusted (isTrustedOrigin).
 const envOrigins: ReadonlySet<string> = (() => {
-  const trusted = new Set<string>();
-  for (const raw of [
-    process.env.AUTH_URL,
-    ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(","),
-  ]) {
-    const origin = parseTrustedOrigin(raw);
-    if (origin) trusted.add(origin);
-  }
+  const trusted = configuredTrustedOrigins();
   if (trusted.size === 0 && process.env.NODE_ENV === "production") {
     console.error(
       "[proxy] No trusted origins configured in production. " +
@@ -69,22 +49,36 @@ const envOrigins: ReadonlySet<string> = (() => {
   return trusted;
 })();
 
-// Fallback used only when no AUTH_URL / AUTH_TRUSTED_ORIGIN is set: trust the
-// request's own origin.
-const trustedOriginsCache = new Map<string, ReadonlySet<string>>();
-// The key comes from the Host header, which the client controls, so the map is
-// capped: otherwise a stream of random Host values would grow it forever. The
-// entries are cheap to rebuild, so clearing it all at once loses nothing.
-const TRUSTED_ORIGINS_CACHE_MAX = 512;
+// Machine endpoints that authenticate themselves (webhook secret, CRON_SECRET
+// or an admin session with its own same-origin check, Discord's signature).
+// They are public to the session gate AND exempt from the CSRF Origin check:
+// their callers send no browser Origin. Declared once so the two lists can't
+// drift — a route in one and not the other either 401s its machine caller or
+// skips the Origin check for a cookie one.
+function isMachinePath(pathname: string): boolean {
+  return (
+    pathname.startsWith("/api/webhooks/") ||
+    pathname === "/api/sync" ||
+    pathname.startsWith("/api/sync/") ||
+    pathname.startsWith("/api/cron/") ||
+    pathname === "/api/interactions"
+  );
+}
 
-function buildTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
-  if (envOrigins.size > 0) return envOrigins;
-  const cached = trustedOriginsCache.get(selfOrigin);
-  if (cached) return cached;
-  const fallback = new Set<string>([selfOrigin]);
-  if (trustedOriginsCache.size >= TRUSTED_ORIGINS_CACHE_MAX) trustedOriginsCache.clear();
-  trustedOriginsCache.set(selfOrigin, fallback);
-  return fallback;
+// Auth routes that legitimately have no Origin header:
+//   - oidc/callback: top-level redirect initiated by the IdP.
+//   - oidc/start: same-site top-level navigation (no Origin sent by browsers
+//     on top-level navigations).
+//   - machine-session: server-to-server caller with Bearer CRON_SECRET.
+// Every other /api/auth/* route is public but still Origin-checked: browser
+// sign-in/sign-out/register POSTs DO send Origin, and the check defends
+// against login-CSRF and forced-logout-CSRF.
+function isAuthRouteExemptFromCsrf(pathname: string): boolean {
+  return (
+    pathname === "/api/auth/oidc/callback" ||
+    pathname === "/api/auth/oidc/start" ||
+    pathname === "/api/auth/machine-session"
+  );
 }
 
 function isPublicPath(pathname: string): boolean {
@@ -103,11 +97,7 @@ function isPublicPath(pathname: string): boolean {
     pathname.startsWith("/auth/plex") ||
     pathname.startsWith("/api/auth/") ||
     pathname.startsWith("/api/setup/") ||
-    pathname.startsWith("/api/webhooks/") ||
-    pathname === "/api/sync" ||
-    pathname.startsWith("/api/sync/") ||
-    pathname.startsWith("/api/cron/") ||
-    pathname === "/api/interactions" ||
+    isMachinePath(pathname) ||
     pathname === "/api/health" ||
     pathname === "/api/config/compat" ||
     // Notification-email verification link is clicked from an email (possibly
@@ -138,6 +128,52 @@ function buildLoginRedirect(req: NextRequest): URL {
   // value with safeInternalPath, which preserves a query it is given.
   url.searchParams.set("callbackUrl", req.nextUrl.pathname + req.nextUrl.search);
   return url;
+}
+
+// The CSRF Origin check for a mutating cookie request to a protected API: the
+// 403 to return, or null when the request names a trusted origin (its Origin
+// header, else its Referer's). Runs before the session is resolved, so a
+// cross-site request never costs a DB read.
+function csrfRefusal(request: NextRequest): Response | null {
+  const origin = requestOrigin(request.headers);
+  if (!origin) {
+    return NextResponse.json({ error: "Forbidden — missing origin" }, { status: 403 });
+  }
+  if (!isTrustedOrigin(origin, envOrigins, request.nextUrl.origin)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  return null;
+}
+
+// The Content-Security-Policy for one response, around its fresh nonce.
+//
+// 'unsafe-eval' is `next dev` ONLY. React's development build calls eval() to
+// reconstruct server-side error stacks in the browser, and Turbopack's HMR
+// runtime evaluates modules the same way; without it every dev page logs
+// "eval() is not supported in this environment" and those debugging features
+// go dark. Next's CSP guide documents this exact carve-out and states neither
+// React nor Next uses eval() in production.
+//
+// NEVER widen this past `=== "development"`. 'unsafe-eval' turns any string
+// that reaches eval()/new Function() into executable script, which is most
+// of what the nonce + 'strict-dynamic' policy exists to prevent — and a
+// production response is the one an attacker can reach. `next build` sets
+// NODE_ENV=production, so this reads false for every shipped deployment.
+// NODE_ENV is read on every call; tests/proxy.test.mts pins both directions.
+function buildCsp(nonce: string): string {
+  const isDev = process.env.NODE_ENV === "development";
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
+    `style-src 'self' 'unsafe-inline'`,
+    "img-src 'self' data: https://image.tmdb.org https://plex.tv https://assets.plex.tv https://secure.gravatar.com https://i0.wp.com",
+    "font-src 'self'",
+    `connect-src 'self' https://plex.tv${(() => { try { return process.env.OIDC_ISSUER ? ` ${new URL(process.env.OIDC_ISSUER).origin}` : ""; } catch { return ""; } })()}`,
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ].join("; ");
 }
 
 function loginRedirectResponse(redirectTo: URL, clearCookies: boolean): Response {
@@ -187,25 +223,10 @@ export async function proxy(request: NextRequest) {
     request.headers.get(NATIVE_CLIENT_HEADER),
   );
 
-  // Auth routes that legitimately have no Origin header:
-  //   - oidc/callback: top-level redirect initiated by the IdP.
-  //   - oidc/start: same-site top-level navigation (no Origin sent by browsers
-  //     on top-level navigations).
-  //   - machine-session: server-to-server caller with Bearer CRON_SECRET.
-  // Browser-facing sign-in/sign-out/register POSTs DO send Origin and SHOULD
-  // be Origin-checked to defend against login-CSRF and forced-logout-CSRF.
-  const isAuthRouteExemptFromCsrf =
-    pathname === "/api/auth/oidc/callback" ||
-    pathname === "/api/auth/oidc/start" ||
-    pathname === "/api/auth/machine-session";
   const isProtectedApi =
     pathname.startsWith("/api/") &&
-    !isAuthRouteExemptFromCsrf &&
-    !pathname.startsWith("/api/webhooks/") &&
-    pathname !== "/api/sync" &&
-    !pathname.startsWith("/api/sync/") &&
-    !pathname.startsWith("/api/cron/") &&
-    pathname !== "/api/interactions";
+    !isAuthRouteExemptFromCsrf(pathname) &&
+    !isMachinePath(pathname);
 
   const isMutating = ["POST", "PUT", "PATCH", "DELETE"].includes(request.method);
 
@@ -235,22 +256,8 @@ export async function proxy(request: NextRequest) {
   // ambient-cookie CSRF risk (this also lets a native client POST the sign-in
   // route, which has no Origin header).
   if (isMutating && isProtectedApi && !bearerToken && !isNativeClient) {
-    const origin = request.headers.get("origin");
-    let effectiveOrigin = origin;
-    if (!effectiveOrigin) {
-      const referer = request.headers.get("referer");
-      if (referer) {
-        try { effectiveOrigin = new URL(referer).origin; } catch { }
-      }
-    }
-    if (effectiveOrigin) {
-      const trusted = buildTrustedOrigins(request.nextUrl.origin);
-      if (!trusted.has(effectiveOrigin)) {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-      }
-    } else {
-      return NextResponse.json({ error: "Forbidden — missing origin" }, { status: 403 });
-    }
+    const refusal = csrfRefusal(request);
+    if (refusal) return refusal;
   }
 
   // Resolve the session for the gating + role checks below. Public paths are
@@ -302,6 +309,13 @@ export async function proxy(request: NextRequest) {
     // victim's browser family along with it; all the comparison ever did was
     // sign real users out when a browser changed its UA.
 
+    // The effective mask (ADMIN role → superbit; unseeded → role preset), for
+    // the /api/admin/* backstop and the /admin page gate below.
+    const perms = effectivePermissions(
+      role ?? "USER",
+      parsePermissions(refreshResult.claims.permissions),
+    );
+
     // Defense-in-depth backstop for the admin API surface — fails closed only if a
     // per-route withAdmin/withIssueAdmin/withPermission guard is ever missing, and
     // only for principals with NO admin-surface access at all.
@@ -318,10 +332,6 @@ export async function proxy(request: NextRequest) {
       role !== "ADMIN" &&
       role !== "ISSUE_ADMIN"
     ) {
-      const perms = effectivePermissions(
-        role ?? "USER",
-        parsePermissions(refreshResult.claims.permissions),
-      );
       const hasAdminSurface = hasPermission(
         perms,
         [Permission.MANAGE_USERS, Permission.MANAGE_REQUESTS, Permission.MANAGE_ISSUES],
@@ -352,10 +362,6 @@ export async function proxy(request: NextRequest) {
 
     const lowerPath = pathname.toLowerCase();
     if (lowerPath.startsWith("/admin") && role !== "ADMIN") {
-      const perms = effectivePermissions(
-        role ?? "USER",
-        parsePermissions(refreshResult.claims.permissions),
-      );
       // Honor granular MANAGE_* bits for page access (proxy must not redirect
       // before the server component's bit guard can run). ADMIN bit covers all.
       const canIssues = hasPermission(perms, Permission.MANAGE_ISSUES);
@@ -383,32 +389,7 @@ export async function proxy(request: NextRequest) {
   // A fresh random nonce per request. It is passed on in the x-nonce request
   // header, and server components read it to stamp their inline scripts.
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
-  // `next dev` ONLY. React's development build calls eval() to reconstruct
-  // server-side error stacks in the browser, and Turbopack's HMR runtime
-  // evaluates modules the same way; without this every dev page logs "eval()
-  // is not supported in this environment" and those debugging features go
-  // dark. Next's CSP guide documents this exact carve-out and states neither
-  // React nor Next uses eval() in production.
-  //
-  // NEVER widen this past `=== "development"`. 'unsafe-eval' turns any string
-  // that reaches eval()/new Function() into executable script, which is most
-  // of what the nonce + 'strict-dynamic' policy exists to prevent — and a
-  // production response is the one an attacker can reach. `next build` sets
-  // NODE_ENV=production, so this reads false for every shipped deployment;
-  // tests/proxy.test.mts pins both directions.
-  const isDev = process.env.NODE_ENV === "development";
-  const cspValue = [
-    "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
-    `style-src 'self' 'unsafe-inline'`,
-    "img-src 'self' data: https://image.tmdb.org https://plex.tv https://assets.plex.tv https://secure.gravatar.com https://i0.wp.com",
-    "font-src 'self'",
-    `connect-src 'self' https://plex.tv${(() => { try { return process.env.OIDC_ISSUER ? ` ${new URL(process.env.OIDC_ISSUER).origin}` : ""; } catch { return ""; } })()}`,
-    "frame-ancestors 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    "object-src 'none'",
-  ].join("; ");
+  const cspValue = buildCsp(nonce);
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);

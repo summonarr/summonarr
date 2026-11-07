@@ -116,10 +116,12 @@ export function HeatmapCellPopover({
     setPos({ left, top: Math.max(MARGIN, top) });
   }, [anchor, detail, error]);
 
-  // Dismiss on outside click, Escape, and ANY scroll. The popover is
-  // position:fixed on an anchor measured once at click time, so a scroll would
-  // leave it floating over whatever moved underneath. Scroll events don't
-  // bubble, hence `capture` — the heatmaps' own overflow containers scroll too.
+  // Dismiss on outside click, Escape, ANY page scroll and a resize. The
+  // popover is position:fixed on an anchor measured once at click time, so a
+  // scroll or a reflow would leave it floating over whatever moved underneath.
+  // Scroll events don't bubble, hence `capture` — the heatmaps' own overflow
+  // containers scroll too. The popover's own body scrolls when it is taller
+  // than the viewport, so a scroll inside it is not a dismissal.
   useEffect(() => {
     function onDown(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
@@ -127,17 +129,20 @@ export function HeatmapCellPopover({
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
     }
-    function onScroll() {
+    function onScroll(e: Event) {
+      if (e.target instanceof Node && ref.current?.contains(e.target)) return;
       onClose();
     }
     const scrollOpts: AddEventListenerOptions = { passive: true, capture: true };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, scrollOpts);
+    window.addEventListener("resize", onClose);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", onScroll, scrollOpts);
+      window.removeEventListener("resize", onClose);
     };
   }, [onClose]);
 
@@ -153,6 +158,11 @@ export function HeatmapCellPopover({
         left: pos?.left ?? anchor.x,
         top: pos?.top ?? anchor.y + anchor.h + 6,
         width: POPOVER_WIDTH,
+        // Never taller than the viewport: the header and the "View these
+        // plays" link stay put and the body between them scrolls.
+        maxHeight: `calc(100dvh - ${MARGIN * 2}px)`,
+        display: "flex",
+        flexDirection: "column",
         visibility: pos ? "visible" : "hidden",
         zIndex: 60,
         background: "var(--ds-bg-1)",
@@ -183,7 +193,7 @@ export function HeatmapCellPopover({
         </button>
       </div>
 
-      <div style={{ padding: "10px 12px" }}>
+      <div style={{ padding: "10px 12px", overflowY: "auto", minHeight: 0 }}>
         {error ? (
           <div>
             <p role="alert" style={{ color: "var(--ds-danger)", margin: 0 }}>{t(error)}</p>

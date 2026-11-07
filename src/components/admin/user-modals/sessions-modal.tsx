@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
+import { localizeDeviceLabel } from "@/lib/ua-fingerprint";
 import {
   Trash2,
   Loader2,
@@ -39,7 +40,9 @@ function DeviceIcon({ deviceType }: { deviceType: string }) {
 }
 
 function deviceName(s: AdminAuthSession, t: Translator): string {
-  if (s.deviceLabel) return s.deviceLabel;
+  // The stored label is English (native clients read it as-is).
+  const label = localizeDeviceLabel(s.deviceLabel || null, t);
+  if (label) return label;
   if (s.deviceType === "mobile") return t("profile.sessions.device.mobile");
   if (s.deviceType === "tablet") return t("profile.sessions.device.tablet");
   if (s.deviceType === "desktop") return t("profile.sessions.device.desktop");

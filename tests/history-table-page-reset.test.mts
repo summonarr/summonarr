@@ -142,3 +142,25 @@ test("f66: the fetch effect decides the page-1 reset itself, before fetching, wi
   assert.ok(depNames.includes("reloadToken"));
   assert.ok(depNames.includes("buildFilterParams"));
 });
+
+// The table writes its from/to/watched into the URL with a null history state.
+// Next's patched replaceState skips its router sync for a state that carries
+// its own marker, and `window.history.state` does: with it, useSearchParams kept
+// the old query and the period selector re-pushed a cleared date. The history
+// page keys the table on the period filters only, so a live refresh after a
+// date edit (which now re-renders the page WITH that date) doesn't remount it.
+test("the URL sync hands Next a null state, and the page doesn't key the table on the dates it writes", () => {
+  const text = readFileSync(FILE, "utf8");
+  assert.match(text, /window\.history\.replaceState\(null, "", url\)/);
+  assert.doesNotMatch(text, /replaceState\(window\.history\.state/);
+  // A date picked by hand is written too, not only one that came from a link.
+  assert.doesNotMatch(text, /value !== "" && url\.searchParams\.has\(key\)/);
+
+  const page = readFileSync(join(here, "..", "src", "app", "(app)", "admin", "activity", "history", "page.tsx"), "utf8");
+  const key = /<ActivityHistoryTable\s+key=\{`([^`]*)`\}/.exec(page);
+  assert.ok(key, "the table is keyed");
+  assert.match(key[1], /\$\{days\}/);
+  for (const seeded of ["fromDate", "toDate", "initialWatched"]) {
+    assert.doesNotMatch(key[1], new RegExp(`\\$\\{${seeded}\\b`), `${seeded} must not remount the table`);
+  }
+});

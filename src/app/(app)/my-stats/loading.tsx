@@ -3,12 +3,12 @@
 // line box over the 22px value's 33px line box, gap 4), the ~204px 365-day
 // calendar card (+22px on phones for ActivityCalendar's sm:hidden scroll
 // hint), and the minmax(280px,1fr) grid of ~220px chart cards.
-import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   const card = { ...SKELETON_CARD, borderRadius: 10, padding: 18 };
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <div>
         <Bar w="100%" h={52} r={12} style={{ marginBottom: 22 }} />
@@ -40,6 +40,6 @@ export default function Loading() {
           </div>
         </div>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

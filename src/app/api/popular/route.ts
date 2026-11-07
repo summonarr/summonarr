@@ -63,9 +63,14 @@ export const GET = withAuth(async (request, _ctx, session) => {
       if (items.length === 0) return [];
       const dbType = type === "movie" ? "MOVIE" : "TV";
 
+      // One query for the whole page, as the page does: every item shares
+      // mediaType and the freshness check, so a single `tmdbId IN (...)` list
+      // is all that's needed — not one OR branch (and one `new Date()`) per item.
       const coreRows = await prisma.tmdbMediaCore.findMany({
         where: {
-          OR: items.map((i) => ({ tmdbId: i.tmdbId, mediaType: dbType, expiresAt: { gt: new Date() } })),
+          tmdbId: { in: items.map((i) => i.tmdbId) },
+          mediaType: dbType,
+          expiresAt: { gt: new Date() },
         },
       });
       const coreMap = new Map(coreRows.map((r) => [r.tmdbId, r]));
@@ -116,8 +121,8 @@ export const GET = withAuth(async (request, _ctx, session) => {
       resolveMedia(tvResult.items, "tv"),
     ]);
 
-    const enrich = async (items: EnrichedMedia[]): Promise<EnrichedMedia[]> =>
-      (await attachAllAvailability(items, session.user.id, { show4k })) as EnrichedMedia[];
+    // attachAllAvailability is generic, so the play stats come back typed.
+    const enrich = (items: EnrichedMedia[]) => attachAllAvailability(items, session.user.id, { show4k });
 
     [movies, tv] = await Promise.all([enrich(movies), enrich(tv)]);
 

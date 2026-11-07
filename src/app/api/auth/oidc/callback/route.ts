@@ -7,6 +7,7 @@ import {
   isNativeOidcState,
   isOidcConfigured,
   NATIVE_OIDC_CALLBACK_URL,
+  oidcLoginErrorRedirect,
   readOidcStateCookie,
   verifyOidcStateCookie,
 } from "@/lib/oidc";
@@ -23,19 +24,10 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // buildLoginRedirect does. No-op when BASE_PATH is unset (the default).
 const basePath = process.env.BASE_PATH ?? "";
 
+// Every web failure here also expires the flow cookie: the state it carries
+// is spent or unusable either way.
 function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
-  // AUTH_URL is guaranteed set by the early guard in GET; fail closed otherwise
-  // rather than deriving the base from an attacker-influenceable request Host.
-  const base = process.env.AUTH_URL;
-  if (!base) {
-    const t = translatorForRequest(req);
-    return NextResponse.json({ error: t("apiAuth.common.authUrlMissing") }, { status: 500 });
-  }
-  const url = new URL(`${basePath}/login`, base);
-  url.searchParams.set("error", code);
-  const res = NextResponse.redirect(url.toString());
-  res.headers.append("Set-Cookie", clearOidcStateCookie());
-  return res;
+  return oidcLoginErrorRedirect(req, code, { clearStateCookie: true });
 }
 
 // Hand a native flow straight back to the app on its custom scheme, carrying
@@ -157,7 +149,9 @@ export async function GET(req: NextRequest) {
   let result: Awaited<ReturnType<typeof signInAndMintSession>>;
   try {
     result = await signInAndMintSession({
-      user: { ...dbUser, ...device },
+      // rememberMe only picks the configured duration; the lifetime itself is
+      // decided in initializeTokenOnSignIn (guardrail 6c), as for every provider.
+      user: { ...dbUser, ...device, ...(flowState.rememberMe ? { rememberMe: "true" } : {}) },
       providerId: "oidc",
     });
   } catch (err) {

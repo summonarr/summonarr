@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
+import { chunkedUploadErrorMessage, uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
@@ -96,14 +96,14 @@ export function SetupImportPanel({ onBusyChange }: { onBusyChange?: (busy: boole
       });
     } catch (err) {
       // Thrown before the uploader's own try (e.g. no crypto in this context).
-      outcome = { kind: "error", status: null, error: err instanceof Error ? err.message : t("auth.setup.error.generic") };
+      outcome = { kind: "error", status: null, code: "network", error: err instanceof Error ? err.message : t("auth.setup.error.generic") };
     }
 
     setImporting(false);
 
     if (outcome.kind === "error") {
       onBusyChange?.(false);
-      setResult({ ok: false, error: outcome.error });
+      setResult({ ok: false, error: chunkedUploadErrorMessage(outcome, t) });
       return;
     }
 

@@ -1,7 +1,15 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
-import { getWatchedThreshold, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
+import { coalesce } from "@/lib/concurrency";
+import { processSingleton } from "@/lib/process-singleton";
+import {
+  currentActivityGeneration,
+  getWatchedThreshold,
+  isPlayHistoryEnabled,
+  isSourceEnabled,
+} from "@/lib/play-history";
 import {
   resolveAccountMediaIdentities,
   resolveMediaServerUserOwners,
@@ -336,6 +344,8 @@ export interface WatchGradeComputation {
   grades: Map<string, UserWatchGrade>;
 }
 
+type ComputeOptions = { resolveIdentityForAll?: boolean; now?: Date; settings?: WatchGradeSettings };
+
 // Grades `userIds` in one batch. `resolveIdentityForAll` also resolves identity
 // for accounts with nothing fulfilled in the window — the detail view wants
 // "not linked" vs "nothing to grade yet"; list surfaces skip that work, since an
@@ -343,12 +353,17 @@ export interface WatchGradeComputation {
 // `settings` grades with values other than the stored ones — the settings
 // preview. Availability (feature flag, tracking, watched threshold) still comes
 // from what is in force.
-export async function computeWatchGrades(
+export async function computeWatchGrades(userIds: string[], opts: ComputeOptions = {}): Promise<WatchGradeComputation> {
+  return computeWatchGradesWith(await getWatchGradeAvailability(), userIds, opts);
+}
+
+// The same, against an availability the caller already read.
+async function computeWatchGradesWith(
+  availability: WatchGradeAvailability,
   userIds: string[],
-  opts: { resolveIdentityForAll?: boolean; now?: Date; settings?: WatchGradeSettings } = {},
+  opts: ComputeOptions,
 ): Promise<WatchGradeComputation> {
   const grades = new Map<string, UserWatchGrade>();
-  const availability = await getWatchGradeAvailability();
   const ids = [...new Set(userIds)];
   if (!availability.enabled || ids.length === 0) return { availability, grades };
 
@@ -484,6 +499,37 @@ export async function computeWatchGrades(
   return { availability, grades };
 }
 
+// The list surfaces (/admin, /admin/users, /admin/stats) re-read the same
+// summaries on every render, and each computation is the whole query budget
+// above — play-history aggregates included. So they share one result per (user
+// set, settings in force) for a short while, held to guardrail 19b like the
+// play-history aggregates themselves: an entry is good only for the activity
+// generation it was computed under (every finalize or history delete bumps it),
+// and a computation that spans a clear is returned but never stored.
+//   - Settings, tracked sources and the watched threshold are in the key, so a
+//     save is never served the old grades.
+//   - A request changing status bumps nothing; the TTL bounds that staleness
+//     (and a newly fulfilled request sits in its grace period anyway).
+// The detail view and the settings preview stay uncached.
+const SUMMARY_TTL_MS = 2 * 60 * 1000;
+const SUMMARY_CACHE_MAX = 32;
+type SummaryEntry = { generation: number; at: number; value: Map<string, WatchGradeSummary> };
+const summaryCache = processSingleton("watch-grade:summaries", () => new Map<string, SummaryEntry>());
+
+function storeSummaries(key: string, entry: SummaryEntry): void {
+  if (summaryCache.size >= SUMMARY_CACHE_MAX && !summaryCache.has(key)) {
+    for (const [k, v] of summaryCache) {
+      if (v.generation !== entry.generation || Date.now() - v.at >= SUMMARY_TTL_MS) summaryCache.delete(k);
+    }
+    while (summaryCache.size >= SUMMARY_CACHE_MAX) {
+      const oldest = summaryCache.keys().next().value;
+      if (oldest === undefined) break;
+      summaryCache.delete(oldest);
+    }
+  }
+  summaryCache.set(key, entry);
+}
+
 // Summary per user for list surfaces (Users page, request queue). null when the
 // feature is off or tracking is disabled — callers render no grade at all.
 //
@@ -495,9 +541,26 @@ export async function getWatchGradeSummaries(
   userIds: string[],
 ): Promise<Map<string, WatchGradeSummary> | null> {
   try {
-    const { availability, grades } = await computeWatchGrades(userIds);
+    const availability = await getWatchGradeAvailability();
     if (!availability.enabled) return null;
-    return new Map([...grades].map(([id, g]) => [id, g.summary]));
+    const ids = [...new Set(userIds)].sort();
+    if (ids.length === 0) return new Map();
+    const key = createHash("sha256")
+      .update(JSON.stringify([availability.settings, availability.trackedSources, availability.watchedThresholdPercent, ids]))
+      .digest("hex");
+    // Read BEFORE computing (19b): a clear after this point means the result
+    // may predate the plays the clear was meant to surface.
+    const generation = currentActivityGeneration();
+    const hit = summaryCache.get(key);
+    if (hit && hit.generation === generation && Date.now() - hit.at < SUMMARY_TTL_MS) return new Map(hit.value);
+    const value = await coalesce(`watch-grade:summaries:${generation}:${key}`, async () => {
+      const { grades } = await computeWatchGradesWith(availability, ids, {});
+      const summaries = new Map([...grades].map(([id, g]) => [id, g.summary]));
+      if (currentActivityGeneration() === generation) storeSummaries(key, { generation, at: Date.now(), value: summaries });
+      return summaries;
+    });
+    // A copy per caller: the stored map is shared.
+    return new Map(value);
   } catch (err) {
     console.error("[watch-grade] summary load failed:", err instanceof Error ? err.message : err);
     return null;
@@ -548,10 +611,10 @@ export async function previewWatchGradeSpread(proposed: WatchGradeSettings): Pro
   }
   // Requesters with an approved request of their own, then those whose only
   // fulfilled requests are covered by another request's approval of the title.
-  const approvedOwn = await prisma.mediaRequest.findMany({
+  // groupBy, not findMany + distinct: Prisma applies `distinct` in memory.
+  const approvedOwn = await prisma.mediaRequest.groupBy({
+    by: ["requestedBy"],
     where: { status: "AVAILABLE", approvedAt: { not: null } },
-    distinct: ["requestedBy"],
-    select: { requestedBy: true },
   });
   const unapproved = await prisma.mediaRequest.findMany({
     where: { status: "AVAILABLE", approvedAt: null },

@@ -19,6 +19,7 @@ import {
   parsePermissions,
   serializePermissions,
   parseAndValidatePermissions,
+  presetExceeds,
   parseMediaServerGrants,
   serializeMediaServerGrants,
   canViewMediaInstance,
@@ -106,6 +107,19 @@ test("defaultPermissionsForRole: known roles map to their preset; unknown falls 
   // An unrecognized role string (future enum drift, corrupted row) must fall
   // back to the least-privileged USER preset, never throw or return 0n.
   assert.equal(defaultPermissionsForRole("BOGUS"), PRESETS.USER);
+});
+
+test("presetExceeds: a delegate may name only a role whose WHOLE preset it holds", () => {
+  const baseline = Permission.REQUEST | Permission.REQUEST_MOVIE | Permission.REQUEST_TV;
+  // The ADMIN superbit holds everything.
+  assert.equal(presetExceeds("ISSUE_ADMIN", Permission.ADMIN), false);
+  assert.equal(presetExceeds("ADMIN", Permission.ADMIN), false);
+  // A management bit the caller lacks: ISSUE_ADMIN carries MANAGE_ISSUES.
+  assert.equal(presetExceeds("ISSUE_ADMIN", Permission.MANAGE_USERS | baseline), true);
+  assert.equal(presetExceeds("ISSUE_ADMIN", Permission.MANAGE_USERS | Permission.MANAGE_ISSUES | baseline), false);
+  // A baseline bit the caller lacks: USER carries REQUEST_TV.
+  assert.equal(presetExceeds("USER", Permission.MANAGE_USERS | Permission.REQUEST | Permission.REQUEST_MOVIE), true);
+  assert.equal(presetExceeds("USER", Permission.MANAGE_USERS | baseline), false);
 });
 
 test("ISSUE_ADMIN preset grants MANAGE_ISSUES (the withIssueAdmin gate bit)", () => {

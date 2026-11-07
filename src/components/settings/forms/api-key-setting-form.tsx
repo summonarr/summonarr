@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
+import { settingsPatchSucceeded } from "./shared";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
@@ -70,7 +71,7 @@ export function ApiKeySettingForm({
         body: JSON.stringify({ [settingKey]: value }),
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (!res.ok || data.ok === false) {
+      if (!settingsPatchSucceeded(res, data)) {
         setSaveError(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
         return false;

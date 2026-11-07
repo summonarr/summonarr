@@ -21,6 +21,8 @@ interface SearchResult {
   mediaType: "movie" | "tv";
   title: string;
   releaseYear?: string | null;
+  /** /api/search marks a title on the WHOLE blacklist — the page loads only the newest 1000 rows. */
+  blacklisted: boolean;
 }
 
 const rowKey = (tmdbId: number, mt: string) => `${tmdbId}:${mt}`;
@@ -37,12 +39,25 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
   // True once a search has come back successfully, so an empty result list can
   // say "no matches" instead of rendering nothing at all.
   const [searched, setSearched] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
+  // Keys with a request in flight, one per row: a single slot let Block A's
+  // finish re-enable Block B while B's POST was still out.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   const [error, setError] = useState("");
   // Client-side narrowing of the blocked list (the page ships up to 1,000 rows).
   const [filter, setFilter] = useState("");
 
   const blocked = new Set(items.map((i) => rowKey(i.tmdbId, i.mediaType)));
+  // Blocked per the loaded rows OR the search's own flag, which covers titles past
+  // the 1000 the page ships (a stale "Block" there rewrote the stored reason).
+  const isBlocked = (r: SearchResult, k: string) => blocked.has(k) || r.blacklisted;
+  function markBusy(k: string, on: boolean) {
+    setBusy((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(k);
+      else next.delete(k);
+      return next;
+    });
+  }
   const visible = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     if (!needle) return items;
@@ -80,7 +95,13 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
           data
             .filter((d): d is SearchResult => d?.mediaType === "movie" || d?.mediaType === "tv")
             .slice(0, 8)
-            .map((d) => ({ id: d.id, mediaType: d.mediaType, title: d.title, releaseYear: d.releaseYear })),
+            .map((d) => ({
+              id: d.id,
+              mediaType: d.mediaType,
+              title: d.title,
+              releaseYear: d.releaseYear,
+              blacklisted: d.blacklisted === true,
+            })),
         );
       } else {
         setResults([]);
@@ -95,9 +116,9 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
   async function add(r: SearchResult) {
     const mediaType = r.mediaType === "movie" ? "MOVIE" : "TV";
     const k = rowKey(r.id, mediaType);
-    if (blocked.has(k)) return;
+    if (isBlocked(r, k) || busy.has(k)) return;
     const trimmedReason = reason.trim();
-    setBusy(k);
+    markBusy(k, true);
     setError("");
     try {
       const res = await fetch(withBasePath("/api/admin/blacklist"), {
@@ -116,14 +137,13 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
         return;
       }
       // The route is an "upsert" (insert, or update if it already exists) and
-      // answers 201 either way. Only one button is disabled at a time, so
-      // Block A → Block B → Block A can send two POSTs for A. Remove any existing
-      // row for this title before adding, so the list never holds two rows with
-      // the same React key. Prefer the server's row (cleaned title/reason, real
+      // answers 201 either way, with `created` saying which. Another admin (or
+      // another tab) can block the same title meanwhile, so remove any existing
+      // row for it before adding: the list never holds two rows with the same
+      // React key. Prefer the server's row (cleaned title/reason, real
       // createdAt); fall back to local values if the body won't parse.
-      const d = (await res.json().catch(() => ({}))) as { item?: Partial<BlacklistRow> | null };
+      const d = (await res.json().catch(() => ({}))) as { item?: Partial<BlacklistRow> | null; created?: unknown };
       const item = d?.item ?? null;
-      const existed = items.some((i) => i.tmdbId === r.id && i.mediaType === mediaType);
       setItems((prev) => [
         {
           tmdbId: r.id,
@@ -134,7 +154,11 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
         },
         ...prev.filter((i) => !(i.tmdbId === r.id && i.mediaType === mediaType)),
       ]);
-      if (!existed) setBlockedTotal((n) => n + 1);
+      // The count goes up only when the server says it added a row: the loaded
+      // list holds at most 1000 rows and this call's `items` closure can be stale,
+      // so neither can tell a new title from a rewritten one. An unreadable body
+      // leaves the count as it is until the next load.
+      if (d?.created === true) setBlockedTotal((n) => n + 1);
       // The placeholder promises the reason is "saved with the NEXT title you
       // block" — one-shot — so it must not silently ride along onto a second,
       // unrelated title from the same result list.
@@ -142,13 +166,14 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
     } catch {
       setError(t("shared.thread.networkError"));
     } finally {
-      setBusy(null);
+      markBusy(k, false);
     }
   }
 
   async function remove(row: BlacklistRow) {
     const k = rowKey(row.tmdbId, row.mediaType);
-    setBusy(k);
+    if (busy.has(k)) return;
+    markBusy(k, true);
     setError("");
     try {
       const res = await fetch(
@@ -162,10 +187,17 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
       }
       setItems((prev) => prev.filter((i) => !(i.tmdbId === row.tmdbId && i.mediaType === row.mediaType)));
       setBlockedTotal((n) => Math.max(0, n - 1));
+      // The search's flag predates this unblock: clear it, or the title would
+      // still read as blocked in the results above.
+      setResults((prev) =>
+        prev.map((r) =>
+          r.id === row.tmdbId && (r.mediaType === "movie" ? "MOVIE" : "TV") === row.mediaType ? { ...r, blacklisted: false } : r,
+        ),
+      );
     } catch {
       setError(t("shared.thread.networkError"));
     } finally {
-      setBusy(null);
+      markBusy(k, false);
     }
   }
 
@@ -211,7 +243,8 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
             {results.map((r) => {
               const mediaType = r.mediaType === "movie" ? "MOVIE" : "TV";
               const k = rowKey(r.id, mediaType);
-              const isBlocked = blocked.has(k);
+              const rowBlocked = isBlocked(r, k);
+              const rowBusy = busy.has(k);
               return (
                 <div
                   key={k}
@@ -224,14 +257,14 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
                     <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>{r.mediaType === "movie" ? t("adminQueue.blacklist.movie") : t("adminQueue.blacklist.tv")}</span>
                   </span>
                   <Button
-                    variant={isBlocked ? "outline" : "destructive"}
+                    variant={rowBlocked ? "outline" : "destructive"}
                     size="sm"
                     onClick={() => add(r)}
-                    disabled={isBlocked || busy === k}
+                    disabled={rowBlocked || rowBusy}
                     className="shrink-0"
                   >
-                    {busy === k ? <Loader2 className="animate-spin" /> : <Ban />}
-                    {isBlocked ? t("adminQueue.blacklist.blocked") : t("adminQueue.blacklist.block")}
+                    {rowBusy ? <Loader2 className="animate-spin" /> : <Ban />}
+                    {rowBlocked ? t("adminQueue.blacklist.blocked") : t("adminQueue.blacklist.block")}
                   </Button>
                 </div>
               );
@@ -294,12 +327,12 @@ export function BlacklistManager({ initial, total }: { initial: BlacklistRow[]; 
                         variant="outline"
                         size="sm"
                         onClick={() => remove(row)}
-                        disabled={busy === k}
+                        disabled={busy.has(k)}
                         title={t("adminQueue.blacklist.removeTitle")}
                         aria-label={t("adminQueue.blacklist.unblockAria", { title: row.title ?? row.tmdbId })}
                         className="shrink-0"
                       >
-                        {busy === k ? <Loader2 className="animate-spin" /> : <X />}
+                        {busy.has(k) ? <Loader2 className="animate-spin" /> : <X />}
                         {t("adminQueue.blacklist.unblock")}
                       </Button>
                     </div>

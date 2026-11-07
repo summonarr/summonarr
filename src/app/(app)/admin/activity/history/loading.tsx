@@ -5,7 +5,7 @@
 // toolbar, a hairline, and the 920px-min table rows. Table-shaped on purpose:
 // this tab used to be a `?tab=history` branch of the overview and flashed the
 // KPI strip + chart cards before swapping to a table.
-import { SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 import {
   ActivityTableCardSkeleton,
   ActivityTabsSkeleton,
@@ -13,10 +13,10 @@ import {
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <ActivityTabsSkeleton filters />
       <ActivityTableCardSkeleton rows={12} toolbar />
-    </div>
+    </SkeletonRoot>
   );
 }

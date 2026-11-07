@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
@@ -57,6 +57,20 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const topBarRef = useRef<HTMLDivElement>(null);
+  // Cmd/Ctrl+K below lg: the header's SearchBar is mounted but hidden there
+  // and ignores the key, so this bar opens its own search sheet instead. Once
+  // the sheet is open, its SearchBar owns the shortcut.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.key === "k" || e.key === "K") || !(e.metaKey || e.ctrlKey)) return;
+      if (searchOpen || !topBarRef.current || topBarRef.current.offsetParent === null) return;
+      e.preventDefault();
+      setSearchOpen(true);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [searchOpen]);
   const onDrawerOpenChange = useCallback(
     (open: boolean) => setDrawerOpen(open),
     [],
@@ -79,6 +93,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
     <>
       {/* Top bar (mobile / tablet) */}
       <div
+        ref={topBarRef}
         className="lg:hidden flex items-center sticky top-0 z-30"
         style={{
           minHeight: 52,

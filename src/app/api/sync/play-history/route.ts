@@ -28,6 +28,7 @@ import { mapLimit } from "@/lib/concurrency";
 import { emitSSE } from "@/lib/sse-emitter";
 import { evaluateConcurrentStreams } from "@/lib/stream-limit-data";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import { claimCooldownSlot } from "@/lib/warm-cooldown";
 import {
   PLEX_STALL_THRESHOLD_MS,
   clearFinalizedNotInCurrentSnapshot,
@@ -1196,20 +1197,12 @@ async function syncPlayHistory(request: NextRequest) {
     await postSync("retention", async () => {
       const now = Date.now();
 
-      // Atomic CAS: only the first caller within a 1-hour window performs the retention purge.
-      // Regex-guard the CAST: a non-numeric value (e.g. left over from a manual edit) would otherwise
-      // crash the route. Treat a non-numeric value as expired so the next run overwrites it.
-      const retentionClaimed = await prisma.$executeRaw`
-        INSERT INTO "Setting" (key, value, "updatedAt")
-        VALUES ('lastRetentionCheckAt', ${String(now)}, NOW())
-        ON CONFLICT (key) DO UPDATE
-          SET value = EXCLUDED.value, "updatedAt" = NOW()
-        WHERE "Setting".value !~ '^[0-9]+$'
-           OR CAST("Setting".value AS BIGINT) + ${3600_000}::bigint <= ${now}::bigint
-      `;
+      // Atomic CAS: only the first caller within a 1-hour window performs the
+      // retention purge. A non-numeric or over-long stored value (a manual edit)
+      // reads as expired instead of crashing the route (claimCooldownSlot).
       // A failed purge keeps the claim: releasing it would retry a failing delete
       // every 5s instead of once an hour.
-      if (retentionClaimed > 0) {
+      if (await claimCooldownSlot("lastRetentionCheckAt", 3600_000, now)) {
         const purged = await purgeOldHistory();
         if (purged > 0) results.purged = purged;
       }

@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { getUpcomingMoviesForRefresh, getUpcomingTVForRefresh } from "@/lib/tmdb";
 import { CRON_SYSTEM_ACTOR, cronSkippedResponse, isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, UPCOMING_CACHE_LOCK_ID } from "@/lib/advisory-lock";
 import { warmCalendarCache, type CalendarWarmResult } from "@/lib/calendar-feed";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
   }
 
   return withCronRunRecording("upcoming-cache", () => withAdvisoryLock(
-    2007,
+    UPCOMING_CACHE_LOCK_ID,
     async (signal) => {
       const startTime = Date.now();
 
@@ -60,7 +60,7 @@ export async function POST(request: NextRequest) {
       // Per-source replace: only delete+repopulate a media type whose fetch SUCCEEDED.
       // A blanket deleteMany() would wipe the sibling type when only one source failed
       // (e.g. movies OK, TV rejected → TV cache erased). Concurrency is already
-      // serialized by the outer withAdvisoryLock(2007); the tx still gives atomicity.
+      // serialized by the outer withAdvisoryLock(UPCOMING_CACHE_LOCK_ID); the tx still gives atomicity.
       // NOTE: a fulfilled-but-empty fetch (0 rows, every TMDB page answered)
       // intentionally clears that media type's cache — for the upcoming list an
       // empty TMDB result is a valid "nothing upcoming" state, and the cache

@@ -6,18 +6,18 @@
 // Date.now()/new Date() while rendering (CLAUDE.md guardrail 16). The file is
 // "use client" only because the shared chart pieces call React's useId().
 
-import Link from "next/link";
 import type { ReactNode } from "react";
 import {
   ActivityCard,
   AreaChart,
   Avatar,
   DistributionList,
+  Empty,
   HourHeatmap,
+  LeaderboardRow,
   Poster,
   SectionHeader,
   Sparkline,
-  sourceDotColor,
 } from "@/components/admin/activity-ui";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
@@ -171,6 +171,7 @@ export function AnalyticsRow({
   playsByDay,
   heatmapMatrix,
   heatmapDetailBase,
+  timeZone,
   streamMix,
   mediaMix,
   days,
@@ -183,6 +184,8 @@ export function AnalyticsRow({
   heatmapMatrix: number[][];
   // Forwarded to HourHeatmap so its cells open the drill-down popover.
   heatmapDetailBase?: { userId?: string; source?: string; mediaType?: string; days?: number };
+  // The statistics zone the heatmap's hours are in (getPlayHistoryStats names it).
+  timeZone: string;
   streamMix: DistRow[];
   mediaMix: DistRow[];
   days: number;
@@ -231,7 +234,7 @@ export function AnalyticsRow({
         </ActivityCard>
         <ActivityCard>
           <SectionHeader label={t("adminActivity.overview.dayHour")} sub={t("adminActivity.overview.dayHourSub")} />
-          <HourHeatmap matrix={heatmapMatrix} detailBase={heatmapDetailBase} />
+          <HourHeatmap matrix={heatmapMatrix} detailBase={heatmapDetailBase} timeZone={timeZone} />
           <div
             className="ds-mono"
             style={{
@@ -282,25 +285,6 @@ export interface RewatchedTitle {
   posterSrc?: string | null;
 }
 
-// The same centred 12px block HorizontalBars shows for an empty list, so an
-// empty leaderboard reads like every neighbouring empty card instead of a
-// header over 300px of blank space.
-function NoData() {
-  const t = useT();
-  return (
-    <div
-      style={{
-        fontSize: 12,
-        color: "var(--ds-fg-subtle)",
-        padding: "20px 0",
-        textAlign: "center",
-      }}
-    >
-      {t("adminActivity.common.noDataYet")}
-    </div>
-  );
-}
-
 const POSTER_ACCENTS = [
   "oklch(0.42 0.08 60)",
   "oklch(0.32 0.06 230)",
@@ -327,7 +311,9 @@ export function Leaderboards({
   // bare toFixed(1) mixed "1.234 plays" with "12.3h" for a de/fr/pt/it admin.
   const dec1 = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
   const hoursSuffix = t("adminActivity.common.hoursSuffix");
-  const maxHours = Math.max(...users.map((u) => u.hours), 1);
+  // Scaled to the real leader (only a zero is guarded), so a #1 under an hour
+  // still gets a full bar; a floor of 1 drew a 0.4 h leader at 40%.
+  const maxHours = Math.max(0, ...users.map((u) => u.hours)) || 1;
   const maxPlays = Math.max(...rewatched.map((m) => m.plays), 1);
   return (
     <section style={{ marginBottom: 22 }}>
@@ -340,109 +326,28 @@ export function Leaderboards({
             label={t("adminActivity.overview.topViewers")}
             sub={t("adminActivity.overview.usersDays", { count: users.length, days })}
           />
-          {users.length === 0 && <NoData />}
+          {users.length === 0 && <Empty />}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {users.map((u, i) => (
-              <Link
+              <LeaderboardRow
                 key={u.id}
                 href={`/admin/activity/user/${u.id}`}
-                className="lb-row"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  padding: "4px 6px",
-                  margin: "0 -6px",
-                  borderRadius: 5,
-                  textDecoration: "none",
-                }}
-              >
-                <span
-                  className="ds-mono"
-                  style={{
-                    width: 16,
-                    textAlign: "right",
-                    fontSize: 10.5,
-                    color: "var(--ds-fg-subtle)",
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
-                  {u.rank.toString().padStart(2, "0")}
-                </span>
-                {showPosters && (
-                  <Avatar
-                    letter={(u.username[0] ?? "?").toUpperCase()}
-                    accent={POSTER_ACCENTS[i % POSTER_ACCENTS.length]}
-                    size={26}
-                  />
-                )}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "baseline",
-                      marginBottom: 3,
-                      gap: 8,
-                      minWidth: 0,
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 12.5,
-                        color: "var(--ds-fg)",
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                      }}
-                    >
-                      {u.username}
-                      <span
-                        style={{
-                          marginLeft: 6,
-                          width: 5,
-                          height: 5,
-                          display: "inline-block",
-                          borderRadius: 999,
-                          background: sourceDotColor(u.source),
-                          verticalAlign: "middle",
-                        }}
-                      />
-                    </span>
-                    <span
-                      className="ds-mono"
-                      style={{
-                        fontSize: 11,
-                        color: "var(--ds-fg-muted)",
-                        fontVariantNumeric: "tabular-nums",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {dec1.format(u.hours)}{hoursSuffix}{" "}
-                      <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        · {t("adminActivity.common.playsFormatted", { count: u.plays, n: u.plays.toLocaleString(locale) })}
-                      </span>
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      height: 4,
-                      background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
-                      borderRadius: 999,
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: `${(u.hours / maxHours) * 100}%`,
-                        height: "100%",
-                        background: "var(--ds-accent)",
-                        borderRadius: 999,
-                      }}
+                rank={u.rank}
+                avatar={
+                  showPosters && (
+                    <Avatar
+                      letter={(u.username[0] ?? "?").toUpperCase()}
+                      accent={POSTER_ACCENTS[i % POSTER_ACCENTS.length]}
+                      size={26}
                     />
-                  </div>
-                </div>
-              </Link>
+                  )
+                }
+                title={u.username}
+                source={u.source}
+                primary={`${dec1.format(u.hours)}${hoursSuffix}`}
+                secondary={t("adminActivity.common.playsFormatted", { count: u.plays, n: u.plays.toLocaleString(locale) })}
+                pct={(u.hours / maxHours) * 100}
+              />
             ))}
           </div>
         </ActivityCard>
@@ -451,121 +356,43 @@ export function Leaderboards({
             label={t("adminActivity.overview.mostRewatched")}
             sub={t("adminActivity.overview.libraryChampions", { days })}
           />
-          {rewatched.length === 0 && <NoData />}
+          {rewatched.length === 0 && <Empty />}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rewatched.map((m, i) => (
-              <Link
+              <LeaderboardRow
                 key={`${m.tmdbId}-${i}`}
                 href={`/admin/activity/media/${m.tmdbId}?type=${m.mediaType}`}
-                className="lb-row"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  padding: "4px 6px",
-                  margin: "0 -6px",
-                  borderRadius: 5,
-                  textDecoration: "none",
-                }}
-              >
-                <span
-                  className="ds-mono"
-                  style={{
-                    width: 16,
-                    textAlign: "right",
-                    fontSize: 10.5,
-                    color: "var(--ds-fg-subtle)",
-                  }}
-                >
-                  {m.rank.toString().padStart(2, "0")}
-                </span>
-                {showPosters && (
-                  <Poster
-                    src={m.posterSrc}
-                    letter={(m.title[0] ?? "?").toUpperCase()}
-                    accent={POSTER_ACCENTS[i % POSTER_ACCENTS.length]}
-                    w={26}
-                    h={36}
-                    radius={3}
-                  />
-                )}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "baseline",
-                      marginBottom: 3,
-                      gap: 8,
-                      minWidth: 0,
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 12.5,
-                        color: "var(--ds-fg)",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 6,
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        minWidth: 0,
-                      }}
-                    >
-                      <span
-                        style={{
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                      >
-                        {m.title}
-                      </span>
-                      <span
-                        className="ds-mono"
-                        style={{
-                          fontSize: 9,
-                          color: "var(--ds-fg-subtle)",
-                          letterSpacing: "0.06em",
-                          flexShrink: 0,
-                        }}
-                      >
-                        {m.mediaType}
-                      </span>
-                    </span>
-                    <span
-                      className="ds-mono"
-                      style={{
-                        fontSize: 11,
-                        color: "var(--ds-fg-muted)",
-                        fontVariantNumeric: "tabular-nums",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {m.plays.toLocaleString(locale)}{" "}
-                      <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        · {t("adminActivity.common.viewers", { count: m.viewers })}
-                      </span>
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      height: 4,
-                      background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
-                      borderRadius: 999,
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: `${(m.plays / maxPlays) * 100}%`,
-                        height: "100%",
-                        background: "var(--ds-accent)",
-                        borderRadius: 999,
-                      }}
+                rank={m.rank}
+                avatar={
+                  showPosters && (
+                    <Poster
+                      src={m.posterSrc}
+                      letter={(m.title[0] ?? "?").toUpperCase()}
+                      accent={POSTER_ACCENTS[i % POSTER_ACCENTS.length]}
+                      w={26}
+                      h={36}
+                      radius={3}
                     />
-                  </div>
-                </div>
-              </Link>
+                  )
+                }
+                title={m.title}
+                tag={
+                  <span
+                    className="ds-mono"
+                    style={{
+                      fontSize: 9,
+                      color: "var(--ds-fg-subtle)",
+                      letterSpacing: "0.06em",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {m.mediaType}
+                  </span>
+                }
+                primary={m.plays.toLocaleString(locale)}
+                secondary={t("adminActivity.common.viewers", { count: m.viewers })}
+                pct={(m.plays / maxPlays) * 100}
+              />
             ))}
           </div>
         </ActivityCard>

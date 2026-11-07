@@ -559,6 +559,24 @@ test("events: a plain USER never receives another user's request:* frame (the by
   ]);
 });
 
+test("events: an inbox event (request:updated) says whether it is about the viewer — `own`, never the other user's id", async () => {
+  // A request manager receives every request:* frame; the bell re-fetches the
+  // inbox only for its own (an inbox row exists only for the requester).
+  const token = await mintSession({ permissions: Permission.MANAGE_REQUESTS });
+  const res = await inScope(() => events.GET(), `${COOKIE}=${token}`);
+  const me = `u-${seq}`;
+  emitSSE({ type: "request:updated", requestId: "r-other", status: "APPROVED", userId: "someone-else" });
+  emitSSE({ type: "request:updated", requestId: "r-mine", status: "APPROVED", userId: me });
+  emitSSE({ type: "request:new", requestId: "r-new", userId: "someone-else" });
+  const frames = await readFrames(res, 4);
+  assert.deepEqual(frames.map((f) => JSON.parse(f)), [
+    { type: "connected" },
+    { type: "request:updated", requestId: "r-other", status: "APPROVED", own: false },
+    { type: "request:updated", requestId: "r-mine", status: "APPROVED", own: true },
+    { type: "request:new", requestId: "r-new" }, // not an inbox event: unchanged
+  ]);
+});
+
 test("events caps concurrent connections per user with 429", async () => {
   const token = await mintSession();
   const opened: Response[] = [];

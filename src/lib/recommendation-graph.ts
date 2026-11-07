@@ -2,7 +2,7 @@ import "server-only";
 import { prisma } from "./prisma";
 import { Prisma, type MediaType } from "@/generated/prisma";
 import type { TmdbMedia } from "./tmdb-types";
-import { getCacheStaleMany } from "./tmdb-cache";
+import { getCacheStaleMany, tmdbDetailsKey } from "./tmdb-cache";
 import {
   getMovieSuggestions,
   getTVSuggestions,
@@ -142,6 +142,39 @@ function key(tmdbId: number, mediaType: MediaType): string {
 
 function toTmdbMediaType(m: MediaType): "movie" | "tv" {
   return m === "MOVIE" ? "movie" : "tv";
+}
+
+// Column widths of the denormalized display fields on TitleSuggestion and
+// CoWatchSuggestion (and RecommendationTitle.releaseDate). TMDB bounds none of
+// them, and ONE over-long value fails its whole page's createMany — on every
+// run, since the page's sources are never stamped and sort first again.
+const EDGE_TITLE_MAX = 500;
+const EDGE_PATH_MAX = 500;
+const EDGE_SHORT_MAX = 16;
+
+// Cut by code points (Postgres counts characters, not UTF-16 units), so a
+// clamp never splits a surrogate pair.
+function clampText(s: string, max: number): string {
+  return s.length <= max ? s : Array.from(s).slice(0, max).join("");
+}
+
+// A path or code too long for its column is useless cut short: drop it.
+function fitOrNull(s: string | null | undefined, max: number): string | null {
+  return typeof s === "string" && s.length <= max ? s : null;
+}
+
+// An edge row's display columns, fitted to their widths.
+function edgeDisplayColumns(item: Omit<TmdbMedia, "id" | "mediaType">) {
+  return {
+    title: clampText(item.title, EDGE_TITLE_MAX),
+    overview: item.overview || null,
+    posterPath: fitOrNull(item.posterPath, EDGE_PATH_MAX),
+    backdropPath: fitOrNull(item.backdropPath, EDGE_PATH_MAX),
+    releaseDate: fitOrNull(item.releaseDate, EDGE_SHORT_MAX),
+    voteAverage: item.voteAverage,
+    voteCount: item.voteCount ?? 0,
+    originalLanguage: fitOrNull(item.originalLanguage, EDGE_SHORT_MAX),
+  };
 }
 
 export interface TitleQualityRow {
@@ -372,14 +405,7 @@ async function writeSourcePage(page: FetchedSource[], run: string): Promise<Page
       tmdbId: item.id,
       mediaType: (item.mediaType === "movie" ? "MOVIE" : "TV") as MediaType,
       position,
-      title: item.title,
-      overview: item.overview || null,
-      posterPath: item.posterPath,
-      backdropPath: item.backdropPath,
-      releaseDate: item.releaseDate,
-      voteAverage: item.voteAverage,
-      voteCount: item.voteCount ?? 0,
-      originalLanguage: item.originalLanguage ?? null,
+      ...edgeDisplayColumns(item),
     })),
   );
 
@@ -475,6 +501,8 @@ export interface GraphRefreshResult {
   sourcesFailed: number;
   edgesWritten: number;
   sourcesSwept: number;
+  // The orphan sweep threw; the rest of the refresh ran (it is cleanup only).
+  sweepFailed?: boolean;
   titlesRated: number;
   // Titles whose lookup produced nothing while a provider was locked out, so no
   // verdict was written. They are re-asked next run rather than carrying a
@@ -541,11 +569,16 @@ async function refreshSuggestionEdges(
 
   const batch = Number.isFinite(limit) ? stale.slice(0, limit) : stale;
   let slowest: PageWrite | null = null;
+  // The empty sources of the last INCONCLUSIVE page, asked once more with the
+  // next one (see below).
+  let carried: GraphSource[] = [];
   for (let i = 0; i < batch.length; i += SOURCE_WRITE_PAGE) {
     // Stop when the lock's timeout aborts us; ignoring it would keep this
     // running after withAdvisoryLock released the lock (guardrail 41).
     if (signal?.aborted) break;
-    const page = batch.slice(i, i + SOURCE_WRITE_PAGE);
+    const carriedCount = carried.length;
+    const page = [...carried, ...batch.slice(i, i + SOURCE_WRITE_PAGE)];
+    carried = [];
     const results = await settleLimit(page, SOURCE_CONCURRENCY, (source) =>
       source.mediaType === "MOVIE"
         ? getMovieSuggestions(source.tmdbId, SUGGESTIONS_CACHE_MAX)
@@ -556,8 +589,17 @@ async function refreshSuggestionEdges(
     // so an empty list could mean "TMDB has nothing" OR "TMDB is down". Saving a
     // wrong "nothing" would serve it to every user for a week. So: if any
     // source in this page got results, TMDB is up and the empty ones are real
-    // answers. If the whole page came back empty, treat it as an outage, write
-    // nothing, and retry those sources next run.
+    // answers. If the whole page came back empty, treat it as an outage and
+    // write nothing.
+    //
+    // An all-empty page is NOT simply dropped, though: never-built sources sort
+    // first, so a block of titles TMDB genuinely has nothing for would form the
+    // same all-empty page every run and never be stamped (two uncached TMDB
+    // calls each, every run, forever). Its sources are asked AGAIN with the next
+    // page and judged with that page's answers — fetched together, so the rule
+    // above is unchanged: a zero is only ever stamped from an answer fetched
+    // alongside a non-empty one. Once only: a carried source that comes back
+    // inconclusive again waits for the next run.
     const conclusive = results.some((r) => r.status === "fulfilled" && r.value.length > 0);
     const fetched: FetchedSource[] = [];
     for (let j = 0; j < page.length; j++) {
@@ -567,7 +609,8 @@ async function refreshSuggestionEdges(
         continue;
       }
       if (!conclusive) {
-        stats.sourcesSkipped++;
+        if (j >= carriedCount) carried.push(page[j]);
+        else stats.sourcesSkipped++;
         continue;
       }
       fetched.push({ source: page[j], suggestions: r.value });
@@ -584,6 +627,8 @@ async function refreshSuggestionEdges(
       stats.sourcesFailed += fetched.length;
     }
   }
+  // The last page's carry had no next page (or the run was aborted first).
+  stats.sourcesSkipped += carried.length;
 
   // A page normally commits in about a second. One that took a third of the
   // transaction limit is the early sign of the stall that makes pages fail, so
@@ -613,7 +658,7 @@ async function warmFallbackPool(): Promise<void> {
     for (const item of [...trending, ...popMovies, ...popTV]) {
       const mediaType: MediaType = item.mediaType === "movie" ? "MOVIE" : "TV";
       const k = key(item.id, mediaType);
-      if (!pool.has(k)) pool.set(k, { tmdbId: item.id, mediaType, releaseDate: item.releaseDate });
+      if (!pool.has(k)) pool.set(k, { tmdbId: item.id, mediaType, releaseDate: fitOrNull(item.releaseDate, EDGE_SHORT_MAX) });
     }
     if (pool.size > 0) await batchCreateMany(prisma.recommendationTitle, [...pool.values()]);
   } catch (err) {
@@ -674,10 +719,14 @@ export const COWATCH_MIN_PEOPLE = COWATCH_MIN_VIEWERS + COWATCH_MIN_NON_VIEWERS;
 export const COWATCH_PER_SOURCE = 20;
 // Bounds the table (rows are wide, like TitleSuggestion's).
 const COWATCH_MAX_EDGES = 200_000;
-// The build is one aggregate over every person's watched titles. It is bounded
-// by the floors above (only titles at least COWATCH_MIN_VIEWERS people watched
-// can pair), and by this as a safety valve: on a timeout the previous edges
-// stay and the next run tries again.
+// The build is one aggregate over every person's watched titles. Pairing is a
+// self-join per person, so its cost is the SUM of (titles per person)² — one
+// viewer with 20k imported titles alone would be 400M rows. So each person
+// pairs only their COWATCH_MAX_TITLES_PER_PERSON most recently watched popular
+// titles (only titles at least COWATCH_MIN_VIEWERS people watched can pair at
+// all). The statement timeout stays as a safety valve: on a timeout the
+// previous edges stay and the next run tries again.
+const COWATCH_MAX_TITLES_PER_PERSON = 500;
 const COWATCH_STATEMENT_TIMEOUT = "60s";
 const COWATCH_TX_TIMEOUT_MS = 90_000;
 
@@ -698,7 +747,7 @@ async function coWatchDisplay(targets: GraphSource[]): Promise<Map<string, Omit<
   const out = new Map<string, Omit<TmdbMedia, "id" | "mediaType">>();
   for (let i = 0; i < targets.length; i += TRIAGE_PAGE) {
     const page = targets.slice(i, i + TRIAGE_PAGE);
-    const blobKeys = page.map((t) => `${toTmdbMediaType(t.mediaType)}:${t.tmdbId}:details`);
+    const blobKeys = page.map((t) => tmdbDetailsKey(t.mediaType, t.tmdbId));
     const blobs = await getCacheStaleMany<TmdbMedia>(blobKeys);
     const missing: GraphSource[] = [];
     page.forEach((t, j) => {
@@ -743,23 +792,38 @@ async function coWatchDisplay(targets: GraphSource[]): Promise<Map<string, Omit<
 
 // One aggregate, in the database: the per-person title sets never leave
 // Postgres, only the edges that clear every floor do.
+//
+// The per-person cap (COWATCH_MAX_TITLES_PER_PERSON) can only UNDER-count
+// `together`, which keeps the "at least COWATCH_MIN_VIEWERS watched both" floor
+// safe. It would NOT keep the non-viewer floor safe — an under-counted pair could
+// pass while everyone else watched both — so once any person is capped that floor
+// is held on the uncapped viewer counts instead: at most total − 2 people watched
+// one of the two titles, so at least two did not watch both. Uncapped (the usual
+// case) every floor reads exactly as it always did.
+//
+// `people` and `capped` are MATERIALIZED: both are one-row aggregates
+// cross-joined into the scored set, and inlined the planner (misjudging them as
+// tiny) re-ran the COUNT(DISTINCT) once per candidate pair. Measured on Postgres
+// 17 with ten heavy viewers: over 120s inlined, about 1.5s materialized.
 async function queryCoWatchEdges(): Promise<CoWatchEdgeRow[]> {
   return prisma.$transaction(
     async (tx) => {
       await tx.$executeRaw(Prisma.sql`SELECT set_config('statement_timeout', ${COWATCH_STATEMENT_TIMEOUT}, true)`);
       return tx.$queryRaw<CoWatchEdgeRow[]>(Prisma.sql`
         WITH watched AS (
-          SELECT "mediaServerUserId", "tmdbId", "mediaType" FROM "PlayHistory"
+          SELECT "mediaServerUserId", "tmdbId", "mediaType", MAX("startedAt") AS at FROM "PlayHistory"
             WHERE "watched" = true AND "tmdbId" IS NOT NULL AND "mediaType" IS NOT NULL
-          UNION
-          SELECT "mediaServerUserId", "tmdbId", "mediaType" FROM "ServerWatchedTitle"
+            GROUP BY 1, 2, 3
+          UNION ALL
+          SELECT "mediaServerUserId", "tmdbId", "mediaType", "lastWatchedAt" AS at FROM "ServerWatchedTitle"
             WHERE "plays" > 0
         ),
         person_titles AS (
-          SELECT DISTINCT COALESCE(m."userId", m."id") AS person, w."tmdbId", w."mediaType"
+          SELECT COALESCE(m."userId", m."id") AS person, w."tmdbId", w."mediaType", MAX(w.at) AS at
           FROM watched w JOIN "MediaServerUser" m ON m."id" = w."mediaServerUserId"
+          GROUP BY 1, 2, 3
         ),
-        people AS (
+        people AS MATERIALIZED (
           SELECT COUNT(DISTINCT person)::int AS total FROM person_titles
         ),
         popular AS (
@@ -768,9 +832,19 @@ async function queryCoWatchEdges(): Promise<CoWatchEdgeRow[]> {
           GROUP BY "tmdbId", "mediaType"
           HAVING COUNT(*) >= ${COWATCH_MIN_VIEWERS}
         ),
-        pt AS (
-          SELECT p.person, p."tmdbId", p."mediaType"
+        ranked_pt AS (
+          SELECT p.person, p."tmdbId", p."mediaType",
+                 ROW_NUMBER() OVER (
+                   PARTITION BY p.person
+                   ORDER BY p.at DESC NULLS LAST, p."tmdbId" ASC, p."mediaType" ASC
+                 ) AS rn
           FROM person_titles p JOIN popular USING ("tmdbId", "mediaType")
+        ),
+        pt AS (
+          SELECT person, "tmdbId", "mediaType" FROM ranked_pt WHERE rn <= ${COWATCH_MAX_TITLES_PER_PERSON}
+        ),
+        capped AS MATERIALIZED (
+          SELECT EXISTS (SELECT 1 FROM ranked_pt WHERE rn > ${COWATCH_MAX_TITLES_PER_PERSON}) AS hit
         ),
         pairs AS (
           SELECT a."tmdbId" AS "srcId", a."mediaType" AS "srcType",
@@ -788,8 +862,10 @@ async function queryCoWatchEdges(): Promise<CoWatchEdgeRow[]> {
           JOIN popular ps ON ps."tmdbId" = p."srcId" AND ps."mediaType" = p."srcType"
           JOIN popular pd ON pd."tmdbId" = p."dstId" AND pd."mediaType" = p."dstType"
           CROSS JOIN people
+          CROSS JOIN capped
           WHERE people.total >= ${COWATCH_MIN_PEOPLE}
             AND p.together <= people.total - ${COWATCH_MIN_NON_VIEWERS}
+            AND (NOT capped.hit OR LEAST(ps.viewers, pd.viewers) <= people.total - ${COWATCH_MIN_NON_VIEWERS})
         ),
         ranked AS (
           SELECT s.*, (ROW_NUMBER() OVER (
@@ -854,14 +930,7 @@ async function refreshCoWatchEdges(stats: GraphRefreshResult, signal?: AbortSign
         mediaType: dstType,
         position,
         viewers: r.together,
-        title: shown.title.slice(0, 500),
-        overview: shown.overview || null,
-        posterPath: shown.posterPath,
-        backdropPath: shown.backdropPath,
-        releaseDate: shown.releaseDate,
-        voteAverage: shown.voteAverage,
-        voteCount: shown.voteCount ?? 0,
-        originalLanguage: shown.originalLanguage ?? null,
+        ...edgeDisplayColumns(shown),
       });
     }
     await prisma.$transaction(
@@ -1025,7 +1094,7 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
     const mdblistFailedInBatch = mdblistTransportFailureCount() !== mdblistFailuresBefore;
     const providersAnswering = !isMdblistQuotaLocked(BACKGROUND_RATINGS) && !isOmdbQuotaLocked() && !mdblistFailedInBatch;
 
-    const now = new Date();
+    const verdicts: Prisma.Sql[] = [];
     for (const media of rated) {
       const mediaType: MediaType = media.mediaType === "movie" ? "MOVIE" : "TV";
       const verdict = qualityScoreOf(media);
@@ -1035,24 +1104,28 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
         stats.verdictsDeferred++;
         continue;
       }
-      try {
-        await prisma.recommendationTitle.update({
-          where: { tmdbId_mediaType: { tmdbId: media.id, mediaType } },
-          data: {
-            quality: verdict?.quality ?? null,
-            evidence: verdict?.evidence ?? 0,
-            // Stamped even when nothing answered — PROVIDED the providers were
-            // reachable (see above). "Asked, nobody answered" is the state the
-            // obscurity damp keys on, and leaving it null would both lose that
-            // verdict and re-ask every run forever.
-            qualityRatedAt: now,
-          },
-        });
-        stats.titlesRated++;
-      } catch (err) {
-        stats.ratingsFailed++;
-        console.error("[recommendation-graph] verdict write failed:", err);
-      }
+      verdicts.push(
+        Prisma.sql`(${media.id}::int, ${mediaType}::"MediaType", ${verdict?.quality ?? null}::float8, ${verdict?.evidence ?? 0}::float8)`,
+      );
+    }
+    if (verdicts.length === 0) continue;
+
+    // ONE statement per batch, in place of an awaited round trip per title.
+    // qualityRatedAt is stamped even when nothing answered — PROVIDED the
+    // providers were reachable (see above). "Asked, nobody answered" is the
+    // state the obscurity damp keys on, and leaving it null would both lose
+    // that verdict and re-ask every run forever. A failed write leaves the
+    // whole batch unrated, so it is re-asked next run.
+    try {
+      stats.titlesRated += await prisma.$executeRaw(Prisma.sql`
+        UPDATE "RecommendationTitle" AS r
+        SET "quality" = v."quality", "evidence" = v."evidence", "qualityRatedAt" = ${new Date()}
+        FROM (VALUES ${Prisma.join(verdicts)}) AS v("tmdbId", "mediaType", "quality", "evidence")
+        WHERE r."tmdbId" = v."tmdbId" AND r."mediaType" = v."mediaType"
+      `);
+    } catch (err) {
+      stats.ratingsFailed += verdicts.length;
+      console.error(`[recommendation-graph] verdict write failed for a batch of ${verdicts.length}; they are re-asked next run:`, err);
     }
   }
 }
@@ -1066,9 +1139,20 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
 // the title still earns as somebody else's suggestion); only its source
 // bookkeeping is cleared, which is also what makes the sweep idempotent — a
 // cleared node is no longer "built" and cannot be swept twice.
-async function sweepOrphanSources(live: Set<string>, stats: GraphRefreshResult): Promise<void> {
+//
+// The scan reads OLDEST stamps first. Built sources can outnumber the read cap
+// (the required set alone may hold more), and an unordered take would examine an
+// arbitrary slice each run, so an orphan could hide past it indefinitely. An
+// orphan is never refreshed again, so its stamp only ages, and oldest-first
+// reaches it (the stamp index serves the order).
+//
+// Observes the lock's signal between pages and returns, never throws
+// (guardrail 41): a half-done sweep is just finished by a later run.
+async function sweepOrphanSources(live: Set<string>, stats: GraphRefreshResult, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
   const built = await prisma.recommendationTitle.findMany({
     where: { suggestionsRefreshedAt: { not: null } },
+    orderBy: { suggestionsRefreshedAt: "asc" },
     select: { tmdbId: true, mediaType: true },
     take: MAX_GRAPH_SOURCES,
   });
@@ -1078,6 +1162,7 @@ async function sweepOrphanSources(live: Set<string>, stats: GraphRefreshResult):
   if (orphans.length === 0) return;
 
   for (let i = 0; i < orphans.length; i += SOURCE_WRITE_PAGE) {
+    if (signal?.aborted) return;
     const page = orphans.slice(i, i + SOURCE_WRITE_PAGE);
     await prisma.$transaction(
       async (tx) => {
@@ -1206,9 +1291,18 @@ export async function refreshRecommendationGraph(
   // 3. Reap sources that have left the server. Only on a COMPLETE source list —
   //    see SourceSet.complete. The required set is added to `live` too: a seed
   //    is still in use by definition, so it must never look departed.
+  //
+  //    Cleanup only, so a failure here is reported and survived: the required
+  //    edges are already written, and letting a transient sweep error throw out
+  //    of the refresh would skip the verdicts and recompute no user at all.
   if (complete) {
     const live = new Set([...requiredKeys, ...tail.map((s) => key(s.tmdbId, s.mediaType))]);
-    await sweepOrphanSources(live, stats);
+    try {
+      await sweepOrphanSources(live, stats, opts.signal);
+    } catch (err) {
+      stats.sweepFailed = true;
+      console.warn("[recommendation-graph] orphan sweep failed; departed sources keep their edges until a later run:", err);
+    }
   }
 
   // 4. Warm the trending/popular pool so the cold-start path's reads are cache

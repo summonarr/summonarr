@@ -6,13 +6,13 @@
 // No year pills: the page renders them only when there's more than one year,
 // and a single-year account is the common case. Bars inside the filled
 // hero/stat cards use a translucent fg mix so they read in both themes.
-import { Bar, SKELETON_CARD, SKELETON_FILL, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SKELETON_FILL, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 const INNER = "color-mix(in oklab, var(--ds-fg) 8%, transparent)";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <div className="flex items-center" style={{ height: 24, marginBottom: 14 }}>
         <Bar w={120} h={13} />
       </div>
@@ -69,6 +69,6 @@ export default function Loading() {
           ))}
         </div>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

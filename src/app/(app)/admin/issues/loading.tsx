@@ -4,12 +4,12 @@
 // 56px poster, gap 12) on the left and the sticky side panel on the right,
 // which below xl is hidden exactly like the real aside. The generic subtree
 // skeleton used to stand in here and offered no two-pane placeholder.
-import { SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 import { AdminCardRowsSkeleton, AdminPillGroupSkeleton } from "@/components/loading/admin-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle subtitleLines={2} />
 
       <div style={{ marginBottom: 20 }}>
@@ -24,6 +24,6 @@ export default function Loading() {
           <div className="h-full" style={{ ...SKELETON_CARD, borderRadius: 8 }} />
         </aside>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

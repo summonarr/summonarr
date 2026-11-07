@@ -181,13 +181,14 @@ test("instrumentation awaits the backfill before the fire-and-forget startup wor
 // ═══ structural pins over the source ═════════════════════════════════════════
 
 const DECISION_ROUTES = [
-  // The Discord bot's decision paths, split out of src/app/api/interactions/route.ts:
-  // the /request result pick (auto-approve + mirror) and the admin approve/decline buttons.
-  "src/lib/discord-interactions/components/pick.ts",
+  // The Discord bot's admin approve/decline buttons, split out of
+  // src/app/api/interactions/route.ts. (The /request result pick files through
+  // src/lib/request-create.ts and writes no MediaRequest of its own.)
   "src/lib/discord-interactions/components/admin-decision.ts",
   "src/app/api/requests/[id]/route.ts",
   "src/app/api/requests/batch/route.ts",
-  "src/app/api/requests/bulk/route.ts",
+  // POST /api/requests/bulk's create transaction (the route's item pipeline).
+  "src/lib/request-bulk.ts",
   // POST /api/requests' create + auto-approve, extracted from the route so the
   // watchlist auto-request files through the same chokepoint. The route itself
   // no longer writes a MediaRequest.
@@ -360,7 +361,7 @@ test("across every MediaRequest write: approving sets approvedAt, declining clea
     else if (status === "PENDING" || status === "AVAILABLE") untouched.push(w);
   }
   // Guards against a scan that silently matches nothing.
-  assert.ok(approves.length >= 4, `expected the literal approve writes, found ${approves.length}`);
+  assert.ok(approves.length >= 3, `expected the literal approve writes, found ${approves.length}`);
   assert.ok(reverts.length >= 1, `expected the sync's AVAILABLE→APPROVED revert, found ${reverts.length}`);
   assert.ok(declines.length >= 2, `expected the literal decline writes, found ${declines.length}`);
   assert.ok(untouched.length >= 12, `expected the rollbacks and the fulfilment flips, found ${untouched.length}`);
@@ -391,7 +392,7 @@ test("across every MediaRequest write: approving sets approvedAt, declining clea
 test("computed-status writes: a copy records no approval of its own, batch follows its decision, bulk stamps auto-approved rows only", () => {
   const computed = allWrites.filter((w) => approvedAtAssignments(w.data).length > 0 && literalStatus(w.data) === null);
   const byFile = new Map(computed.map((w) => [w.file, w]));
-  assert.deepEqual([...byFile.keys()].sort(), ["src/app/api/requests/batch/route.ts", "src/app/api/requests/bulk/route.ts"]);
+  assert.deepEqual([...byFile.keys()].sort(), ["src/app/api/requests/batch/route.ts", "src/lib/request-bulk.ts"]);
 
   // Copies of a greenlit peer's status (web and Discord): no approvedAt at all.
   const copies = allWrites.filter((w) => {
@@ -404,7 +405,8 @@ test("computed-status writes: a copy records no approval of its own, batch follo
     return (ts.isPropertyAccessExpression(init) && init.getText().endsWith(".status")) ||
       (ts.isIdentifier(init) && init.text === "mirrorStatus");
   });
-  assert.deepEqual(copies.map((w) => w.file).sort(), ["src/lib/discord-interactions/components/pick.ts", "src/lib/request-create.ts"]);
+  // The Discord pick copies through request-create.ts too.
+  assert.deepEqual(copies.map((w) => w.file).sort(), ["src/lib/request-create.ts"]);
 
   const batch = byFile.get("src/app/api/requests/batch/route.ts")!;
   assert.equal(
@@ -412,7 +414,7 @@ test("computed-status writes: a copy records no approval of its own, batch follo
     `typedStatus === "APPROVED" ? new Date() : null`,
   );
 
-  const bulk = byFile.get("src/app/api/requests/bulk/route.ts")!;
+  const bulk = byFile.get("src/lib/request-bulk.ts")!;
   const [stamp] = approvedAtAssignments(bulk.data);
   let conditional: ts.Node = stamp;
   while (!ts.isConditionalExpression(conditional) && conditional !== bulk.data) conditional = conditional.parent;

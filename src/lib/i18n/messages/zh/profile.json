@@ -14,10 +14,6 @@
   "profile.error.generic": "出错了",
   "profile.error.network": "网络错误——请重试",
   "profile.error.saveFailed": "保存失败——请重试",
-  "profile.time.justNow": "刚刚",
-  "profile.time.minutesAgo": "{n} 分钟前",
-  "profile.time.hoursAgo": "{n} 小时前",
-  "profile.time.daysAgo": "{n} 天前",
   "profile.discord.description": "关联你的 Discord 账户，即可直接在 Discord 中请求媒体。",
   "profile.discord.optionA": "方式 A——从 Discord 关联",
   "profile.discord.stepGenerate": "点击下方的{button}",
@@ -29,6 +25,7 @@
   "profile.discord.yourToken": "你的关联令牌",
   "profile.discord.copyToken": "复制令牌",
   "profile.discord.expiresRun": "{time} 过期 · 在 Discord 中运行 {command}",
+  "profile.discord.expired": "此令牌已于 {time} 过期。请生成新令牌。",
   "profile.discord.error.generate": "生成令牌失败",
   "profile.discord.error.malformed": "服务器响应格式错误",
   "profile.discord.error.sendCode": "发送验证码失败",
@@ -264,5 +261,10 @@
   "profile.notifications.comments": "请求评论",
   "profile.notifications.discord.comments": "当我参与的请求对话中有新评论时通过 Discord 通知我",
   "profile.notifications.email.comments": "当我参与的请求对话中有新评论时给我发送电子邮件",
-  "profile.notifications.push.comments": "当我参与的请求对话中有新评论时发送推送通知"
+  "profile.notifications.push.comments": "当我参与的请求对话中有新评论时发送推送通知",
+  "profile.sessions.label.browserOnOs": "{os} 上的 {browser}",
+  "profile.sessions.label.unknownBrowser": "未知浏览器",
+  "profile.sessions.label.unknownOs": "未知系统",
+  "profile.sessions.label.androidTablet": "Android 平板",
+  "profile.sessions.label.machine": "机器（API）"
 }

@@ -7,10 +7,12 @@ import { withBasePath } from "@/lib/base-path";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
   hasWatchGradeSignal,
+  verdictMatchesFilter,
   watchGradeBands,
   watchGradeVolume,
   type RequestWatchVerdict,
   type WatchGradeDetail,
+  type WatchGradeFilter,
   type WatchGradeLetter,
   type WatchGradeSettings,
   type WatchGradeSummary,
@@ -127,22 +129,13 @@ export function WatchGradeChip({
   );
 }
 
-type Filter = "all" | "unwatched" | "partial" | "others" | "watched" | "grace" | "untracked";
+// The breakdown's filters, in chip order.
+const FILTERS: readonly WatchGradeFilter[] = ["all", "unwatched", "partial", "others", "watched", "grace", "untracked"];
 
-// Mirrors the summary's buckets, so each filter's rows match its count.
-function matchesFilter(v: RequestWatchVerdict, filter: Filter): boolean {
-  switch (filter) {
-    case "all":
-      return true;
-    case "grace":
-    case "untracked":
-      return v.scoring === filter;
-    case "others":
-      return v.scoring === "scored" && v.watchedByOthers;
-    default:
-      return v.scoring === "scored" && !v.watchedByOthers && v.watch === filter;
-  }
-}
+// A !res.ok answer: its text (the server's message, or the status) is shown as
+// is. Anything else that throws — a network failure, a body that isn't JSON —
+// carries browser text in no particular language, so it gets loadFailed.
+class GradeLoadError extends Error {}
 
 // Only ever set on a scored request the requester didn't fully watch.
 function othersText(v: RequestWatchVerdict, t: Translator): string {
@@ -216,7 +209,7 @@ export function WatchGradeModal({
   const locale = useLocale();
   const [data, setData] = useState<WatchGradeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<WatchGradeFilter>("all");
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const titleId = `watch-grade-title-${userId}`;
@@ -237,7 +230,7 @@ export function WatchGradeModal({
       .then(async (res) => {
         if (!res.ok) {
           const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error ?? tRef.current("adminQueue.grade.loadFailedStatus", { status: res.status }));
+          throw new GradeLoadError(body?.error ?? tRef.current("adminQueue.grade.loadFailedStatus", { status: res.status }));
         }
         return (await res.json()) as WatchGradeDetail;
       })
@@ -245,7 +238,7 @@ export function WatchGradeModal({
         if (!cancelled) setData(detail);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : tRef.current("adminQueue.grade.loadFailed"));
+        if (!cancelled) setError(err instanceof GradeLoadError ? err.message : tRef.current("adminQueue.grade.loadFailed"));
       });
     return () => {
       cancelled = true;
@@ -255,17 +248,21 @@ export function WatchGradeModal({
   const grade = data?.grade ?? null;
   const settings = data?.settings ?? null;
   const verdicts = data?.requests ?? [];
-  const shown = verdicts.filter((v) => matchesFilter(v, filter));
-  const filters: { id: Filter; label: string; count: number }[] = grade
-    ? [
-        { id: "all", label: t("requests.filter.all"), count: verdicts.length },
-        { id: "unwatched", label: t("adminQueue.grade.state.unwatched"), count: grade.unwatched },
-        { id: "partial", label: t("adminQueue.grade.filter.partial"), count: grade.partial },
-        { id: "others", label: t("adminQueue.grade.state.others"), count: grade.byOthers },
-        { id: "watched", label: t("adminQueue.grade.state.watched"), count: grade.watched },
-        { id: "grace", label: t("adminQueue.grade.filter.grace"), count: grade.inGrace },
-        { id: "untracked", label: t("adminQueue.grade.state.untracked"), count: grade.untracked },
-      ]
+  const shown = verdicts.filter((v) => verdictMatchesFilter(v, filter));
+  const filterLabel: Record<WatchGradeFilter, string> = {
+    all: t("requests.filter.all"),
+    unwatched: t("adminQueue.grade.state.unwatched"),
+    partial: t("adminQueue.grade.filter.partial"),
+    others: t("adminQueue.grade.state.others"),
+    watched: t("adminQueue.grade.state.watched"),
+    grace: t("adminQueue.grade.filter.grace"),
+    untracked: t("adminQueue.grade.state.untracked"),
+  };
+  // Counted from the rows loaded, not the summary: past the row cap the summary
+  // covers requests the list doesn't hold, and a chip would promise rows that
+  // aren't there. Uncut, the two agree (each filter is one summary bucket).
+  const filters: { id: WatchGradeFilter; label: string; count: number }[] = grade
+    ? FILTERS.map((id) => ({ id, label: filterLabel[id], count: verdicts.filter((v) => verdictMatchesFilter(v, id)).length }))
     : [];
 
   const overlay = (

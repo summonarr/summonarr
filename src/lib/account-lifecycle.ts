@@ -268,6 +268,9 @@ export async function purgeUserDataInTx(
   // row and keep delivering pushes (to a possibly handed-down device) or leave
   // dangling unique link/merge rows. Remove them in the same transaction.
   await tx.pushSubscription.deleteMany({ where: { userId: id } });
+  // The removed-device markers name this account's endpoints (hashed); with no
+  // account left to sign in, they guard nothing.
+  await tx.pushSubscriptionRemoval.deleteMany({ where: { userId: id } });
   await tx.discordLinkToken.deleteMany({ where: { userId: id } });
   await tx.discordMergeCode.deleteMany({ where: { userId: id } });
   // Sever the play-history identity link: MediaServerUser rows FK this user and

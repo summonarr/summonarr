@@ -250,6 +250,25 @@ export async function getVisibleServerInstancesForUserId(
 // column on TVEpisodeCache, which contradicts its shared-data design.
 export type EpisodeSource = "plex" | "jellyfin";
 
+// The episode sources a viewer's sign-in PROVIDER narrows to: a Plex sign-in is
+// told about Plex only, a Jellyfin one (QuickConnect included) about Jellyfin
+// only, anyone else about both. One definition for the detail page and both
+// TV routes; it only narrows — the grants gate below still applies on top.
+export function providerEpisodeSources(provider: string | null | undefined): EpisodeSource[] {
+  if (provider === "plex") return ["plex"];
+  if (provider === "jellyfin" || provider === "jellyfin-quickconnect") return ["jellyfin"];
+  return ["plex", "jellyfin"];
+}
+
+// The wire `source` of the TV routes: which sources the reported episode rows
+// came from, or null when none.
+export function summarizeEpisodeSources(present: ReadonlySet<string>): "plex" | "jellyfin" | "both" | null {
+  if (present.has("plex") && present.has("jellyfin")) return "both";
+  if (present.has("plex")) return "plex";
+  if (present.has("jellyfin")) return "jellyfin";
+  return null;
+}
+
 // JS-only form for callers that already hold the scoped library rows (a detail
 // page fetching them in the same Promise.all) — costs no extra query.
 export function visibleEpisodeSourcesFrom(

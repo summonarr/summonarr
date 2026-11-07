@@ -3,7 +3,6 @@
   "apiAuth.common.forbidden": "禁止访问",
   "apiAuth.common.invalidCredentials": "凭据无效",
   "apiAuth.common.invalidEmail": "邮箱地址无效",
-  "apiAuth.common.invalidJson": "JSON 无效",
   "apiAuth.common.invalidPassword": "密码无效",
   "apiAuth.common.invalidServer": "服务器无效",
   "apiAuth.common.reservedEmail": "该电子邮件地址为保留地址，不能用于账户。",

@@ -58,6 +58,7 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { hashPassword } = await import("../src/lib/password-hash.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
+const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 
 // ── recording op log ─────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -101,10 +102,12 @@ let deleteThrows = false; // flip tx.authSession.delete to reject (revoke-failur
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) =>
     authSessionRows.get(args.where.sessionId) ?? null,
-  findMany: async (args: { where: { userId: string } }) => {
+  findMany: async (args: { where: { userId: string; expiresAt?: { gt?: Date } } }) => {
     rec("authSession.findMany", args);
+    const after = args.where.expiresAt?.gt;
     return [...authSessionRows.values()]
       .filter((r) => r.userId === args.where.userId)
+      .filter((r) => after === undefined || r.expiresAt.getTime() > after.getTime())
       .sort((a, b) => b.lastSeenAt.getTime() - a.lastSeenAt.getTime());
   },
   // lastSeenAt fire-and-forget touch on the auth path — no-op.
@@ -314,6 +317,20 @@ test("GET lists ONLY the caller's devices, with a non-secret select and the call
   const other = rows.find((r) => r.sessionId === "sess-other-device");
   assert.equal(current?.isCurrent, true, "the caller's own session is flagged current");
   assert.equal(other?.isCurrent, false, "a sibling device is not current");
+});
+
+test("GET leaves out a row past its deadline (dead until the purge sweeps it) and keeps a never-expiring native session", async () => {
+  const caller = await mintSession();
+  addDevice(caller.userId, "sess-expired", { expiresAt: new Date(Date.now() - 60_000) });
+  addDevice(caller.userId, "sess-native", { expiresAt: new Date(NEVER_EXPIRES_AT_SEC * 1000) });
+
+  const res = await getSessions(caller.token);
+  assert.equal(res.status, 200);
+  const rows = (await res.json()) as Array<{ sessionId: string; indefinite: boolean }>;
+  const ids = rows.map((r) => r.sessionId).sort();
+  assert.deepEqual(ids, [caller.sessionId, "sess-native"].sort(), "the expired row is not listed as a live device");
+  assert.equal(rows.find((r) => r.sessionId === "sess-native")?.indefinite, true);
+  assert.ok(authSessionRows.has("sess-expired"), "the read deletes nothing (only the purge sweep may — guardrail 6c)");
 });
 
 // ═══════════════════════ DELETE /api/sessions (single) ═══════════════════════

@@ -15,13 +15,15 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { isFeatureEnabled, requireFeature } from "@/lib/features";
-import Link from "next/link";
 import { Suspense } from "react";
 import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
+import { SegmentedLinks } from "@/components/ui/design/segmented-links";
 import { TrendingUp, Film } from "@/components/icons";
 import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
 import { canRequest } from "@/lib/permissions";
+import { parsePageNumber } from "@/lib/pagination";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 type EnrichedMedia = TmdbMedia & {
   // 1-based position in the SERVER-WIDE ranking (page offset included), taken
@@ -51,6 +53,8 @@ const TYPE_OPTIONS = [
   { labelKey: "nav.tvShows", value: "tv" },
 ] as const;
 
+type MediaTypeFilter = (typeof TYPE_OPTIONS)[number]["value"];
+
 // Tab / bookmark / history title — the nav label, in the viewer's language.
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslator();
@@ -60,7 +64,7 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function PopularOnServerPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   await requireFeature("feature.page.popular");
   const [sp, session, plexEnabled, jellyfinEnabled, t] = await Promise.all([
@@ -70,7 +74,6 @@ export default async function PopularOnServerPage({
     isFeatureEnabled("feature.integration.jellyfin"),
     getTranslator(),
   ]);
-  if (!session) return null;
   // Integration flags passed explicitly — they default to TRUE when omitted.
   const { showPlex, showJellyfin } = getBadgeVisibility(session, {
     plex: plexEnabled,
@@ -99,12 +102,18 @@ export default async function PopularOnServerPage({
     );
   }
 
-  const mediaTypeFilter = sp.mediaType || undefined;
+  // Only the two real types filter; anything else (a hand-edited ?mediaType=)
+  // is "all" — otherwise it showed both sections with no tab marked and was
+  // copied into every sort, empty-state and pager link.
+  const rawMediaType = first(sp.mediaType);
+  const mediaTypeFilter: MediaTypeFilter =
+    rawMediaType === "movies" || rawMediaType === "tv" ? rawMediaType : undefined;
   const validSorts = new Set<PopularSort>(["plays", "viewers", "trending"]);
-  const sort: PopularSort = validSorts.has(sp.sort as PopularSort)
-    ? (sp.sort as PopularSort)
+  const sortParam = first(sp.sort);
+  const sort: PopularSort = validSorts.has(sortParam as PopularSort)
+    ? (sortParam as PopularSort)
     : "trending";
-  const requestedPage = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+  const requestedPage = parsePageNumber(sp.page);
 
   const activeSort = SORT_OPTIONS.find((s) => s.value === sort)!;
 
@@ -182,6 +191,14 @@ export default async function PopularOnServerPage({
         };
       },
     );
+    // A title whose TMDB resolve rejected is dropped (its rank was taken up
+    // front, so the rest keep theirs) — logged, as /api/popular does, so a
+    // most-played title that vanished is diagnosable.
+    for (const r of results) {
+      if (r.status === "rejected") {
+        console.error(`[popular] ${type} detail resolve failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
+      }
+    }
     return results
       .filter((r): r is PromiseFulfilledResult<EnrichedMedia> => r.status === "fulfilled")
       .map((r) => r.value);
@@ -192,9 +209,7 @@ export default async function PopularOnServerPage({
     resolveMedia(tvResult.items, "tv"),
   ]);
 
-  async function enrich(items: EnrichedMedia[]): Promise<EnrichedMedia[]> {
-    return (await attachAllAvailability(items, session?.user.id, { show4k })) as EnrichedMedia[];
-  }
+  const enrich = (items: EnrichedMedia[]) => attachAllAvailability(items, session.user.id, { show4k });
 
   [movies, tv] = await Promise.all([enrich(movies), enrich(tv)]);
 
@@ -228,79 +243,28 @@ export default async function PopularOnServerPage({
       <PageHeader title={t("nav.popularOnServer")} subtitle={t(activeSort.descriptionKey)} />
 
       <div className="flex flex-col sm:flex-row gap-3 mb-6 flex-wrap">
-        <div
-          className="ds-no-scrollbar flex overflow-x-auto max-w-full"
-          style={{
-            padding: 2,
-            background: "var(--ds-bg-1)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-            gap: 0,
-          }}
-        >
-          {SORT_OPTIONS.map(({ value, labelKey }) => {
-            const isActive = sort === value;
-            return (
-              <Link
-                key={value}
-                href={buildHref({ sort: value === "trending" ? undefined : value })}
-                aria-current={isActive ? "page" : undefined}
-                className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
-                style={{
-                  // 32px hit area: these segments are the page's only controls
-                  // at phone width, and 5px padding alone left them ~26px tall.
-                  minHeight: 32,
-                  padding: "5px 12px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  background: isActive ? "var(--ds-bg-3)" : "transparent",
-                  color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                }}
-              >
-                {t(labelKey)}
-              </Link>
-            );
-          })}
-        </div>
+        <SegmentedLinks
+          links={SORT_OPTIONS.map(({ value, labelKey }) => ({
+            key: value,
+            label: t(labelKey),
+            href: buildHref({ sort: value === "trending" ? undefined : value }),
+          }))}
+          active={sort}
+        />
 
         <div
           className="hidden sm:block self-stretch"
           style={{ width: 1, background: "var(--ds-border)", marginInline: 4 }}
         />
 
-        <div
-          className="ds-no-scrollbar flex overflow-x-auto max-w-full"
-          style={{
-            padding: 2,
-            background: "var(--ds-bg-1)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-          }}
-        >
-          {TYPE_OPTIONS.map(({ labelKey, value }) => {
-            const isActive = mediaTypeFilter === value;
-            return (
-              <Link
-                key={value ?? "all"}
-                href={buildHref({ mediaType: value })}
-                aria-current={isActive ? "page" : undefined}
-                className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
-                style={{
-                  // 32px hit area: these segments are the page's only controls
-                  // at phone width, and 5px padding alone left them ~26px tall.
-                  minHeight: 32,
-                  padding: "5px 12px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  background: isActive ? "var(--ds-bg-3)" : "transparent",
-                  color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                }}
-              >
-                {t(labelKey)}
-              </Link>
-            );
-          })}
-        </div>
+        <SegmentedLinks
+          links={TYPE_OPTIONS.map(({ labelKey, value }) => ({
+            key: value ?? "all",
+            label: t(labelKey),
+            href: buildHref({ mediaType: value }),
+          }))}
+          active={mediaTypeFilter ?? "all"}
+        />
       </div>
 
       {!hasAny ? (

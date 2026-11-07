@@ -4,9 +4,11 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
+import { Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
+import { SaveStatusMessage } from "./forms/save-status";
+import { useSettingsSave, type SettingsPatchResult } from "./forms/shared";
 import {
   WATCH_GRADE_DEFAULTS,
   WATCH_GRADE_SETTING_KEYS,
@@ -14,7 +16,6 @@ import {
   type WatchGradeSpread,
 } from "@/lib/watch-grade";
 
-type SaveStatus = "idle" | "saving" | "ok" | "error";
 type Field = keyof typeof WATCH_GRADE_SETTING_KEYS;
 
 // A null i18nKey means the column header is the grade letter itself.
@@ -44,52 +45,36 @@ const BAND_FIELDS: { field: "bandA" | "bandB" | "bandC" | "bandD"; letter: strin
 export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, string> }) {
   const t = useT();
   const [values, setValues] = useState<Record<Field, string>>(initial);
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ body: string; result: WatchGradePreview } | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
+  // An edit during a save keeps Save locked and isn't reported as saved
+  // (useSettingsSave). Only a success fades; an error keeps its icon beside
+  // its message until the next edit or save.
+  const { status, message, save, edited } = useSettingsSave();
+
   function set(field: Field, value: string) {
     setValues((v) => ({ ...v, [field]: value }));
-    setStatus("idle");
+    edited();
   }
 
-  // The body both Save and Preview send: every watch-grade key, trimmed.
-  function body(): string {
+  // What both Save and Preview send: every watch-grade key, trimmed.
+  function fields(): Record<string, string> {
     const out: Record<string, string> = {};
     for (const field of Object.keys(WATCH_GRADE_SETTING_KEYS) as Field[]) {
       out[WATCH_GRADE_SETTING_KEYS[field]] = values[field].trim();
     }
-    return JSON.stringify(out);
+    return out;
   }
+  const body = () => JSON.stringify(fields());
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    setStatus("saving");
-    setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: body(),
-      });
-      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
-      if (!res.ok || !data?.ok) {
-        setError(data?.error ?? t("settings.common.saveFailedStatus", { status: res.status }));
-        setStatus("error");
-        return;
-      }
-      setStatus("ok");
-      // The preview's "Now" row described the settings just replaced.
-      setPreview(null);
-      // Only clear a success: an error keeps its icon beside its message, and
-      // a later save's "saving" must not be clobbered by this timer.
-      setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
-    } catch {
-      setError(t("settings.common.networkError"));
-      setStatus("error");
-    }
+    const result = await save(fields(), (r: SettingsPatchResult) =>
+      r.status === 0 ? t("settings.common.networkError") : t("settings.common.saveFailedStatus", { status: r.status }));
+    // The preview's "Now" row described the settings just replaced.
+    if (result.ok) setPreview(null);
   }
 
   async function handlePreview() {
@@ -263,12 +248,9 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
           {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
           {t("settings.common.save")}
         </Button>
-        {status === "ok" && <CheckCircle className="w-4 h-4 text-green-500" />}
-        {/* Same shape as the Play History form two cards up: the icon is
-            decorative, the text is announced, and both leave together when an
-            edit resets `status` (set() clears status but not `error`). */}
-        {status === "error" && <XCircle className="w-4 h-4 shrink-0 text-red-500" aria-hidden="true" />}
-        {status === "error" && error && <span role="alert" className="text-xs text-red-400">{error}</span>}
+        {/* Announced either way: "Saved" in a polite live region, the error
+            in an assertive one (an edit resets `status`, so both leave). */}
+        <SaveStatusMessage status={status} errorLabel={message || undefined} />
       </div>
     </form>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { memo, useState, useCallback, useDeferredValue, useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { FixMatchButton } from "@/components/admin/fix-match-button";
@@ -9,7 +9,7 @@ import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { rich } from "@/components/settings/forms/rich";
-import { suggestWrongSide, type DiffSource } from "@/lib/library-diff";
+import { badMatchSideKey, fixAllEligible, suggestWrongSide, type DiffSource } from "@/lib/library-diff";
 
 interface RequestSummary {
   total: number;
@@ -65,17 +65,17 @@ export interface ClientBadMatch {
 type ArrFilter     = "all" | "mismatch" | "not_in_arr" | "matches";
 type RequestFilter = "all" | "has_requests";
 
+type Server = "plex" | "jellyfin";
+
 // One identity token per brand, the same ones the page's stat tiles use —
 // the Jellyfin column/chips used to be purple while the tile beside them was
-// the cyan brand token, so one product read as two.
-const PLEX_TINT     = "var(--ds-plex)";
-const JELLYFIN_TINT = "var(--ds-jellyfin)";
-// The tints above are fills and borders; as TEXT on the light theme they are
-// ~2:1. Text on a tint chip takes the per-theme text colour instead (worst
-// case 4.6:1 on a 14% chip in either theme) — guardrail 42.
-const TEXT_FOR_TINT: Record<string, string> = {
-  [PLEX_TINT]:     "var(--ds-plex-text)",
-  [JELLYFIN_TINT]: "var(--ds-jellyfin-text)",
+// the cyan brand token, so one product read as two. `tint` is a fill/border;
+// as TEXT on the light theme it is ~2:1, so text on a tint chip takes the
+// per-theme `text` colour (worst case 4.6:1 on a 14% chip in either theme) —
+// guardrail 42. Keyed by server, so every chip gets both halves of one brand.
+const SERVER_COLOURS: Record<Server, { tint: string; text: string }> = {
+  plex:     { tint: "var(--ds-plex)",     text: "var(--ds-plex-text)" },
+  jellyfin: { tint: "var(--ds-jellyfin)", text: "var(--ds-jellyfin-text)" },
 };
 
 function statusChip(status: string) {
@@ -88,14 +88,16 @@ function statusChip(status: string) {
   }
 }
 
-function MediaCard({
+// Memoized: a search keystroke re-filters the lists but keeps each item's
+// reference, so only cards whose props changed render again.
+const MediaCard = memo(function MediaCard({
   item,
   highlight = false,
   server,
 }: {
   item: DiffItem;
   highlight?: boolean;
-  server?: "plex" | "jellyfin";
+  server?: Server;
 }) {
   const t = useT();
   const thumb        = posterUrl(item.posterPath, "w342");
@@ -192,9 +194,9 @@ function MediaCard({
             <span
               className="ds-chip"
               style={{
-                background: `color-mix(in oklab, ${server === "plex" ? PLEX_TINT : JELLYFIN_TINT} 14%, transparent)`,
-                borderColor: `color-mix(in oklab, ${server === "plex" ? PLEX_TINT : JELLYFIN_TINT} 35%, var(--ds-border))`,
-                color: TEXT_FOR_TINT[server === "plex" ? PLEX_TINT : JELLYFIN_TINT],
+                background: `color-mix(in oklab, ${SERVER_COLOURS[server].tint} 14%, transparent)`,
+                borderColor: `color-mix(in oklab, ${SERVER_COLOURS[server].tint} 35%, var(--ds-border))`,
+                color: SERVER_COLOURS[server].text,
                 fontSize: 9.5,
                 padding: "1px 6px",
               }}
@@ -305,7 +307,7 @@ function MediaCard({
       </div>
     </div>
   );
-}
+});
 
 function DiffSourceNote({ source, server }: { source: DiffSource; server?: "plex" | "jellyfin" }) {
   const t = useT();
@@ -337,14 +339,15 @@ function DiffSourceNote({ source, server }: { source: DiffSource; server?: "plex
 function BadMatchSide({
   item,
   label,
-  tint,
+  server,
   filePath,
 }: {
   item: BadMatchSideData;
   label: string;
-  tint: string;
+  server: Server;
   filePath?: string | null;
 }) {
+  const { tint, text } = SERVER_COLOURS[server];
   const thumb        = posterUrl(item.posterPath, "w342");
   const displayTitle = item.title || `TMDB #${item.tmdbId}`;
 
@@ -394,7 +397,7 @@ function BadMatchSide({
           style={{
             background: `color-mix(in oklab, ${tint} 14%, transparent)`,
             borderColor: `color-mix(in oklab, ${tint} 35%, var(--ds-border))`,
-            color: TEXT_FOR_TINT[tint] ?? tint,
+            color: text,
             fontSize: 9.5,
             padding: "1px 7px",
             fontWeight: 600,
@@ -529,9 +532,9 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
             opacity: arrVerdict === "jellyfin" ? 0.4 : 1,
           }}
         >
-          <BadMatchSide item={match.plex} label={sideLabel("plex", match.plex.serverInstance)} tint={PLEX_TINT} filePath={match.relativePath} />
+          <BadMatchSide item={match.plex} label={sideLabel("plex", match.plex.serverInstance)} server="plex" filePath={match.relativePath} />
           {arrVerdict === "plex" || arrVerdict === null ? (
-            match.plexRatingKey ? (
+            badMatchSideKey(match, "plex") ? (
               <FixMatchButton
                 server="plex"
                 serverInstance={match.plex.serverInstance}
@@ -562,9 +565,9 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
             opacity: arrVerdict === "plex" ? 0.4 : 1,
           }}
         >
-          <BadMatchSide item={match.jellyfin} label={sideLabel("jellyfin", match.jellyfin.serverInstance)} tint={JELLYFIN_TINT} filePath={match.relativePath} />
+          <BadMatchSide item={match.jellyfin} label={sideLabel("jellyfin", match.jellyfin.serverInstance)} server="jellyfin" filePath={match.relativePath} />
           {arrVerdict === "jellyfin" || arrVerdict === null ? (
-            match.jellyfinItemId ? (
+            badMatchSideKey(match, "jellyfin") ? (
               <FixMatchButton
                 server="jellyfin"
                 serverInstance={match.jellyfin.serverInstance}
@@ -592,10 +595,11 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
 
 type FixResult = { key: string; title: string; kind: "ok" | "warn" | "error"; text?: string };
 
-function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
+function FixAllArrButton({ matches, onStart }: { matches: ClientBadMatch[]; onStart: () => void }) {
   const t = useT();
   const router  = useRouter();
-  const fixable = matches.filter((m) => m.arrVerdict !== null && m.arrTmdbId !== null);
+  // The cards' own rule: a side with no item key says "re-sync to fix".
+  const fixable = matches.filter(fixAllEligible);
 
   const [state, setRunState] = useState<"idle" | "confirm" | "running" | "done">("idle");
   const [progress, setProgress] = useState({ fixed: 0, failed: 0, partial: 0, handled: 0, total: 0, stopped: false });
@@ -611,6 +615,7 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
 
   const handleFixAll = useCallback(async () => {
     stopRef.current = false;
+    onStart();
     setRunState("running");
     setProgress({ fixed: 0, failed: 0, partial: 0, handled: 0, total: fixable.length, stopped: false });
     setResults([]);
@@ -665,7 +670,7 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
     }
     setRunState("done");
     if (fixed > 0) router.refresh();
-  }, [fixable, router, t]);
+  }, [fixable, onStart, router, t]);
 
   if (fixable.length === 0 && state === "idle") return null;
 
@@ -770,7 +775,6 @@ const RENDER_CAP = 500;
 
 function DiffColumn({
   label,
-  tint,
   items,
   totalBefore,
   configured,
@@ -781,18 +785,18 @@ function DiffColumn({
   highlightKey,
 }: {
   label: string;
-  tint: string;
   items: DiffItem[];
   totalBefore: number;
   configured: boolean;
-  otherServer: "plex" | "jellyfin";
+  otherServer: Server;
   filtersActive: boolean;
-  server: "plex" | "jellyfin";
+  server: Server;
   highlightServer: string | null;
   highlightKey: string | null;
 }) {
   const t = useT();
   const locale = useLocale();
+  const { tint, text } = SERVER_COLOURS[server];
   const otherConfiguredMsg = otherServer === "plex"
     ? t("adminManage.library.diff.plexHasAll")
     : t("adminManage.library.diff.jellyfinHasAll");
@@ -813,7 +817,7 @@ function DiffColumn({
           style={{
             background: `color-mix(in oklab, ${tint} 14%, transparent)`,
             borderColor: `color-mix(in oklab, ${tint} 35%, var(--ds-border))`,
-            color: TEXT_FOR_TINT[tint] ?? tint,
+            color: text,
             fontSize: 10,
             letterSpacing: "0.06em",
             textTransform: "uppercase",
@@ -880,6 +884,32 @@ function DiffColumn({
   );
 }
 
+function applyFilters(items: DiffItem[], q: string, arrFilter: ArrFilter, requestFilter: RequestFilter): DiffItem[] {
+  let result = items;
+  if (q) {
+    result = result.filter(
+      (i) =>
+        (i.title ?? "").toLowerCase().includes(q) ||
+        (i.relPath ?? "").toLowerCase().includes(q),
+    );
+  }
+  if (arrFilter === "mismatch")   result = result.filter((i) => i.arrMismatch);
+  if (arrFilter === "not_in_arr") result = result.filter((i) => !i.inArr);
+  if (arrFilter === "matches")    result = result.filter((i) => i.inArr && !i.arrMismatch);
+  if (requestFilter === "has_requests") result = result.filter((i) => i.requests.total > 0);
+  return result;
+}
+
+function filterBadMatches(items: ClientBadMatch[], q: string): ClientBadMatch[] {
+  if (!q) return items;
+  return items.filter(
+    (m) =>
+      m.relativePath.toLowerCase().includes(q) ||
+      (m.plex.title     ?? "").toLowerCase().includes(q) ||
+      (m.jellyfin.title ?? "").toLowerCase().includes(q),
+  );
+}
+
 // Client view for the admin library-diff page: searchable/filterable Plex-only, Jellyfin-only, and suspected-bad-match lists with inline fix-match actions.
 export function LibraryDiffClient({
   onlyPlex,
@@ -902,38 +932,20 @@ export function LibraryDiffClient({
   const [search,        setSearch]        = useState("");
   const [arrFilter,     setArrFilter]     = useState<ArrFilter>("all");
   const [requestFilter, setRequestFilter] = useState<RequestFilter>("all");
+  // Once a bulk Fix all starts, its section stays: the progress and the
+  // per-title results must outlive the list emptying, whether the search
+  // filters every match out mid-run or the run fixed them all and the refresh
+  // brought an empty list. (Unmounting it also stopped the run.)
+  const [fixAllStarted, setFixAllStarted] = useState(false);
+  const onFixAllStart = useCallback(() => setFixAllStarted(true), []);
 
-  function applyFilters(items: DiffItem[]): DiffItem[] {
-    let result = items;
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      result = result.filter(
-        (i) =>
-          (i.title ?? "").toLowerCase().includes(q) ||
-          (i.relPath ?? "").toLowerCase().includes(q),
-      );
-    }
-    if (arrFilter === "mismatch")   result = result.filter((i) => i.arrMismatch);
-    if (arrFilter === "not_in_arr") result = result.filter((i) => !i.inArr);
-    if (arrFilter === "matches")    result = result.filter((i) => i.inArr && !i.arrMismatch);
-    if (requestFilter === "has_requests") result = result.filter((i) => i.requests.total > 0);
-    return result;
-  }
-
-  function filterBadMatches(items: ClientBadMatch[]): ClientBadMatch[] {
-    if (!search.trim()) return items;
-    const q = search.trim().toLowerCase();
-    return items.filter(
-      (m) =>
-        m.relativePath.toLowerCase().includes(q) ||
-        (m.plex.title     ?? "").toLowerCase().includes(q) ||
-        (m.jellyfin.title ?? "").toLowerCase().includes(q),
-    );
-  }
-
-  const filteredPlex       = applyFilters(onlyPlex);
-  const filteredJellyfin   = applyFilters(onlyJellyfin);
-  const filteredBadMatches = filterBadMatches(badMatches);
+  // Typing stays responsive: the lists (up to RENDER_CAP cards a column)
+  // follow the deferred query.
+  const deferredSearch = useDeferredValue(search);
+  const q = deferredSearch.trim().toLowerCase();
+  const filteredPlex       = useMemo(() => applyFilters(onlyPlex, q, arrFilter, requestFilter), [onlyPlex, q, arrFilter, requestFilter]);
+  const filteredJellyfin   = useMemo(() => applyFilters(onlyJellyfin, q, arrFilter, requestFilter), [onlyJellyfin, q, arrFilter, requestFilter]);
+  const filteredBadMatches = useMemo(() => filterBadMatches(badMatches, q), [badMatches, q]);
 
   const filtersActive = !!search.trim() || arrFilter !== "all" || requestFilter !== "all";
 
@@ -986,7 +998,7 @@ export function LibraryDiffClient({
         </ArrFilterButton>
       </div>
 
-      {filteredBadMatches.length > 0 && (
+      {(filteredBadMatches.length > 0 || fixAllStarted) && (
         <section>
           <div className="flex items-center gap-2.5 flex-wrap" style={{ marginBottom: 12 }}>
             <span
@@ -1014,7 +1026,7 @@ export function LibraryDiffClient({
               {" · "}{t("adminManage.library.diff.badMatchesHint")}
             </span>
             <div style={{ marginLeft: "auto" }}>
-              <FixAllArrButton matches={filteredBadMatches} />
+              <FixAllArrButton matches={filteredBadMatches} onStart={onFixAllStart} />
             </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1033,7 +1045,6 @@ export function LibraryDiffClient({
       <div className="ds-two-up" style={{ gap: 20 }}>
         <DiffColumn
           label={t("adminManage.library.diff.plexOnly")}
-          tint={PLEX_TINT}
           items={filteredPlex}
           totalBefore={onlyPlex.length}
           configured={plexConfigured}
@@ -1045,7 +1056,6 @@ export function LibraryDiffClient({
         />
         <DiffColumn
           label={t("adminManage.library.diff.jellyfinOnly")}
-          tint={JELLYFIN_TINT}
           items={filteredJellyfin}
           totalBefore={onlyJellyfin.length}
           configured={jellyfinConfigured}

@@ -1,6 +1,6 @@
 import "server-only";
 import { getCacheMany, setCache } from "./tmdb-cache";
-import { coalesce } from "./concurrency";
+import { coalesce, settleLimit } from "./concurrency";
 import { processSingleton } from "./process-singleton";
 import { prisma } from "./prisma";
 import {
@@ -9,12 +9,13 @@ import {
   fetchTitleTranslations,
   getMovieGenres,
   getTVGenres,
+  isTmdbNotFound,
   tmdbLanguageFor,
   type CollectionTranslations,
   type PersonTranslations,
   type TitleTranslations,
 } from "./tmdb";
-import type { TmdbMedia } from "./tmdb-types";
+import type { MediaType } from "./tmdb-types";
 import { isLocale, type Locale } from "./i18n/locales";
 import { instanceDefaultLocale } from "./i18n/server-locale";
 
@@ -42,11 +43,16 @@ import { instanceDefaultLocale } from "./i18n/server-locale";
 const KEY_VERSION = "v2";
 const translationsKey = (mediaType: string, id: number) => `${mediaType}:${id}:i18n:${KEY_VERSION}`;
 const personKey = (id: number) => `person:${id}:i18n:v1`;
+const collectionKey = (id: number) => `collection:${id}:i18n:v1`;
 const dbType = (mediaType: string) => (mediaType === "MOVIE" || mediaType === "movie" ? "movie" : "tv");
 
 // Translations change rarely, and the library prewarm needs the headroom: at
 // MAX_PREWARM_PER_RUN a day, 30 days covers a library of well over 100k titles.
 export const TRANSLATIONS_TTL = 30 * 24 * 60 * 60;
+// A TMDB 404 (a dead id) is a definitive answer: {} is cached for this long, as
+// the details prewarm tombstones one (tmdb-prewarm.ts), instead of re-fetching
+// it on every view and every prewarm run.
+const NOT_FOUND_TTL = 14 * 24 * 60 * 60;
 
 // How long a page waits for translations it doesn't have cached yet. Fetches
 // still running at the deadline keep going and fill the cache, so the next view
@@ -91,18 +97,48 @@ export function createInFlightLimiter(max: number): <T>(fn: () => Promise<T>) =>
 
 const limited = processSingleton("tmdb-localize:limiter", () => createInFlightLimiter(MAX_IN_FLIGHT));
 
-// Fetch + store one title's translations. Coalesced on the cache key, so a
-// stampede of pages listing the same title shares one fetch. A title with no
-// translation stores {} — a cached answer, not a miss to retry every view.
-function loadTranslations(mediaType: string, id: number): Promise<TitleTranslations> {
-  const key = translationsKey(dbType(mediaType), id);
+// Fetch + store one translations payload: coalesced on the cache key (a
+// stampede of pages listing the same title shares one fetch) and run through
+// the process-wide limiter. Nothing translated stores {} — a cached answer, not
+// a miss to retry every view — and so does a TMDB 404, for NOT_FOUND_TTL.
+function fetchAndCache<T extends object>(key: string, fetcher: () => Promise<T>): Promise<T> {
   return coalesce(key, () =>
     limited(async () => {
-      const value = await fetchTitleTranslations(dbType(mediaType), id);
-      await setCache(key, value, TRANSLATIONS_TTL);
+      let value: T;
+      let ttl = TRANSLATIONS_TTL;
+      try {
+        value = await fetcher();
+      } catch (err) {
+        if (!isTmdbNotFound(err)) throw err;
+        value = {} as T;
+        ttl = NOT_FOUND_TTL;
+      }
+      await setCache(key, value, ttl);
       return value;
     }),
   );
+}
+
+// Waits for `work` at most `budgetMs`, then answers `fallback` and lets the
+// work finish in the background — it still writes the cache, so the next view
+// is localized. A late rejection is swallowed here, never left unhandled.
+async function withinBudget<T, F>(work: Promise<T>, budgetMs: number, fallback: F): Promise<T | F> {
+  work.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<F>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), budgetMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function loadTranslations(mediaType: string, id: number): Promise<TitleTranslations> {
+  return fetchAndCache(translationsKey(dbType(mediaType), id), () => fetchTitleTranslations(dbType(mediaType), id));
 }
 
 // Cached translations for `refs`, fetching up to MAX_MISSES_PER_CALL misses and
@@ -140,7 +176,24 @@ async function translationsFor(
   return cached;
 }
 
-function overlay<T extends TmdbMedia>(
+/**
+ * The fields the overlay reads and writes. A TmdbMedia is one; so is any card
+ * shaped like one (a person's filmography credit), with no cast needed.
+ */
+export interface LocalizableMedia {
+  id: number;
+  mediaType: MediaType;
+  title: string;
+  overview?: string;
+  tagline?: string | null;
+  posterPath: string | null;
+  originalTitle?: string | null;
+  originalLanguage?: string | null;
+  genres?: string[];
+  genreList?: { id: number; name: string }[];
+}
+
+function overlay<T extends LocalizableMedia>(
   item: T,
   tr: TitleTranslations | undefined,
   locale: Exclude<Locale, "en">,
@@ -180,7 +233,7 @@ function localizedTitle(
   return translated || (item.originalLanguage === locale && item.originalTitle ? item.originalTitle : undefined);
 }
 
-async function genreNamesFor(items: TmdbMedia[], language: string): Promise<Map<number, string> | undefined> {
+async function genreNamesFor(items: LocalizableMedia[], language: string): Promise<Map<number, string> | undefined> {
   const types = new Set(items.filter((i) => i.genreList?.length).map((i) => i.mediaType));
   if (types.size === 0) return undefined;
   const lists = await Promise.all(
@@ -196,7 +249,7 @@ async function genreNamesFor(items: TmdbMedia[], language: string): Promise<Map<
  * `locale`. Never throws and never removes or reorders items: any failure
  * leaves the affected titles in English.
  */
-export async function localizeMedia<T extends TmdbMedia>(items: T[], locale: Locale): Promise<T[]> {
+export async function localizeMedia<T extends LocalizableMedia>(items: T[], locale: Locale): Promise<T[]> {
   if (locale === "en" || items.length === 0) return items;
   const language = tmdbLanguageFor(locale);
   if (!language) return items;
@@ -300,44 +353,55 @@ export async function localizeStoredTitles<T extends TitleRef>(rows: T[], locale
   });
 }
 
-/** A collection's name in `locale`, or `englishName` when untranslated. Never throws. */
-export async function localizedCollectionName(collectionId: number, englishName: string, locale: Locale): Promise<string> {
+/**
+ * A collection's name in `locale`, or `englishName` when untranslated or not
+ * cached within the miss budget (the page renders on; the fetch fills the cache
+ * for the next view). Never throws.
+ */
+export async function localizedCollectionName(
+  collectionId: number,
+  englishName: string,
+  locale: Locale,
+  opts: { budgetMs?: number } = {},
+): Promise<string> {
   if (locale === "en") return englishName;
   try {
-    const key = `collection:${collectionId}:i18n:v1`;
+    const key = collectionKey(collectionId);
     const cached = await getCacheMany<CollectionTranslations>([key]);
     const value =
       cached.get(key) ??
-      (await coalesce(key, () =>
-        limited(async () => {
-          const v = await fetchCollectionTranslations(collectionId);
-          await setCache(key, v, TRANSLATIONS_TTL);
-          return v;
-        }),
+      (await withinBudget(
+        fetchAndCache(key, () => fetchCollectionTranslations(collectionId)),
+        opts.budgetMs ?? MISS_BUDGET_MS,
+        null,
       ));
-    return value[locale as Exclude<Locale, "en">]?.name ?? englishName;
+    return value?.[locale as Exclude<Locale, "en">]?.name ?? englishName;
   } catch {
     return englishName;
   }
 }
 
-/** A person's biography in `locale`, or null to keep the English one. Never throws. */
-export async function localizedBiography(personId: number, locale: Locale): Promise<string | null> {
+/**
+ * A person's biography in `locale`, or null to keep the English one (also when
+ * it isn't cached within the miss budget — see localizedCollectionName). Never throws.
+ */
+export async function localizedBiography(
+  personId: number,
+  locale: Locale,
+  opts: { budgetMs?: number } = {},
+): Promise<string | null> {
   if (locale === "en") return null;
   try {
     const key = personKey(personId);
     const cached = await getCacheMany<PersonTranslations>([key]);
-    let value = cached.get(key);
-    if (!value) {
-      value = await coalesce(key, () =>
-        limited(async () => {
-          const v = await fetchPersonTranslations(personId);
-          await setCache(key, v, TRANSLATIONS_TTL);
-          return v;
-        }),
-      );
-    }
-    return value[locale as Exclude<Locale, "en">]?.biography ?? null;
+    const value =
+      cached.get(key) ??
+      (await withinBudget(
+        fetchAndCache(key, () => fetchPersonTranslations(personId)),
+        opts.budgetMs ?? MISS_BUDGET_MS,
+        null,
+      ));
+    return value?.[locale as Exclude<Locale, "en">]?.biography ?? null;
   } catch {
     return null;
   }
@@ -399,9 +463,13 @@ export async function nonEnglishInUse(): Promise<boolean> {
  * Fill translation rows for the titles people are most likely to see in a
  * list: requests and watchlists first (the iCal feed's titles, which it reads
  * from the cache only), then the library. Skips titles already cached (an
- * expired row counts as missing), stops at MAX_PREWARM_PER_RUN fetches, and
- * observes `signal` between chunks (guardrail 41). A no-op — zero fetches —
- * unless nonEnglishInUse().
+ * expired row counts as missing; a TMDB 404 is cached as an answer), stops at
+ * MAX_PREWARM_PER_RUN fetches, and observes `signal` before each title
+ * (guardrail 41). A no-op — zero fetches — unless nonEnglishInUse().
+ *
+ * It shares the process-wide limiter with page renders but never holds more
+ * than MAX_IN_FLIGHT of its own titles in it, so a viewer's miss waits for at
+ * most one fetch to finish, not for the rest of a 500-title chunk.
  */
 export async function prewarmTitleTranslations(
   opts: { signal?: AbortSignal; maxFetches?: number } = {},
@@ -429,10 +497,14 @@ export async function prewarmTitleTranslations(
     const chunk = all.slice(i, i + PREWARM_CHUNK);
     const cached = await getCacheMany<TitleTranslations>(chunk.map(([k]) => k));
     const missing = chunk.filter(([k]) => !cached.has(k)).slice(0, max - result.fetched - result.failed);
-    const settled = await Promise.allSettled(missing.map(([, r]) => loadTranslations(r.mediaType, r.id)));
+    const settled = await settleLimit(missing, MAX_IN_FLIGHT, async ([, r]) => {
+      if (opts.signal?.aborted) return false;
+      await loadTranslations(r.mediaType, r.id);
+      return true;
+    });
     for (const s of settled) {
-      if (s.status === "fulfilled") result.fetched++;
-      else result.failed++;
+      if (s.status === "rejected") result.failed++;
+      else if (s.value) result.fetched++;
     }
   }
   return result;

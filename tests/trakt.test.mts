@@ -228,15 +228,30 @@ test("concurrent cold-cache callers share ONE page fan-out and one cache write (
 
 test("a non-empty result is cached under the list key and served from cache on the next call", async () => {
   respond = () => jsonResponse([movieRow(550, "Fight Club", 1999)]);
-  const first = await getTraktPopularMovies(1);
+  // The default page count — every production caller's — keeps the plain key.
+  const first = await getTraktPopularMovies();
+  assert.equal(fetchCalls.length, 5);
   assert.equal(cacheUpserts.length, 1);
   assert.equal(cacheUpserts[0].key, "trakt:popular:movies");
   assert.deepEqual(JSON.parse(cacheUpserts[0].data), first);
 
   // Second call: cache hit, no new fetch.
   fetchCalls.length = 0;
-  assert.deepEqual(await getTraktPopularMovies(1), first);
+  assert.deepEqual(await getTraktPopularMovies(), first);
   assert.equal(fetchCalls.length, 0);
+});
+
+test("two page counts never share a cache entry: a one-page list can't stand in for the five-page one", async () => {
+  respond = (url) => jsonResponse([movieRow(Number(url.searchParams.get("page")), `Page ${url.searchParams.get("page")}`)]);
+  const one = await getTraktPopularMovies(1);
+  assert.deepEqual(one.map((m) => m.id), [1]);
+  assert.equal(cacheUpserts[0].key, "trakt:popular:movies:pages=1");
+
+  fetchCalls.length = 0;
+  const two = await getTraktPopularMovies(2);
+  assert.equal(fetchCalls.length, 2, "a miss: the one-page entry is not served for two pages");
+  assert.deepEqual(two.map((m) => m.id), [1, 2]);
+  assert.equal(cacheUpserts[1].key, "trakt:popular:movies:pages=2");
 });
 
 test("no configured client id ⇒ [] without touching the network", async () => {
@@ -303,4 +318,14 @@ test("testTraktConnection bypasses the lockout: the admin test reaches the wire 
   fetchCalls.length = 0;
   assert.equal(await testTraktConnection(), "The Matrix");
   assert.equal(fetchCalls.length, 1, "the connection test must not be short-circuited by the lockout");
+});
+
+test("guardrail 27a: the 429 lockout is process-wide — a second copy of trakt.ts (another chunk) is locked too", async () => {
+  // Still inside the window the 429 test above tripped (30s, real clock).
+  const specifier = "../src/lib/trakt.ts?chunk=page";
+  const other: typeof import("../src/lib/trakt.ts") = await import(specifier);
+  respond = () => jsonResponse([movieRow(603, "The Matrix", 1999)]);
+  fetchCalls.length = 0;
+  assert.deepEqual(await other.getTraktPopularMovies(1), []);
+  assert.equal(fetchCalls.length, 0, "the other copy saw the lockout");
 });

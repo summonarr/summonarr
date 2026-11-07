@@ -1,10 +1,11 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { getCache, setCache, TTL } from "./tmdb-cache";
-import { safeFetchTrusted } from "./safe-fetch";
+import { getCache, getCacheEntry, setCache, setCacheUntil, tmdbDetailsKey, TTL } from "./tmdb-cache";
+import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 // coalesce: concurrent callers for the same list/detail key share one upstream
 // fetch rather than hammering TMDB and writing the same cache row N times.
 import { settleLimit, coalesce } from "./concurrency";
+import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { syncTmdbMediaCore, upsertTmdbMediaCore } from "./tmdb-core-sync";
 import { fetchUnifiedRatings } from "./omdb-availability";
 import type { MdblistRatings } from "./mdblist";
@@ -19,14 +20,17 @@ import type {
 import { languageName, regionName } from "./tmdb-types";
 import { extractHomeReleaseDates } from "./home-release-dates";
 import { buildStudioList, isCertificationCap } from "./studio-list";
+import { upcomingCutoffDate } from "./format-release-date";
 
 // Merge a unified ratings payload (fetchUnifiedRatings) onto a media object.
 // `trailerUrl` must never displace an already-extracted TMDB YouTube trailerKey
 // (mirrors applyMdblist's guard in omdb-availability.ts) — the fresh-fetch paths
-// set trailerKey before this runs, and cached rows already carry theirs.
+// set trailerKey before this runs, and cached rows already carry theirs. Nor may
+// a ratings source with no IMDb id erase the one TMDB's external_ids supplied.
 function assignUnifiedRatings(media: TmdbMedia, data: MdblistRatings): void {
-  const { trailerUrl, ...rest } = data;
+  const { trailerUrl, imdbId, ...rest } = data;
   Object.assign(media, rest);
+  if (imdbId != null || media.imdbId == null) media.imdbId = imdbId;
   if (!media.trailerKey) media.trailerUrl = trailerUrl;
 }
 
@@ -60,6 +64,31 @@ export type {
 export { posterUrl, backdropUrl, stillUrl } from "./tmdb-types";
 
 const BASE_URL = "https://api.themoviedb.org/3";
+
+// A dropped connection, as the transport really reports it: safe-fetch wraps
+// every transport failure in SafeFetchError("network") and keeps the cause's
+// text in the message — node:http's ECONNRESET / "socket hang up", undici's
+// "other side closed" / UND_ERR_SOCKET, and "terminated" for a body torn
+// mid-read. A plain "fetch failed" (DNS, refused connection) is not one.
+const CONNECTION_DROPPED = /ECONNRESET|EPIPE|socket hang up|UND_ERR_SOCKET|other side closed|terminated/i;
+// Gateway answers in front of TMDB: transient by nature. 500 is not retried
+// (TMDB's own error), and no other 4xx than 429 ever is.
+const RETRY_STATUSES = new Set([502, 503, 504]);
+const RETRY_BACKOFF_MS = 250;
+
+/** Whether a thrown tmdbFetch error is TMDB answering 404 (the title or person doesn't exist). */
+export function isTmdbNotFound(err: unknown): boolean {
+  return err instanceof Error && /failed: 404\b/.test(err.message);
+}
+
+// A transport failure worth another attempt: a dropped connection (up to the
+// loop's two retries), or a timeout once — a second 15s wait is the most a page
+// render should pay for one TMDB call.
+function retriableTransportError(err: unknown, attempt: number): boolean {
+  if (!(err instanceof SafeFetchError)) return false;
+  if (err.reason === "network") return CONNECTION_DROPPED.test(err.message);
+  return err.reason === "timeout" && attempt === 0;
+}
 
 async function tmdbFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
   const auth = tmdbAuth();
@@ -100,6 +129,12 @@ async function tmdbFetch<T>(path: string, params?: Record<string, string>): Prom
         lastErr = new Error(`TMDB ${path} failed: 429`);
         continue;
       }
+      if (RETRY_STATUSES.has(res.status) && attempt < 2) {
+        res.body?.cancel().catch(() => {});
+        lastErr = new Error(`TMDB ${path} failed: ${res.status}`);
+        await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)));
+        continue;
+      }
       if (!res.ok) throw new Error(`TMDB ${path} failed: ${res.status}`);
       const data = await res.json();
 
@@ -108,18 +143,16 @@ async function tmdbFetch<T>(path: string, params?: Record<string, string>): Prom
       }
       return data as T;
     } catch (err) {
-      // UND_ERR_SOCKET is a transient undici connection reset; retry twice before surfacing the error
-      const cause = (err as { cause?: { code?: string } })?.cause;
-      const isSocketError =
-        cause?.code === "UND_ERR_SOCKET" ||
-        (err instanceof Error && err.message.includes("UND_ERR_SOCKET"));
-      if (isSocketError && attempt < 2) {
+      // A body read that fails mid-stream lands here too (res.json()).
+      if (retriableTransportError(err, attempt) && attempt < 2) {
         lastErr = err;
+        await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS * (attempt + 1)));
         continue;
       }
       throw err;
     }
   }
+  // Unreachable (the last attempt returns or throws), but the return type needs it.
   throw lastErr;
 }
 
@@ -175,11 +208,15 @@ interface RawMovie {
   videos?: RawVideos;
   belongs_to_collection?: { id: number; name: string } | null;
   credits?: { cast: RawCastMember[] };
-  recommendations?: { results: RawMovie[] };
-  similar?: { results: RawMovie[] };
+  recommendations?: { results?: RawMovie[] };
+  similar?: { results?: RawMovie[] };
   keywords?: RawKeywords;
   "watch/providers"?: RawWatchProviders;
   external_ids?: { imdb_id?: string | null; tvdb_id?: number | null };
+  // Movie details carry the IMDb id at the top level too, and origin_country
+  // beside production_countries.
+  imdb_id?: string | null;
+  origin_country?: string[];
 }
 
 interface RawTV {
@@ -220,8 +257,8 @@ interface RawTV {
   };
   videos?: RawVideos;
   credits?: { cast: RawCastMember[] };
-  recommendations?: { results: RawTV[] };
-  similar?: { results: RawTV[] };
+  recommendations?: { results?: RawTV[] };
+  similar?: { results?: RawTV[] };
   keywords?: RawKeywords;
   "watch/providers"?: RawWatchProviders;
   external_ids?: { imdb_id?: string | null; tvdb_id?: number | null };
@@ -254,8 +291,10 @@ function extractTrailerKey(videos?: RawVideos): string | null {
   return official?.key ?? null;
 }
 
+// `results` is optional to match reality: a 200 can come back without it, and
+// every reader must degrade to an empty page rather than throw.
 interface PagedResponse<T> {
-  results: T[];
+  results?: T[];
   total_pages: number;
   total_results: number;
 }
@@ -293,12 +332,17 @@ function extractWatchProviders(
   return out.length ? out : undefined;
 }
 
+// TMDB sends "" for an undated title; the contract is `string | null`.
+function dateOrNull(date: string | null | undefined): string | null {
+  return date || null;
+}
+
 function normalizeMovie(r: RawMovie): TmdbMedia {
   const media: TmdbMedia = {
     id: r.id, mediaType: "movie", title: r.title ?? "", overview: r.overview ?? "",
     posterPath: r.poster_path ?? null, backdropPath: r.backdrop_path ?? null,
-    releaseDate: r.release_date ?? null,
-    releaseYear: r.release_date?.slice(0, 4) ?? null,
+    releaseDate: dateOrNull(r.release_date),
+    releaseYear: r.release_date ? r.release_date.slice(0, 4) : null,
     voteAverage: r.vote_average ?? 0,
     voteCount: r.vote_count ?? 0,
   };
@@ -325,6 +369,12 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
     media.productionCountryCodes = r.production_countries.map((c) => c.iso_3166_1);
     // ISO codes alongside the display names — the anime auto-route matches "JP".
     media.originCountryCodes = r.production_countries.map((c) => c.iso_3166_1);
+  } else if (r.origin_country?.length) {
+    // Details only (list items carry no origin_country): the same fallback the
+    // TV mapper takes, so the anime route sees the codes either way.
+    media.productionCountries = r.origin_country.map(displayRegion);
+    media.productionCountryCodes = r.origin_country;
+    media.originCountryCodes = r.origin_country;
   }
   if (r.homepage) media.homepage = r.homepage;
   if (r.budget) media.budget = r.budget;
@@ -336,6 +386,9 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
   }
   const wp = extractWatchProviders(r["watch/providers"]);
   if (wp) media.watchProviders = wp;
+  // Only detail responses carry an IMDb id, so list payloads stay lean.
+  const imdbId = r.external_ids?.imdb_id || r.imdb_id;
+  if (imdbId) media.imdbId = imdbId;
   return media;
 }
 
@@ -343,8 +396,8 @@ function normalizeTV(r: RawTV): TmdbMedia {
   const media: TmdbMedia = {
     id: r.id, mediaType: "tv", title: r.name ?? "", overview: r.overview ?? "",
     posterPath: r.poster_path ?? null, backdropPath: r.backdrop_path ?? null,
-    releaseDate: r.first_air_date ?? null,
-    releaseYear: r.first_air_date?.slice(0, 4) ?? null,
+    releaseDate: dateOrNull(r.first_air_date),
+    releaseYear: r.first_air_date ? r.first_air_date.slice(0, 4) : null,
     voteAverage: r.vote_average ?? 0,
     voteCount: r.vote_count ?? 0,
   };
@@ -395,6 +448,50 @@ function normalizeTV(r: RawTV): TmdbMedia {
   const wp = extractWatchProviders(r["watch/providers"]);
   if (wp) media.watchProviders = wp;
   if (r.external_ids?.tvdb_id) media.tvdbId = r.external_ids.tvdb_id;
+  if (r.external_ids?.imdb_id) media.imdbId = r.external_ids.imdb_id;
+  return media;
+}
+
+// The `:details` blob for a single-title response. The ONE builder for both
+// writers of that key — getMovieDetails/getTVDetails and the library prewarm
+// (tmdb-prewarm.ts) — so the stored shape can't depend on which wrote it: the
+// normalized fields plus the detail-only ones (US certification, home release
+// dates, trailer, collection, real seasons). Absent data stays absent; a
+// writer's own concerns (ratings, carry-forward, TTL) stay with the writer.
+export type TmdbDetailsBody = RawMovie | RawTV;
+export function buildDetailsMedia(raw: TmdbDetailsBody, mediaType: "movie" | "tv"): TmdbMedia {
+  if (mediaType === "movie") {
+    const r = raw as RawMovie;
+    const media = normalizeMovie(r);
+    const usEntry = r.release_dates?.results?.find((x) => x.iso_3166_1 === "US");
+    const cert = usEntry?.release_dates?.find((d) => d.certification)?.certification;
+    if (cert) media.certification = cert;
+    const home = extractHomeReleaseDates(r.release_dates);
+    media.digitalReleaseDate = home.digital;
+    media.physicalReleaseDate = home.physical;
+    media.trailerKey = extractTrailerKey(r.videos);
+    if (r.belongs_to_collection) {
+      media.collectionId = r.belongs_to_collection.id;
+      media.collectionName = r.belongs_to_collection.name;
+    }
+    return media;
+  }
+  const r = raw as RawTV;
+  const media = normalizeTV(r);
+  const usEntry = r.content_ratings?.results?.find((x) => x.iso_3166_1 === "US");
+  if (usEntry?.rating) media.certification = usEntry.rating;
+  media.trailerKey = extractTrailerKey(r.videos);
+  // Season 0 is the specials season; skip it and any placeholder seasons with no episodes
+  media.seasons = (r.seasons ?? [])
+    .filter((s) => s.season_number > 0 && s.episode_count > 0)
+    .map((s) => ({
+      seasonNumber: s.season_number,
+      episodeCount: s.episode_count,
+      airDate: s.air_date ?? null,
+      posterPath: s.poster_path ?? null,
+      name: s.name ?? `Season ${s.season_number}`,
+      overview: s.overview ?? "",
+    }));
   return media;
 }
 
@@ -439,99 +536,117 @@ function discoverKey(type: "movie" | "tv", filters: DiscoverFilters): string {
 const PAGES = 5;
 const BROWSE_PAGES = 20;
 const UPCOMING_PAGES = 10;
+const TOP_PAGES = 20;
+
+const TOP_MIN_VOTES_MOVIE = 200;
+const TOP_MIN_VOTES_TV = 100;
 
 // Each cold-cache list helper fans out many paged TMDB fetches, and the Discover
 // home page fires seven of them at once — ~105 concurrent requests on a cold
 // cache without a bound. Cap the per-list page fan-out, and wrap each helper in
 // coalesce() so simultaneous callers share one fan-out instead of multiplying it.
 //
-// Each helper below caches its result ONLY when every page settled fulfilled.
+// Each helper caches its result ONLY when every page settled fulfilled.
 // settleLimit swallows per-page rejections, so without this gate a transient TMDB
 // degradation (e.g. 2/10 pages succeed) would cache a truncated list for the full
 // TTL.DISCOVER. On partial success the helper still returns what it has (so the
 // page renders) but doesn't cache it, so the next request re-fetches.
 const LIST_PAGE_CONCURRENCY = 5;
 
+interface PagedListSpec<R extends { id: number }> {
+  /** The shared English cache key (and coalesce key) — never a language in it (guardrail 40a). */
+  key: string;
+  path: string;
+  pages: number;
+  params?: Record<string, string>;
+  /** Rows the list must not show (a date or vote gate). */
+  keep?: (row: R) => boolean;
+  /** Identity for the first-wins dedupe; the TMDB id unless the list mixes types. */
+  identity?: (row: R) => string | number;
+  normalize: (row: R) => TmdbMedia;
+  /** Re-filter a cache hit (the upcoming lists drop what has since released). */
+  fromCache?: (cached: TmdbMedia[]) => TmdbMedia[];
+}
+
+// A list and whether EVERY TMDB page answered with a page of results (a cache
+// hit is complete). The ONE paged-list loader: cache-first, a bounded fan-out,
+// first-wins dedupe, the all-fulfilled cache gate, and the TmdbMediaCore sync.
+interface PagedList {
+  items: TmdbMedia[];
+  complete: boolean;
+}
+function loadPagedList<R extends { id: number }>(spec: PagedListSpec<R>): Promise<PagedList> {
+  return coalesce(spec.key, async (): Promise<PagedList> => {
+    const cached = await getCache<TmdbMedia[]>(spec.key);
+    if (cached?.length) return { items: spec.fromCache ? spec.fromCache(cached) : cached, complete: true };
+
+    const pages = await settleLimit(
+      Array.from({ length: spec.pages }, (_, i) => i + 1),
+      LIST_PAGE_CONCURRENCY,
+      (page) => tmdbFetch<PagedResponse<R>>(spec.path, { ...spec.params, page: String(page) }),
+    );
+    const identity = spec.identity ?? ((r: R) => r.id);
+    const seen = new Set<string | number>();
+    const items = pages
+      .flatMap((p) => (p.status === "fulfilled" ? p.value.results ?? [] : []))
+      .filter((r) => r.id != null && r.id > 0)
+      .filter((r) => !spec.keep || spec.keep(r))
+      .filter((r) => {
+        const k = identity(r);
+        return seen.has(k) ? false : (seen.add(k), true);
+      })
+      .map(spec.normalize);
+
+    // A page that answered without a results array is a malformed page, not an
+    // empty one — served, but not cached as the whole list.
+    const complete = pages.every((p) => p.status === "fulfilled" && Array.isArray(p.value.results));
+    if (complete && items.length > 0) await setCache(spec.key, items, TTL.DISCOVER);
+    // settleLimit swallows each page's rejection, so a revoked token or a TMDB
+    // outage read as an empty list with no trace. Say so once per change of
+    // reason (guardrail 7b), keyed on the fixed TMDB path, never the filters.
+    const failures = pages.flatMap((p) => (p.status === "rejected" ? [p.reason] : []));
+    const logKey = `tmdb:list:${spec.path}`;
+    if (failures.length > 0 && failures.length === pages.length) {
+      const reason = failures[0] instanceof Error ? failures[0].message : String(failures[0]);
+      warnOnChange(logKey, reason, `[tmdb] every page of ${spec.path} failed: ${reason}`);
+    } else {
+      forgetWarnOnChange(logKey);
+    }
+    syncTmdbMediaCore(items).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
+    return { items, complete };
+  });
+}
+
+type RawTrending = RawMovie & RawTV & { media_type: string };
+
 export async function getTrending(): Promise<TmdbMedia[]> {
   const key = "trending:week";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
-
-  const pages = await settleLimit(
-    Array.from({ length: PAGES }, (_, i) => i + 1),
-    LIST_PAGE_CONCURRENCY,
-    (page) => tmdbFetch<PagedResponse<RawMovie & RawTV & { media_type: string }>>(
-      "/trending/all/week", { page: String(page) }
-    ),
-  );
-  // /trending/all is the only mixed-type list here, and TMDB movie ids and TV ids are
-  // independent namespaces (movie 1399 ≠ tv 1399) — a bare-id Set would drop the second
-  // title of a colliding pair from the rail for the whole 12h cache TTL. Key on the
-  // composite identity, as every other dedupe in the tree does.
-  const seen = new Set<string>();
-  const result = pages
-    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
-    .filter((r) => r.media_type === "movie" || r.media_type === "tv")
-    .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => {
-      const k = `${r.media_type}:${r.id}`;
-      return seen.has(k) ? false : (seen.add(k), true);
-    })
-    .map((r) => r.media_type === "movie" ? normalizeMovie(r as RawMovie) : normalizeTV(r as RawTV));
-
-  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return result;
-  });
+  return (await loadPagedList<RawTrending>({
+    key,
+    path: "/trending/all/week",
+    pages: PAGES,
+    keep: (r) => r.media_type === "movie" || r.media_type === "tv",
+    // /trending/all is the only mixed-type list here, and TMDB movie ids and TV ids are
+    // independent namespaces (movie 1399 ≠ tv 1399) — a bare-id Set would drop the second
+    // title of a colliding pair from the rail for the whole 12h cache TTL. Key on the
+    // composite identity, as every other dedupe in the tree does.
+    identity: (r) => `${r.media_type}:${r.id}`,
+    normalize: (r) => (r.media_type === "movie" ? normalizeMovie(r) : normalizeTV(r)),
+  })).items;
 }
 
 export async function getPopularMovies(): Promise<TmdbMedia[]> {
   const key = "movies:popular";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
-
-  const pages = await settleLimit(
-    Array.from({ length: BROWSE_PAGES }, (_, i) => i + 1),
-    LIST_PAGE_CONCURRENCY,
-    (page) => tmdbFetch<PagedResponse<RawMovie>>("/movie/popular", { page: String(page) }),
-  );
-  const seen = new Set<number>();
-  const result = pages
-    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
-    .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
-    .map(normalizeMovie);
-
-  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return result;
-  });
+  return (await loadPagedList<RawMovie>({
+    key, path: "/movie/popular", pages: BROWSE_PAGES, normalize: normalizeMovie,
+  })).items;
 }
 
 export async function getPopularTV(): Promise<TmdbMedia[]> {
   const key = "tv:popular";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
-
-  const pages = await settleLimit(
-    Array.from({ length: BROWSE_PAGES }, (_, i) => i + 1),
-    LIST_PAGE_CONCURRENCY,
-    (page) => tmdbFetch<PagedResponse<RawTV>>("/tv/popular", { page: String(page) }),
-  );
-  const seen = new Set<number>();
-  const result = pages
-    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
-    .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
-    .map(normalizeTV);
-
-  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return result;
-  });
+  return (await loadPagedList<RawTV>({
+    key, path: "/tv/popular", pages: BROWSE_PAGES, normalize: normalizeTV,
+  })).items;
 }
 
 export async function searchMulti(query: string): Promise<TmdbMedia[]> {
@@ -563,10 +678,7 @@ function stillUpcoming(items: TmdbMedia[], today: string): TmdbMedia[] {
 // complete). The page helpers absorb a failed page and keep going, so an outage
 // reads as an empty list; the cache-refresh cron must tell the two apart or it
 // replaces the stored list with nothing (sync/upcoming).
-interface UpcomingList {
-  items: TmdbMedia[];
-  complete: boolean;
-}
+type UpcomingList = PagedList;
 
 /** Thrown by the *ForRefresh helpers when TMDB did not answer every page. */
 export class UpcomingIncompleteError extends Error {
@@ -591,60 +703,32 @@ export async function getUpcomingMoviesForRefresh(): Promise<TmdbMedia[]> {
   return items;
 }
 
-async function loadUpcomingMovies(): Promise<UpcomingList> {
-  const key = "movies:upcoming";
-  return coalesce(key, async (): Promise<UpcomingList> => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return { items: stillUpcoming(cached, new Date().toISOString().slice(0, 10)), complete: true };
-
-  const pages = await settleLimit(
-    Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
-    LIST_PAGE_CONCURRENCY,
-    (page) => tmdbFetch<PagedResponse<RawMovie>>("/movie/upcoming", { page: String(page), region: "US" }),
-  );
+function loadUpcomingMovies(): Promise<UpcomingList> {
+  // The shared Upcoming cutoff (the page and /api/upcoming use it too): the bare
+  // UTC date dropped a title releasing today every evening west of UTC.
+  const today = upcomingCutoffDate();
   // /movie/upcoming's window is region-relative and, unanchored, drifts to
   // include already-released titles — the /upcoming page re-filters >= today
   // at read time, but the home "Hitting theaters soon" rail rendered the raw
   // list. Filter here like the TV sibling does, and pin the region to US to
   // match the app-wide convention (certifications, watch providers).
-  const today = new Date().toISOString().slice(0, 10);
-  const seen = new Set<number>();
-  const result = pages
-    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
-    .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => r.release_date && r.release_date >= today)
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
-    .map(normalizeMovie);
-
-  const complete = pages.every((p) => p.status === "fulfilled");
-  if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return { items: result, complete };
+  const key = "movies:upcoming";
+  return loadPagedList<RawMovie>({
+    key,
+    path: "/movie/upcoming",
+    pages: UPCOMING_PAGES,
+    params: { region: "US" },
+    keep: (r) => !!r.release_date && r.release_date >= today,
+    normalize: normalizeMovie,
+    fromCache: (cached) => stillUpcoming(cached, today),
   });
 }
 
 export async function getOnTheAirTV(): Promise<TmdbMedia[]> {
   const key = "tv:on_the_air";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
-
-  const pages = await settleLimit(
-    Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
-    LIST_PAGE_CONCURRENCY,
-    (page) => tmdbFetch<PagedResponse<RawTV>>("/tv/on_the_air", { page: String(page) }),
-  );
-  const seen = new Set<number>();
-  const result = pages
-    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
-    .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
-    .map(normalizeTV);
-
-  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return result;
-  });
+  return (await loadPagedList<RawTV>({
+    key, path: "/tv/on_the_air", pages: UPCOMING_PAGES, normalize: normalizeTV,
+  })).items;
 }
 
 export async function getUpcomingTV(): Promise<TmdbMedia[]> {
@@ -658,41 +742,20 @@ export async function getUpcomingTVForRefresh(): Promise<TmdbMedia[]> {
   return items;
 }
 
-async function loadUpcomingTV(): Promise<UpcomingList> {
-  const key = "tv:upcoming";
-  return coalesce(key, async (): Promise<UpcomingList> => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return { items: stillUpcoming(cached, new Date().toISOString().slice(0, 10)), complete: true };
-
+function loadUpcomingTV(): Promise<UpcomingList> {
+  const today = upcomingCutoffDate(); // see loadUpcomingMovies
   // /tv/on_the_air returns shows whose original first_air_date is often years past
   // (long-running shows currently airing new episodes). For "Upcoming" we want
   // shows premiering today or later, so we use /discover/tv with first_air_date.gte.
-  const today = new Date().toISOString().slice(0, 10);
-  const pages = await settleLimit(
-    Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
-    LIST_PAGE_CONCURRENCY,
-    (page) => tmdbFetch<PagedResponse<RawTV>>(
-      "/discover/tv",
-      {
-        include_adult: "false",
-        sort_by: "popularity.desc",
-        "first_air_date.gte": today,
-        page: String(page),
-      },
-    ),
-  );
-  const seen = new Set<number>();
-  const result = pages
-    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
-    .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => r.first_air_date && r.first_air_date >= today)
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
-    .map(normalizeTV);
-
-  const complete = pages.every((p) => p.status === "fulfilled");
-  if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return { items: result, complete };
+  const key = "tv:upcoming";
+  return loadPagedList<RawTV>({
+    key,
+    path: "/discover/tv",
+    pages: UPCOMING_PAGES,
+    params: { include_adult: "false", sort_by: "popularity.desc", "first_air_date.gte": today },
+    keep: (r) => !!r.first_air_date && r.first_air_date >= today,
+    normalize: normalizeTV,
+    fromCache: (cached) => stillUpcoming(cached, today),
   });
 }
 
@@ -726,16 +789,17 @@ export const SUGGESTIONS_CACHE_MAX = 40;
 const SUGGESTIONS_RAIL_LIMIT = 18;
 
 export async function getMovieDetails(id: number): Promise<TmdbMedia> {
-  const key = `movie:${id}:details`;
+  const key = tmdbDetailsKey("movie", id);
   return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia>(key);
+  const entry = await getCacheEntry<TmdbMedia>(key);
+  const cached = entry?.value;
 
   // Self-heal: the old getMovieReleaseInfo (arr.ts, pre key-split) wrote the
   // RAW snake_case TMDB body under this key. Every normalized writer sets
   // `mediaType`; a row without it is a poisoned blob — treat it as a miss so
   // it re-fetches and overwrites now instead of serving a shape with
   // mediaType/posterPath/releaseDate undefined for the rest of the TTL.
-  if (cached && cached.mediaType) {
+  if (entry && cached && cached.mediaType) {
     let needsWrite = migrateKeywordShape(cached);
     // `mdblistScore === undefined` also catches rows cached before the unified
     // payload widened to the full MDBList field set, so they lazily re-fetch and
@@ -768,7 +832,9 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
         console.warn(`[tmdb] movie:${id} release_dates fetch failed:`, err instanceof Error ? err.message : err);
       }
     }
-    if (needsWrite) await setCache(key, cached, TTL.DETAILS);
+    // An in-place upgrade keeps the row's own expiry: rewriting with a fresh
+    // TTL.DETAILS let the TMDB fields it carries live up to two TTLs.
+    if (needsWrite) await setCacheUntil(key, cached, entry.expiresAt);
     return cached;
   }
 
@@ -777,22 +843,10 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   // brand-new release's MDBList/OMDB rows were cached with the 30-day
   // back-catalog TTL instead of the 3-day fresh-title one.
   const r = await tmdbFetch<RawMovie>(`/movie/${id}`, { append_to_response: "release_dates,videos,credits,recommendations,similar,keywords,watch/providers,external_ids" });
+  const media = buildDetailsMedia(r, "movie");
   // The appended external_ids already carry the IMDb id — hand it to the ratings
   // chain so a cold OMDB fallback doesn't re-buy it with a second TMDB call.
-  const ratings = await fetchUnifiedRatings(id, "movie", r.release_date ?? null, r.external_ids?.imdb_id ?? null);
-
-  const media = normalizeMovie(r);
-  const usEntry = r.release_dates?.results.find((x) => x.iso_3166_1 === "US");
-  const cert = usEntry?.release_dates.find((d) => d.certification)?.certification;
-  if (cert) media.certification = cert;
-  const home = extractHomeReleaseDates(r.release_dates);
-  media.digitalReleaseDate = home.digital;
-  media.physicalReleaseDate = home.physical;
-  media.trailerKey = extractTrailerKey(r.videos);
-  if (r.belongs_to_collection) {
-    media.collectionId = r.belongs_to_collection.id;
-    media.collectionName = r.belongs_to_collection.name;
-  }
+  const ratings = await fetchUnifiedRatings(id, "movie", media.releaseDate, media.imdbId ?? null);
   if (ratings.found && ratings.data) {
     assignUnifiedRatings(media, ratings.data);
   } else if (ratings.keyConfigured && !ratings.transient) {
@@ -801,7 +855,6 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
     // null for the full 7-day TTL (pinAuthoritativeNoRatings covers every field the
     // cached-branch lazy-upgrade trigger checks, so a no-ratings title never re-fetches
     // on every read).
-    media.imdbId = media.imdbId ?? r.external_ids?.imdb_id ?? null;
     pinAuthoritativeNoRatings(media);
   }
 
@@ -818,7 +871,7 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
     // as getMovieSuggestions; the two writers must agree on ordering.
     for (const page of [r.recommendations, r.similar]) {
       if (!page) continue;
-      for (const item of page.results) {
+      for (const item of page.results ?? []) {
         if (item.id == null || item.id <= 0 || seen.has(item.id) || !item.poster_path) continue;
         seen.add(item.id);
         suggestions.push(normalizeMovie(item));
@@ -834,11 +887,12 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
 }
 
 export async function getTVDetails(id: number): Promise<TmdbMedia> {
-  const key = `tv:${id}:details`;
+  const key = tmdbDetailsKey("tv", id);
   return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia>(key);
+  const entry = await getCacheEntry<TmdbMedia>(key);
+  const cached = entry?.value;
 
-  if (cached) {
+  if (entry && cached) {
     // A cached TV entry without a seasons field is from before the schema added seasons; bust it
     // so the next request fetches a fresh response that includes seasons.
     if (cached.seasons === undefined) {
@@ -862,7 +916,8 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
           needsWrite = true;
         }
       }
-      if (needsWrite) await setCache(key, cached, TTL.DETAILS);
+      // Keeps the row's own expiry — see getMovieDetails.
+      if (needsWrite) await setCacheUntil(key, cached, entry.expiresAt);
       return cached;
     }
   }
@@ -870,25 +925,10 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
   // Sequential on purpose — see getMovieDetails: the ratings caches key their
   // TTL off the release date, so it must be known before the ratings fetch.
   const r = await tmdbFetch<RawTV>(`/tv/${id}`, { append_to_response: "content_ratings,videos,credits,recommendations,similar,seasons,keywords,watch/providers,external_ids" });
+  const media = buildDetailsMedia(r, "tv");
   // See getMovieDetails — the appended external_ids IMDb id spares the OMDB
   // fallback its own TMDB resolve.
-  const ratings = await fetchUnifiedRatings(id, "tv", r.first_air_date ?? null, r.external_ids?.imdb_id ?? null);
-
-  const media = normalizeTV(r);
-  const usEntry = r.content_ratings?.results.find((x) => x.iso_3166_1 === "US");
-  if (usEntry?.rating) media.certification = usEntry.rating;
-  media.trailerKey = extractTrailerKey(r.videos);
-  // Season 0 is the specials season; skip it and any placeholder seasons with no episodes
-  media.seasons = (r.seasons ?? [])
-    .filter((s) => s.season_number > 0 && s.episode_count > 0)
-    .map((s) => ({
-      seasonNumber: s.season_number,
-      episodeCount: s.episode_count,
-      airDate: s.air_date ?? null,
-      posterPath: s.poster_path ?? null,
-      name: s.name ?? `Season ${s.season_number}`,
-      overview: s.overview ?? "",
-    }));
+  const ratings = await fetchUnifiedRatings(id, "tv", media.releaseDate, media.imdbId ?? null);
   if (ratings.found && ratings.data) {
     assignUnifiedRatings(media, ratings.data);
   } else if (ratings.keyConfigured && !ratings.transient) {
@@ -897,7 +937,6 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
     // null for the full 7-day TTL (pinAuthoritativeNoRatings covers every field the
     // cached-branch lazy-upgrade trigger checks, so a no-ratings title never re-fetches
     // on every read).
-    media.imdbId = media.imdbId ?? r.external_ids?.imdb_id ?? null;
     pinAuthoritativeNoRatings(media);
   }
 
@@ -914,7 +953,7 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
     // as getMovieSuggestions; the two writers must agree on ordering.
     for (const page of [r.recommendations, r.similar]) {
       if (!page) continue;
-      for (const item of page.results) {
+      for (const item of page.results ?? []) {
         if (item.id == null || item.id <= 0 || seen.has(item.id) || !item.poster_path) continue;
         seen.add(item.id);
         suggestions.push(normalizeTV(item));
@@ -1334,59 +1373,26 @@ export async function getWatchProviders(type: "movie" | "tv", region = "US"): Pr
   return providers;
 }
 
-const TOP_PAGES = 20;
-
-const TOP_MIN_VOTES_MOVIE = 200;
-const TOP_MIN_VOTES_TV = 100;
-
 export async function getTopRatedMovies(): Promise<TmdbMedia[]> {
   const key = "movies:top_rated";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
-
-  const pages = await settleLimit(
-    Array.from({ length: TOP_PAGES }, (_, i) => i + 1),
-    LIST_PAGE_CONCURRENCY,
-    (page) => tmdbFetch<PagedResponse<RawMovie>>("/movie/top_rated", { page: String(page) }),
-  );
-  const seen = new Set<number>();
-  const result = pages
-    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
-    .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
-    .filter((r) => r.vote_count >= TOP_MIN_VOTES_MOVIE)
-    .map(normalizeMovie);
-
-  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return result;
-  });
+  return (await loadPagedList<RawMovie>({
+    key,
+    path: "/movie/top_rated",
+    pages: TOP_PAGES,
+    keep: (r) => r.vote_count >= TOP_MIN_VOTES_MOVIE,
+    normalize: normalizeMovie,
+  })).items;
 }
 
 export async function getTopRatedTV(): Promise<TmdbMedia[]> {
   const key = "tv:top_rated";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
-
-  const pages = await settleLimit(
-    Array.from({ length: TOP_PAGES }, (_, i) => i + 1),
-    LIST_PAGE_CONCURRENCY,
-    (page) => tmdbFetch<PagedResponse<RawTV>>("/tv/top_rated", { page: String(page) }),
-  );
-  const seen = new Set<number>();
-  const result = pages
-    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
-    .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
-    .filter((r) => r.vote_count >= TOP_MIN_VOTES_TV)
-    .map(normalizeTV);
-
-  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
-  return result;
-  });
+  return (await loadPagedList<RawTV>({
+    key,
+    path: "/tv/top_rated",
+    pages: TOP_PAGES,
+    keep: (r) => r.vote_count >= TOP_MIN_VOTES_TV,
+    normalize: normalizeTV,
+  })).items;
 }
 
 export async function getMovieSuggestions(
@@ -1416,7 +1422,7 @@ export async function getMovieSuggestions(
   // whenever /similar alone could satisfy the cap.
   for (const r of [recommended, similar]) {
     if (r.status !== "fulfilled") continue;
-    for (const item of r.value.results) {
+    for (const item of r.value.results ?? []) {
       if (item.id == null || item.id <= 0 || seen.has(item.id) || !item.poster_path) continue;
       seen.add(item.id);
       result.push(normalizeMovie(item));
@@ -1453,7 +1459,7 @@ export async function getTVSuggestions(
   const result: TmdbMedia[] = [];
   for (const r of [recommended, similar]) {
     if (r.status !== "fulfilled") continue;
-    for (const item of r.value.results) {
+    for (const item of r.value.results ?? []) {
       if (item.id == null || item.id <= 0 || seen.has(item.id) || !item.poster_path) continue;
       seen.add(item.id);
       result.push(normalizeTV(item));

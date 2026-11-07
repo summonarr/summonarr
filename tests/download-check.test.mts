@@ -581,7 +581,7 @@ test("the Discord admin-approve button schedules the check, not just the pending
   // Bounded to the approve arm: the sibling decline arm starts at the `} else {`
   // that closes it, and the /request auto-approve path is far earlier in the file.
   const branch = text.slice(start, text.indexOf("\n  } else {", start));
-  assert.match(branch, /pendingNotifyAt: new Date\(Date\.now\(\) \+ 90_000\)/);
+  assert.match(branch, /pendingNotifyAt: new Date\(Date\.now\(\) \+ DOWNLOAD_CHECK_DELAY_MS\)/);
   assert.match(
     branch,
     /scheduleDownloadCheck\(/,
@@ -597,12 +597,14 @@ test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
   // buys the orchestrator's periodic sweep — the schedule is what makes it prompt.
   // src/lib/request-create.ts is POST /api/requests' body, extracted so the
   // watchlist auto-request files through the same chokepoint — an approval path
-  // like the routes, so it is scanned with them.
+  // like the routes, so it is scanned with them; src/lib/request-bulk.ts is the
+  // bulk route's item pipeline, likewise.
   const arming = walkSrc()
-    .filter((f) => f.startsWith("src/app/api/") || f.startsWith("src/lib/discord-interactions/") || f === "src/lib/request-create.ts")
+    .filter((f) => f.startsWith("src/app/api/") || f.startsWith("src/lib/discord-interactions/") || f === "src/lib/request-create.ts" || f === "src/lib/request-bulk.ts")
     .filter((f) => {
       const text = src(f);
-      return text.includes("pendingNotifyAt") && /\+ 90_000/.test(text);
+      // The delay is the shared DOWNLOAD_CHECK_DELAY_MS; a bare literal still counts.
+      return text.includes("pendingNotifyAt") && /\+ (?:90_000|DOWNLOAD_CHECK_DELAY_MS)\b/.test(text);
     });
 
   // Guards the pin itself: if the arming literal is ever reformatted, the regex
@@ -610,9 +612,10 @@ test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
   assert.deepEqual(arming.sort(), [
     "src/app/api/requests/[id]/route.ts",
     "src/app/api/requests/batch/route.ts",
-    "src/app/api/requests/bulk/route.ts",
     "src/lib/discord-interactions/components/admin-decision.ts",
-    "src/lib/discord-interactions/components/pick.ts",
+    // The Discord /request pick arms nothing itself: it files through request-create.ts.
+    // POST /api/requests/bulk arms through its item pipeline.
+    "src/lib/request-bulk.ts",
     "src/lib/request-create.ts",
   ], "an approval path was added or removed — confirm it schedules, then update this roster");
 

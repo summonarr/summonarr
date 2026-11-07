@@ -112,8 +112,8 @@ export type AuthorizedDbUser = { id: string; email: string; name: string | null;
 // first-admin bootstrap: OAuth bootstrap disabled, setup not yet completed, and no
 // ADMIN exists. Creating a plain USER row in that state trips /api/auth/register's
 // "registration closed" guard while runFirstAdminPromotion won't promote the row,
-// leaving the instance with no admin and no way to create one. The Plex/Jellyfin
-// create paths consult this before minting; OIDC inlines the same check.
+// leaving the instance with no admin and no way to create one. Every provider's
+// create path (Plex, Jellyfin, OIDC) consults this before minting.
 async function isPreSetupBootstrapBlocked(): Promise<boolean> {
   if (process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true") return false;
   const setupRow = await prisma.setting.findUnique({ where: { key: "setup_completed_at" } });
@@ -473,21 +473,11 @@ async function provisionOidcUser(
 
   if (!allowCreate) return new ProviderRefusal("existing_users_only");
 
-  // Refuse to MINT THE FIRST USER via OIDC before setup has run. With OAuth
-  // bootstrap disabled (the default), runFirstAdminPromotion won't promote this
-  // sign-in, so a plain USER row would close /api/auth/register's "registration"
-  // guard and permanently brick first-admin setup. Mirrors the promotion
-  // preconditions: only block when bootstrap is off AND setup isn't complete AND
-  // no admin exists yet. After that, normal OIDC onboarding proceeds.
-  if (process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN !== "true") {
-    const setupRow = await prisma.setting.findUnique({ where: { key: "setup_completed_at" } });
-    if (!setupRow) {
-      const existingAdmin = await prisma.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
-      if (!existingAdmin) {
-        console.warn("[auth/oidc] Refused pre-setup OIDC sign-in: complete initial setup (create the first admin) first.");
-        return PROVIDER_SETUP_REQUIRED;
-      }
-    }
+  // Refuse to MINT THE FIRST USER via OIDC before setup has run — see
+  // isPreSetupBootstrapBlocked. After that, normal OIDC onboarding proceeds.
+  if (await isPreSetupBootstrapBlocked()) {
+    console.warn("[auth/oidc] Refused pre-setup OIDC sign-in: complete initial setup (create the first admin) first.");
+    return PROVIDER_SETUP_REQUIRED;
   }
 
   // Create the user and its OAuth account in ONE transaction. The account must be
@@ -649,7 +639,7 @@ export async function authActive(): Promise<SummonarrSession | null> {
   // A machine session carries a mint-time IP allowlist; the API guards + isCronAuthorized
   // enforce it, so bind the page-render path too — else a leaked machine JWT could render
   // admin pages from a disallowed IP. Absent/empty allowlist ⇒ true (no restriction).
-  if (!machineIpAllowed(claims, h as unknown as Headers)) return null;
+  if (!machineIpAllowed(claims, h)) return null;
   return claimsToSession(claims);
 }
 
@@ -788,19 +778,49 @@ export function buildDeviceMeta(headers: Headers): DeviceMeta {
   };
 }
 
-type JwtToken = Record<string, unknown>;
+// What every authorize* step hands to signInAndMintSession: the resolved user,
+// this request's device payload (buildDeviceMeta) and the sign-in's options.
+// The MFA and OIDC routes build the same shape from their own user row.
+export type AuthorizedSignIn = AuthorizedDbUser & DeviceMeta & {
+  // "true" picks the configured remember-me duration (web only — guardrail 6c).
+  rememberMe?: string;
+  // Keyed fingerprint of the password hash the credentials step verified; the
+  // 2FA challenge binds to it (guardrail 6d). Never the hash itself.
+  _passwordVersion?: string;
+};
+
+// The credentials step always carries the fingerprint: mfaChallengeFor needs it.
+export type CredentialsAuthorizedUser = AuthorizedSignIn & { _passwordVersion: string };
+
+// The session JWT's claims while they are being assembled at sign-in:
+// signInAndMintSession fills the identity, initializeTokenOnSignIn the
+// deadline, the transport and a provider-unpinned mediaServer.
+type SignInToken = {
+  id: string;
+  role: string;
+  provider: string;
+  mediaServer: string | null;
+  sessionId?: string;
+  uaFingerprint?: string;
+  isMobile?: boolean;
+  deviceLabel?: string;
+  expiresAt?: number;
+  transport?: SessionTransport;
+};
+
+// The same claims once initializeTokenOnSignIn has filled them.
+type MintedSignInToken = SignInToken & { sessionId: string; expiresAt: number; transport: SessionTransport };
 
 // Mutates `token` in place at sign-in: fills sessionId, computes the TTL →
 // expiresAt, resolves mediaServer when not provider-pinned, and
 // upserts the backing AuthSession row.
-export async function initializeTokenOnSignIn(token: JwtToken, user: Record<string, unknown>): Promise<JwtToken> {
-  if (!token.sessionId) {
-    // Normally already set from DeviceMeta._sessionId; this is a fallback for a caller that skipped it.
-    token.sessionId = crypto.randomUUID();
-  }
+export async function initializeTokenOnSignIn(token: SignInToken, user: AuthorizedSignIn): Promise<MintedSignInToken> {
+  // Normally already set from DeviceMeta._sessionId; this is a fallback for a caller that skipped it.
+  const sessionId = token.sessionId || crypto.randomUUID();
+  token.sessionId = sessionId;
 
-  const rememberMe = (user as { rememberMe?: string }).rememberMe === "true";
-  const isMobile   = token.isMobile as boolean | undefined;
+  const rememberMe = user.rememberMe === "true";
+  const isMobile   = token.isMobile;
   const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();
 
   // The never-expiring native-app session is reserved for a real native client,
@@ -845,9 +865,10 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   // deadline: the never-expiring native session is presented as a bearer and
   // nothing else, a browser session as the cookie and nothing else. Every
   // reader refuses the token on the other one.
-  token.transport = isNativeClient ? "bearer" : "cookie";
+  const transport: SessionTransport = isNativeClient ? "bearer" : "cookie";
+  token.transport = transport;
 
-  const userId = user.id as string | undefined;
+  const userId = user.id;
   if (!token.mediaServer && userId) {
     const dbUser = await prisma.user.findUnique({
       where: { id: userId },
@@ -857,25 +878,24 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   }
 
   if (userId) {
-    const sessionId   = token.sessionId as string;
-    const deviceLabel = (token.deviceLabel as string | undefined) ?? null;
+    const deviceLabel = token.deviceLabel ?? null;
     const deviceType  = isMobile ? "mobile" : "desktop";
-    const ipAddress   = (user as { _auditIp?: string })._auditIp ?? null;
+    const ipAddress   = user._auditIp ?? null;
     await prisma.authSession.upsert({
       where: { sessionId },
-      update: { lastSeenAt: new Date(), expiresAt: new Date((token.expiresAt as number) * 1000) },
+      update: { lastSeenAt: new Date(), expiresAt: new Date(expiresAt * 1000) },
       create: {
         sessionId,
         userId,
         deviceType,
         deviceLabel,
         ipAddress,
-        expiresAt:   new Date((token.expiresAt as number) * 1000),
+        expiresAt:   new Date(expiresAt * 1000),
       },
     });
   }
 
-  return token;
+  return Object.assign(token, { sessionId, expiresAt, transport });
 }
 
 
@@ -900,19 +920,50 @@ async function rehashPassword(userId: string, verifiedHash: string, password: st
   }
 }
 
+// What every sign-in attempt is audited with: the request headers, the client
+// address (getClientIp — the UA bucket when it can't be trusted) and the
+// capped User-Agent.
+type SignInRequestContext = { headers: Headers; ip: string; ua: string | null };
+
+function signInRequestContext(req: Request): SignInRequestContext {
+  const headers = req.headers;
+  return { headers, ip: getClientIp(headers), ua: headers.get("user-agent")?.slice(0, 512) ?? null };
+}
+
+type SignInProvider = "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect";
+
+// The one AUTH_LOGIN_FAILED row shape for every refused sign-in in this file:
+// anonymous actor, `details.reason` plus any extra detail (an emailHash).
+function auditLoginFailure(
+  ctx: SignInRequestContext,
+  provider: SignInProvider,
+  reason: string,
+  extra?: Record<string, unknown>,
+): void {
+  void logAudit({
+    userId: "anonymous",
+    userName: "anonymous",
+    action: "AUTH_LOGIN_FAILED",
+    target: "auth:login",
+    ipAddress: ctx.ip,
+    userAgent: ctx.ua,
+    provider,
+    details: { reason, ...extra },
+  });
+}
+
 export async function authorizeWithCredentials(
   credentials: Partial<Record<string, unknown>>,
   req: Request,
-): Promise<Record<string, unknown> | null> {
+): Promise<CredentialsAuthorizedUser | null> {
   if (!credentials?.email || !credentials?.password) return null;
   if ((credentials.password as string).length > MAX_PASSWORD_LENGTH) return null;
 
   const disableRow = await prisma.setting.findUnique({ where: { key: "disableLocalLogin" } });
   if (disableRow?.value === "true") return null;
 
-  const headers = (req as Request).headers as Headers;
-  const ip = getClientIp(headers);
-  const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
+  const ctx = signInRequestContext(req);
+  const { ip } = ctx;
   const email = normalizeEmail(credentials.email as string);
 
   // Two independent throttles:
@@ -957,7 +1008,7 @@ export async function authorizeWithCredentials(
   const accountHitAt = ipAllowed ? reserveRateLimit(accountKey, accountLimit, accountWindowMs) : null;
 
   if (!ipAllowed || accountHitAt === null) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
+    auditLoginFailure(ctx, "credentials", "rate_limited", { emailHash });
     return null;
   }
 
@@ -978,7 +1029,7 @@ export async function authorizeWithCredentials(
   if (!valid || !user || !verifiedHash) {
     // The hit was already reserved at the gate above — a genuine wrong password (or an
     // unknown account, which also reached the dummyVerify branch) simply keeps it.
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
+    auditLoginFailure(ctx, "credentials", "invalid_credentials", { emailHash });
     // This failure spent the last of the account's budget of wrong passwords, so
     // the owner's own password sign-in is refused from now on too: tell them, ONCE
     // per window however many attempts follow (guardrail 6i). Noticed here, where
@@ -1013,7 +1064,7 @@ export async function authorizeWithCredentials(
     currentHash = await rehashPassword(user.id, verifiedHash, credentials.password as string);
   }
 
-  const device = buildDeviceMeta(headers);
+  const device = buildDeviceMeta(ctx.headers);
   return {
     id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device,
     // A keyed fingerprint, never the hash itself (it rides along to the mint).
@@ -1024,14 +1075,12 @@ export async function authorizeWithCredentials(
 export async function authorizeWithPlex(
   credentials: Partial<Record<string, unknown>>,
   req: Request,
-): Promise<Record<string, unknown> | null> {
+): Promise<AuthorizedSignIn | null> {
   if (!credentials?.plexToken) return null;
-  const headers = (req as Request).headers as Headers;
-  const ip = getClientIp(headers);
-  const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
+  const ctx = signInRequestContext(req);
 
-  if (!checkRateLimit(`plex-ip:${ipBucketKey(ip)}`, 20, 5 * 60 * 1000)) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "rate_limited" } });
+  if (!checkRateLimit(`plex-ip:${ipBucketKey(ctx.ip)}`, 20, 5 * 60 * 1000)) {
+    auditLoginFailure(ctx, "plex", "rate_limited");
     return null;
   }
   // Per-token bucket so one Plex token can't be replayed from rotating IPs.
@@ -1039,11 +1088,16 @@ export async function authorizeWithPlex(
   // of a live token, held in the limiter map.
   const tokenKey = createHash("sha256").update(credentials.plexToken as string).digest("hex").slice(0, 16);
   if (!checkRateLimit(`plex:${tokenKey}`, 10, 5 * 60 * 1000)) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "rate_limited" } });
+    auditLoginFailure(ctx, "plex", "rate_limited");
     return null;
   }
 
-  let plexResult: ReturnType<typeof buildDeviceMeta> & { id: string; email: string; name: string | null; role: string; rememberMe?: string } | null = null;
+  let plexResult: AuthorizedSignIn | null = null;
+  // A refusal where some server's member list could not be read is audited as
+  // that, not as a bad credential: the account may belong to the server that
+  // failed to answer.
+  let membershipFetchFailed = false;
+  let membershipMatched = false;
   try {
 
     const browserClientId = typeof credentials.plexClientId === "string" && /^[a-f0-9-]{8,64}$/i.test(credentials.plexClientId)
@@ -1090,7 +1144,7 @@ export async function authorizeWithPlex(
     }
     if (instances.length === 0) {
       console.warn("[auth] Plex sign-in refused: no Plex server is configured.");
-      void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "plex_server_not_configured" } });
+      auditLoginFailure(ctx, "plex", "plex_server_not_configured");
       await dummyVerify();
       return null;
     }
@@ -1173,6 +1227,7 @@ export async function authorizeWithPlex(
         allowed = await getPlexFriendEmails(inst.token, inst.url);
       } catch (err) {
         console.warn(`[plex auth] membership check failed for ${mediaInstanceLabel("plex", inst.slug)}:`, err instanceof Error ? err.message : String(err));
+        membershipFetchFailed = true;
         continue;
       }
       // normalizeEmail (NFKC + lowercase + trim) — verifiedEmail is normalized the
@@ -1187,6 +1242,7 @@ export async function authorizeWithPlex(
       // fallback: an email is user-changeable on plex.tv, and a mid-window
       // change used to bounce the member off sign-in entirely.
       if (!allowed.ids.has(plexUserSub) && !allowed.emails.has(verifiedEmail)) continue;
+      membershipMatched = true;
 
       const plexDbUser = await findOrCreatePlexUser({
         plexUserId: plexUserSub,
@@ -1198,16 +1254,16 @@ export async function authorizeWithPlex(
       });
 
       if (plexDbUser === PROVIDER_REBIND_REQUIRED) {
-        void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "email_collision_needs_rebind", emailHash: hashAuditEmail(verifiedEmail) } });
+        auditLoginFailure(ctx, "plex", "email_collision_needs_rebind", { emailHash: hashAuditEmail(verifiedEmail) });
       } else if (plexDbUser instanceof ProviderRefusal) {
-        void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: plexDbUser.reason, emailHash: hashAuditEmail(verifiedEmail) } });
+        auditLoginFailure(ctx, "plex", plexDbUser.reason, { emailHash: hashAuditEmail(verifiedEmail) });
       } else if (plexDbUser === PROVIDER_SETUP_REQUIRED) {
-        void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "setup_required", emailHash: hashAuditEmail(verifiedEmail) } });
+        auditLoginFailure(ctx, "plex", "setup_required", { emailHash: hashAuditEmail(verifiedEmail) });
       } else {
         // notificationEmail + plexClientId were written by findOrCreatePlexUser
         // (one UPDATE for a returning user, the CREATE for a new one) — no second
         // write on the same row here.
-        const device = buildDeviceMeta(headers);
+        const device = buildDeviceMeta(ctx.headers);
         plexResult = { ...plexDbUser, rememberMe: credentials.rememberMe as string | undefined, ...device };
       }
       // Identity (findOrCreatePlexUser) is instance-independent — a sentinel
@@ -1222,7 +1278,9 @@ export async function authorizeWithPlex(
     // Run a dummy password check so a failure takes about as long as a real
     // attempt; response timing then leaks nothing (same as the credentials path).
     await dummyVerify();
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "invalid_credentials" } });
+    // The client still sees the same 401 either way.
+    const reason = membershipFetchFailed && !membershipMatched ? "membership_check_failed" : "invalid_credentials";
+    auditLoginFailure(ctx, "plex", reason);
     return null;
   }
   return { ...plexResult };
@@ -1274,24 +1332,91 @@ function jellyfinRefusalReason(result: ProviderRebindRequired | ProviderSetupReq
   return result.reason;
 }
 
+// How the two Jellyfin sign-ins differ once a credential has been checked:
+// only the audit provider and the log scope. Every refusal on both is padded
+// with a dummy password check and audited with the same reasons, so neither
+// timing nor the audit trail tells the two paths' refusals apart.
+type JellyfinSignInPath = {
+  provider: "jellyfin" | "jellyfin-quickconnect";
+  log: string;
+};
+
+const JELLYFIN_PASSWORD_PATH: JellyfinSignInPath = {
+  provider: "jellyfin",
+  log: "[jellyfin auth]",
+};
+
+const JELLYFIN_QUICKCONNECT_PATH: JellyfinSignInPath = {
+  provider: "jellyfin-quickconnect",
+  log: "[jellyfin quickconnect auth]",
+};
+
+// The configured server's URL for `instance`, or null (logged, and padded with a
+// dummy password check like every refusal) when it has none.
+async function jellyfinSignInUrl(instance: MediaInstanceKey, path: JellyfinSignInPath): Promise<string | null> {
+  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
+  if (!jellyfinUrl) {
+    console.error(`${path.log} Jellyfin URL is not configured for instance "${instance}"`);
+    await dummyVerify();
+    return null;
+  }
+  return jellyfinUrl;
+}
+
+// The server refused the credential (or could not be asked).
+async function refuseJellyfinCredential(err: unknown, ctx: SignInRequestContext, path: JellyfinSignInPath): Promise<null> {
+  console.error(`${path.log} authentication failed:`, err);
+  await dummyVerify();
+  auditLoginFailure(ctx, path.provider, "invalid_credentials");
+  return null;
+}
+
+// The shared tail once the Jellyfin server has vouched for `jfUser`: the
+// fail-closed membership gate, the identity lookup/provision with its 34e
+// binding refusals, then this request's device payload.
+async function completeJellyfinSignIn(
+  jfUser: { id: string; name: string },
+  instance: MediaInstanceKey,
+  ctx: SignInRequestContext,
+  path: JellyfinSignInPath,
+  rememberMe: string | undefined,
+): Promise<AuthorizedSignIn | null> {
+  // A valid server credential is not enough: the account must be a known
+  // member of this Summonarr instance (or the gate must be explicitly
+  // disabled). See isJellyfinSignInAllowed for the membership criteria.
+  if (!(await isJellyfinSignInAllowed(jfUser.id, instance))) {
+    console.warn(`${path.log} sign-in refused: user is not an authorized member of this instance.`);
+    await dummyVerify();
+    auditLoginFailure(ctx, path.provider, "not_authorized");
+    return null;
+  }
+  const dbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
+  if (!isAuthorizedDbUser(dbUser)) {
+    await dummyVerify();
+    auditLoginFailure(ctx, path.provider, jellyfinRefusalReason(dbUser));
+    return null;
+  }
+  const device = buildDeviceMeta(ctx.headers);
+  return { ...dbUser, rememberMe, ...device };
+}
+
 export async function authorizeWithJellyfin(
   credentials: Partial<Record<string, unknown>>,
   req: Request,
   instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
-): Promise<Record<string, unknown> | null> {
+): Promise<AuthorizedSignIn | null> {
   if (!credentials?.username || !credentials?.password) return null;
   const username = credentials.username as string;
   if (username.length > 200 || (credentials.password as string).length > MAX_PASSWORD_LENGTH) {
     return null;
   }
-  const headers = (req as Request).headers as Headers;
-  const ip = getClientIp(headers);
-  const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
+  const ctx = signInRequestContext(req);
+  const path = JELLYFIN_PASSWORD_PATH;
 
   // Deliberately NOT scoped by instance — an attacker's per-IP attempt budget
   // must not multiply with the number of configured Jellyfin servers.
-  if (!checkRateLimit(`jellyfin-ip:${ipBucketKey(ip)}`, 10, 5 * 60 * 1000)) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "rate_limited" } });
+  if (!checkRateLimit(`jellyfin-ip:${ipBucketKey(ctx.ip)}`, 10, 5 * 60 * 1000)) {
+    auditLoginFailure(ctx, path.provider, "rate_limited");
     return null;
   }
 
@@ -1314,16 +1439,12 @@ export async function authorizeWithJellyfin(
   // standard cost of credential-keyed throttling, and it is strictly better than
   // unlimited guessing — the window is 5 minutes, not an account disable.
   if (!checkRateLimit(`jellyfin-user:${username.toLowerCase()}`, 10, 5 * 60 * 1000)) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "rate_limited_username" } });
+    auditLoginFailure(ctx, path.provider, "rate_limited_username");
     return null;
   }
 
-  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
-  if (!jellyfinUrl) {
-    console.error(`[jellyfin auth] Jellyfin URL is not configured for instance "${instance}"`);
-    await dummyVerify();
-    return null;
-  }
+  const jellyfinUrl = await jellyfinSignInUrl(instance, path);
+  if (!jellyfinUrl) return null;
 
   let jfUser;
   try {
@@ -1333,43 +1454,22 @@ export async function authorizeWithJellyfin(
       credentials.password as string
     );
   } catch (err) {
-    console.error("[jellyfin auth] authentication failed:", err);
-    await dummyVerify();
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "invalid_credentials" } });
-    return null;
+    return refuseJellyfinCredential(err, ctx, path);
   }
-  // Fail-closed membership gate — the Jellyfin credentials are valid, but a valid
-  // server credential is not enough: the account must be a known member of this
-  // Summonarr instance (or the gate must be explicitly disabled). See
-  // isJellyfinSignInAllowed for the membership criteria.
-  if (!(await isJellyfinSignInAllowed(jfUser.id, instance))) {
-    console.warn("[jellyfin auth] sign-in refused: user is not an authorized member of this instance.");
-    await dummyVerify();
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "not_authorized" } });
-    return null;
-  }
-  const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
-  if (!isAuthorizedDbUser(jfDbUser)) {
-    await dummyVerify();
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: jellyfinRefusalReason(jfDbUser) } });
-    return null;
-  }
-  const device = buildDeviceMeta(headers);
-  return { ...jfDbUser, rememberMe: credentials.rememberMe as string | undefined, ...device };
+  return completeJellyfinSignIn(jfUser, instance, ctx, path, credentials.rememberMe as string | undefined);
 }
 
 export async function authorizeWithJellyfinQuickConnect(
   credentials: Partial<Record<string, unknown>>,
   req: Request,
   instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
-): Promise<Record<string, unknown> | null> {
+): Promise<AuthorizedSignIn | null> {
   if (!credentials?.secret) return null;
-  const headers = (req as Request).headers as Headers;
-  const ip = getClientIp(headers);
-  const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
+  const ctx = signInRequestContext(req);
+  const path = JELLYFIN_QUICKCONNECT_PATH;
   // Deliberately NOT scoped by instance — see authorizeWithJellyfin.
-  if (!checkRateLimit(`jellyfin-qc-ip:${ipBucketKey(ip)}`, 10, 5 * 60 * 1000)) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
+  if (!checkRateLimit(`jellyfin-qc-ip:${ipBucketKey(ctx.ip)}`, 10, 5 * 60 * 1000)) {
+    auditLoginFailure(ctx, path.provider, "rate_limited");
     return null;
   }
   // Per-secret bucket so a QuickConnect secret can't be brute-redeemed from
@@ -1377,15 +1477,11 @@ export async function authorizeWithJellyfinQuickConnect(
   // secret material lands in a limiter key.
   const qcKey = createHash("sha256").update(credentials.secret as string).digest("hex").slice(0, 16);
   if (!checkRateLimit(`jellyfin-qc-secret:${qcKey}`, 10, 5 * 60 * 1000)) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
+    auditLoginFailure(ctx, path.provider, "rate_limited");
     return null;
   }
-  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
-  if (!jellyfinUrl) {
-    console.error(`[jellyfin quickconnect auth] Jellyfin URL is not configured for instance "${instance}"`);
-    await dummyVerify();
-    return null;
-  }
+  const jellyfinUrl = await jellyfinSignInUrl(instance, path);
+  if (!jellyfinUrl) return null;
 
   let jfUser;
   try {
@@ -1394,28 +1490,12 @@ export async function authorizeWithJellyfinQuickConnect(
       credentials.secret as string
     );
   } catch (err) {
-    console.error("[jellyfin quickconnect auth] failed:", err);
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "authentication_failed" } });
-    return null;
+    return refuseJellyfinCredential(err, ctx, path);
   }
-  // Fail-closed membership gate (same as the standard Jellyfin path): a valid
-  // QuickConnect secret authenticates the account but does not by itself authorize
-  // sign-in — the account must be a known member of this instance.
-  if (!(await isJellyfinSignInAllowed(jfUser.id, instance))) {
-    console.warn("[jellyfin quickconnect auth] sign-in refused: user is not an authorized member of this instance.");
-    await dummyVerify();
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "not_authorized" } });
-    return null;
-  }
-  const qcDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
-  if (!isAuthorizedDbUser(qcDbUser)) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: jellyfinRefusalReason(qcDbUser) } });
-    return null;
-  }
-  const device = buildDeviceMeta(headers);
-  return { ...qcDbUser, rememberMe: credentials.rememberMe as string | undefined, ...device };
+  // A valid QuickConnect secret authenticates the account but does not by
+  // itself authorize sign-in — the same membership gate as the password path.
+  return completeJellyfinSignIn(jfUser, instance, ctx, path, credentials.rememberMe as string | undefined);
 }
-
 
 // Session minting. The sign-in route handlers under /api/auth/sign-in/* (and the
 // OIDC callback) call signInAndMintSession after the provider-specific
@@ -1491,7 +1571,7 @@ export class AccountDeactivatedError extends Error {
 }
 
 export async function signInAndMintSession(params: {
-  user: Record<string, unknown>;
+  user: AuthorizedSignIn;
   providerId: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect" | "oidc";
   // Set ONLY by POST /api/auth/sign-in/mfa, after the second factor verified —
   // recorded in the AUTH_LOGIN audit row. The credentials route never mints for
@@ -1500,7 +1580,7 @@ export async function signInAndMintSession(params: {
   secondFactor?: "totp" | "recovery" | "webauthn";
 }): Promise<SignInResult> {
   const { user, providerId, secondFactor } = params;
-  const userId = user.id as string | undefined;
+  const userId = user.id;
 
   // Single chokepoint for every provider (credentials / plex / jellyfin /
   // jellyfin-quickconnect / oidc): refuse a disabled account BEFORE
@@ -1522,7 +1602,7 @@ export async function signInAndMintSession(params: {
   // AuthSession row: a promotion or permissions read that threw afterwards left
   // a row with no token behind it, listed as a device — and, for a native
   // client, one that never expires.
-  let role = (user as { role?: string }).role;
+  let role = user.role;
   let permissionsClaim = "0";
   if (userId) {
     const promoted = await runFirstAdminPromotion(userId, providerId);
@@ -1536,7 +1616,7 @@ export async function signInAndMintSession(params: {
   }
 
   // The claims that go into the session JWT.
-  const token: Record<string, unknown> = {
+  const token: SignInToken = {
     id: user.id,
     role,
     provider: providerId,
@@ -1549,40 +1629,34 @@ export async function signInAndMintSession(params: {
           ? "jellyfin"
           : null,
   };
-  const sessionField = (user as { _sessionId?: string })._sessionId;
-  if (sessionField) token.sessionId = sessionField;
-  const uaFp = (user as { _uaFingerprint?: string })._uaFingerprint;
-  if (uaFp) token.uaFingerprint = uaFp;
-  const isMobileField = (user as { _isMobile?: boolean })._isMobile;
-  if (isMobileField !== undefined) token.isMobile = isMobileField;
-  const deviceLabelField = (user as { _deviceLabel?: string })._deviceLabel;
-  if (deviceLabelField) token.deviceLabel = deviceLabelField;
+  if (user._sessionId) token.sessionId = user._sessionId;
+  if (user._uaFingerprint) token.uaFingerprint = user._uaFingerprint;
+  if (user._isMobile !== undefined) token.isMobile = user._isMobile;
+  if (user._deviceLabel) token.deviceLabel = user._deviceLabel;
 
   // initializeTokenOnSignIn mutates `token` in place: sets sessionId/expiresAt,
   // looks up mediaServer if not provider-pinned, AND creates the
   // AuthSession row.
-  await initializeTokenOnSignIn(token, user);
+  const { sessionId, expiresAt, transport } = await initializeTokenOnSignIn(token, user);
 
   const now = Math.floor(Date.now() / 1000);
-  const expiresAt = token.expiresAt as number;
   const expiresInSeconds = Math.max(60, expiresAt - now);
-  const transport: SessionTransport = token.transport === "bearer" ? "bearer" : "cookie";
 
   let jwt: string;
   try {
     jwt = await signSessionJwt(
       {
-        id: token.id as string,
-        role: token.role as string,
+        id: token.id,
+        role: token.role,
         permissions: permissionsClaim,
-        email: (user.email as string | null) ?? null,
-        name: (user.name as string | null) ?? null,
-        provider: token.provider as string,
-        mediaServer: (token.mediaServer as string | null | undefined) ?? null,
-        sessionId: token.sessionId as string,
-        uaFingerprint: token.uaFingerprint as string | undefined,
-        isMobile: token.isMobile as boolean | undefined,
-        deviceLabel: token.deviceLabel as string | undefined,
+        email: user.email ?? null,
+        name: user.name ?? null,
+        provider: token.provider,
+        mediaServer: token.mediaServer ?? null,
+        sessionId,
+        uaFingerprint: token.uaFingerprint,
+        isMobile: token.isMobile,
+        deviceLabel: token.deviceLabel,
         expiresAt,
         transport,
       },
@@ -1592,18 +1666,18 @@ export async function signInAndMintSession(params: {
     // No token, so no session: drop the row just written (best-effort — the
     // signing failure is what the caller must hear about).
     if (userId) {
-      await prisma.authSession.delete({ where: { sessionId: token.sessionId as string } }).catch(() => {});
+      await prisma.authSession.delete({ where: { sessionId } }).catch(() => {});
     }
     throw err;
   }
 
   void logAudit({
-    userId: (user.id as string) ?? "unknown",
-    userName: (user.name as string) ?? (user.email as string) ?? "unknown",
+    userId: user.id ?? "unknown",
+    userName: user.name ?? user.email ?? "unknown",
     action: "AUTH_LOGIN",
     target: "auth:login",
-    ipAddress: (user as { _auditIp?: string })._auditIp ?? null,
-    userAgent: (user as { _auditUa?: string })._auditUa ?? null,
+    ipAddress: user._auditIp ?? null,
+    userAgent: user._auditUa ?? null,
     provider: providerId,
     details: {
       provider: providerId,
@@ -1613,8 +1687,8 @@ export async function signInAndMintSession(params: {
       emailHash: typeof user.email === "string" ? hashAuditEmail(user.email) : null,
       role: token.role,
       ...(secondFactor ? { secondFactor } : {}),
-      ip: (user as { _auditIp?: string })._auditIp,
-      browser: ((user as { _auditUa?: string })._auditUa)?.slice(0, 100),
+      ip: user._auditIp,
+      browser: user._auditUa?.slice(0, 100),
     },
   });
 
@@ -1627,22 +1701,22 @@ export async function signInAndMintSession(params: {
   // after initializeTokenOnSignIn has written the AuthSession row it reports.
   if (userId && expiresAt === NEVER_EXPIRES_AT_SEC) {
     void notifyAccountSecurityEvent(userId, "app-signed-in", {
-      device: (token.deviceLabel as string | undefined) ?? null,
+      device: token.deviceLabel ?? null,
     });
   }
 
   return {
     token: jwt,
     expiresInSeconds,
-    sessionId: token.sessionId as string,
+    sessionId,
     transport,
     user: {
-      id: token.id as string,
-      role: token.role as string,
-      email: (user.email as string | null) ?? null,
-      name: (user.name as string | null) ?? null,
+      id: token.id,
+      role: token.role,
+      email: user.email ?? null,
+      name: user.name ?? null,
       provider: providerId,
-      mediaServer: (token.mediaServer as string | null | undefined) ?? null,
+      mediaServer: token.mediaServer ?? null,
     },
   };
 }

@@ -11,6 +11,8 @@ type TrayJob = {
   status: "queued" | "running" | "done" | "failed";
   title: string | null;
   server: string;
+  // "" = the default server; absent from a server that predates the field.
+  serverInstance?: string;
   startedAt: number;
   finishedAt: number | null;
   queueAhead?: number;
@@ -34,17 +36,31 @@ export function FixMatchTray() {
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   const [hasActive, setHasActive] = useState(false);
   const alive = useRef(true);
+  // Reads can overlap (the poll and a start event): only the latest one sent
+  // may land, so a slow older answer never rolls a job back to "running" or
+  // switches the poll off under a job that just started.
+  const seq = useRef(0);
 
   const refresh = useCallback(async () => {
-    let next: TrayJob[] = [];
+    const id = ++seq.current;
+    let next: TrayJob[];
     try {
       const res = await fetch(withBasePath("/api/admin/fix-match/jobs"));
-      if (res.ok) next = ((await res.json()) as { jobs?: TrayJob[] }).jobs ?? [];
+      if (res.status === 401 || res.status === 403) {
+        // Signed out (or no longer allowed): nothing here can be read again.
+        next = [];
+      } else {
+        // Any other failure keeps the tray — and the poll — as they were, so a
+        // job still running server-side is not dropped by one bad read.
+        if (!res.ok) return;
+        const body = (await res.json()) as { jobs?: unknown };
+        if (!Array.isArray(body.jobs)) return;
+        next = body.jobs as TrayJob[];
+      }
     } catch {
-      // A blip leaves the tray as it was on the next successful read.
       return;
     }
-    if (!alive.current) return;
+    if (!alive.current || id !== seq.current) return;
     setJobs(next);
     setHasActive(next.some((j) => j.status === "queued" || j.status === "running"));
   }, []);
@@ -106,7 +122,7 @@ export function FixMatchTray() {
                   {j.title ?? t("adminQueue.fixMatch.tray.untitled")}
                 </span>
                 <span className="ds-mono shrink-0" style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}>
-                  {mediaInstanceLabel(j.server === "jellyfin" ? "jellyfin" : "plex", "")}
+                  {mediaInstanceLabel(j.server === "jellyfin" ? "jellyfin" : "plex", j.serverInstance ?? "")}
                 </span>
               </div>
               <div className="flex items-start justify-between gap-2">

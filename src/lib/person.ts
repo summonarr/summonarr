@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { getPersonDetails } from "@/lib/tmdb";
-import type { PersonDetails, TmdbMedia } from "@/lib/tmdb-types";
+import type { PersonCredit, PersonDetails, TmdbMedia } from "@/lib/tmdb-types";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { isFeatureEnabled } from "@/lib/features";
@@ -10,6 +10,25 @@ import { getVisibleServerInstances } from "@/lib/media-visibility";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { localizeMedia, localizedBiography } from "@/lib/tmdb-localize";
 import { getContentLocale } from "@/lib/i18n/server";
+
+// What the ratings pass needs to know about a credit. A credit carries a year,
+// not a date; the ratings caches key their TTLs off the date (a new release
+// refreshes sooner, and a not-found answer for one is retried within a day), so
+// the year stands in as its first day, as mdblist.ts does for an undated answer.
+function ratingsInputFor(c: PersonCredit): TmdbMedia {
+  const releaseDate = /^\d{4}$/.test(c.releaseYear) ? `${c.releaseYear}-01-01` : null;
+  return {
+    id: c.id,
+    mediaType: c.mediaType,
+    title: c.title,
+    overview: "",
+    posterPath: c.posterPath,
+    backdropPath: null,
+    releaseDate,
+    releaseYear: releaseDate ? c.releaseYear : null,
+    voteAverage: c.voteAverage,
+  };
+}
 
 // Fetch a person's filmography and enrich each credit with THIS viewer's
 // availability, request state, ratings, and a request token — the exact shape a
@@ -37,12 +56,12 @@ export async function getEnrichedPerson(
   // field added below sits on the localized card.
   const [biography, localizedCredits] = await Promise.all([
     localizedBiography(personId, locale),
-    localizeMedia(englishPerson.credits as unknown as TmdbMedia[], locale),
+    localizeMedia(englishPerson.credits, locale),
   ]);
   const person: PersonDetails = {
     ...englishPerson,
     ...(biography ? { biography } : {}),
-    credits: localizedCredits as unknown as PersonDetails["credits"],
+    credits: localizedCredits,
   };
   const { showPlex, showJellyfin } = getBadgeVisibility(session, {
     plex: plexEnabled,
@@ -62,7 +81,7 @@ export async function getEnrichedPerson(
   // their results: a restricted server the viewer holds no grant for must never reach the
   // response body at all (getBadgeVisibility, applied further down, is a cosmetic mask).
   const [ratedCredits, visible] = await Promise.all([
-    attachRatingsUnified(person.credits as unknown as TmdbMedia[], { blocking: true }),
+    attachRatingsUnified(person.credits.map(ratingsInputFor), { blocking: true }),
     getVisibleServerInstances(session),
   ]);
   const ratingByKey = new Map<string, TmdbMedia>();

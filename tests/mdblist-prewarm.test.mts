@@ -73,7 +73,7 @@ console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" "));
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 const { prisma } = await import("../src/lib/prisma.ts");
-const { shadowPrismaModel } = await import("./_helpers.mts");
+const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { isMdblistQuotaLocked } = await import("../src/lib/mdblist.ts");
 const { prewarmMdblistCache } = await import("../src/lib/mdblist-prewarm.ts");
 
@@ -86,7 +86,9 @@ type LibFindManyArgs = {
   where: { mediaType: MediaType };
   take: number;
   skip?: number;
-  cursor?: { tmdbId_mediaType: { tmdbId: number; mediaType: MediaType } };
+  // library-iterator pages on (tmdbId, mediaType, serverInstance); these rows
+  // carry no serverInstance, so the tmdbId alone places the cursor.
+  cursor?: { tmdbId_mediaType_serverInstance: { tmdbId: number; mediaType: MediaType } };
 };
 
 const libCalls: { source: "plex" | "jellyfin" }[] = [];
@@ -101,7 +103,7 @@ function libraryDelegate(source: "plex" | "jellyfin") {
         .sort((a, b) => a.tmdbId - b.tmdbId);
       let start = 0;
       if (args.cursor) {
-        const { tmdbId, mediaType } = args.cursor.tmdbId_mediaType;
+        const { tmdbId, mediaType } = args.cursor.tmdbId_mediaType_serverInstance;
         const idx = all.findIndex((r) => r.tmdbId === tmdbId && r.mediaType === mediaType);
         if (idx === -1) throw new Error(`cursor row ${tmdbId}:${mediaType} not found`);
         start = idx + (args.skip ?? 0);
@@ -135,12 +137,17 @@ type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const cacheRows = new Map<string, CacheRow>();
 type DeleteManyCall = { keys: string[]; data?: string };
 const deleteManyCalls: DeleteManyCall[] = [];
+// Every tmdbCache.findMany key list, so a test can pin that no details blob is
+// read through it (the releaseDates come from the $queryRaw below).
+const findManyKeys: string[][] = [];
 shadowPrismaModel(prisma, "tmdbCache", {
-  findMany: async (args: { where: { key: { in: string[] } } }) =>
-    args.where.key.in.flatMap((k) => {
+  findMany: async (args: { where: { key: { in: string[] } } }) => {
+    findManyKeys.push([...args.where.key.in]);
+    return args.where.key.in.flatMap((k) => {
       const r = cacheRows.get(k);
       return r ? [{ ...r }] : [];
-    }),
+    });
+  },
   upsert: async (args: { where: { key: string }; create: CacheRow }) => {
     cacheRows.set(args.where.key, args.create);
     return args.create;
@@ -162,6 +169,22 @@ shadowPrismaModel(prisma, "tmdbCache", {
     }
     return { count };
   },
+});
+
+// The details releaseDate read (src/lib/details-release-dates.ts): one
+// Prisma.sql value whose first bound value is the extraction pattern and the
+// rest are the keys. Modelled by applying that pattern to the stored text, as
+// Postgres's substring(… from …) does, so a malformed row reads as null.
+const rawSql: string[] = [];
+shadowPrismaClientMethod(prisma, "$queryRaw", async (query: { sql: string; values: unknown[] }) => {
+  rawSql.push(query.sql);
+  const [pattern, ...keys] = query.values as string[];
+  return keys.flatMap((k) => {
+    const r = cacheRows.get(k);
+    if (!r) return [];
+    const m = new RegExp(pattern).exec(r.data);
+    return [{ key: k, releaseDate: m ? m[1] : null }];
+  });
 });
 
 // ── scripted fetch (captures the POST body for batch-shape pins) ────────────
@@ -218,6 +241,8 @@ beforeEach(() => {
   settingReads.length = 0;
   cacheRows.clear();
   deleteManyCalls.length = 0;
+  findManyKeys.length = 0;
+  rawSql.length = 0;
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
@@ -337,6 +362,30 @@ test("cold items go out as ONE chunked POST per media type — never per-item �
   assert.equal(cacheRows.get("mdblist:tmdb:movie:12")?.expiresAt.getTime(), Date.now() + 30 * DAY_MS);
 });
 
+test("the details releaseDates are read as one extracted field per row — never the whole blob — and a malformed row reads as null", async () => {
+  tables.plex = [
+    { tmdbId: 50, mediaType: "MOVIE" },
+    { tmdbId: 51, mediaType: "MOVIE" },
+  ];
+  seedCacheRow("movie:50:details", 20 * HOUR_MS, JSON.stringify({ title: "x", overview: "y".repeat(5000), releaseDate: "2026-01-01" }));
+  seedCacheRow("movie:51:details", 20 * HOUR_MS, "{not json at all");
+  respond = (_url, call) => echo(call);
+
+  assert.deepEqual(await prewarmMdblistCache(), {
+    total: 2, fetched: 2, skipped: 0, failed: 0, purged: 0, quotaExhausted: undefined,
+  });
+  assert.equal(
+    findManyKeys.some((keys) => keys.some((k) => k.endsWith(":details"))),
+    false,
+    "the details blobs must not be loaded through findMany",
+  );
+  assert.equal(rawSql.length, 1);
+  assert.match(rawSql[0], /^SELECT "key", substring\("data" from \?::text\) AS "releaseDate" FROM "TmdbCache" WHERE "key" IN \(/);
+  assert.equal(cacheRows.get("mdblist:tmdb:movie:50")?.expiresAt.getTime(), Date.now() + 3 * DAY_MS);
+  // The malformed row is a null date (the 30d bucket), and the run carried on.
+  assert.equal(cacheRows.get("mdblist:tmdb:movie:51")?.expiresAt.getTime(), Date.now() + 30 * DAY_MS);
+});
+
 test("pages interleave across media types: page 0 (200 movie + 200 tv) completes before page 1 (1 + 1)", async () => {
   tables.plex = [
     ...Array.from({ length: 201 }, (_, i): Row => ({ tmdbId: i + 1, mediaType: "MOVIE" })),
@@ -375,8 +424,8 @@ test("a partial batch response yields fetched < toFetch without counting failed"
     { tmdbId: 33, mediaType: "MOVIE" },
   ];
   respond = () => jsonResponse([
-    { id: 31, ratings: [{ source: "imdb", value: 6 }] },
-    { id: 32, ratings: [{ source: "imdb", value: 7 }] },
+    { tmdb_id: 31, ratings: [{ source: "imdb", value: 6 }] },
+    { tmdb_id: 32, ratings: [{ source: "imdb", value: 7 }] },
   ]);
 
   // `fetched` counts the ids MDBList actually returned (the batch map size);
@@ -417,6 +466,24 @@ test("a rejected fetchMdblistBatch marks the whole page failed for BOTH types an
   } finally {
     settingRead = defaultSettingRead;
   }
+});
+
+test("an MDBList that keeps failing stops each media type after the breaker's limit instead of one request per page", async () => {
+  // Five pages of each type. Every POST answers 500: a response, so neither the
+  // pause nor the transport breaker trips, and fetchMdblistBatch's own per-call
+  // breaker never reaches its limit on a one-page call.
+  tables.plex = [
+    ...Array.from({ length: 1000 }, (_, i): Row => ({ tmdbId: i + 1, mediaType: "MOVIE" })),
+    ...Array.from({ length: 1000 }, (_, i): Row => ({ tmdbId: 5001 + i, mediaType: "TV" })),
+  ];
+  respond = () => new Response("upstream down", { status: 500 });
+
+  assert.deepEqual(await prewarmMdblistCache(), {
+    total: 2000, fetched: 0, skipped: 0, failed: 0, purged: 0, quotaExhausted: undefined,
+  });
+  assert.equal(fetchCalls.filter((c) => c.url.pathname === "/tmdb/movie/").length, 3, "movies stop at the limit");
+  assert.equal(fetchCalls.filter((c) => c.url.pathname === "/tmdb/show/").length, 3, "shows stop at the limit");
+  assert.ok(warns.some((w) => w.includes("[mdblist-prewarm] MDBList kept failing — stopping after 0 fetches")));
 });
 
 // ── quota lockout (LAST — module-global state) ──────────────────────────────

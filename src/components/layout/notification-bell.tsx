@@ -110,6 +110,16 @@ export function NotificationBell() {
           role="dialog"
           aria-label={t("personal.notifications.title")}
           tabIndex={-1}
+          // Tabbing past the last link leaves a non-modal panel floating over
+          // the page: close it once focus has left both it and the bell. Focus
+          // is NOT pulled back — the user tabbed onward on purpose. (A blur to
+          // nowhere — relatedTarget null, e.g. the window losing focus — keeps
+          // it open; the outside click / Escape paths still close it.)
+          onBlur={(e) => {
+            const next = e.relatedTarget as Node | null;
+            if (!next || panelRef.current?.contains(next) || btnRef.current?.contains(next)) return;
+            setOpen(false);
+          }}
           className="absolute right-0 mt-2 overflow-hidden outline-none"
           style={{
             width: 340,

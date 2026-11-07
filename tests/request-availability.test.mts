@@ -16,7 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
 import type { TmdbMedia } from "../src/lib/tmdb-types.ts";
-import { buildMediaTypeWhere, attachRequestedStatus } from "../src/lib/request-availability.ts";
+import { buildMediaTypeWhere, attachRequestedStatus, permanentlyDeclinedKeys } from "../src/lib/request-availability.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
 
 function media(id: number, mediaType: "movie" | "tv"): TmdbMedia {
@@ -57,7 +57,7 @@ test("buildMediaTypeWhere: mixed input partitions ids by type", () => {
 
 type Row = { tmdbId: number; mediaType: "MOVIE" | "TV" };
 type FindManyArgs = {
-  where: { requestedBy?: string; arrInstance?: string; status?: unknown; OR?: unknown };
+  where: { requestedBy?: string; arrInstance?: string; status?: unknown; OR?: unknown; permanentlyDeclined?: boolean };
 };
 
 let globalRows: Row[] = [];
@@ -124,4 +124,31 @@ test("attachRequestedStatus: without a userId the per-user query is skipped", as
   assert.equal(calls[0].where.requestedBy, undefined);
   assert.equal(out[0].requested, true);
   assert.equal(out[0].requestedByMe, false);
+});
+
+// ─── permanentlyDeclinedKeys (stubbed findMany) ───────────────────────────────
+// What the collection "Request all" button leaves out. A permanent decline can
+// never be re-requested (the bulk route answers `skipped-declined`), so the
+// button used to count and send those titles again on every visit.
+
+test("permanentlyDeclinedKeys: the viewer's permanent declines on the default instance, keyed for the client", async () => {
+  calls.length = 0;
+  mineRows = [{ tmdbId: 603, mediaType: "MOVIE" }, { tmdbId: 1399, mediaType: "TV" }];
+  const keys = await permanentlyDeclinedKeys([media(603, "movie"), media(604, "movie"), media(1399, "tv")], "u_1");
+  assert.deepEqual(keys, ["movie:603", "tv:1399"]);
+  assert.equal(calls.length, 1);
+  const where = calls[0].where;
+  assert.equal(where.requestedBy, "u_1", "only the viewer's own declines");
+  assert.equal(where.permanentlyDeclined, true, "an ordinary decline is re-requestable and must stay offered");
+  assert.equal(where.arrInstance, "");
+  assert.deepEqual(where.OR, [
+    { mediaType: "MOVIE", tmdbId: { in: [603, 604] } },
+    { mediaType: "TV", tmdbId: { in: [1399] } },
+  ]);
+});
+
+test("permanentlyDeclinedKeys: no items, no query", async () => {
+  calls.length = 0;
+  assert.deepEqual(await permanentlyDeclinedKeys([], "u_1"), []);
+  assert.equal(calls.length, 0);
 });

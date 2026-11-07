@@ -459,7 +459,9 @@ test("a SHORT batch response negative-caches the ids MDBList left out — absenc
   // batch CONTENT). The cost of the old reading was unbounded: an id MDBList
   // does not have was re-requested on every page load forever AND pushed into
   // the OMDB fallback each time.
-  respond = () => jsonResponse([{ id: 1, ratings: [{ source: "imdb", value: 8 }] }]);
+  // The row names its TMDB id: an id-less row in a short response can't be
+  // placed (see the positional test below).
+  respond = () => jsonResponse([{ tmdb_id: 1, ratings: [{ source: "imdb", value: 8 }] }]);
   const map = await fetchMdblistBatch([{ id: 1 }, { id: 2 }, { id: 3 }], "movie");
   assert.deepEqual([...map.keys()], [1]);
   assert.equal(cacheRows.has("mdblist:tmdb:movie:2"), true, "the omitted id is negative-cached");
@@ -471,6 +473,43 @@ test("a SHORT batch response negative-caches the ids MDBList left out — absenc
     false,
     "a short response is expected now, not an anomaly to warn about",
   );
+});
+
+test("an id-less row binds by position ONLY when the response lines up one to one with the request", async () => {
+  // A short response: MDBList left out ids it doesn't know, so position 0 may
+  // be any of the three. Binding it to id 1 would cache another title's ratings
+  // under id 1 for the full TTL, and sentinel the real missing ids.
+  respond = () => jsonResponse([{ ratings: [{ source: "imdb", value: 8 }] }]);
+  const map = await fetchMdblistBatch([{ id: 1 }, { id: 2 }, { id: 3 }], "movie");
+  assert.equal(map.size, 0, "nothing is bound by position");
+  for (const id of [1, 2, 3]) {
+    assert.equal(cacheRows.has(`mdblist:tmdb:movie:${id}`), false, `id ${id} is neither cached nor sentinelled`);
+  }
+  assert.ok(warns.some((w) => w.includes("returned 1 unmatched row(s) (1 rows for 3 ids)")), "the unmatched row is warned");
+
+  // Mixed: one row names its id, so the response is not positional at all.
+  warns.length = 0;
+  respond = () => jsonResponse([
+    { tmdb_id: 2, ratings: [{ source: "imdb", value: 5 }] },
+    { ratings: [{ source: "imdb", value: 9 }] },
+  ]);
+  const map2 = await fetchMdblistBatch([{ id: 4 }, { id: 2 }], "movie");
+  assert.deepEqual([...map2.keys()], [2]);
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:4"), false, "the id-less row must not bind to id 4");
+});
+
+test("a malformed row (null, non-object, non-array ratings) is skipped, never thrown on: the page's other ratings are kept and cached", async () => {
+  respond = () => jsonResponse([
+    null,
+    { tmdb_id: 10, ratings: [{ source: "imdb", value: 7 }] },
+    { tmdb_id: 30, ratings: { source: "imdb", value: 1 } },
+  ]);
+  const map = await fetchMdblistBatch([{ id: 10 }, { id: 20 }, { id: 30 }], "movie");
+  assert.equal(map.get(10)?.imdbRating, "7");
+  assert.ok(cacheRows.has("mdblist:tmdb:movie:10"), "id 10 is cached: the page's cache flush still ran");
+  assert.equal(map.get(30)?.imdbRating, null, "a non-array ratings reads as no rating");
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:20"), false, "the null row displaced id 20's answer: no sentinel");
+  assert.equal(errors.some((e) => e.includes("batch error")), false, "the page did not fail");
 });
 
 test("the two AMBIGUOUS response shapes still never negative-cache", async () => {

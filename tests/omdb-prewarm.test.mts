@@ -74,7 +74,7 @@ console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" "));
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 const { prisma } = await import("../src/lib/prisma.ts");
-const { shadowPrismaModel } = await import("./_helpers.mts");
+const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { isOmdbQuotaLocked } = await import("../src/lib/omdb.ts");
 const { prewarmOmdbCache } = await import("../src/lib/omdb-prewarm.ts");
 
@@ -126,17 +126,21 @@ const settingReads: string[] = [];
 // left to reject an item's chain, since fetchAndCacheOmdbForTmdb catches
 // everything downstream of its own getApiKey call.
 let settingReadFailAt: number | null = null;
+// When set, each omdbApiKey read takes the next value from this list instead
+// (one test lets the prewarm's own read see a key that omdb.ts then doesn't).
+let scriptedKeyReads: Array<string | null> | null = null;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
     settingReads.push(args.where.key);
     if (settingReadFailAt !== null && settingReads.length === settingReadFailAt) {
       throw new Error(`setting read exploded for ${args.where.key}`);
     }
-    return args.where.key === "omdbApiKey" && omdbApiKeyValue !== null
-      ? { key: "omdbApiKey", value: omdbApiKeyValue }
-      : null;
+    if (args.where.key !== "omdbApiKey") return null;
+    const value = scriptedKeyReads ? (scriptedKeyReads.shift() ?? null) : omdbApiKeyValue;
+    return value !== null ? { key: "omdbApiKey", value } : null;
   },
 });
+const OMDB_KEY_MEMO_MS = 30_000; // mirrors src/lib/omdb.ts's API_KEY_TTL_MS
 
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const cacheRows = new Map<string, CacheRow>();
@@ -166,6 +170,19 @@ shadowPrismaModel(prisma, "tmdbCache", {
     if (args.where.key) cacheRows.delete(args.where.key);
     return { count: 0 };
   },
+});
+
+// The details releaseDate read (src/lib/details-release-dates.ts): one
+// Prisma.sql value whose first bound value is the extraction pattern and the
+// rest are the keys — modelled by applying that pattern to the stored text.
+shadowPrismaClientMethod(prisma, "$queryRaw", async (query: { values: unknown[] }) => {
+  const [pattern, ...keys] = query.values as string[];
+  return keys.flatMap((k) => {
+    const r = cacheRows.get(k);
+    if (!r) return [];
+    const m = new RegExp(pattern).exec(r.data);
+    return [{ key: k, releaseDate: m ? m[1] : null }];
+  });
 });
 
 // ── scripted fetch (routed per upstream host) ───────────────────────────────
@@ -235,6 +252,20 @@ test("no OMDB API key: the zero-counter shape without a library scan or a fetch"
   }
 });
 
+test("a whitespace-only OMDB key is no key: the zero-counter shape, no library scan, no fetch", async () => {
+  // omdb.ts trims the key and reads a blank one as none; reading it raw here
+  // walked the whole library and reported every title as "not found".
+  omdbApiKeyValue = "   ";
+  tables.plex = [{ tmdbId: 1, mediaType: "MOVIE" }, { tmdbId: 2, mediaType: "MOVIE" }];
+  try {
+    assert.deepEqual(await prewarmOmdbCache(), ZERO);
+    assert.equal(libCalls.length, 0);
+    assert.equal(fetchCalls.length, 0);
+  } finally {
+    omdbApiKeyValue = DEFAULT_KEY;
+  }
+});
+
 test("empty library: zero counters after the scan — no cache reads, no fetches", async () => {
   assert.deepEqual(await prewarmOmdbCache(), ZERO);
   assert.equal(libCalls.length, 4); // plex MOVIE/TV + jellyfin MOVIE/TV, one empty page each
@@ -279,6 +310,9 @@ test("cold items run the external_ids→OMDB chain: found counts fetched, a null
   // the pass-through).
   assert.equal(cacheRows.get("omdb:tmdb:movie:550")?.expiresAt.getTime(), Date.now() + 3 * DAY_MS);
   assert.equal(cacheRows.get("omdb:tmdb:tv:1399")?.expiresAt.getTime(), Date.now() + 30 * DAY_MS);
+  // The date is read as one extracted field ($queryRaw above), never by loading
+  // the whole details blob.
+  assert.equal(cacheFindManyCalls.some((keys) => keys.some((k) => k.endsWith(":details"))), false);
 });
 
 test("triage: a fresh row skips; sub-threshold-but-UNEXPIRED rows are genuinely re-fetched upstream (a stale rating is rewritten, a sentinel re-resolves); absent rows fetch", async () => {
@@ -338,6 +372,21 @@ test("no TMDB read token: cold items count as FAILED (not notFound) with zero fe
   }
 });
 
+test("a key removed mid-run (keyConfigured:false) counts the items failed, not notFound", async () => {
+  tables.plex = [{ tmdbId: 780, mediaType: "MOVIE" }, { tmdbId: 781, mediaType: "MOVIE" }];
+  mock.timers.tick(OMDB_KEY_MEMO_MS + 1_000); // omdb.ts must read the key afresh
+  // The prewarm's own read still sees the key; omdb.ts's read finds it gone.
+  scriptedKeyReads = [DEFAULT_KEY, null];
+  try {
+    assert.deepEqual(await prewarmOmdbCache(), { total: 2, fetched: 0, notFound: 0, skipped: 0, failed: 2 });
+    assert.equal(fetchCalls.length, 0);
+    assert.equal(cacheUpserts.length, 0);
+  } finally {
+    scriptedKeyReads = null;
+    mock.timers.tick(OMDB_KEY_MEMO_MS + 1_000); // drop the memoized "no key"
+  }
+});
+
 // ── failure isolation ───────────────────────────────────────────────────────
 
 test("a rejected chain counts failed without aborting the run — the next batch is still issued", async () => {
@@ -364,8 +413,12 @@ test("a rejected chain counts failed without aborting the run — the next batch
 
 // ── transient failures are failed, not notFound ─────────────────────────────
 
-test("a rotated-bad OMDB key (401 Invalid API key) counts every item failed — not notFound — writes no sentinel, and does NOT trip the lockout", async () => {
-  tables.plex = Array.from({ length: 4 }, (_, i): Row => ({ tmdbId: 760 + i, mediaType: "MOVIE" }));
+test("a rotated-bad OMDB key (401 Invalid API key) counts every item failed — not notFound — writes no sentinel, does NOT trip the lockout, and stops asking OMDb after the first refusal", async () => {
+  // Seven items: a batch of five, then two. A key of its own, because OMDb's
+  // refusal latches THAT key (omdb.ts), and the tests below use the default one.
+  tables.plex = Array.from({ length: 7 }, (_, i): Row => ({ tmdbId: 760 + i, mediaType: "MOVIE" }));
+  omdbApiKeyValue = "rotated-bad-key";
+  mock.timers.tick(OMDB_KEY_MEMO_MS + 1_000);
   respond = (url) => {
     if (url.hostname === "api.themoviedb.org") {
       const m = url.pathname.match(/^\/3\/movie\/(\d+)\/external_ids$/);
@@ -377,16 +430,25 @@ test("a rotated-bad OMDB key (401 Invalid API key) counts every item failed — 
     throw new Error(`unexpected fetch ${url}`);
   };
 
-  // fetchAndCacheOmdbForTmdb CATCHES the 401 and resolves {found:false,
-  // transient:true}; the prewarm used to count that as notFound with
-  // failed=0, so warm-omdb's `recordCronRun(..., failed === 0)` wrote ok:true
-  // for a run in which not one item was warmed.
-  assert.deepEqual(await prewarmOmdbCache(), { total: 4, fetched: 0, notFound: 0, skipped: 0, failed: 4 });
-  assert.equal(isOmdbQuotaLocked(), false); // invalid-key deliberately never locks (omdb.ts)
-  assert.equal(cacheUpserts.length, 0); // a transient miss is never negative-cached
-  assert.ok(!cacheUpserts.some((r) => r.data.includes("_notFound")));
-  // The per-item cause is omdb.ts's console.error; the prewarm adds no line of its own.
-  assert.ok(errors.some((e) => e.includes("[omdb] fetch failed for tt0000760")));
+  try {
+    // fetchAndCacheOmdbForTmdb CATCHES the 401 and resolves {found:false,
+    // transient:true}; the prewarm used to count that as notFound with
+    // failed=0, so warm-omdb's `recordCronRun(..., failed === 0)` wrote ok:true
+    // for a run in which not one item was warmed.
+    assert.deepEqual(await prewarmOmdbCache(), { total: 7, fetched: 0, notFound: 0, skipped: 0, failed: 7 });
+    assert.equal(isOmdbQuotaLocked(), false); // invalid-key deliberately never locks (omdb.ts)
+    assert.equal(cacheUpserts.length, 0); // a transient miss is never negative-cached
+    assert.ok(!cacheUpserts.some((r) => r.data.includes("_notFound")));
+    // The first batch was in flight when OMDb said no; the second asked nobody.
+    assert.equal(fetchCalls.filter((c) => c.url.hostname === "www.omdbapi.com").length, 5);
+    assert.equal(fetchCalls.length, 10, "five external_ids resolves + five OMDb calls, nothing for batch 2");
+    // One line for the refused key, not an error pair per title; the prewarm adds no line of its own.
+    assert.equal(warns.filter((w) => w.includes("[omdb] OMDb refused the API key")).length, 1);
+    assert.equal(errors.filter((e) => e.includes("[omdb]")).length, 0);
+  } finally {
+    omdbApiKeyValue = DEFAULT_KEY;
+    mock.timers.tick(OMDB_KEY_MEMO_MS + 1_000);
+  }
 });
 
 test("a TMDB external_ids outage (503) is transient too: failed, not notFound, no sentinel — while a genuine null imdb_id in the same run still counts notFound", async () => {

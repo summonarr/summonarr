@@ -14,10 +14,6 @@
   "profile.error.generic": "Algo deu errado",
   "profile.error.network": "Erro de rede — tente novamente",
   "profile.error.saveFailed": "Falha ao salvar — tente novamente",
-  "profile.time.justNow": "agora mesmo",
-  "profile.time.minutesAgo": "há {n} min",
-  "profile.time.hoursAgo": "há {n} h",
-  "profile.time.daysAgo": "há {n} d",
   "profile.discord.description": "Vincule sua conta do Discord para solicitar mídia diretamente pelo Discord.",
   "profile.discord.optionA": "Opção A — Vincular pelo Discord",
   "profile.discord.stepGenerate": "Clique em {button} abaixo",
@@ -29,6 +25,7 @@
   "profile.discord.yourToken": "Seu token de vínculo",
   "profile.discord.copyToken": "Copiar token",
   "profile.discord.expiresRun": "Expira às {time} · Execute {command} no Discord",
+  "profile.discord.expired": "Este token expirou às {time}. Gere um novo.",
   "profile.discord.error.generate": "Falha ao gerar o token",
   "profile.discord.error.malformed": "Resposta do servidor malformada",
   "profile.discord.error.sendCode": "Falha ao enviar o código",
@@ -264,5 +261,10 @@
   "profile.notifications.comments": "Comentários em pedidos",
   "profile.notifications.discord.comments": "Avisar-me no Discord quando um comentário for adicionado a uma conversa de pedido de que participo",
   "profile.notifications.email.comments": "Enviar-me um e-mail quando um comentário for adicionado a uma conversa de pedido de que participo",
-  "profile.notifications.push.comments": "Notificação push quando um comentário for adicionado a uma conversa de pedido de que participo"
+  "profile.notifications.push.comments": "Notificação push quando um comentário for adicionado a uma conversa de pedido de que participo",
+  "profile.sessions.label.browserOnOs": "{browser} em {os}",
+  "profile.sessions.label.unknownBrowser": "Navegador desconhecido",
+  "profile.sessions.label.unknownOs": "sistema desconhecido",
+  "profile.sessions.label.androidTablet": "tablet Android",
+  "profile.sessions.label.machine": "Máquina (API)"
 }

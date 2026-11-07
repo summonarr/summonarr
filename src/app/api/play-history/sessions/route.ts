@@ -17,14 +17,19 @@ export const dynamic = "force-dynamic";
 // server component and refreshed over the `activity:sessions` SSE payload,
 // neither of which serializes through here) nothing on the web surfaced it.
 // Deriving the set from the row means the next BigInt column can't repeat that.
-function withoutBigInts<T extends Record<string, unknown>>(row: T): T {
+// Distributes over a union, so a nullable bigint column reads `number | null`.
+type Unbig<V> = V extends bigint ? number : V;
+type WithoutBigInts<T> = { [K in keyof T]: Unbig<T[K]> };
+
+function withoutBigInts<T extends Record<string, unknown>>(row: T): WithoutBigInts<T> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(row)) {
     out[key] = typeof value === "bigint" ? Number(value) : value;
   }
   // Every bigint became a number and nothing else moved; the wire shape is
-  // identical to the field-by-field version this replaced.
-  return out as T;
+  // identical to the field-by-field version this replaced. The return type says
+  // so: each bigint field is a number.
+  return out as WithoutBigInts<T>;
 }
 
 export const GET = withPermission(Permission.ADMIN)(async (_req, _ctx, _session) => {

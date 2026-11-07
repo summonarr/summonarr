@@ -3,11 +3,11 @@
 // 44×66 poster, title (14px) + body (12px) + mono timestamp lines, and the
 // two 32×32 icon buttons pulled into the corner by the -6px margin (~96px
 // per row, 8px apart).
-import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <div>
         <div className="flex items-center justify-end gap-3" style={{ marginBottom: 10, height: 18 }}>
@@ -40,6 +40,6 @@ export default function Loading() {
           ))}
         </div>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

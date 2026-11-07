@@ -16,6 +16,7 @@
   "request.requestTv": "请求剧集",
   "request.qualityProfile": "质量配置",
   "request.serverDefaultQuality": "服务器默认质量",
+  "request.profilesLoadFailed": "无法加载质量配置——将使用服务器默认质量",
   "request.availableOn": "可在 {server} 上观看",
   "request.alreadyAvailable": "已可观看",
   "request.queued": "已排队",
@@ -29,6 +30,7 @@
   "request.usersLoadFailed": "无法加载用户——请重试",
   "request.selectUserLabel": "选择要代为请求的用户",
   "request.loadingUsers": "正在加载用户…",
+  "request.noEligibleUsers": "没有可以代为请求的用户",
   "request.selectUser": "选择用户…",
   "request.requestForUser": "为用户请求",
   "request.submitting": "正在提交…",
@@ -88,6 +90,7 @@
   "request.report.submit": "提交报告",
   "request.collection.partial": "已请求 {created} / {total}——{reason}",
   "request.collection.done": "已请求 {created} / {total}",
+  "request.collection.doneSkipped": "已请求 {created} / {total}——{skipped} 个无法请求",
   "request.collection.networkErrorLower": "网络错误，请重试",
   "request.collection.requested": "已请求",
   "request.collection.requestAll": "全部请求（{count}）"

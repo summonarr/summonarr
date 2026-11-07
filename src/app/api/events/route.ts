@@ -3,6 +3,7 @@ import { requireAuth } from "@/lib/api-auth";
 import { sseEmitter, SSE_MAX_LISTENERS, type SSEEvent } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { isInboxLiveEventType } from "@/lib/inbox-live-event-types";
 
 export const dynamic = "force-dynamic";
 
@@ -139,7 +140,12 @@ export async function GET() {
           }
 
           const { userId: _uid, ...clientEvent } = event as SSEEvent & { userId?: string };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(clientEvent)}\n\n`));
+          // The bypasses above deliver other users' request/issue frames, and
+          // the inbox only has a row for the event's own user: say which this
+          // is (a boolean — the other user's id is never sent), so the store
+          // does not re-fetch the inbox for every one of them.
+          const frame = isInboxLiveEventType(event.type) ? { ...clientEvent, own: evtUserId === userId } : clientEvent;
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
         } catch {
           cleanup(controller);
         }

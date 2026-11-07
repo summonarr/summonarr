@@ -7,7 +7,8 @@ import { ActivityHistoryTable } from "@/components/admin/activity-history-table"
 import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
 import { requireFeature } from "@/lib/features";
 import { getTranslator } from "@/lib/i18n/server";
-import { parseActivityDays } from "@/lib/activity-days";
+import { firstParam, parseActivityFilters, type PageParam } from "@/lib/activity-days";
+import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
 
 export const dynamic = "force-dynamic";
 
@@ -21,15 +22,16 @@ export const dynamic = "force-dynamic";
 export default async function ActivityHistoryPage({
   searchParams,
 }: {
+  // A repeated key arrives as an array; the parsers below take its first value.
   searchParams: Promise<{
-    days?: string;
-    source?: string;
-    mediaType?: string;
-    from?: string;
-    to?: string;
-    watched?: string;
+    days?: PageParam;
+    source?: PageParam;
+    mediaType?: PageParam;
+    from?: PageParam;
+    to?: PageParam;
+    watched?: PageParam;
     // Older deep links may still carry `tab=history`; ignored here.
-    tab?: string;
+    tab?: PageParam;
   }>;
 }) {
   await requireFeature("feature.admin.activity");
@@ -38,10 +40,11 @@ export default async function ActivityHistoryPage({
 
   const t = await getTranslator();
 
-  const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, from: fromParam, to: toParam, watched: watchedParam } = await searchParams;
-  const days = parseActivityDays(daysParam);
-  const source = sourceParam && ["plex", "jellyfin"].includes(sourceParam) ? sourceParam : undefined;
-  const mediaType = mediaTypeParam && ["MOVIE", "TV"].includes(mediaTypeParam) ? mediaTypeParam : undefined;
+  const sp = await searchParams;
+  const { days, source, mediaType } = parseActivityFilters(sp);
+  const fromParam = firstParam(sp.from);
+  const toParam = firstParam(sp.to);
+  const watchedParam = firstParam(sp.watched);
   // Date deep-link from a calendar-cell "View these plays" link. Seeds the
   // history table's date filter. Validated to YYYY-MM-DD; anything else ignored.
   const isYmd = (v?: string) => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -51,6 +54,9 @@ export default async function ActivityHistoryPage({
 
   // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
   const periodCutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  // The date filter's days are whole days in the statistics zone (the API reads
+  // them there); the table names the zone beside the pickers.
+  const timeZone = await getStatsTimeZone();
 
   return (
     <div className="ds-page-enter">
@@ -60,12 +66,18 @@ export default async function ActivityHistoryPage({
         subtitle={t("adminActivity.subtitle")}
       />
       <ActivityFilterBar />
+      {/* Keyed on the period filters only. The table writes its own
+          from/to/watched into the URL, so a live refresh re-renders this page
+          with them; keyed on those too, every finished stream after a date
+          edit would remount the table and drop its page, search and user
+          filter. They only seed the table's state on a (re)mount. */}
       <ActivityHistoryTable
-        key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}-${fromDate ?? ""}-${toDate ?? ""}-${initialWatched ?? ""}`}
+        key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}`}
         source={source}
         mediaType={mediaType}
         days={days}
         startDateIso={periodCutoff.toISOString()}
+        timeZone={timeZone}
         initialFromDate={fromDate}
         initialToDate={toDate}
         initialWatched={initialWatched}

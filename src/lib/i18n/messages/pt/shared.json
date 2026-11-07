@@ -2,6 +2,7 @@
   "shared.bell.empty": "Nenhuma notificação ainda.",
   "shared.bell.viewAll": "Ver todas",
   "shared.common.dismiss": "Dispensar",
+  "shared.common.loading": "Carregando…",
   "shared.common.cancel": "Cancelar",
   "shared.maintenance.active": "O modo de manutenção está ativo.",
   "shared.maintenance.blocked": "Usuários não administradores estão bloqueados.",
@@ -56,5 +57,10 @@
   "shared.common.clearSearch": "Limpar busca",
   "shared.thread.placeholderShortcut": "Escreva uma mensagem… ({shortcut} para enviar)",
   "shared.rateLimited.generic": "Muitas solicitações. Tente novamente em instantes.",
-  "shared.rateLimited.seconds": "Muitas solicitações. Tente novamente em {seconds} s."
+  "shared.rateLimited.seconds": "Muitas solicitações. Tente novamente em {seconds} s.",
+  "shared.upload.chunkFailed": "Falha ao enviar a parte {chunk} de {total} (HTTP {status}).",
+  "shared.upload.nonJson": "O servidor enviou uma resposta inesperada. A solicitação provavelmente foi redirecionada, por exemplo para a página de login.",
+  "shared.upload.noCompletion": "O envio terminou, mas o servidor nunca confirmou a restauração.",
+  "shared.upload.network": "O envio falhou. Verifique sua conexão e tente novamente.",
+  "shared.upload.cancelled": "Envio cancelado."
 }

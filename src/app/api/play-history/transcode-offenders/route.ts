@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { getTranscodeOffenders } from "@/lib/play-history";
-import { parseActivityDays } from "@/lib/activity-days";
+import { parseActivityDays, parseActivitySourceMediaType } from "@/lib/activity-days";
 
 export const dynamic = "force-dynamic";
 
@@ -15,15 +15,9 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, _sessi
   // Clamp identically to /api/play-history/stats so an unbounded/negative
   // window can't scan or invert the whole table.
   const days = parseActivityDays(params.get("days"));
-  // Whitelist BEFORE these reach getTranscodeOffenders: the cache key is built
-  // from the raw strings while the SQL filter honours only these values, so an
-  // unrecognised one ran both uncached aggregate scans under a key nothing would
-  // ever reuse — and evicted real entries from the shared 500-key activity cache
-  // on its way out. Same two-branch check as /api/play-history/stats.
-  const rawSource = params.get("source");
-  const source = rawSource === "plex" || rawSource === "jellyfin" ? rawSource : undefined;
-  const rawMediaType = params.get("mediaType");
-  const mediaType = rawMediaType === "MOVIE" || rawMediaType === "TV" ? rawMediaType : undefined;
+  // Whitelisted BEFORE these reach getTranscodeOffenders, whose cache key is
+  // built from them (see parseActivitySourceMediaType).
+  const { source, mediaType } = parseActivitySourceMediaType(params);
 
   const offenders = await getTranscodeOffenders({ days, source, mediaType });
   return NextResponse.json(offenders);

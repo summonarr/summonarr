@@ -119,6 +119,8 @@
   "browse.forYou.rebuild.failed": "Neuaufbau fehlgeschlagen (HTTP {status})",
   "browse.forYou.rebuild.done_one": "{updated} von {count} Regal neu aufgebaut",
   "browse.forYou.rebuild.done_other": "{updated} von {count} Regalen neu aufgebaut",
+  "browse.forYou.rebuild.partial_one": "{updated} von {count} Regal neu aufgebaut, {failed} fehlgeschlagen",
+  "browse.forYou.rebuild.partial_other": "{updated} von {count} Regalen neu aufgebaut, {failed} fehlgeschlagen",
   "browse.forYou.rebuild.label": "Vorschläge neu aufbauen",
   "browse.forYou.rebuild.labelWait": "Vorschläge neu aufbauen – {seconds} s warten",
   "browse.forYou.rebuild.wait": "{seconds} s warten",

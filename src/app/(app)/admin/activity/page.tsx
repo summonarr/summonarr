@@ -5,7 +5,16 @@ import { prisma } from "@/lib/prisma";
 import { indexPlexRowsByKey } from "@/lib/plex-dedupe";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
-import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, getTranscodeOffenders, appendPlayHistoryFilter, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
+import {
+  getPlayHistoryStats,
+  getMostRewatched,
+  getActivityCalendar,
+  getTranscodeOffenders,
+  getWatchTimeLeaderboard,
+  getBusiestDay,
+  isPlayHistoryEnabled,
+  isSourceEnabled,
+} from "@/lib/play-history";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { Activity } from "@/components/icons";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
@@ -22,20 +31,25 @@ import { ActivityCalendar } from "@/components/admin/activity-calendar";
 import { TranscodePressure } from "@/components/admin/transcode-pressure";
 import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
 import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
-import { posterUrl } from "@/lib/tmdb-types";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import {
   addTitleResolutions,
   collectUnmappedPairs,
   lookupTitleResolution,
+  sessionBackfill,
   titleWhereDisjuncts,
   toActivityMediaType,
   type TitleResolveMap,
+  type UnmappedTitlePair,
 } from "@/lib/activity-title-resolve";
 import { requireFeature, getFeatureFlags } from "@/lib/features";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
-import { parseActivityDays } from "@/lib/activity-days";
+import { firstParam, parseActivityFilters, type PageParam } from "@/lib/activity-days";
+import { RECENT_PLAYS_PAGE_SIZE } from "@/lib/activity-constants";
+import { zoneShortLabel, zonedTodayIso } from "@/lib/stats-time-zone";
+import { Prisma, type ActiveSession } from "@/generated/prisma";
+import type { ReactNode } from "react";
 
 export const dynamic = "force-dynamic";
 
@@ -67,6 +81,29 @@ function shortDay(day: string, locale: string): string {
   });
 }
 
+// The newest resolved play per (title, mediaType) pair, for the display-only
+// title fallback. DISTINCT ON keeps one row per pair in Postgres: Prisma's
+// `distinct` (no native distinct here) fetched EVERY matching play and
+// de-duplicated in memory, so a long-running series sent back each episode.
+// One Prisma.sql value, never a tagged template with a fragment (guardrail 23a).
+async function latestResolvedByTitle(
+  pairs: readonly UnmappedTitlePair[],
+): Promise<{ title: string; tmdbId: number; mediaType: string | null }[]> {
+  // The pair scoping comes from titleWhereDisjuncts, so this query and the map
+  // keying (activity-title-resolve) can't drift apart.
+  const disjuncts = titleWhereDisjuncts(pairs).map((d) =>
+    d.mediaType
+      ? Prisma.sql`("title" = ${d.title} AND "mediaType" = CAST(${d.mediaType} AS "MediaType"))`
+      : Prisma.sql`"title" = ${d.title}`,
+  );
+  return prisma.$queryRaw<{ title: string; tmdbId: number; mediaType: string | null }[]>(Prisma.sql`
+    SELECT DISTINCT ON ("title", "mediaType") "title", "tmdbId", "mediaType"::text AS "mediaType"
+    FROM "PlayHistory"
+    WHERE "tmdbId" IS NOT NULL AND (${Prisma.join(disjuncts, " OR ")})
+    ORDER BY "title", "mediaType", "startedAt" DESC
+  `);
+}
+
 // Catalog keys (Mon-first), translated at render.
 const HEATMAP_DAY_KEYS = [
   "adminActivity.weekday.mon",
@@ -81,21 +118,23 @@ const HEATMAP_DAY_KEYS = [
 export default async function ActivityPage({
   searchParams,
 }: {
+  // A repeated key arrives as an array; the parsers below take its first value.
   searchParams: Promise<{
-    days?: string;
-    source?: string;
-    mediaType?: string;
-    tab?: string;
-    from?: string;
-    to?: string;
-    watched?: string;
+    days?: PageParam;
+    source?: PageParam;
+    mediaType?: PageParam;
+    tab?: PageParam;
+    from?: PageParam;
+    to?: PageParam;
+    watched?: PageParam;
   }>;
 }) {
   await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const featureFlags = await getFeatureFlags();
+  // Read before any data: a section the page won't render runs no query.
+  const [featureFlags, phEnabled] = await Promise.all([getFeatureFlags(), isPlayHistoryEnabled()]);
   const showActiveSessions   = featureFlags["feature.behavior.activeSessions"] !== false;
   const showActivityCalendar = featureFlags["feature.behavior.activityCalendar"] !== false;
 
@@ -106,7 +145,7 @@ export default async function ActivityPage({
   const dec1 = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
   const hoursSuffix = t("adminActivity.common.hoursSuffix");
 
-  const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, tab, from: fromParam, to: toParam, watched: watchedParam } = await searchParams;
+  const sp = await searchParams;
 
   // The History tab moved to its own route segment (history/page.tsx) so it
   // gets a table-shaped loading.tsx instead of flashing this page's KPI/chart
@@ -114,139 +153,113 @@ export default async function ActivityPage({
   // the recent-plays "View history", the play-detail back link, the
   // delete-play redirect — still land here and are forwarded with every filter
   // they carried.
-  if (tab === "history") {
+  if (firstParam(sp.tab) === "history") {
     const forward = new URLSearchParams();
+    // One value per key: a repeated one used to be joined into "a,b".
     const carried: Record<string, string | undefined> = {
-      days: daysParam,
-      source: sourceParam,
-      mediaType: mediaTypeParam,
-      from: fromParam,
-      to: toParam,
-      watched: watchedParam,
+      days: firstParam(sp.days),
+      source: firstParam(sp.source),
+      mediaType: firstParam(sp.mediaType),
+      from: firstParam(sp.from),
+      to: firstParam(sp.to),
+      watched: firstParam(sp.watched),
     };
     for (const [k, v] of Object.entries(carried)) if (v) forward.set(k, v);
     const qs = forward.toString();
     redirect(`/admin/activity/history${qs ? `?${qs}` : ""}`);
   }
 
-  const days = parseActivityDays(daysParam);
-  const source = sourceParam && ["plex", "jellyfin"].includes(sourceParam) ? sourceParam : undefined;
-  const mediaType = mediaTypeParam && ["MOVIE", "TV"].includes(mediaTypeParam) ? mediaTypeParam : undefined;
+  const { days, source, mediaType } = parseActivityFilters(sp);
+  const filters = { days, source, mediaType };
 
   // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
   const periodCutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const prismaWhere: Record<string, unknown> = { startedAt: { gte: periodCutoff } };
-  if (source) prismaWhere.source = source;
-  if (mediaType) prismaWhere.mediaType = mediaType as "MOVIE" | "TV";
+  const prismaWhere: Prisma.PlayHistoryWhereInput = {
+    startedAt: { gte: periodCutoff },
+    ...(source ? { source } : {}),
+    ...(mediaType ? { mediaType } : {}),
+  };
 
-  // Only the window-function leaderboard and the peak-day pick remain inline —
-  // genuinely unique to this page; the rest comes from getPlayHistoryStats.
-  const fp = appendPlayHistoryFilter([periodCutoff], { source, mediaType });
-  const fpJoin = appendPlayHistoryFilter([periodCutoff], { source, mediaType, tableAlias: "p" });
+  // Every aggregate, started now so it overlaps the now-playing work below, and
+  // only when play history is recorded: with tracking off the page renders an
+  // EmptyState instead of these sections. The calendar is skipped when hidden.
+  // The leaderboard and busiest day are memoized in play-history.ts like the
+  // rest (guardrail 19b). The no-op catch only marks the promise handled while
+  // the session work runs first; the await below still rethrows a failure.
+  const aggregates = phEnabled
+    ? Promise.all([
+        getPlayHistoryStats(filters),
+        getMostRewatched(filters, 10),
+        showActivityCalendar ? getActivityCalendar(source, mediaType) : Promise.resolve([]),
+        getTranscodeOffenders(filters),
+        getWatchTimeLeaderboard(filters),
+        getBusiestDay(filters),
+        prisma.playHistory.findMany({
+          where: prismaWhere,
+          // This seeds page 1; `ActivityRecentPlays` loads page 2+ from
+          // /api/play-history (ungrouped), whose query orders
+          // `ORDER BY startedAt DESC, id DESC`. The `id` tiebreak — and its DESC
+          // direction — must match so both walk ONE total order: same-poll
+          // sessions share a stamped startedAt, and a tie straddling the page-1/2
+          // boundary would otherwise repeat one row and silently skip the other.
+          // The page size is shared with the card's own page-N requests.
+          orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+          take: RECENT_PLAYS_PAGE_SIZE,
+          include: {
+            mediaServerUser: {
+              select: { username: true, source: true, thumbUrl: true },
+            },
+          },
+        }),
+      ])
+    : null;
+  aggregates?.catch(() => {});
+  // The rewatched posters resolve as soon as their list does, overlapping the
+  // session work and the reads below; awaited where the value is consumed.
+  const rewatchedPostersPromise = aggregates?.then(([, mostRewatched]) => resolvePosterMap(mostRewatched.slice(0, 6)));
+  rewatchedPostersPromise?.catch(() => {});
 
   // Which Plex servers exist has to be known BEFORE the batch below, because it
   // determines which Setting keys the reachability read asks for. One extra
   // round-trip (the registry is a single Setting row) rather than widening the
-  // query to `startsWith: "plex"`, which would drag every instance's admin token
-  // through the decryption extension just to render a status chip.
-  const plexInstances = await getMediaInstances("plex");
+  // query to `startsWith: "plex"`. The admin tokens are tested for PRESENCE
+  // only, by a key-only read: selecting `value` sent every instance's token
+  // through the decryption extension just to render a status chip (guardrail
+  // 7a). Now playing hidden ⇒ nothing here is read.
+  const plexInstances = showActiveSessions ? await getMediaInstances("plex") : [];
   const plexStatusKeys = plexInstances.flatMap((i) => [
     plexSettingKey(i.slug, "ServerReachable"),
     plexSettingKey(i.slug, "ServerUrl"),
-    plexSettingKey(i.slug, "AdminToken"),
   ]);
+  const plexTokenKeys = plexInstances.map((i) => plexSettingKey(i.slug, "AdminToken"));
 
-  const [
-    stats,
-    activeSessions,
-    recentPlays,
-    mostRewatched,
-    calendarData,
-    transcodeOffenders,
-    plexReachableRows,
-    phEnabled,
-    plexSourceEnabled,
-    watchTimeLeaderboard,
-    mostActiveDay,
-  ] = await Promise.all([
-    getPlayHistoryStats({ days, source, mediaType }),
-    prisma.activeSession.findMany({
-      ...(source || mediaType
-        ? { where: { ...(source ? { source } : {}), ...(mediaType ? { mediaType } : {}) } }
-        : {}),
-      // Match emitActiveSessionsSnapshot's deterministic ordering so the SSR
-      // list and the first live SSE push agree (no reorder flash on connect).
-      // `id` (immutable PK) breaks the common startedAt ties.
-      orderBy: [{ startedAt: "desc" }, { id: "asc" }],
-    }),
-    prisma.playHistory.findMany({
-      where: prismaWhere,
-      // This seeds page 1; `ActivityRecentPlays` loads page 2+ from
-      // /api/play-history (ungrouped), whose query orders
-      // `ORDER BY startedAt DESC, id DESC`. The `id` tiebreak — and its DESC
-      // direction — must match so both walk ONE total order: same-poll
-      // sessions share a stamped startedAt, and a tie straddling the page-1/2
-      // boundary would otherwise repeat one row and silently skip the other.
-      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
-      take: 20,
-      include: {
-        mediaServerUser: {
-          select: { username: true, source: true, thumbUrl: true },
-        },
-      },
-    }),
-    getMostRewatched({ days, source, mediaType }, 10),
-    getActivityCalendar(source, mediaType),
-    getTranscodeOffenders({ days, source, mediaType }),
-    prisma.setting.findMany({
-      where: { key: { in: plexStatusKeys } },
-      select: { key: true, value: true },
-    }),
-    isPlayHistoryEnabled(),
-    isSourceEnabled("plex"),
-    prisma.$queryRawUnsafe<
-      { id: string; username: string; source: string; hours: number | null; plays: bigint }[]
-    >(
-      // `plays` is computed HERE, per row, with the same `watched = true` rule as
-      // getPlayHistoryStats' topUsers. Looking it up from topUsers instead read 0
-      // for anyone outside the per-source top 10 by PLAY COUNT — exactly the
-      // few-long-plays viewer a watch-time leaderboard surfaces ("42h · 0 plays").
-      `WITH user_hours AS (
-         SELECT m."id", m."username", m."source", (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours,
-                COUNT(*) FILTER (WHERE p."watched" = true)::bigint AS plays
-         FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
-         WHERE p."startedAt" >= $1${fpJoin.sql}
-         GROUP BY m."id", m."username", m."source"
-       ), ranked AS (
-         SELECT *, ROW_NUMBER() OVER (PARTITION BY "source" ORDER BY "hours" DESC) AS rn
-         FROM user_hours
-       )
-       SELECT "id", "username", "source", "hours", "plays"
-       FROM ranked
-       WHERE rn <= 10
-       ORDER BY "hours" DESC`,
-      ...fpJoin.params,
-    ),
-    prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
-      // `watched = true` is NOT optional: the "Plays per day" chart this label sits on
-      // is built from getPlayHistoryStats' wwhere, which filters watched plays. Counting
-      // every row here meant the stated busiest day could be a day the chart shows as a
-      // trough — a day of many abandoned starts outranking a day of real viewing.
-      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "startedAt" >= $1 AND "watched" = true${fp.sql}
-       GROUP BY day ORDER BY count DESC LIMIT 1`,
-      ...fp.params,
-    ),
+  const [activeSessions, plexReachableRows, plexTokenRows, plexSourceEnabled] = await Promise.all([
+    showActiveSessions
+      ? prisma.activeSession.findMany({
+          ...(source || mediaType
+            ? { where: { ...(source ? { source } : {}), ...(mediaType ? { mediaType } : {}) } }
+            : {}),
+          // Match emitActiveSessionsSnapshot's deterministic ordering so the SSR
+          // list and the first live SSE push agree (no reorder flash on connect).
+          // `id` (immutable PK) breaks the common startedAt ties.
+          orderBy: [{ startedAt: "desc" }, { id: "asc" }],
+        })
+      : Promise.resolve([] as ActiveSession[]),
+    plexStatusKeys.length > 0
+      ? prisma.setting.findMany({
+          where: { key: { in: plexStatusKeys } },
+          select: { key: true, value: true },
+        })
+      : Promise.resolve([] as { key: string; value: string }[]),
+    plexTokenKeys.length > 0
+      ? prisma.setting.findMany({
+          where: { key: { in: plexTokenKeys }, NOT: { value: "" } },
+          select: { key: true },
+        })
+      : Promise.resolve([] as { key: string }[]),
+    showActiveSessions ? isSourceEnabled("plex") : Promise.resolve(false),
   ]);
-
-  // Start the rewatched-poster resolution now so it overlaps the tmdb fallback
-  // chain and poster-map reads below; awaited where the value is consumed. The
-  // no-op catch only marks the promise handled if an intermediate await throws
-  // first — the await below still rethrows a resolvePosterMap failure.
-  const rewatchedSlice = mostRewatched.slice(0, 6);
-  const rewatchedPostersPromise = resolvePosterMap(rewatchedSlice);
-  rewatchedPostersPromise.catch(() => {});
 
   // Parse the saved Plex reachability snapshot (JSON written by
   // plex-events.persistReachability). A malformed row falls back to null
@@ -257,10 +270,11 @@ export default async function ActivityPage({
   // borrowing the default server's answer, and a configured one that goes down
   // gets its own "unreachable" chip.
   const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
+  const plexTokenSet = new Set(plexTokenRows.map((r) => r.key));
   const plexReachability = plexInstances.map((inst) => {
     const configured =
       !!plexSettings.get(plexSettingKey(inst.slug, "ServerUrl")) &&
-      !!plexSettings.get(plexSettingKey(inst.slug, "AdminToken"));
+      plexTokenSet.has(plexSettingKey(inst.slug, "AdminToken"));
     // Only trust the flag when the poller that maintains it is running: it is
     // written by the 5s poller (true on getPlexSessions success, false on throw)
     // plus the SSE connect-time probe, which run only when play-history + the
@@ -283,18 +297,28 @@ export default async function ActivityPage({
     return { instance: inst.slug, name, reachable };
   });
 
-  const resolvedTmdb: Record<string, { tmdbId: number; mediaType: string }> = {};
+  // The item-level answers carry the matched row's own type, null when the
+  // history row had none (no longer guessed as "TV").
+  const resolvedTmdb: Record<string, { tmdbId: number; mediaType: string | null }> = {};
   const titleResolved: TitleResolveMap = {};
-  const sessionsNeedingTmdb = activeSessions.filter((s: typeof activeSessions[0]) => s.tmdbId == null);
+  const sessionsNeedingTmdb = activeSessions.filter((s) => s.tmdbId == null);
 
   if (sessionsNeedingTmdb.length > 0) {
-    const sourceItemIds = sessionsNeedingTmdb
-      .filter((s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId)
-      .map((s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId!);
+    const withItem = sessionsNeedingTmdb.filter(
+      (s): s is typeof s & { sourceItemId: string } => !!s.sourceItemId,
+    );
+    // Per source, so the [source, sourceItemId, …] index serves the lookup —
+    // the id alone matches no index's leading column.
+    const itemsBySource = (["plex", "jellyfin"] as const)
+      .map((src) => ({
+        source: src,
+        sourceItemId: { in: withItem.filter((s) => s.source === src).map((s) => s.sourceItemId) },
+      }))
+      .filter((arm) => arm.sourceItemId.in.length > 0);
 
-    if (sourceItemIds.length > 0) {
+    if (itemsBySource.length > 0) {
       const historyMatches = await prisma.playHistory.findMany({
-        where: { sourceItemId: { in: sourceItemIds }, tmdbId: { not: null } },
+        where: { OR: itemsBySource, tmdbId: { not: null } },
         // distinct + select BOTH carry serverInstance: a sourceItemId is issued by
         // one server and two servers reuse the same ids, so distinct on the id
         // alone collapses two servers rows into one and resolves the wrong tmdbId.
@@ -304,31 +328,31 @@ export default async function ActivityPage({
       });
       for (const h of historyMatches) {
         if (h.sourceItemId && h.tmdbId != null) {
-          resolvedTmdb[`item:${h.serverInstance}:${h.sourceItemId}`] = { tmdbId: h.tmdbId, mediaType: h.mediaType ?? "TV" };
+          resolvedTmdb[`item:${h.serverInstance}:${h.sourceItemId}`] = { tmdbId: h.tmdbId, mediaType: h.mediaType };
         }
       }
     }
 
-    const stillNeedLibrary = sessionsNeedingTmdb.filter(
-      (s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId && !resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`],
+    const stillNeedLibrary = withItem.filter(
+      (s) => !resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`],
     );
     if (stillNeedLibrary.length > 0) {
       // Both ratingKey columns, for the same reason (guardrail 37c).
       const plexPairs = stillNeedLibrary
-        .filter((s: typeof stillNeedLibrary[0]) => s.source === "plex")
-        .flatMap((s: typeof stillNeedLibrary[0]) => [
-          { plexRatingKey: s.sourceItemId!, serverInstance: s.serverInstance },
-          { plexRatingKeys: { has: s.sourceItemId! }, serverInstance: s.serverInstance },
+        .filter((s) => s.source === "plex")
+        .flatMap((s) => [
+          { plexRatingKey: s.sourceItemId, serverInstance: s.serverInstance },
+          { plexRatingKeys: { has: s.sourceItemId }, serverInstance: s.serverInstance },
         ]);
       // Both id columns (guardrail 37): a title in two Jellyfin libraries has an
       // id per copy but only one is the stored `jellyfinItemId`, so a session on
       // the other copy never resolved here. Rows predating `jellyfinItemIds` are
       // `[]`, so the legacy branch stays.
       const jellyfinPairs = stillNeedLibrary
-        .filter((s: typeof stillNeedLibrary[0]) => s.source === "jellyfin")
-        .flatMap((s: typeof stillNeedLibrary[0]) => [
-          { jellyfinItemId: s.sourceItemId!, serverInstance: s.serverInstance },
-          { jellyfinItemIds: { has: s.sourceItemId! }, serverInstance: s.serverInstance },
+        .filter((s) => s.source === "jellyfin")
+        .flatMap((s) => [
+          { jellyfinItemId: s.sourceItemId, serverInstance: s.serverInstance },
+          { jellyfinItemIds: { has: s.sourceItemId }, serverInstance: s.serverInstance },
         ]);
       const [plexItems, jellyfinItems] = await Promise.all([
         plexPairs.length > 0
@@ -369,99 +393,80 @@ export default async function ActivityPage({
     }
 
     const stillNeedTitle = sessionsNeedingTmdb.filter(
-      (s: typeof sessionsNeedingTmdb[0]) => !(s.sourceItemId && resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`]),
+      (s) => !(s.sourceItemId && resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`]),
     );
     if (stillNeedTitle.length > 0) {
       // Keyed on (title, mediaType) through activity-title-resolve, never the
       // bare title: a TV session titled "Fargo" must not pick up the MOVIE
-      // "Fargo"'s tmdbId, because the backfill below PERSISTS the answer.
+      // "Fargo"'s tmdbId. Display-only: a title match is never persisted
+      // (sessionBackfill below).
       const titlePairs = collectUnmappedPairs(stillNeedTitle);
       if (titlePairs.length > 0) {
-        const titleMatches = await prisma.playHistory.findMany({
-          where: {
-            tmdbId: { not: null },
-            OR: titleWhereDisjuncts(titlePairs),
-          },
-          distinct: ["title", "mediaType"],
-          orderBy: { startedAt: "desc" },
-          select: { title: true, tmdbId: true, mediaType: true },
-        });
-        addTitleResolutions(titleResolved, titleMatches);
+        addTitleResolutions(titleResolved, await latestResolvedByTitle(titlePairs));
       }
     }
   }
 
-  const effectiveSessions = activeSessions.map((s: typeof activeSessions[0]) => {
-    if (s.tmdbId != null) return { ...s, effectiveTmdbId: s.tmdbId, effectiveMediaType: s.mediaType };
+  const effectiveSessions = activeSessions.map((s) => {
+    if (s.tmdbId != null) return { ...s, effectiveTmdbId: s.tmdbId, effectiveMediaType: s.mediaType, backfill: null };
     // The `item:` key is serverInstance-scoped — a sourceItemId is server-local, so two
     // servers reuse the same ids. EVERY write above uses `item:<instance>:<id>`; reading
     // a bare `item:<id>` here matched nothing at all, so every session that the lookup
     // chain had correctly resolved fell through to the title fallback on the next line.
-    // That is worse than the collision it replaced: the title fallback matches across
-    // media types, and its answer is then PERSISTED to ActiveSession by the backfill
-    // below — so a wrong id became durable.
     const byItem = s.sourceItemId ? resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`] : undefined;
-    if (byItem) return { ...s, effectiveTmdbId: byItem.tmdbId, effectiveMediaType: byItem.mediaType };
+    if (byItem) {
+      return {
+        ...s,
+        effectiveTmdbId: byItem.tmdbId,
+        effectiveMediaType: byItem.mediaType ?? s.mediaType,
+        backfill: sessionBackfill(s.mediaType, { ...byItem, via: "item" }),
+      };
+    }
     // Title fallback: matched on (title, mediaType), and the session's own known
     // type is never overwritten by the resolution (activity-title-resolve rule).
+    // It feeds the poster and the link only — never the backfill.
     const byTitle = lookupTitleResolution(titleResolved, s.title, s.mediaType);
     return {
       ...s,
       effectiveTmdbId: byTitle?.tmdbId ?? null,
       effectiveMediaType: toActivityMediaType(s.mediaType) ?? byTitle?.mediaType ?? s.mediaType,
+      backfill: null,
     };
   });
 
   const sessionsToBackfill = effectiveSessions.filter(
-    (s: typeof effectiveSessions[0]) => s.tmdbId == null && s.effectiveTmdbId != null,
+    (s): s is typeof s & { backfill: NonNullable<typeof s.backfill> } => s.backfill !== null,
   );
   // INTENTIONAL fire-and-forget: persist the resolved tmdbId so future renders
   // skip the lookup chain. NOT awaited — a cache warm, not part of the response,
   // must not delay the page. Safe because Summonarr is a single long-lived Node
   // server (not serverless/edge), so the promise survives past render. Do NOT
   // "fix" by awaiting or moving into the request path — see CLAUDE.md guardrail
-  // 17. Errors swallowed by design (next sync re-resolves).
+  // 17. Errors swallowed by design (next sync re-resolves). Item-level matches
+  // only (sessionBackfill): the finalize copies this into PlayHistory, and the
+  // poller never overwrites a stored id it can't resolve itself.
   if (sessionsToBackfill.length > 0) {
     void Promise.all(
-      sessionsToBackfill.map((s: typeof sessionsToBackfill[0]) =>
+      sessionsToBackfill.map((s) =>
         prisma.activeSession.update({
           where: { id: s.id },
-          data: { tmdbId: s.effectiveTmdbId, mediaType: s.effectiveMediaType },
+          data: { tmdbId: s.backfill.tmdbId, mediaType: s.backfill.mediaType },
         }).catch(() => {}),
       ),
     ).catch(() => {});
   }
 
-  // Keyed by the FULL cache key, not the bare tmdbId: a movie and a series can
-  // share a TMDB id, so a bare-id map with a first-row-wins guard rendered
-  // whichever of the two the unordered findMany happened to return first.
-  const posterMap: Record<string, string | null> = {};
-  const sessionTmdbIds = [...new Set(effectiveSessions.map((s: typeof effectiveSessions[0]) => s.effectiveTmdbId).filter((id): id is number => id != null))];
-  if (sessionTmdbIds.length > 0) {
-    const cacheKeys = sessionTmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
-    const cacheRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: cacheKeys } },
-      select: { key: true, data: true },
-    });
-    for (const row of cacheRows) {
-      try {
-        const parsed = JSON.parse(row.data) as { posterPath?: string | null };
-        if (parsed.posterPath && !posterMap[row.key]) {
-          posterMap[row.key] = posterUrl(parsed.posterPath, "w342");
-        }
-      } catch { }
-    }
-  }
-  // Prefer the session's own media type; fall back to the other so a session
-  // whose type has no cached details still gets the poster it used to get.
-  const posterFor = (tmdbId: number | null, mediaType: string | null): string | null => {
-    if (tmdbId == null) return null;
-    const own = mediaType === "TV" ? "tv" : "movie";
-    const other = own === "tv" ? "movie" : "tv";
-    return posterMap[`${own}:${tmdbId}:details`] ?? posterMap[`${other}:${tmdbId}:details`] ?? null;
-  };
+  // Through the shared poster lookup (TmdbMediaCore, then the :details cache),
+  // keyed by (tmdbId, mediaType): TMDB numbers movies and TV separately, and a
+  // type the session NAMES is never filled from the other medium's art — only
+  // an unknown type consults both (poster-cache.ts).
+  const sessionPosters = await resolvePosterMap(
+    effectiveSessions.map((s) => ({ tmdbId: s.effectiveTmdbId, mediaType: toActivityMediaType(s.effectiveMediaType) })),
+  );
+  const posterFor = (tmdbId: number | null, mediaType: string | null): string | null =>
+    tmdbId == null ? null : sessionPosters[posterPathKey(tmdbId, toActivityMediaType(mediaType))] ?? null;
 
-  const serializedSessions = effectiveSessions.map((s: typeof effectiveSessions[0]) => ({
+  const serializedSessions = effectiveSessions.map((s) => ({
     id: s.id,
     source: s.source,
     state: s.state,
@@ -501,7 +506,51 @@ export default async function ActivityPage({
     posterUrl: posterFor(s.effectiveTmdbId, s.effectiveMediaType),
   }));
 
-  const serializedRecentPlays = recentPlays.map((p: typeof recentPlays[0]) => ({
+  // Header, filter bar and Now playing render in every state; `body` is the rest.
+  const shell = (body: ReactNode) => (
+    <div className="ds-page-enter">
+      <ActivityLiveRefresher />
+      <PageHeader
+        title={t("adminActivity.title")}
+        subtitle={t("adminActivity.subtitle")}
+        right={<ActivityWarmButton />}
+      />
+
+      <ActivityFilterBar />
+
+      {showActiveSessions && (
+        <ActivityNowPlaying
+          key={`np-${source ?? ""}-${mediaType ?? ""}`}
+          initialSessions={serializedSessions}
+          source={source}
+          mediaType={mediaType}
+          plexReachability={plexReachability}
+        />
+      )}
+
+      {body}
+    </div>
+  );
+
+  if (!aggregates || !rewatchedPostersPromise) {
+    // Tracking off: every aggregate below would read as an all-zero quiet
+    // server with nothing saying why — and none of them was queried. Now
+    // playing stays above (the SSE feed is independent of play-history
+    // recording).
+    return shell(
+      <EmptyState
+        icon={Activity}
+        title={t("adminActivity.trackingOff.title")}
+        description={t("adminActivity.trackingOff.description")}
+        cta={{ href: "/settings?tab=media#play-history", label: t("adminActivity.trackingOff.cta") }}
+      />,
+    );
+  }
+
+  const [stats, mostRewatched, calendarData, transcodeOffenders, watchTimeLeaderboard, busiestDay, recentPlays] =
+    await aggregates;
+
+  const serializedRecentPlays = recentPlays.map((p) => ({
     id: p.id,
     source: p.source,
     // Which media server the play came from. "" for the default/only server
@@ -547,7 +596,8 @@ export default async function ActivityPage({
 
   const watchHoursNd = Math.round(stats.totalWatchTimeHours);
   const activeUsersNd = stats.uniqueViewers;
-  const busiestDay = mostActiveDay[0];
+  // Every day and hour on this page is a bucket in the statistics zone.
+  const zoneLabel = zoneShortLabel(stats.timeZone);
 
   const kpis: Kpi[] = [
     {
@@ -578,8 +628,10 @@ export default async function ActivityPage({
     {
       label: t("adminActivity.kpi.busiestDay"),
       value: busiestDay?.day ? fmtDay(busiestDay.day) : "—",
+      // A day in the statistics zone, like every day bucket on the page (the
+      // charts carry the same zone tag).
       sub: busiestDay?.day
-        ? t("adminActivity.common.playsFormatted", { count: Number(busiestDay.count), n: Number(busiestDay.count).toLocaleString(locale) })
+        ? `${t("adminActivity.common.playsFormatted", { count: busiestDay.count, n: busiestDay.count.toLocaleString(locale) })} · ${zoneLabel}`
         : undefined,
     },
     {
@@ -618,7 +670,10 @@ export default async function ActivityPage({
     peakVal > 0
       ? t("adminActivity.overview.heatmapPeak", {
           day: t(HEATMAP_DAY_KEYS[peakRow]),
-          hour: `${peakHour}:00`,
+          // The heatmap buckets by the statistics zone's hour and names the
+          // zone on its axis; the sentence under it does too, in the grid's own
+          // HH:00 form.
+          hour: `${String(peakHour).padStart(2, "0")}:00 ${zoneLabel}`,
           count: peakVal,
           n: peakVal.toLocaleString(locale),
         })
@@ -669,7 +724,7 @@ export default async function ActivityPage({
     }
   }
   const peakSub = busiestDay?.day
-    ? t("adminActivity.overview.peakOn", { n: Number(busiestDay.count).toLocaleString(locale), day: fmtDay(busiestDay.day) })
+    ? t("adminActivity.overview.peakOn", { n: busiestDay.count.toLocaleString(locale), day: `${fmtDay(busiestDay.day)} ${zoneLabel}` })
     : "";
 
   // calendarData is GROUP BY date over the last 365 days, so every row already
@@ -683,16 +738,17 @@ export default async function ActivityPage({
     if (d.count > 0) activeDays++;
   }
 
-  const leaderUsers = watchTimeLeaderboard.slice(0, 8).map((u, i) => ({
+  // One overall ranking of WATCH_TIME_LEADERBOARD_SIZE (8), ties broken by id.
+  const leaderUsers = watchTimeLeaderboard.map((u, i) => ({
     id: u.id,
     username: u.username,
     source: u.source,
-    hours: u.hours ?? 0,
-    plays: Number(u.plays),
+    hours: u.hours,
+    plays: u.plays,
     rank: i + 1,
   }));
   const rewatchedPosters = await rewatchedPostersPromise;
-  const leaderRewatched = rewatchedSlice.map((m, i) => ({
+  const leaderRewatched = mostRewatched.slice(0, 6).map((m, i) => ({
     tmdbId: m.tmdbId,
     mediaType: m.mediaType,
     title: m.title,
@@ -702,85 +758,55 @@ export default async function ActivityPage({
     posterSrc: rewatchedPosters[posterPathKey(m.tmdbId, m.mediaType)] ?? null,
   }));
 
-  return (
-    <div className="ds-page-enter">
-      <ActivityLiveRefresher />
-      <PageHeader
-        title={t("adminActivity.title")}
-        subtitle={t("adminActivity.subtitle")}
-        right={<ActivityWarmButton />}
+  return shell(
+    <>
+      <KpiStrip kpis={kpis} />
+
+      <AnalyticsRow
+        playsByDay={stats.playsByDay.map((d) => d.count)}
+        playsByDayLabels={stats.playsByDay.map((d) => fmtDay(d.day))}
+        heatmapMatrix={heatmapMatrix}
+        heatmapDetailBase={{ days, source, mediaType }}
+        timeZone={stats.timeZone}
+        streamMix={streamMix}
+        mediaMix={mediaMix}
+        days={days}
+        peakSub={peakSub}
+        axisLabels={axisLabels}
+        heatmapInsight={heatmapInsight}
       />
 
-      <ActivityFilterBar />
+      <Leaderboards
+        users={leaderUsers}
+        rewatched={leaderRewatched}
+        days={days}
+      />
 
-      {showActiveSessions && (
-        <ActivityNowPlaying
-          key={`np-${source ?? ""}-${mediaType ?? ""}`}
-          initialSessions={serializedSessions}
-          source={source}
-          mediaType={mediaType}
-          plexReachability={plexReachability}
-        />
+      <TranscodePressure data={transcodeOffenders} days={days} />
+
+      {showActivityCalendar && calendarData.length > 0 && (
+        <CalendarSection
+          activeDays={activeDays}
+          totalPlays={totalCalPlays}
+        >
+          <ActivityCalendar
+            data={calendarData}
+            // The statistics zone's today: the calendar's days are that zone's.
+            today={zonedTodayIso(new Date(), stats.timeZone)}
+            timeZone={stats.timeZone}
+            detailBase={{ source, mediaType, historyPath: "/admin/activity/history" }}
+          />
+        </CalendarSection>
       )}
 
-      {!phEnabled ? (
-        // Tracking off: every aggregate below would read as an all-zero quiet
-        // server with nothing saying why. Now playing stays above (the SSE feed
-        // is independent of play-history recording).
-        <EmptyState
-          icon={Activity}
-          title={t("adminActivity.trackingOff.title")}
-          description={t("adminActivity.trackingOff.description")}
-          cta={{ href: "/settings?tab=media#play-history", label: t("adminActivity.trackingOff.cta") }}
-        />
-      ) : (
-        <>
-          <KpiStrip kpis={kpis} />
-
-          <AnalyticsRow
-            playsByDay={stats.playsByDay.map((d) => d.count)}
-            playsByDayLabels={stats.playsByDay.map((d) => fmtDay(d.day))}
-            heatmapMatrix={heatmapMatrix}
-            heatmapDetailBase={{ days, source, mediaType }}
-            streamMix={streamMix}
-            mediaMix={mediaMix}
-            days={days}
-            peakSub={peakSub}
-            axisLabels={axisLabels}
-            heatmapInsight={heatmapInsight}
-          />
-
-          <Leaderboards
-            users={leaderUsers}
-            rewatched={leaderRewatched}
-            days={days}
-          />
-
-          <TranscodePressure data={transcodeOffenders} days={days} />
-
-          {showActivityCalendar && calendarData.length > 0 && (
-            <CalendarSection
-              activeDays={activeDays}
-              totalPlays={totalCalPlays}
-            >
-              <ActivityCalendar
-                data={calendarData}
-                today={new Date().toISOString()}
-                detailBase={{ source, mediaType, historyPath: "/admin/activity/history" }}
-              />
-            </CalendarSection>
-          )}
-
-          <ActivityRecentPlays
-            key={`rp-${days}-${source ?? ""}-${mediaType ?? ""}`}
-            plays={serializedRecentPlays}
-            source={source}
-            mediaType={mediaType}
-            days={days}
-            startDateIso={periodCutoff.toISOString()}
-          />
-        </>
-      )}
-    </div>
+      <ActivityRecentPlays
+        key={`rp-${days}-${source ?? ""}-${mediaType ?? ""}`}
+        plays={serializedRecentPlays}
+        source={source}
+        mediaType={mediaType}
+        days={days}
+        startDateIso={periodCutoff.toISOString()}
+      />
+    </>,
   );
 }

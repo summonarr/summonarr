@@ -1,14 +1,13 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { setCache, getCacheStale, libraryDetailsTtl } from "./tmdb-cache";
+import { setCache, getCacheStale, libraryDetailsTtl, tmdbDetailsKey } from "./tmdb-cache";
 import { upsertTmdbMediaCore } from "./tmdb-core-sync";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { iterateLibrary, LIBRARY_PAGE_SIZE } from "./library-iterator";
 import type { LibraryItem } from "./library-iterator";
 import { tmdbAuth } from "./tmdb-auth";
 import type { TmdbMedia } from "./tmdb-types";
-import { extractHomeReleaseDates } from "./home-release-dates";
-import { buildStudioList } from "./studio-list";
+import { buildDetailsMedia, type TmdbDetailsBody } from "./tmdb";
 
 const CONCURRENCY = 5;
 const BATCH_DELAY_MS = 250;
@@ -41,104 +40,6 @@ const UNIFIED_RATINGS_FIELDS = [
   "traktRating", "letterboxdRating", "mdblistScore", "malRating",
   "rogerEbertRating", "releasedDigital",
 ] as const;
-
-interface RawSeason {
-  season_number: number;
-  episode_count: number;
-  air_date?: string | null;
-  poster_path?: string | null;
-  name?: string;
-  overview?: string;
-}
-
-interface RawProvider {
-  provider_id: number;
-  provider_name: string;
-  logo_path: string | null;
-}
-
-interface RawItem {
-  id: number;
-  title?: string;
-  name?: string;
-  original_title?: string;
-  original_name?: string;
-  overview?: string;
-  poster_path?: string | null;
-  backdrop_path?: string | null;
-  release_date?: string;
-  first_air_date?: string;
-  last_air_date?: string | null;
-  vote_average?: number;
-  vote_count?: number;
-  seasons?: RawSeason[];
-  videos?: { results?: { key: string; site: string; type: string; official: boolean }[] };
-  belongs_to_collection?: { id: number; name: string } | null;
-
-  runtime?: number;
-  episode_run_time?: number[];
-  status?: string;
-  type?: string;
-  in_production?: boolean;
-  tagline?: string;
-  imdb_id?: string;
-  homepage?: string | null;
-  budget?: number | null;
-  revenue?: number | null;
-  genres?: { id: number; name: string }[];
-  networks?: { id: number; name: string }[];
-  production_companies?: { id: number; name: string }[];
-  production_countries?: { iso_3166_1: string; name: string }[];
-  origin_country?: string[];
-  spoken_languages?: { iso_639_1: string; english_name?: string; name?: string }[];
-  original_language?: string;
-  number_of_seasons?: number;
-  number_of_episodes?: number;
-  next_episode_to_air?: { air_date?: string | null } | null;
-  keywords?: { keywords?: { id: number; name: string }[]; results?: { id: number; name: string }[] };
-  "watch/providers"?: { results?: Record<string, { flatrate?: RawProvider[]; rent?: RawProvider[]; buy?: RawProvider[] }> };
-  external_ids?: { imdb_id?: string | null; tvdb_id?: number | null };
-  release_dates?: { results?: { iso_3166_1: string; release_dates: { certification?: string; type?: number; release_date?: string }[] }[] };
-  content_ratings?: { results?: { iso_3166_1: string; rating?: string }[] };
-}
-
-let pwRegionNames: Intl.DisplayNames | null = null;
-let pwLanguageNames: Intl.DisplayNames | null = null;
-function pwRegion(code: string): string {
-  try { pwRegionNames ??= new Intl.DisplayNames(["en"], { type: "region" }); return pwRegionNames.of(code.toUpperCase()) ?? code; } catch { return code; }
-}
-function pwLanguage(code: string): string {
-  try { pwLanguageNames ??= new Intl.DisplayNames(["en"], { type: "language" }); return pwLanguageNames.of(code) ?? code; } catch { return code; }
-}
-function pwKeywords(raw?: RawItem["keywords"]): { id: number; name: string }[] | undefined {
-  const list = raw?.keywords ?? raw?.results;
-  if (!list?.length) return undefined;
-  return list.slice(0, 12).map((k) => ({ id: k.id, name: k.name }));
-}
-// Mirrors extractTrailerKey in tmdb.ts (not exported there): official YouTube
-// trailer first, then any trailer, then official teaser, then any teaser.
-function pwTrailerKey(videos?: RawItem["videos"]): string | null {
-  if (!videos?.results?.length) return null;
-  const trailers = videos.results.filter((v) => v.site === "YouTube" && v.type === "Trailer");
-  const teasers  = videos.results.filter((v) => v.site === "YouTube" && v.type === "Teaser");
-  const official = trailers.find((v) => v.official) ?? trailers[0] ?? teasers.find((v) => v.official) ?? teasers[0];
-  return official?.key ?? null;
-}
-function pwWatchProviders(raw?: RawItem["watch/providers"], region = "US"): TmdbMedia["watchProviders"] {
-  const r = raw?.results?.[region];
-  if (!r) return undefined;
-  const out: NonNullable<TmdbMedia["watchProviders"]> = [];
-  const seen = new Set<number>();
-  const add = (type: "stream" | "rent" | "buy", list?: RawProvider[]) => {
-    for (const p of list ?? []) {
-      if (seen.has(p.provider_id)) continue;
-      seen.add(p.provider_id);
-      out.push({ type, name: p.provider_name, logoPath: p.logo_path });
-    }
-  };
-  add("stream", r.flatrate); add("rent", r.rent); add("buy", r.buy);
-  return out.length ? out : undefined;
-}
 
 // Resolves `true` when TMDB gave a definitive answer (details stored, or a 404
 // tombstoned) and `false` when it didn't (SafeFetchError, non-404 non-2xx such
@@ -186,7 +87,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     if (res.status === 404) {
       // Tombstone the dead id so the triage skips it on later runs. Silent —
       // the title simply isn't on TMDB; noise here would flood every run.
-      await setCache(`${type}:${tmdbId}:details:missing`, { _notFound: true }, MISSING_TOMBSTONE_TTL);
+      await setCache(`${tmdbDetailsKey(type, tmdbId)}:missing`, { _notFound: true }, MISSING_TOMBSTONE_TTL);
       return true;
     }
     console.warn(`[prewarm] TMDB ${type}:${tmdbId} → HTTP ${res.status}`);
@@ -197,9 +98,9 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
   // throws a SyntaxError whose message renders non-printable leading bytes invisibly ("Unexpected
   // token '', \"\"..."), making the failure mode impossible to diagnose from the log alone.
   const bodyText = await res.text();
-  let raw: RawItem;
+  let raw: TmdbDetailsBody;
   try {
-    raw = JSON.parse(bodyText) as RawItem;
+    raw = JSON.parse(bodyText) as TmdbDetailsBody;
   } catch (err) {
     const head = bodyText.slice(0, 80);
     const hex = Buffer.from(bodyText.slice(0, 16), "utf-8").toString("hex");
@@ -211,60 +112,15 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     );
     return false;
   }
-  const rawDate = mediaType === "MOVIE" ? raw.release_date : raw.first_air_date;
-  // US certification, extracted the same way getMovieDetails/getTVDetails do.
-  const certification =
-    (mediaType === "MOVIE"
-      ? raw.release_dates?.results?.find((x) => x.iso_3166_1 === "US")
-          ?.release_dates.find((d) => d.certification)?.certification
-      : raw.content_ratings?.results?.find((x) => x.iso_3166_1 === "US")?.rating) || undefined;
 
-  const seasons = mediaType === "TV"
-    ? (raw.seasons ?? [])
-        .filter((s) => s.season_number > 0 && s.episode_count > 0)
-        .map((s) => ({
-          seasonNumber: s.season_number,
-          episodeCount: s.episode_count,
-          airDate: s.air_date ?? null,
-          posterPath: s.poster_path ?? null,
-          name: s.name ?? `Season ${s.season_number}`,
-          overview: s.overview ?? "",
-        }))
-    : undefined;
-
-  const title = (mediaType === "MOVIE" ? raw.title : raw.name) ?? "";
-  // null (not "Unknown") — the normalize writers (tmdb.ts) use null for a
-  // missing year, and both persist the same :details key / TmdbMediaCore row.
-  const releaseYear = rawDate ? rawDate.substring(0, 4) : null;
-  const originalTitle = mediaType === "MOVIE" ? raw.original_title : raw.original_name;
-  const studios = (mediaType === "TV" && raw.networks?.length ? raw.networks : raw.production_companies) ?? [];
-  const countries = raw.production_countries?.length
-    ? raw.production_countries.map((c) => c.name || pwRegion(c.iso_3166_1))
-    : (raw.origin_country?.map(pwRegion) ?? []);
-  // ISO codes beside the display names: the anime auto-route matches "JP"
-  // against these, and the normalize writers (tmdb.ts) store them under this
-  // same :details key — TV prefers origin_country (already ISO codes), movies
-  // take production_countries.
-  const countryCodes = mediaType === "TV" && raw.origin_country?.length
-    ? raw.origin_country
-    : (raw.production_countries?.length
-        ? raw.production_countries.map((c) => c.iso_3166_1)
-        : (raw.origin_country ?? []));
-  // Index-aligned with `countries` (normalizeMovie/normalizeTV store the same
-  // pairing as `productionCountryCodes`). Omitting it made every prewarm rewrite
-  // drop the codes localizedProductionCountry needs, so a non-English viewer got
-  // TMDB's English country name for library titles.
-  const productionCountryCodes = raw.production_countries?.length
-    ? raw.production_countries.map((c) => c.iso_3166_1)
-    : (raw.origin_country ?? []);
-  // Match the normalize shape (src/lib/tmdb.ts): `genres`/`keywords` = names (back-compat),
-  // `genreList`/`keywordList` = id+name. Both writers persist the same `:details` cache key.
-  const genreObjs = raw.genres?.map((g) => ({ id: g.id, name: g.name })) ?? [];
-  const keywordObjs = pwKeywords(raw.keywords) ?? [];
+  // The same builder getMovieDetails/getTVDetails write this key with, so the
+  // stored shape never depends on which writer filled it.
+  const media = buildDetailsMedia(raw, type);
+  const key = tmdbDetailsKey(type, tmdbId);
 
   // Carry-forward read (stale/expired-in-place rows still serve here; a row the
   // purge already deleted has nothing to carry). See UNIFIED_RATINGS_FIELDS.
-  const prior = (await getCacheStale<Partial<TmdbMedia>>(`${type}:${tmdbId}:details`)).value;
+  const prior = (await getCacheStale<Partial<TmdbMedia>>(key)).value;
   const carriedRatings: Record<string, unknown> = {};
   if (prior) {
     for (const f of UNIFIED_RATINGS_FIELDS) {
@@ -274,85 +130,15 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
       if (prior[f] !== undefined) carriedRatings[f] = prior[f];
     }
   }
-  const newTrailerKey = pwTrailerKey(raw.videos);
   // assignUnifiedRatings' guard, preserved across the rewrite: trailerUrl only
   // ever fills in when TMDB itself has no trailer.
-  if (!newTrailerKey && prior?.trailerUrl !== undefined) carriedRatings.trailerUrl = prior.trailerUrl;
+  if (!media.trailerKey && prior?.trailerUrl !== undefined) carriedRatings.trailerUrl = prior.trailerUrl;
+  // TMDB's external_ids answer first; `prior` is the fallback because a ratings
+  // hit can supply an id TMDB never had.
+  media.imdbId = media.imdbId ?? prior?.imdbId ?? null;
 
-  await setCache(`${type}:${tmdbId}:details`, {
-    ...carriedRatings,
-    id: raw.id,
-    mediaType: type,
-    title,
-    // `?? ""` (not null) — TmdbMedia.overview is a non-nullable string and the
-    // normalize writers use "", so the shared :details key keeps one nullability.
-    overview: raw.overview ?? "",
-    posterPath: raw.poster_path ?? null,
-    backdropPath: raw.backdrop_path ?? null,
-    releaseDate: rawDate ?? null,
-    releaseYear,
-    voteAverage: raw.vote_average ?? 0,
-    voteCount: raw.vote_count ?? 0,
-    ...(certification && { certification }),
-    // Same extraction as getMovieDetails — omitting it would erase the detail
-    // page's Release dates section on every prewarm rewrite (the cert-drop class).
-    ...(mediaType === "MOVIE" && (() => {
-      const home = extractHomeReleaseDates(raw.release_dates);
-      return { digitalReleaseDate: home.digital, physicalReleaseDate: home.physical };
-    })()),
-    ...(seasons !== undefined && { seasons }),
-    // trailerKey/collection mirror getMovieDetails/getTVDetails — omitting them
-    // made every prewarm refresh erase the trailer button and the collection
-    // row from library titles' detail pages (see the append_to_response note).
-    trailerKey: newTrailerKey,
-    ...(mediaType === "MOVIE" && raw.belongs_to_collection
-      ? { collectionId: raw.belongs_to_collection.id, collectionName: raw.belongs_to_collection.name }
-      : {}),
-
-    genres:          genreObjs.map((g) => g.name),
-    genreList:       genreObjs,
-    studios:         studios.map((c) => c.name),
-    studioList:      buildStudioList(mediaType, raw.networks, raw.production_companies),
-    tagline:         raw.tagline ?? null,
-    status:          raw.status ?? null,
-    // /tv carries no top-level imdb_id — it lives in the appended external_ids,
-    // so reading only raw.imdb_id nulled the id on every TV rewrite. `prior` is
-    // the last fallback because a ratings hit can supply one TMDB never had.
-    imdbId:          raw.external_ids?.imdb_id ?? raw.imdb_id ?? prior?.imdbId ?? null,
-    runtime:         raw.runtime ?? (raw.episode_run_time?.[0] ?? null),
-    numberOfSeasons: raw.number_of_seasons ?? null,
-    numberOfEpisodes: raw.number_of_episodes ?? null,
-
-    originalTitle:       originalTitle && originalTitle !== title ? originalTitle : null,
-    originalLanguage:    raw.original_language ?? null,
-    spokenLanguages:     raw.spoken_languages?.map((l) => l.english_name || l.name || pwLanguage(l.iso_639_1)) ?? [],
-    productionCountries: countries,
-    productionCountryCodes,
-    originCountryCodes:  countryCodes,
-    homepage:            raw.homepage || null,
-    budget:              raw.budget || null,
-    revenue:             raw.revenue || null,
-    keywords:            keywordObjs.map((k) => k.name),
-    keywordList:         keywordObjs,
-    watchProviders:      pwWatchProviders(raw["watch/providers"]) ?? [],
-    tvdbId:              raw.external_ids?.tvdb_id ?? null,
-    lastAirDate:         raw.last_air_date ?? null,
-    inProduction:        raw.in_production ?? null,
-    tvType:              raw.type ?? null,
-    nextEpisodeAirDate:  raw.next_episode_to_air?.air_date ?? null,
-  }, libraryDetailsTtl(rawDate));
-  await upsertTmdbMediaCore({
-    id: raw.id,
-    mediaType: type,
-    title,
-    overview: raw.overview ?? "",
-    posterPath: raw.poster_path ?? null,
-    backdropPath: raw.backdrop_path ?? null,
-    releaseDate: rawDate ?? null,
-    releaseYear,
-    voteAverage: raw.vote_average ?? 0,
-    ...(certification && { certification }),
-  });
+  await setCache(key, { ...carriedRatings, ...media }, libraryDetailsTtl(media.releaseDate));
+  await upsertTmdbMediaCore(media);
   return true;
 }
 
@@ -361,8 +147,7 @@ async function processPrewarmPage(
   stats: { fetched: number; backfilled: number; skipped: number; failed: number },
   signal?: AbortSignal,
 ): Promise<void> {
-  const cacheKey = (i: LibraryItem) =>
-    `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`;
+  const cacheKey = (i: LibraryItem) => tmdbDetailsKey(i.mediaType, i.tmdbId);
 
   const keys = page.map(cacheKey);
   const missingKey = (i: LibraryItem) => `${cacheKey(i)}:missing`;
@@ -498,10 +283,6 @@ export async function prewarmLibraryCache(opts: { signal?: AbortSignal } = {}): 
   // LIBRARY_PAGE_SIZE - 1 more fetches after the lock was released, which is
   // exactly the overshoot the per-item check above exists to prevent.
   if (!opts.signal?.aborted) await flushPage();
-
-  if (total === 0) {
-    return { total: 0, ...stats };
-  }
 
   return { total, ...stats };
 }

@@ -82,5 +82,6 @@
   "media.filter.certAny": "Qualquer classificação",
   "media.filter.certUpTo": "Até {rating}",
   "media.filter.studio": "Estúdio",
-  "media.filter.network": "Emissora"
+  "media.filter.network": "Emissora",
+  "media.filter.serviceChip": "Serviço {id}"
 }

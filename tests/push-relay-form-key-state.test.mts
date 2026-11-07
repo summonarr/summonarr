@@ -28,8 +28,11 @@ test("keyIsSet is React state seeded from the prop, not a frozen const", () => {
 
 test("a confirmed save re-derives keyIsSet from the value that was persisted", () => {
   // The update must sit inside the ok branch — a failed or rejected save must
-  // not flip the hint to a state the server never reached.
-  const okBranch = src.match(/if \(res\.ok && data\.ok !== false\) \{([\s\S]*?)\} else \{/);
+  // not flip the hint to a state the server never reached. The save goes
+  // through the shared settings helper, whose `ok` is a 2xx that says
+  // ok: true (tests/settings-save.test.mts).
+  assert.match(src, /const result = await save\(\{/);
+  const okBranch = src.match(/if \(result\.ok\) \{([\s\S]*?)\n {4}\}/);
   assert.ok(okBranch, "handleSave success branch not found");
   assert.match(okBranch[1], /setKeyIsSet\(relayKey\.length > 0\);/);
   // Exactly one writer: the success branch. No optimistic update on Remove.

@@ -1,14 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 
 interface QuotaFormProps {
@@ -20,40 +19,13 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
   const t = useT();
   const [limit, setLimit] = useState(initialLimit);
   const [period, setPeriod] = useState(initialPeriod || "week");
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  // The route's own reason (out-of-range limit, a 429 cooldown) — shown in
-  // place of the bare "Failed to save".
-  const [message, setMessage] = useState("");
-  // An earlier save's idle timer must not fire into a later save (it would
-  // re-enable Save mid-flight or hide the new result early).
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-  }, []);
+  // `message` is the route's own reason (out-of-range limit, a 429 cooldown),
+  // shown in place of the bare "Failed to save".
+  const { status, message, save, edited } = useSettingsSave();
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    setStatus("saving");
-    setMessage("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ quotaLimit: limit, quotaPeriod: period }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setStatus("ok");
-      } else {
-        setMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-      }
-    } catch {
-      setStatus("error");
-    }
-    // Only an "ok" fades; an error stays until the next edit or save.
-    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
+    await save({ quotaLimit: limit, quotaPeriod: period });
   }
 
   return (
@@ -66,7 +38,7 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
             type="number"
             min="0"
             value={limit}
-            onChange={(e) => { setLimit(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setLimit(e.target.value); edited(); }}
             placeholder="0"
             className="bg-zinc-800 border-zinc-700"
           />
@@ -78,7 +50,7 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
             id="quota-period"
             compact
             value={period}
-            onChange={(e) => { setPeriod(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setPeriod(e.target.value); edited(); }}
           >
             <option value="day">{t("settings.form.quota.perDay")}</option>
             <option value="week">{t("settings.form.quota.perWeek")}</option>

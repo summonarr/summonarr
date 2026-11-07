@@ -220,6 +220,18 @@ export async function loadDiscordRoleAccount(userId: string): Promise<DiscordRol
 
 const ROLE_SETTING_KEYS = ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"];
 
+// The roles Summonarr itself manages (the five configured ids), deduped: the only
+// ones the sync ever revokes. A role an operator granted by hand is never in it.
+function managedRoleIds(cfg: Record<string, string | undefined>): string[] {
+  return [...new Set([
+    cfg.discordLinkedRoleId,
+    cfg.discordPlexRoleId,
+    cfg.discordJellyfinRoleId,
+    cfg.discordAdminRoleId,
+    cfg.discordIssueAdminRoleId,
+  ].filter((id): id is string => isValidSnowflake(id)))];
+}
+
 export async function assignDiscordRolesOnLink(discordUserId: string, account: DiscordRoleAccount): Promise<DiscordRoleSyncOutcome> {
   try {
     if (!(await isFeatureEnabled("feature.integration.discord"))) return "skipped";
@@ -245,14 +257,7 @@ export async function assignDiscordRolesOnLink(discordUserId: string, account: D
     // that set and is never touched, so this can only ever revoke a role that
     // Summonarr granted and that the user no longer qualifies for.
     const desired = new Set(roleIds);
-    const managed = [
-      cfg.discordLinkedRoleId,
-      cfg.discordPlexRoleId,
-      cfg.discordJellyfinRoleId,
-      cfg.discordAdminRoleId,
-      cfg.discordIssueAdminRoleId,
-    ].filter((id): id is string => isValidSnowflake(id));
-    const stale = [...new Set(managed)].filter((id) => !desired.has(id));
+    const stale = managedRoleIds(cfg).filter((id) => !desired.has(id));
 
     if (roleIds.length === 0 && stale.length === 0) return "skipped";
 
@@ -323,13 +328,7 @@ export async function revokeDiscordRolesOnUnlink(discordUserId: string): Promise
     if (!cfg.discordBotToken || !cfg.discordGuildId) return "skipped";
     if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return "skipped";
 
-    const managed = [...new Set([
-      cfg.discordLinkedRoleId,
-      cfg.discordPlexRoleId,
-      cfg.discordJellyfinRoleId,
-      cfg.discordAdminRoleId,
-      cfg.discordIssueAdminRoleId,
-    ].filter((id): id is string => isValidSnowflake(id)))];
+    const managed = managedRoleIds(cfg);
     if (managed.length === 0) return "skipped";
 
     const results = await Promise.allSettled(
@@ -559,8 +558,7 @@ async function notifyUser(
   userId: string,
   // `shared`: the post lands in the shared notification channel every linked user
   // can read, not a DM — a builder carrying private text (a request comment,
-  // guardrail 14e; an issue message or resolution; an admin's decline note)
-  // leaves it out there.
+  // guardrail 14e; an issue message or resolution) leaves it out there.
   build: (t: Translator, locale: Locale, title: string, shared: boolean) => Embed,
   prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue" | "notifyOnComment",
   titleRef?: TitleRef,
@@ -627,10 +625,6 @@ function declinedEmbed(t: Translator, title: string, mediaType: string, adminNot
   };
 }
 
-export async function notifyUserRequestApproved(userId: string, title: string, mediaType: string, tmdbId?: number | null): Promise<void> {
-  await notifyUser(userId, (t, _locale, local) => approvedEmbed(t, local, mediaType), "notifyOnApproved", { title, tmdbId, mediaType });
-}
-
 export async function notifyUserDownloadPending(userId: string, title: string, mediaType: string, tmdbId?: number | null): Promise<void> {
   await notifyUser(userId, (t, _locale, local) => ({
     color: COLORS.pending,
@@ -663,10 +657,6 @@ export async function notifyUserAwaitingRelease(userId: string, title: string, m
       timestamp: new Date().toISOString(),
     };
   }, "notifyOnApproved", { title, tmdbId, mediaType });
-}
-
-export async function notifyUserRequestDeclined(userId: string, title: string, mediaType: string, adminNote?: string | null, tmdbId?: number | null): Promise<void> {
-  await notifyUser(userId, (t, _locale, local, shared) => declinedEmbed(t, local, mediaType, adminNote, shared), "notifyOnDeclined", { title, tmdbId, mediaType });
 }
 
 export async function notifyUserIssueMessage(
@@ -852,8 +842,24 @@ export async function notifyUserIssueResolved(userId: string, title: string, med
   }, "notifyOnIssue", { title, tmdbId, mediaType });
 }
 
-export async function notifyUsersRequestsApproved(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
+type BatchRequest = { requestedBy: string; title: string; mediaType: string; tmdbId?: number | null };
+
+const BATCH_PREF_WHERE = {
+  notifyOnApproved: { notifyOnApproved: true },
+  notifyOnAvailable: { notifyOnAvailable: true },
+  notifyOnDeclined: { notifyOnDeclined: true },
+} as const;
+
+// One batch fan-out for the three request-status notifiers: the requesters who
+// linked Discord, opted in (`prefKey`) and are not disabled (guardrail 33 —
+// account removal keeps the Discord link), each embed written in the language of
+// where it lands, its title resolved in that language (guardrail 40a). The shared
+// channel is paced in chunks; DMs go through the DM queue. Never throws.
+async function notifyUsersBatch<R extends BatchRequest>(
+  requests: R[],
+  prefKey: keyof typeof BATCH_PREF_WHERE,
+  build: (t: Translator, title: string, r: R, shared: boolean) => Embed,
+  logLabel: string,
 ): Promise<void> {
   if (requests.length === 0) return;
   try {
@@ -862,23 +868,19 @@ export async function notifyUsersRequestsApproved(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      // deactivatedAt: null — account removal disables rather than scrubs
-      // (guardrail 33), so a removed user keeps a live Discord link and would
-      // otherwise still get pinged by a later batch approve/decline.
-      where: { id: { in: userIds }, discordId: { not: null }, notifyOnApproved: true, deactivatedAt: null },
+      where: { id: { in: userIds }, discordId: { not: null }, ...BATCH_PREF_WHERE[prefKey], deactivatedAt: null },
       select: { id: true, discordId: true, locale: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
     const userById = new Map(users.map((u) => [u.id, u]));
-    // Titles in the language each embed is written in (guardrail 40a).
-    const resolve = await titleResolver(requests, users.map((u) => recipientLocale(!!cfg.channelId, u)));
+    const shared = !!cfg.channelId;
+    const resolve = await titleResolver(requests, users.map((u) => recipientLocale(shared, u)));
 
     const tasks = requests.map((r) => () => {
       const discordId = idMap.get(r.requestedBy);
       if (!discordId) return Promise.resolve();
-      const locale = recipientLocale(!!cfg.channelId, userById.get(r.requestedBy));
-      const t = translatorFor(locale);
-      const embed = approvedEmbed(t, resolve(r, locale), r.mediaType);
+      const locale = recipientLocale(shared, userById.get(r.requestedBy));
+      const embed = build(translatorFor(locale), resolve(r, locale), r, shared);
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));
@@ -890,86 +892,30 @@ export async function notifyUsersRequestsApproved(
       await Promise.allSettled(tasks.map((t) => t()));
     }
   } catch (err) {
-    console.error("[discord-notify] Failed to send APPROVED notifications:", err);
+    console.error(`[discord-notify] Failed to send ${logLabel} notifications:`, err);
   }
 }
 
-export async function notifyUsersRequestsAvailable(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
-): Promise<void> {
-  if (requests.length === 0) return;
-  try {
-    const cfg = await getConfig();
-    if (!cfg) return;
-
-    const userIds = [...new Set(requests.map((r) => r.requestedBy))];
-    const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, discordId: { not: null }, notifyOnAvailable: true },
-      select: { id: true, discordId: true, locale: true },
-    });
-    const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
-    const userById = new Map(users.map((u) => [u.id, u]));
-    // Titles in the language each embed is written in (guardrail 40a).
-    const resolve = await titleResolver(requests, users.map((u) => recipientLocale(!!cfg.channelId, u)));
-
-    const tasks = requests.map((r) => () => {
-      const discordId = idMap.get(r.requestedBy);
-      if (!discordId) return Promise.resolve();
-      const locale = recipientLocale(!!cfg.channelId, userById.get(r.requestedBy));
-      const t = translatorFor(locale);
-      const embed = availableEmbed(t, resolve(r, locale), r.mediaType);
-      const send = cfg.channelId
-        ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
-        : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));
-      return send.catch((err) => console.error("[discord-notify] Failed to send notification:", err));
-    });
-    if (cfg.channelId) {
-      await chunkSequential(tasks, 5, 600);
-    } else {
-      await Promise.allSettled(tasks.map((t) => t()));
-    }
-  } catch (err) {
-    console.error("[discord-notify] Failed to send AVAILABLE notifications:", err);
-  }
+export async function notifyUsersRequestsApproved(requests: BatchRequest[]): Promise<void> {
+  await notifyUsersBatch(requests, "notifyOnApproved", (t, title, r) => approvedEmbed(t, title, r.mediaType), "APPROVED");
 }
 
+// Callers pass only claimed, deliverable rows (request-notifications.ts), so the
+// shared deactivatedAt filter changes nothing here; it keeps the three alike.
+export async function notifyUsersRequestsAvailable(requests: BatchRequest[]): Promise<void> {
+  await notifyUsersBatch(requests, "notifyOnAvailable", (t, title, r) => availableEmbed(t, title, r.mediaType), "AVAILABLE");
+}
+
+// A row's own `adminNote` (when set, null included) wins over the batch-wide
+// one, so a batch can carry each request's stored note.
 export async function notifyUsersRequestsDeclined(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>,
-  adminNote?: string | null
+  requests: Array<BatchRequest & { adminNote?: string | null }>,
+  adminNote?: string | null,
 ): Promise<void> {
-  if (requests.length === 0) return;
-  try {
-    const cfg = await getConfig();
-    if (!cfg) return;
-
-    const userIds = [...new Set(requests.map((r) => r.requestedBy))];
-    const users = await prisma.user.findMany({
-      // deactivatedAt: null — see notifyUsersRequestsApproved.
-      where: { id: { in: userIds }, discordId: { not: null }, notifyOnDeclined: true, deactivatedAt: null },
-      select: { id: true, discordId: true, locale: true },
-    });
-    const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
-    const userById = new Map(users.map((u) => [u.id, u]));
-    // Titles in the language each embed is written in (guardrail 40a).
-    const resolve = await titleResolver(requests, users.map((u) => recipientLocale(!!cfg.channelId, u)));
-
-    const tasks = requests.map((r) => () => {
-      const discordId = idMap.get(r.requestedBy);
-      if (!discordId) return Promise.resolve();
-      const locale = recipientLocale(!!cfg.channelId, userById.get(r.requestedBy));
-      const t = translatorFor(locale);
-      const embed = declinedEmbed(t, resolve(r, locale), r.mediaType, adminNote, !!cfg.channelId);
-      const send = cfg.channelId
-        ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
-        : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));
-      return send.catch((err) => console.error("[discord-notify] Failed to send notification:", err));
-    });
-    if (cfg.channelId) {
-      await chunkSequential(tasks, 5, 600);
-    } else {
-      await Promise.allSettled(tasks.map((t) => t()));
-    }
-  } catch (err) {
-    console.error("[discord-notify] Failed to send DECLINED notifications:", err);
-  }
+  await notifyUsersBatch(
+    requests,
+    "notifyOnDeclined",
+    (t, title, r, shared) => declinedEmbed(t, title, r.mediaType, r.adminNote !== undefined ? r.adminNote : adminNote, shared),
+    "DECLINED",
+  );
 }

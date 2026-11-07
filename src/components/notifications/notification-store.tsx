@@ -50,6 +50,10 @@ interface NotificationStore {
   items: NotificationItem[];
   unread: number;
   status: NotificationStoreStatus;
+  // Bumped each time the server confirms a markAllRead. The /notifications
+  // page keeps its own (paged) copy of the list, longer than `items`, and marks
+  // every loaded row read when this changes.
+  readAllGen: number;
   reload: () => Promise<void>;
   markAllRead: () => Promise<void>;
 }
@@ -60,6 +64,7 @@ const NotificationContext = createContext<NotificationStore>({
   // No provider mounted ⇒ nothing will ever load; "ready" keeps a stray
   // consumer from showing a spinner forever.
   status: "ready",
+  readAllGen: 0,
   reload: async () => {},
   markAllRead: async () => {},
 });
@@ -70,12 +75,22 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [unread, setUnread] = useState(0);
   const [status, setStatus] = useState<NotificationStoreStatus>("loading");
+  const [readAllGen, setReadAllGen] = useState(0);
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Request sequence. Reloads overlap (poll, tab focus, live events, every
+  // list mutation) and can answer out of order; only the LATEST one may write
+  // state, so an older, slower GET never overwrites a newer answer. markAllRead
+  // bumps it too, so a GET served before its write committed can't put the
+  // rows back to unread.
+  const seq = useRef(0);
 
   const reload = useCallback(async () => {
+    const id = ++seq.current;
     // Only a store that has never loaded flips to "error"; once "ready" it
     // stays "ready" through transient failures (see NotificationStoreStatus).
-    const failed = () => setStatus((s) => (s === "ready" ? s : "error"));
+    const failed = () => {
+      if (id === seq.current) setStatus((s) => (s === "ready" ? s : "error"));
+    };
     try {
       const res = await fetch(withBasePath("/api/notifications"), {
         credentials: "include",
@@ -88,6 +103,7 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
         items?: NotificationItem[];
         unreadCount?: number;
       };
+      if (id !== seq.current) return;
       setItems(data.items ?? []);
       setUnread(data.unreadCount ?? 0);
       setStatus("ready");
@@ -118,10 +134,12 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
   }, [reload]);
 
   // Real-time: the server writes an in-app notification alongside these SSE
-  // events (scoped to this user server-side), so re-fetch on them for a
-  // near-instant badge instead of waiting up to POLL_MS. The poll above stays
-  // as the missed-event safety net. Bursts (a sync flipping several requests at
-  // once) coalesce into one refetch. The event list lives in inbox-live-events.ts.
+  // events, so re-fetch on them for a near-instant badge instead of waiting up
+  // to POLL_MS. An admin or request/issue manager receives these events for
+  // EVERY user, so reloadsInbox only takes the ones the server marks as this
+  // viewer's own (`own`). The poll above stays as the missed-event safety net.
+  // Bursts (a sync flipping several requests at once) coalesce into one
+  // refetch. The event list lives in inbox-live-events.ts.
   useLiveEvents((event) => {
     if (reloadsInbox(event)) {
       if (reloadTimer.current) clearTimeout(reloadTimer.current);
@@ -146,6 +164,9 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
     // handler, not during render, so calling `new Date()` is fine (guardrail 16).
     const flipped = new Set(items.filter((n) => !n.readAt).map((n) => n.id));
     const prevUnread = unread;
+    // Drop every GET already in flight: one served before this write commits
+    // would put the rows back to unread.
+    const mine = ++seq.current;
     setUnread(0);
     if (flipped.size > 0) {
       setItems((cur) => {
@@ -158,29 +179,42 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
       headers: { "Content-Type": "application/json" },
       body: "{}",
     }).catch(() => null);
+    // Did a reload start while the write was in flight? Either way it is
+    // dropped by the bump below: it may have been served before the write
+    // committed.
+    const noReloadMeanwhile = seq.current === mine;
+    seq.current++;
     if (!res || !res.ok) {
       // Roll back on a clean 4xx/5xx too, not just a thrown/network error, so
       // the panel can't show read locally while the server still has them
-      // unread. The next poll reconciles either way.
-      setUnread(prevUnread);
-      if (flipped.size > 0) {
-        setItems((cur) => cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: null } : n)));
+      // unread — then re-read the server's truth: the snapshot taken before the
+      // write may already be out of date.
+      if (noReloadMeanwhile) {
+        setUnread(prevUnread);
+        if (flipped.size > 0) {
+          setItems((cur) => cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: null } : n)));
+        }
       }
+      void reload();
       return;
     }
+    setReadAllGen((g) => g + 1);
     // Reconcile the badge with the server's answer (a notification that landed
-    // between the last poll and this write stays counted).
+    // between the last poll and this write stays counted — and is fetched).
     try {
       const data = (await res.json()) as { unreadCount?: number };
-      if (typeof data.unreadCount === "number") setUnread(data.unreadCount);
+      if (typeof data.unreadCount === "number") {
+        setUnread(data.unreadCount);
+        if (data.unreadCount > 0) void reload();
+      }
     } catch {
       // body unreadable — the optimistic 0 stands until the next poll
     }
-  }, [items, unread]);
+  }, [items, unread, reload]);
 
   const value = useMemo(
-    () => ({ items, unread, status, reload, markAllRead }),
-    [items, unread, status, reload, markAllRead],
+    () => ({ items, unread, status, readAllGen, reload, markAllRead }),
+    [items, unread, status, readAllGen, reload, markAllRead],
   );
 
   return (

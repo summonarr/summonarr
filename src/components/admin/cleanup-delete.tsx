@@ -23,6 +23,7 @@ import { withBasePath } from "@/lib/base-path";
 import { arrTitleDiffers, cleanupExecuteBody } from "@/lib/cleanup-delete-plan";
 import { arrFailureText } from "@/lib/cleanup-error-text";
 import { cleanupExecuteFailure } from "@/lib/cleanup-execute-outcome";
+import { readApiError } from "@/lib/client/api-error";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -54,7 +55,9 @@ export type CleanupExecResult = {
 
 export const cleanupKeyOf = (r: { tmdbId: number; mediaType: string }) => `${r.mediaType}:${r.tmdbId}`;
 
-export const arrInstanceLabel = (service: string, instance: string) =>
+// "Radarr (anime)": the service and the instance SLUG. Not open-in-arr's
+// arrInstanceLabel, which names an instance by its display name.
+export const arrSlugLabel = (service: string, instance: string) =>
   `${service === "radarr" ? "Radarr" : "Sonarr"}${instance ? ` (${instance})` : ""}`;
 
 // Server-supplied ISO timestamp → the viewer's locale. UTC so the day the
@@ -73,11 +76,6 @@ export function formatBytesIn(n: number | null, locale: string): string {
   const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
   const value = new Intl.NumberFormat(locale, { maximumFractionDigits: i >= 3 ? 1 : 0 }).format(n / 1024 ** i);
   return `${value} ${units[i]}`;
-}
-
-export async function readApiError(res: Response, fallback: string): Promise<string> {
-  const d = (await res.json().catch(() => null)) as { error?: string } | null;
-  return d?.error ?? fallback;
 }
 
 export function useCleanupDelete(opts: {
@@ -249,7 +247,7 @@ export function CleanupPlanPanel({ del, formatBytes }: { del: CleanupDeleteState
                 cross-reference) is named, so the admin sees which entry — and
                 whose files — the delete removes. */}
             {it.title} — {it.targets.map((tg) => {
-              const instance = arrInstanceLabel(tg.service, tg.instance);
+              const instance = arrSlugLabel(tg.service, tg.instance);
               const size = formatBytes(tg.sizeOnDisk);
               return arrTitleDiffers(it.title, tg.title)
                 ? t("adminManage.cleanup.plan.targetAs", { instance, title: tg.title, size })
@@ -320,7 +318,7 @@ export function CleanupResultPanel({ result }: { result: CleanupExecResult | nul
             <span className={r.status === "deleted" ? "text-green-400" : "text-red-400"}>{t(`adminManage.cleanup.status.${r.status}`)}</span> — {r.title}
             {r.failed.length > 0
               ? ` ${t("adminManage.cleanup.result.failedReasons", {
-                list: r.failed.map((f) => arrFailureText(t, f.service ? arrInstanceLabel(f.service, f.instance ?? "") : f.target, f)).join("; "),
+                list: r.failed.map((f) => arrFailureText(t, f.service ? arrSlugLabel(f.service, f.instance ?? "") : f.target, f)).join("; "),
               })}`
               : ""}
             {r.uncertain === true && (

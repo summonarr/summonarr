@@ -1,4 +1,4 @@
-import { Suspense } from "react";
+import { Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { authActive } from "@/lib/auth";
@@ -20,6 +20,7 @@ import {
   utcMonthKey,
 } from "@/lib/admin-stats";
 import {
+  getAutoRequestSources,
   getFulfillmentStats,
   getIssueStats,
   getLibraryGrowth,
@@ -27,7 +28,6 @@ import {
   getMostWantedPending,
   getPendingQueue,
   getRequestOverview,
-  getRequestSources,
   getRequestsByInstance,
   getRequestsByMonth,
   getStorageStats,
@@ -36,7 +36,9 @@ import {
   getTopRequesters,
   getUserStats,
   getWatchGradeSpreadForStats,
+  requestSources,
   type DurationStat,
+  type RequestSources,
   type StorageStats,
   type StuckReason,
 } from "@/lib/admin-stats-data";
@@ -101,6 +103,28 @@ function makeFormatters(t: Translator, locale: string, now: Date): Fmt {
 
 const mediaHref = (mediaType: string, tmdbId: number) => `/${mediaType === "TV" ? "tv" : "movie"}/${tmdbId}`;
 
+// The request statuses in the order every status breakdown on the page shows
+// them, each with its label and colour — one list, so the charts can't drift.
+const REQUEST_STATUS_ORDER = ["AVAILABLE", "APPROVED", "PENDING", "DECLINED"] as const;
+
+function requestStatusParts(t: Translator) {
+  return REQUEST_STATUS_ORDER.map((status) => ({
+    status,
+    label: t(`requests.status.${status.toLowerCase()}`),
+    color: STATUS_COLOR[status],
+  }));
+}
+
+// A text link in the accent colour (guardrail 42: the TEXT token, never a fill).
+// `inline` keeps the surrounding text's size, for a link inside a sentence.
+function AccentLink({ href, inline = false, children }: { href: string; inline?: boolean; children: ReactNode }) {
+  return (
+    <Link href={href} className={inline ? "hover:underline" : "text-sm hover:underline"} style={{ color: "var(--ds-accent-text)" }}>
+      {children}
+    </Link>
+  );
+}
+
 export default async function StatsPage({
   searchParams,
 }: {
@@ -120,7 +144,7 @@ export default async function StatsPage({
 
   const [
     overview, fulfillment, months, pending, mostWanted, stuck,
-    instances, users, topRequesters, library, growth, issues, votes,
+    instances, users, topRequesters, library, growth, issues, votes, autoSources,
   ] = await Promise.all([
     getRequestOverview(since),
     getFulfillmentStats(since),
@@ -135,12 +159,21 @@ export default async function StatsPage({
     getLibraryGrowth(),
     getIssueStats(since),
     getTopDeletionVotes(),
+    getAutoRequestSources(since),
   ]);
-  // Needs the window's total, so it can't join the batch above.
-  const sources = await getRequestSources(since, overview.total);
+  // `other` is whatever the window's total leaves once the auto-requests are out.
+  const sources = requestSources(autoSources, overview.total);
 
   const currentMonth = utcMonthKey(now);
   const decisions = overview.approved + overview.byStatus.DECLINED;
+  // The KPI and the Requests section show the same figure.
+  const approval = {
+    value: f.pct(share(overview.approved, decisions)),
+    // `count` picks the plural form; `value` is the Intl-grouped number shown,
+    // so the hint agrees with the formatted KPI above it (translate.ts
+    // interpolates String(v), never Intl).
+    hint: t("adminManage.stats.ofDecisions", { count: decisions, value: f.num(decisions) }),
+  };
   const oldestPendingDays = f.ageDays(pending.oldestCreatedAt);
   const oldestIssueDays = f.ageDays(issues.oldestOpenCreatedAt);
   const unresolvedIssues = issues.open + issues.inProgress;
@@ -155,15 +188,7 @@ export default async function StatsPage({
       value: f.num(pending.requests),
       hint: oldestPendingDays === null ? t("adminManage.stats.queueEmpty") : t("adminManage.stats.oldestDays", { count: oldestPendingDays }),
     },
-    {
-      key: "approval",
-      label: t("adminManage.stats.approvalRate"),
-      value: f.pct(share(overview.approved, decisions)),
-      // `count` picks the plural form; `value` is the Intl-grouped number shown,
-      // so the hint agrees with the formatted KPI above it (translate.ts
-      // interpolates String(v), never Intl).
-      hint: t("adminManage.stats.ofDecisions", { count: decisions, value: f.num(decisions) }),
-    },
+    { key: "approval", label: t("adminManage.stats.approvalRate"), value: approval.value, hint: approval.hint },
     {
       key: "fulfil",
       label: t("adminManage.stats.medianFulfillment"),
@@ -189,11 +214,7 @@ export default async function StatsPage({
       <PageHeader
         title={t("adminManage.stats.title")}
         subtitle={t("adminManage.stats.subtitle")}
-        right={
-          <Link href="/admin/activity/stats" className="text-sm hover:underline" style={{ color: "var(--ds-accent-text)" }}>
-            {t("adminManage.stats.playbackLink")}
-          </Link>
-        }
+        right={<AccentLink href="/admin/activity/stats">{t("adminManage.stats.playbackLink")}</AccentLink>}
       />
 
       <StatsRangeFilter active={range} />
@@ -209,18 +230,18 @@ export default async function StatsPage({
 
       <AttentionSection f={f} pending={pending} oldestPendingDays={oldestPendingDays} stuck={stuck} stuckTotal={stuckTotal} mostWanted={mostWanted} />
 
-      <PipelineSection f={f} overview={overview} decisions={decisions} sources={sources} instances={instances} rangeLabel={rangeLabel} />
+      <PipelineSection f={f} overview={overview} decisions={decisions} approval={approval} sources={sources} instances={instances} rangeLabel={rangeLabel} />
 
       <FulfillmentSection f={f} fulfillment={fulfillment} rangeLabel={rangeLabel} />
 
       <StatsSection id="stats-months" title={t("adminManage.stats.requestsOverTime")} subtitle={t("adminManage.stats.last12Months")}>
         <MonthChart
           months={months.map((m) => m.month)}
-          series={(["AVAILABLE", "APPROVED", "PENDING", "DECLINED"] as const).map((s) => ({
-            key: s,
-            label: t(`requests.status.${s.toLowerCase()}`),
-            color: STATUS_COLOR[s],
-            values: months.map((m) => m.byStatus[s]),
+          series={requestStatusParts(t).map(({ status, label, color }) => ({
+            key: status,
+            label,
+            color,
+            values: months.map((m) => m.byStatus[status]),
           }))}
           locale={locale}
           currentMonth={currentMonth}
@@ -340,12 +361,13 @@ function AttentionSection({
 }
 
 function PipelineSection({
-  f, overview, decisions, sources, instances, rangeLabel,
+  f, overview, decisions, approval, sources, instances, rangeLabel,
 }: {
   f: Fmt;
   overview: Awaited<ReturnType<typeof getRequestOverview>>;
   decisions: number;
-  sources: Awaited<ReturnType<typeof getRequestSources>>;
+  approval: { value: string; hint: string };
+  sources: RequestSources;
   instances: Awaited<ReturnType<typeof getRequestsByInstance>>;
   rangeLabel: string;
 }) {
@@ -357,17 +379,13 @@ function PipelineSection({
       <ShareBar
         ariaLabel={t("adminManage.stats.byStatus")}
         formatNumber={f.num}
-        parts={(["AVAILABLE", "APPROVED", "PENDING", "DECLINED"] as const).map((k) => ({
-          label: t(`requests.status.${k.toLowerCase()}`),
-          value: s[k],
-          color: STATUS_COLOR[k],
-        }))}
+        parts={requestStatusParts(t).map(({ status, label, color }) => ({ label, value: s[status], color }))}
       />
       <div style={{ marginTop: 18 }}>
         <MetricGrid
           columns="grid-cols-2 sm:grid-cols-3 lg:grid-cols-6"
           items={[
-            { label: t("adminManage.stats.approvalRate"), value: f.pct(share(overview.approved, decisions)), hint: t("adminManage.stats.ofDecisions", { count: decisions, value: f.num(decisions) }) },
+            { label: t("adminManage.stats.approvalRate"), value: approval.value, hint: approval.hint },
             { label: t("adminManage.stats.declineRate"), value: f.pct(share(s.DECLINED, decisions)) },
             { label: t("adminManage.stats.fulfillmentRate"), value: f.pct(share(s.AVAILABLE, greenlit)), hint: t("adminManage.stats.fulfillmentRateHint") },
             { label: t("adminManage.stats.alreadyAvailable"), value: f.num(overview.mirrored), hint: t("adminManage.stats.alreadyAvailableHint") },
@@ -386,6 +404,8 @@ function PipelineSection({
               { label: t("adminManage.stats.source.manual"), value: sources.other, color: "var(--ds-accent)" },
               { label: t("adminManage.stats.source.watchlist"), value: sources.watchlist, color: "var(--ds-info)" },
               { label: t("adminManage.stats.source.plexWatchlist"), value: sources.plexWatchlist, color: "var(--ds-plex)" },
+              // Trakt's brand red.
+              { label: t("adminManage.stats.source.traktWatchlist"), value: sources.traktWatchlist, color: "var(--ds-danger)" },
             ]}
           />
           <StatsNote>{t("adminManage.stats.sourcesHint")}</StatsNote>
@@ -529,7 +549,6 @@ function LibrarySection({
     return p.movies + p.series + p.episodes > 0;
   });
   if (services.length === 0) return null;
-  const multiServer = library.servers.length > services.length;
   return (
     <StatsSection id="stats-library" title={t("adminManage.stats.library")} subtitle={t("adminManage.stats.currentState")}>
       <MetricGrid
@@ -558,7 +577,7 @@ function LibrarySection({
                   { label: t("adminManage.stats.episodes"), value: f.num(p.episodes) },
                 ]}
               />
-              {multiServer && servers.length > 1 && (
+              {servers.length > 1 && (
                 <div style={{ marginTop: 14 }}>
                   <RankList
                     emptyLabel=""
@@ -610,11 +629,7 @@ function IssuesSection({
     <StatsSection
       id="stats-issues"
       title={t("adminManage.stats.issues")}
-      right={
-        <Link href="/admin/issues" className="text-sm hover:underline" style={{ color: "var(--ds-accent-text)" }}>
-          {t("adminManage.stats.openIssuesLink")}
-        </Link>
-      }
+      right={<AccentLink href="/admin/issues">{t("adminManage.stats.openIssuesLink")}</AccentLink>}
     >
       <MetricGrid
         columns="grid-cols-2 sm:grid-cols-3 lg:grid-cols-6"
@@ -681,11 +696,7 @@ function VotesSection({ f, votes }: { f: Fmt; votes: Awaited<ReturnType<typeof g
           ? t("adminManage.stats.voteThreshold", { count: votes.threshold })
           : t("adminManage.stats.noVoteThreshold")
       }
-      right={
-        <Link href="/votes" className="text-sm hover:underline" style={{ color: "var(--ds-accent-text)" }}>
-          {t("adminManage.stats.allVotesLink")}
-        </Link>
-      }
+      right={<AccentLink href="/votes">{t("adminManage.stats.allVotesLink")}</AccentLink>}
     >
       <RankList
         emptyLabel=""
@@ -743,10 +754,17 @@ function neverWatchedText(nw: NonNullable<StorageStats["neverWatched"]>, f: Fmt)
 }
 
 // Live Radarr/Sonarr calls. Streamed behind a Suspense boundary so one slow or
-// unreachable instance (30 s timeout) no longer holds the whole page blank.
+// unreachable instance (30 s timeout) no longer holds the whole page blank —
+// and a rejection is caught here, as WatchGradesSection does, so a transient DB
+// failure drops this section instead of replacing the rendered page with the
+// error boundary.
 async function StorageSection({ f }: { f: Fmt }) {
   const { t } = f;
-  const storage = await getStorageStats();
+  const storage = await getStorageStats().catch((err) => {
+    console.warn("[admin-stats] storage failed:", err instanceof Error ? err.message : err);
+    return null;
+  });
+  if (!storage) return null;
   // One down instance fails both calls; say so once.
   const reported = new Set(storage.unreachable.map((u) => `${u.service}:${u.slug}`));
   const listingErrors = storage.listingErrors.filter((e) => !reported.has(`${e.service}:${e.slug}`));
@@ -808,9 +826,9 @@ async function StorageSection({ f }: { f: Fmt }) {
                       count: storage.reclaimable.titles,
                       value: f.num(storage.reclaimable.titles),
                     })}{" "}
-                <Link href="/admin/cleanup" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
+                <AccentLink href="/admin/cleanup" inline>
                   {t("adminManage.stats.reviewCleanup")}
-                </Link>
+                </AccentLink>
               </p>
             </div>
           )}
@@ -819,9 +837,9 @@ async function StorageSection({ f }: { f: Fmt }) {
               <SubHeading>{t("adminManage.stats.neverWatched")}</SubHeading>
               <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
                 {neverWatchedText(storage.neverWatched, f)}{" "}
-                <Link href="/admin/never-watched" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
+                <AccentLink href="/admin/never-watched" inline>
                   {t("adminManage.stats.reviewNeverWatched")}
-                </Link>
+                </AccentLink>
               </p>
             </div>
           )}
@@ -844,11 +862,7 @@ async function WatchGradesSection({ f }: { f: Fmt }) {
       id="stats-grades"
       title={t("adminManage.stats.watchGrades")}
       subtitle={t("adminManage.stats.watchGradesHint")}
-      right={
-        <Link href="/admin/users" className="text-sm hover:underline" style={{ color: "var(--ds-accent-text)" }}>
-          {t("adminManage.stats.usersLink")}
-        </Link>
-      }
+      right={<AccentLink href="/admin/users">{t("adminManage.stats.usersLink")}</AccentLink>}
     >
       <ShareBar
         ariaLabel={t("adminManage.stats.watchGrades")}

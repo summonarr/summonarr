@@ -19,6 +19,10 @@
   "settings.cron.error": "Fehler",
   "settings.cron.running": "Läuft",
   "settings.cron.run": "Ausführen",
+  "settings.cron.runNamed": "{name} ausführen",
+  "settings.cron.runningNamed": "{name} läuft",
+  "settings.cron.skipped": "Übersprungen, nichts ausgeführt: {reason}",
+  "settings.cron.skippedNoReason": "Übersprungen, nichts ausgeführt",
   "settings.cron.interval.hourly": "stündlich",
   "settings.cron.interval.daily": "täglich",
   "settings.cron.interval.weekly": "wöchentlich",
@@ -42,6 +46,8 @@
   "settings.cron.job.warmLibrary.description": "TMDB-Metadaten für die gesamte Bibliothek + der „Für Sie“-Vorschlagsgraph",
   "settings.cron.job.purgeSessions.name": "Sitzungen bereinigen",
   "settings.cron.job.purgeSessions.description": "Abgelaufene Anmeldesitzungen löschen",
+  "settings.cron.job.purgeNotifications.name": "Benachrichtigungen bereinigen",
+  "settings.cron.job.purgeNotifications.description": "Alte In-App-Benachrichtigungen nach Ablauf ihrer Aufbewahrung löschen",
   "settings.cron.job.scrubAuditPii.name": "Audit-Personendaten bereinigen",
   "settings.cron.job.scrubAuditPii.description": "IP/UA aus Audit-Einträgen nach Ablauf der Aufbewahrungsfrist entfernen (Standard 90 Tage)",
   "settings.cron.job.trashSync.name": "TRaSH-Synchronisierung",
@@ -438,6 +444,8 @@
   "settings.featureDesc.behavior_requestComments": "Ermöglicht dem Anfragenden und den Personen, die Anfragen verwalten, Kommentare zu einer Anfrage auszutauschen („andere Version gewünscht?“). Jede Seite wird gemäß den eigenen Benachrichtigungseinstellungen informiert. Ausgeschaltet werden die Threads ausgeblendet und neue Kommentare von Anfragenden abgelehnt; Verwalter können weiterhin schreiben.",
   "settings.playHistory.concurrentLimit": "Warnung bei gleichzeitigen Streams",
   "settings.playHistory.concurrentLimitHelp": "Warnt, wenn eine Person mehr Titel gleichzeitig streamt als hier eingestellt (Plex und Jellyfin zählen zusammen). 0 schaltet die Funktion aus. Es werden nur Admins benachrichtigt (Posteingang und Ihre Benachrichtigungskanäle); nichts wird gestoppt. Konten der Serverbesitzer werden nie gezählt.",
+  "settings.playHistory.timeZone": "Zeitzone der Statistiken",
+  "settings.playHistory.timeZoneHelp": "Die Zeitzone, in der die Aktivitätsstatistiken, Heatmaps und der Kalender, Meine Statistiken und der Jahresrückblick Stunden und Tage zählen: ein IANA-Name wie America/New_York oder Europe/Berlin. Leer lassen, um die Zeitzone des Servers zu verwenden ({zone}).",
   "settings.featureLabel.behavior_issueAutoResolve": "Probleme automatisch lösen",
   "settings.featureDesc.behavior_issueAutoResolve": "Wenn der vom Admin angeforderte Ersatz (Datei reparieren, Release wählen oder Neu laden) von Radarr/Sonarr importiert wurde, wird das Problem als gelöst markiert und der Melder informiert. Nur Filme und Einzelfolgen-Probleme – ein Staffel- oder Serienproblem bleibt für einen Admin offen. Eine Antwort des Melders öffnet es erneut."
 }

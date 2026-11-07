@@ -89,6 +89,10 @@ export function CreateUserButton() {
       <Dialog
         open={open}
         onOpenChange={(o) => {
+          // No dismissing (Escape, backdrop) mid-submit: a failure would land on
+          // a closed dialog and be wiped on reopen, and a late success would
+          // close a dialog the admin had reopened.
+          if (!o && loading) return;
           setOpen(o);
           if (!o) setError(null);
         }}

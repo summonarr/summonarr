@@ -41,7 +41,8 @@ import { Poster } from "@/components/admin/activity-ui";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
 import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
-import { readError, useMissingReports, type Mode, type ReportKey, type Service } from "@/components/admin/use-missing-reports";
+import { useMissingReports, type Mode, type ReportKey, type Service } from "@/components/admin/use-missing-reports";
+import { readApiError } from "@/lib/client/api-error";
 import { rowKey, useBulkSearch, useBulkSelection, type BulkResult, type BulkRow } from "@/components/admin/use-bulk-search";
 import { manageTabFor } from "@/lib/arr-manage-links";
 import { missingDateFormatters } from "@/components/admin/missing-format";
@@ -175,7 +176,7 @@ export function MissingReport({
       const qs = new URLSearchParams({ instance: row.instance, seriesId: String(row.arrId) });
       const res = await fetch(withBasePath(`/api/admin/missing/episodes?${qs}`));
       if (!res.ok) {
-        const message = await readError(res, t("adminManage.missing.episodes.error"));
+        const message = await readApiError(res, t("adminManage.missing.episodes.error"));
         setEpisodes((m) => ({ ...m, [k]: { loading: false, error: message, episodes: [] } }));
         return;
       }

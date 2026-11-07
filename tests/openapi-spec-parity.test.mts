@@ -357,3 +357,326 @@ test("g-openapi#6: the release routes document the background 202, the busy 409 
   assert.match(reqPost, /picked === "busy"\) return NextResponse\.json\(.*\{ status: 409 \}\);/);
   assert.match(handlerSlices(routeSource("/admin/arr/title/releases")).get("post") ?? "", /picked === "busy"\) return NextResponse\.json\(.*\{ status: 409 \}\);/);
 });
+
+// ── The spec stays in step with the handlers it describes ───────────────────
+//
+// Each pin below reads the handler (or the lib module it projects through) and
+// asserts the spec says the same, so a handler change that drifts from the
+// document goes red here instead of shipping a stale contract.
+
+interface SchemaNode {
+  type?: string;
+  pattern?: string;
+  maxLength?: number;
+  description?: string;
+  required?: string[];
+  enum?: unknown[];
+  $ref?: string;
+  properties?: Record<string, SchemaNode>;
+  items?: SchemaNode;
+  additionalProperties?: SchemaNode;
+  allOf?: SchemaNode[];
+}
+interface FullOp {
+  tags?: string[];
+  summary?: string;
+  description?: string;
+  security?: Record<string, string[]>[];
+  requestBody?: { content: Record<string, { schema: SchemaNode }> };
+  responses: Record<string, { description: string; content?: Record<string, { schema: SchemaNode }> }>;
+}
+interface FullSpec {
+  tags: { name: string }[];
+  security: Record<string, string[]>[];
+  servers: { url: string }[];
+  paths: Record<string, Record<string, FullOp>>;
+}
+const fullSpec = async () => (await getSpec()) as unknown as FullSpec;
+const libSource = (path: string) => readFileSync(new URL(`../src/lib/${path}`, import.meta.url), "utf8");
+const jsonSchema = (op: FullOp, status: string) => op.responses[status]?.content?.["application/json"]?.schema;
+const keysOf = (schema: SchemaNode | undefined) => Object.keys(schema?.properties ?? {}).sort();
+
+/** The field names of `export interface <name> { … }` in a lib module (one level). */
+function interfaceFields(src: string, name: string): string[] {
+  const m = new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`).exec(src);
+  assert.ok(m, `interface ${name} not found`);
+  return [...m[1].matchAll(/^\s{2}(\w+)\??:/gm)].map((x) => x[1]).sort();
+}
+
+test("statuses the handlers answer are documented: /popular 500, Trakt device 503, watchlist add 413, fix-match thumb 403/500", async () => {
+  const spec = await fullSpec();
+  assert.match(routeSource("/popular"), /status: 500/);
+  assert.ok(spec.paths["/popular"].get.responses["500"], "/popular 500");
+  assert.match(routeSource("/profile/trakt/device"), /maintenanceGuard\(/);
+  assert.ok(spec.paths["/profile/trakt/device"].post.responses["503"], "trakt device 503");
+  assert.match(handlerSlices(routeSource("/watchlist")).get("post") ?? "", /readJsonCapped[<(]/);
+  assert.ok(spec.paths["/watchlist"].post.responses["413"], "watchlist POST 413");
+  const thumb = readFileSync(new URL("../src/app/api/admin/fix-match/thumb/route.ts", import.meta.url), "utf8");
+  assert.match(thumb, /status: 403/);
+  assert.match(thumb, /Plex not configured", \{ status: 500 \}/);
+  for (const status of ["403", "500"]) assert.ok(spec.paths["/admin/fix-match/thumb"].get.responses[status], `thumb ${status}`);
+});
+
+test("POST /admin/users documents all three of its 403 causes", async () => {
+  const spec = await fullSpec();
+  const src = handlerSlices(routeSource("/admin/users")).get("post") ?? "";
+  for (const key of ["onlyAdminCreate", "cannotGrantBeyondOwn", "onlyAdminCreateServerEmail"]) {
+    assert.match(src, new RegExp(`apiAdmin\\.users\\.${key}"\\) \\}, \\{ status: 403 \\}`), key);
+  }
+  const text = spec.paths["/admin/users"].post.responses["403"].description;
+  assert.match(text, /ADMIN bit/);
+  assert.match(text, /preset/);
+  assert.match(text, /Plex\/Jellyfin server user/);
+});
+
+test("POST /requests/bulk names every request grant its door check accepts", async () => {
+  const spec = await fullSpec();
+  const src = routeSource("/requests/bulk");
+  for (const bit of ["REQUEST", "REQUEST_MOVIE", "REQUEST_TV"]) {
+    assert.match(src, new RegExp(`Permission\\.${bit}\\b`), bit);
+    assert.match(spec.paths["/requests/bulk"].post.summary ?? "", new RegExp(`\\b${bit}\\b`), bit);
+  }
+});
+
+test("every background-job 202 carries the 32-hex job id schema", async () => {
+  const spec = await fullSpec();
+  let jobs = 0;
+  for (const [path, methods] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(methods)) {
+      const r = op.responses["202"];
+      if (!r) continue;
+      const schema = jsonSchema(op, "202");
+      // A job 202's prose names `{ job`; such a response must also carry the schema.
+      if (/\{ job\b/.test(r.description)) assert.ok(schema?.properties?.job, `${method} ${path}: a job 202 without a schema`);
+      if (!schema?.properties?.job) continue;
+      jobs++;
+      assert.equal(schema.properties.job.pattern, "^[0-9a-f]{32}$", `${method} ${path}`);
+      assert.ok(schema.required?.includes("job"), `${method} ${path}: job not required`);
+      if (schema.required?.includes("running")) assert.deepEqual(schema.properties.running?.enum, [true], `${method} ${path}`);
+    }
+  }
+  assert.ok(jobs >= 20, `only ${jobs} job 202s found`);
+  // The registry those routes share mints exactly that id, and its poll answers { job, running: true }.
+  const registry = libSource("release-search-jobs.ts");
+  assert.match(registry, /randomBytes\(16\)\.toString\("hex"\)/);
+  assert.match(registry, /\{ job: jobId, running: true \}, \{ status: 202 \}/);
+});
+
+test("the three release searches document one ArrRelease shape, field for field the projection's", async () => {
+  const spec = await fullSpec();
+  const fromRequests = jsonSchema(spec.paths["/requests/{id}/releases"].get, "200")?.properties?.releases?.items;
+  const fromIssues = jsonSchema(spec.paths["/issues/{id}/releases"].get, "200")?.items;
+  const fromAdmin = jsonSchema(spec.paths["/admin/arr/title/releases"].get, "200")?.properties?.releases?.items;
+  assert.ok(fromRequests && fromIssues && fromAdmin);
+  assert.deepEqual(fromIssues, fromRequests);
+  assert.deepEqual(fromAdmin, fromRequests);
+  assert.deepEqual(keysOf(fromRequests), interfaceFields(libSource("arr.ts"), "ArrRelease"));
+  // The guid on the wire is the search's opaque handle, never the indexer's (guardrail 5e).
+  assert.equal(fromRequests.properties?.guid.pattern, "^[0-9a-f]{32}$");
+});
+
+test("GET /ratings documents every MdblistRatings field, and the batch map every field its handler projects", async () => {
+  const spec = await fullSpec();
+  const single = keysOf(jsonSchema(spec.paths["/ratings"].get, "200"));
+  assert.deepEqual(single, interfaceFields(libSource("mdblist.ts"), "MdblistRatings"));
+  const batchSrc = routeSource("/ratings/batch");
+  const projected = [...batchSrc.matchAll(/^\s+(\w+): item\.(\w+) \?\? null,$/gm)].map((m) => m[1]).sort();
+  assert.ok(projected.length >= 11, projected.join(","));
+  const batchItem = jsonSchema(spec.paths["/ratings/batch"].post, "200")?.properties?.ratings?.additionalProperties;
+  assert.deepEqual(keysOf(batchItem), projected);
+  for (const k of projected) assert.ok(single.includes(k), `GET /ratings lacks ${k}`);
+});
+
+test("the admin user list item, its create answer and every notification-preference list stay one shape", async () => {
+  const spec = await fullSpec();
+  const listItem = jsonSchema(spec.paths["/admin/users"].get, "200")?.items;
+  assert.ok(listItem);
+  assert.deepEqual(jsonSchema(spec.paths["/admin/users"].post, "201"), listItem);
+  const prefKeys = [...(/const PREF_KEYS = \[([\s\S]*?)\]/.exec(routeSource("/profile/notifications"))?.[1] ?? "").matchAll(/"(\w+)"/g)]
+    .map((m) => m[1]).sort();
+  assert.equal(prefKeys.length, 13);
+  const flagsIn = (schema: SchemaNode | undefined) => keysOf(schema).filter((k) => /^(notify|email|push)On/.test(k));
+  const places: Array<[string, SchemaNode | undefined]> = [
+    ["GET /profile/notifications", jsonSchema(spec.paths["/profile/notifications"].get, "200")],
+    ["PATCH /profile/notifications", spec.paths["/profile/notifications"].patch.requestBody?.content["application/json"].schema],
+    ["GET /admin/users item", listItem],
+    ["POST /admin/users 201", jsonSchema(spec.paths["/admin/users"].post, "201")],
+    ["PATCH /admin/users/{id}", spec.paths["/admin/users/{id}"].patch.requestBody?.content["application/json"].schema],
+  ];
+  for (const [where, schema] of places) assert.deepEqual(flagsIn(schema), prefKeys, where);
+});
+
+test("every operation's first tag is a declared tag", async () => {
+  const spec = await fullSpec();
+  const declared = new Set(spec.tags.map((t) => t.name));
+  for (const [path, methods] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(methods)) {
+      assert.ok(declared.has(op.tags?.[0] ?? ""), `${method} ${path}: tag "${op.tags?.[0]}" is not declared`);
+    }
+  }
+});
+
+test("POST /admin/watch-sync documents that both identities must be active and the 64-character id cap", async () => {
+  const spec = await fullSpec();
+  const src = handlerSlices(routeSource("/admin/watch-sync")).get("post") ?? "";
+  assert.match(src, /!plex\.active/);
+  assert.match(src, /plexUserId\.length > 64/);
+  assert.match(src, /jellyfinUserId\.length > 64/);
+  const props = spec.paths["/admin/watch-sync"].post.requestBody?.content["application/json"].schema.properties ?? {};
+  assert.match(props.plexUserId?.description ?? "", /active/);
+  assert.equal(props.plexUserId?.maxLength, 64);
+  assert.equal(props.jellyfinUserId?.maxLength, 64);
+  assert.match(spec.paths["/admin/watch-sync"].post.responses["400"].description, /active Plex account/);
+});
+
+test("every cron and sync operation behind getCronActor/isCronAuthorized lists an admin session on both transports", async () => {
+  const spec = await fullSpec();
+  let checked = 0;
+  for (const [path, methods] of Object.entries(spec.paths)) {
+    if (!path.startsWith("/cron/") && path !== "/sync" && !path.startsWith("/sync/")) continue;
+    const src = routeSource(path.replace(/\{(\w+)\}/g, "[$1]"));
+    for (const [method, op] of Object.entries(methods)) {
+      const handler = handlerSlices(src).get(method) ?? src.slice(src.indexOf(`export async function ${method.toUpperCase()}`));
+      assert.match(handler, /getCronActor\(|isCronAuthorized\(/, `${method} ${path}`);
+      const schemes = new Set((op.security ?? spec.security).flatMap((e) => Object.keys(e)));
+      assert.ok(schemes.has("session") && schemes.has("sessionBearer"), `${method} ${path}: ${[...schemes].join(",")}`);
+      // A poll (GET) is an admin's own job — the secret has no jobs; every run takes it.
+      if (method === "post") assert.ok(schemes.has("cronSecret"), `${method} ${path}: no cronSecret`);
+      checked++;
+    }
+  }
+  assert.ok(checked >= 20, `only ${checked} cron/sync operations`);
+});
+
+test("enums copied from code match it: notification events and kinds, arr error kinds", async () => {
+  const spec = await fullSpec();
+  const { NOTIFY_EVENT_KEYS, AGENT_KINDS } = await import("../src/lib/notify-events.ts");
+  const { ARR_ERROR_KIND_KEYS } = await import("../src/lib/arr-error-kind.ts");
+  const post = spec.paths["/admin/notification-agents"].post.requestBody?.content["application/json"].schema.properties ?? {};
+  assert.deepEqual(post.events?.items?.enum, [...NOTIFY_EVENT_KEYS]);
+  assert.deepEqual(post.kind?.enum, [...AGENT_KINDS]);
+  const kinds = JSON.stringify(Object.keys(ARR_ERROR_KIND_KEYS));
+  const text = JSON.stringify(spec);
+  const enums = [...text.matchAll(/"enum":(\["auth","timeout"[^\]]*\])/g)].map((m) => m[1]);
+  assert.ok(enums.length >= 8, `found ${enums.length} arr error-kind enums`);
+  for (const e of enums) assert.equal(e, kinds);
+});
+
+test("PATCH /settings documents what the handler does: unknown keys skipped, 413 cap, 500 on a failed write, tests before the write", async () => {
+  const spec = await fullSpec();
+  const src = handlerSlices(routeSource("/settings")).get("patch") ?? "";
+  assert.match(src, /if \(!isAllowedKey\(key\)\) continue;/);
+  assert.match(src, /readJsonCapped<Record<string, string>>\(req, 65536\)/);
+  assert.match(src, /status: 500/);
+  assert.match(src, /ignored/);
+  const patch = spec.paths["/settings"].patch;
+  assert.doesNotMatch(patch.responses["400"].description, /unknown key/);
+  assert.ok(patch.responses["413"] && patch.responses["500"]);
+  assert.doesNotMatch(patch.responses["422"].description, /rolled back/);
+  assert.match(patch.responses["200"].description, /`ignored`/);
+});
+
+test("decoded list rows are documented field for field: audit log, notifications, watchlist and hidden", async () => {
+  const spec = await fullSpec();
+  const prisma = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
+  const modelFields = (model: string) => {
+    const body = new RegExp(`model ${model} \\{([\\s\\S]*?)\\n\\}`).exec(prisma)?.[1] ?? "";
+    return [...body.matchAll(/^\s{2}(\w+)\s+\w+/gm)].map((m) => m[1]).filter((f) => f !== "user").sort();
+  };
+  assert.deepEqual(keysOf(jsonSchema(spec.paths["/admin/audit-log"].get, "200")?.properties?.logs.items), modelFields("AuditLog"));
+  const select = (src: string) => [...(/const SELECT = \{([^}]*)\}/.exec(src)?.[1] ?? "").matchAll(/(\w+): true/g)].map((m) => m[1]).sort();
+  const notifSelect = select(routeSource("/notifications")).filter((k) => k !== "data");
+  assert.deepEqual(keysOf(jsonSchema(spec.paths["/notifications"].get, "200")?.properties?.items.items), notifSelect);
+  const watchlistSelect = [...(/WATCHLIST_ITEM_SELECT = \{([^}]*)\}/.exec(libSource("watchlist-add.ts"))?.[1] ?? "").matchAll(/(\w+): true/g)]
+    .map((m) => m[1]).sort();
+  const listItems = (path: string) => jsonSchema(spec.paths[path].get, "200")?.allOf?.[1]?.properties?.items.items;
+  assert.deepEqual(keysOf(listItems("/watchlist")), watchlistSelect);
+  assert.deepEqual(keysOf(listItems("/hidden")), select(routeSource("/hidden")));
+});
+
+test("the arr history and blocklist pages document their projected records, and no path field", async () => {
+  const spec = await fullSpec();
+  const src = libSource("arr-history.ts");
+  const records = (path: string) => jsonSchema(spec.paths[path].get, "200")?.properties?.records.items;
+  assert.deepEqual(keysOf(records("/admin/arr/blocklist")), interfaceFields(src, "BlocklistEntry"));
+  const history = keysOf(records("/admin/arr/history"));
+  const eventFields = interfaceFields(src, "ArrHistoryEvent");
+  for (const k of history) assert.ok(eventFields.includes(k), `history documents ${k}, which ArrHistoryEvent lacks`);
+  for (const k of ["droppedPath", "importedPath", "sourcePath", "path", "downloadId", "downloadClient"]) {
+    assert.ok(eventFields.includes(k), k);
+    assert.ok(!history.includes(k), `history documents ${k}`);
+  }
+});
+
+test("/sync/ratings documents its no-key answer as recorded and WITHOUT X-Cron-Skipped", async () => {
+  const spec = await fullSpec();
+  const src = routeSource("/sync/ratings");
+  const noKey = src.slice(src.indexOf("if (!mdblistKey?.value && !omdbKey?.value)"), src.indexOf("return withCronRunRecording(\"ratings-sync\", () => withAdvisoryLock("));
+  assert.match(noKey, /withCronRunRecording\(/);
+  assert.doesNotMatch(noKey, /cronSkippedResponse|X-Cron-Skipped/);
+  assert.match(spec.paths["/sync/ratings"].post.responses["200"].description, /"no ratings API key configured" WITHOUT the header/);
+});
+
+// ── Every success body is a schema, not prose ───────────────────────────────
+//
+// A body described only in prose ("{ ok, … }") drifts from its handler with
+// nothing going red, and a generated client can't decode it. The per-area pins
+// (tests/openapi-response-schemas-*.test.mts) tie each schema to its handler;
+// these two guards keep a new operation from shipping without one.
+
+type AnySchema = Record<string, unknown>;
+const COMPOSED = ["$ref", "allOf", "oneOf", "anyOf"];
+
+/** Every schema node under `schema`, with its path. */
+function* schemaNodes(schema: unknown, path: string): Generator<[string, AnySchema]> {
+  if (!schema || typeof schema !== "object") return;
+  const node = schema as AnySchema;
+  yield [path, node];
+  for (const [k, v] of Object.entries((node.properties ?? {}) as Record<string, unknown>)) yield* schemaNodes(v, `${path}.${k}`);
+  yield* schemaNodes(node.items, `${path}[]`);
+  if (typeof node.additionalProperties === "object") yield* schemaNodes(node.additionalProperties, `${path}{*}`);
+  for (const k of ["allOf", "oneOf", "anyOf"]) {
+    for (const [i, v] of ((node[k] ?? []) as unknown[]).entries()) yield* schemaNodes(v, `${path}.${k}[${i}]`);
+  }
+}
+
+test("every 2xx response documents its body as a schema, unless it is a 204", async () => {
+  const spec = await fullSpec();
+  const missing: string[] = [];
+  let bodies = 0;
+  for (const [path, methods] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(methods)) {
+      for (const [status, res] of Object.entries(op.responses)) {
+        if (!status.startsWith("2") || status === "204") continue;
+        const media = Object.values(res.content ?? {});
+        if (media.length > 0 && media.every((m) => m.schema)) bodies++;
+        else missing.push(`${method.toUpperCase()} ${path} ${status}`);
+      }
+    }
+  }
+  assert.deepEqual(missing, [], "2xx bodies described only in prose");
+  assert.ok(bodies >= 270, `only ${bodies} documented 2xx bodies`);
+});
+
+test("an open-ended schema in a success body or a component says why it is open-ended", async () => {
+  const spec = (await fullSpec()) as unknown as { paths: FullSpec["paths"]; components: { schemas: Record<string, unknown> } };
+  const roots: Array<[string, unknown]> = Object.entries(spec.components.schemas).map(([name, s]) => [`components.${name}`, s]);
+  for (const [path, methods] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(methods)) {
+      for (const [status, res] of Object.entries(op.responses)) {
+        if (!status.startsWith("2")) continue;
+        for (const [type, m] of Object.entries(res.content ?? {})) roots.push([`${method.toUpperCase()} ${path} ${status} ${type}`, m.schema]);
+      }
+    }
+  }
+  const silent: string[] = [];
+  for (const [where, root] of roots) {
+    for (const [at, node] of schemaNodes(root, "")) {
+      if (COMPOSED.some((k) => k in node) || typeof node.description === "string") continue;
+      // No type at all (any value), or an object with nothing said about its keys.
+      const bareObject = node.type === "object" && !node.properties && node.additionalProperties === undefined;
+      if (node.type === undefined || bareObject) silent.push(`${where}${at}`);
+    }
+  }
+  assert.deepEqual(silent, [], "open-ended schemas without a description");
+});

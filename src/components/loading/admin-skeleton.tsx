@@ -4,18 +4,18 @@
 // instead of blocking on the server render. Every admin page opens with the
 // shared PageHeader + subtitle, so the header is the kit's SkeletonHeader (33px
 // title line box, 18px subtitle line box, mb-5); the body is neutral 44px rows.
-import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export function AdminSkeleton({ rows = 8 }: { rows?: number }) {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <div className="flex flex-col gap-2">
         {Array.from({ length: rows }).map((_, i) => (
           <div key={i} className="rounded" style={{ ...SKELETON_CARD, height: 44 }} />
         ))}
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }
 
@@ -96,11 +96,11 @@ export function AdminCardRowsSkeleton({
 // 4-card stat row → AdminFilterBar → five request cards.
 export function AdminQueueSkeleton() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle right />
       <AdminStatRowSkeleton />
       <AdminQueueFilterBarSkeleton />
       <AdminCardRowsSkeleton rows={5} height={110} />
-    </div>
+    </SkeletonRoot>
   );
 }

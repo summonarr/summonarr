@@ -5,12 +5,12 @@
 // 40px text-xs header row and 52px rows (py-3 around the 28px avatar). The
 // table has 7 columns at ≥sm — Fav platform and Direct % are `hidden
 // sm:table-cell` — so the last two skeleton cells follow the same breakpoint.
-import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 import { ActivityTabsSkeleton } from "@/components/loading/activity-section-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <ActivityTabsSkeleton />
       <div className="mb-4">
@@ -55,6 +55,6 @@ export default function Loading() {
           </div>
         ))}
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

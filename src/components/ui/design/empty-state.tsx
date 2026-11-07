@@ -12,6 +12,61 @@ function isComponent(icon: IconLike): icon is ComponentType<SVGProps<SVGSVGEleme
   return typeof icon === "function";
 }
 
+// `cta` and `action` fill the same slot, so the type allows one or the other:
+// passing both used to drop `action` silently, and is now a compile error.
+type EmptyStateFooter =
+  | {
+      /** Renders a minimal accent-colored link below the description. */
+      cta?: { href: string; label: string };
+      action?: never;
+    }
+  | {
+      cta?: never;
+      /** Legacy slot for arbitrary actions (buttons, links, etc.). */
+      action?: React.ReactNode;
+    };
+
+type EmptyStateProps = {
+  icon?: IconLike;
+  /** Optional — when omitted the description renders on its own. */
+  title?: React.ReactNode;
+  /** Friendly copy under the title. Preferred over `subtitle`. */
+  description?: React.ReactNode;
+  /** Legacy slot — rendered identically to `description`. */
+  subtitle?: React.ReactNode;
+  className?: string;
+} & EmptyStateFooter;
+
+function EmptyStateIcon({ icon }: { icon: IconLike }) {
+  if (isComponent(icon)) {
+    const Icon = icon;
+    return (
+      <Icon
+        width={28}
+        height={28}
+        style={{
+          color: "var(--ds-fg-subtle)",
+          marginBottom: 12,
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      className="inline-flex"
+      style={{
+        padding: 12,
+        borderRadius: 999,
+        background: "var(--ds-bg-3)",
+        color: "var(--ds-fg-subtle)",
+        marginBottom: 12,
+      }}
+    >
+      {icon as React.ReactNode}
+    </div>
+  );
+}
+
 export function EmptyState({
   icon,
   title,
@@ -20,20 +75,7 @@ export function EmptyState({
   cta,
   action,
   className,
-}: {
-  icon?: IconLike;
-  /** Optional — when omitted the description renders on its own. */
-  title?: React.ReactNode;
-  /** Friendly copy under the title. Preferred over `subtitle`. */
-  description?: React.ReactNode;
-  /** Legacy slot — rendered identically to `description`. */
-  subtitle?: React.ReactNode;
-  /** Renders a minimal accent-colored link below the description. */
-  cta?: { href: string; label: string };
-  /** Legacy slot for arbitrary actions (buttons, links, etc.). */
-  action?: React.ReactNode;
-  className?: string;
-}) {
+}: EmptyStateProps) {
   const desc = description ?? subtitle;
 
   return (
@@ -49,35 +91,7 @@ export function EmptyState({
         alignItems: "center",
       }}
     >
-      {icon &&
-        (isComponent(icon) ? (
-          (() => {
-            const Icon = icon;
-            return (
-              <Icon
-                width={28}
-                height={28}
-                style={{
-                  color: "var(--ds-fg-subtle)",
-                  marginBottom: 12,
-                }}
-              />
-            );
-          })()
-        ) : (
-          <div
-            className="inline-flex"
-            style={{
-              padding: 12,
-              borderRadius: 999,
-              background: "var(--ds-bg-3)",
-              color: "var(--ds-fg-subtle)",
-              marginBottom: 12,
-            }}
-          >
-            {icon as React.ReactNode}
-          </div>
-        ))}
+      {icon && <EmptyStateIcon icon={icon} />}
       {title && (
         <div
           className="font-semibold"
@@ -117,7 +131,7 @@ export function EmptyState({
           </Link>
         </div>
       )}
-      {action && !cta && <div style={{ marginTop: 14 }}>{action}</div>}
+      {action && <div style={{ marginTop: 14 }}>{action}</div>}
     </div>
   );
 }

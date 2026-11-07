@@ -8,10 +8,13 @@
 //     resolution (many cards for the same title = one wire item);
 //   • MAX_BATCH=200 caps the POST body, re-scheduling the remainder;
 //   • every path — success, missing key, HTTP error, transport error, bad JSON —
-//     RESOLVES the promise (null on failure). There is no timeout: a path that
-//     neither resolves nor rejects would hang card renders forever.
+//     RESOLVES the promise (null on failure), and a batch the server never
+//     answers resolves null once the batch timeout fires;
+//   • a key asked for again while its batch is on the wire joins that batch
+//     instead of costing a second POST.
 // No network: fetch is replaced with a scripted mock and restored in a finally.
 import { test } from "node:test";
+import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import type { RatingsPayload } from "../src/lib/client/ratings-batcher.ts";
 
@@ -342,4 +345,63 @@ test("a request enqueued while a batch is in flight forms its own debounced batc
       assert.deepEqual(b, payloadFor("tv:200"));
     },
   );
+});
+
+test("a key requested again while its batch is on the wire joins that batch: no second POST, one shared answer", async () => {
+  let releaseFirst: () => void = () => {};
+  const firstGate = new Promise<void>((r) => {
+    releaseFirst = r;
+  });
+  let markStarted: () => void = () => {};
+  const firstStarted = new Promise<void>((r) => {
+    markStarted = r;
+  });
+
+  await withFetch(
+    async (call, index) => {
+      if (index === 0) {
+        markStarted();
+        await firstGate; // hold batch 1's response open
+      }
+      return echoResponder(call);
+    },
+    async (calls) => {
+      const pA = requestRatings(100, "movie");
+      await firstStarted; // batch 1 (movie:100) is on the wire
+      const pAgain = requestRatings(100, "movie");
+      releaseFirst();
+      const [a, again] = await Promise.all([pA, pAgain]);
+      assert.deepEqual(a, payloadFor("movie:100"));
+      assert.deepEqual(again, payloadFor("movie:100"));
+
+      // A later request forms the next batch. Had movie:100 been queued again,
+      // it would ride along in this one.
+      assert.deepEqual(await requestRatings(101, "movie"), payloadFor("movie:101"));
+      assert.equal(calls.length, 2);
+      assert.deepEqual(calls[1].items.map((i) => i.id), [101]);
+    },
+  );
+});
+
+test("a batch the server never answers resolves its waiters null once the batch timeout fires", async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let aborted = false;
+  globalThis.fetch = ((_input: FetchArgs[0], init?: FetchArgs[1]) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(new DOMException("The operation was aborted", "AbortError"));
+      });
+    })) as typeof fetch;
+  try {
+    const pending = requestRatings(300, "movie");
+    t.mock.timers.tick(30); // the debounce: the POST goes out and never answers
+    t.mock.timers.tick(59_999);
+    assert.equal(aborted, false, "not before the timeout");
+    t.mock.timers.tick(1);
+    assert.equal(await pending, null);
+    assert.equal(aborted, true);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

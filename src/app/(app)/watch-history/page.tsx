@@ -1,5 +1,5 @@
 import { requireAppSession } from "@/lib/require-app-session";
-import { getMyWatchHistory } from "@/lib/my-watch-history";
+import { getMyWatchHistory, isMediaServerProvider } from "@/lib/my-watch-history";
 import { isFeatureEnabled } from "@/lib/features";
 import { isPlayHistoryEnabled } from "@/lib/play-history";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -47,9 +47,7 @@ export default async function WatchHistoryPage() {
   // Plex/Jellyfin sign-ins ARE media-server identities — never show them the
   // "get your account linked" explainer; their history simply hasn't been
   // recorded yet. Only local/OIDC accounts can genuinely need linking.
-  const provider = session.user.provider ?? "";
-  const serverProvider =
-    provider === "plex" || provider === "jellyfin" || provider === "jellyfin-quickconnect";
+  const serverProvider = isMediaServerProvider(session.user.provider);
 
   return (
     <div className="ds-page-enter">

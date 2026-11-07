@@ -120,11 +120,16 @@ shadowPrismaModel(prisma, "user", {
   findMany: async () => { rec("user.findMany"); return []; },
   groupBy: async () => [],
 });
+// groupBy answers keyed "<model>:<by fields>"; anything unset groups to nothing.
+const groupByFixture = new Map<string, unknown[]>();
 for (const m of ["mediaRequest", "plexLibraryItem", "jellyfinLibraryItem", "issue", "tVEpisodeCache"]) {
   shadowPrismaModel(prisma, m, {
     count: async (args: unknown) => { rec(`${m}.count`, args); return 3; },
     findMany: async () => { rec(`${m}.findMany`); return []; },
-    groupBy: async () => { rec(`${m}.groupBy`); return []; },
+    groupBy: async (args: { by: string[] }) => {
+      rec(`${m}.groupBy`, args);
+      return groupByFixture.get(`${m}:${[args.by].flat().join(",")}`) ?? [];
+    },
     aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
   });
 }
@@ -770,8 +775,35 @@ test("stats is read-only", async () => {
 test("stats reads the counts it claims to report", async () => {
   const t = await mintSession();
   await getStats(t);
-  assert.ok(opsOf("mediaRequest.count").length >= 5, "request status breakdown");
   assert.equal(opsOf("user.count").length, 1);
-  assert.ok(opsOf("issue.count").length >= 2, "total + open issues");
   assert.ok(opsOf("$queryRaw").length >= 2, "fulfillment average + monthly series");
+});
+
+test("stats: the request and issue breakdowns are one grouped read each, never a count per figure", async () => {
+  groupByFixture.set("mediaRequest:status", [
+    { status: "PENDING", _count: { _all: 4 } },
+    { status: "APPROVED", _count: { _all: 3 } },
+    { status: "AVAILABLE", _count: { _all: 7 } },
+    // DECLINED has no rows, so no group: it must read 0, not be missing.
+  ]);
+  groupByFixture.set("mediaRequest:mediaType", [{ mediaType: "MOVIE", _count: { _all: 9 } }, { mediaType: "TV", _count: { _all: 5 } }]);
+  groupByFixture.set("issue:status", [
+    { status: "OPEN", _count: { _all: 2 } },
+    { status: "RESOLVED", _count: { _all: 6 } },
+  ]);
+  try {
+    ops = [];
+    const t = await mintSession();
+    const body = await (await getStats(t)).json();
+    // The iOS AdminStats contract: same fields, same types.
+    assert.deepEqual(body.requests, { total: 14, pending: 4, approved: 3, available: 7, declined: 0, movie: 9, tv: 5 });
+    assert.deepEqual(body.issues, { total: 8, open: 2, inProgress: 0 });
+    assert.equal(opsOf("mediaRequest.count").length, 0);
+    assert.equal(opsOf("issue.count").length, 0);
+    const grouped = (name: string) => opsOf(name).map((o) => (o.args as { by: string[] }).by);
+    assert.deepEqual(grouped("mediaRequest.groupBy"), [["status"], ["mediaType"]]);
+    assert.deepEqual(grouped("issue.groupBy"), [["status"]]);
+  } finally {
+    groupByFixture.clear();
+  }
 });

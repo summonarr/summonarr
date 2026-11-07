@@ -16,7 +16,9 @@ interface WarmCacheButtonProps {
 export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
   const t = useT();
   const router = useRouter();
-  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  // "partial": the run finished but some TMDB fetches failed — a warning, not
+  // a success, or a run where most fetches failed reads as a clean one.
+  const [status, setStatus] = useState<"idle" | "loading" | "done" | "partial" | "error">("idle");
   const [result, setResult] = useState<string | null>(null);
   // Cancellable end-of-run reset (same shape as the sibling sync buttons): a
   // prior run's timer landing mid-run flipped "loading" back to "idle", so the
@@ -35,8 +37,11 @@ export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
         setStatus("error");
         setResult(data?.error ?? t("adminManage.users.error.requestFailed", { status: res.status }));
       } else {
-        setStatus("done");
-        setResult(t("adminManage.library.btn.warmResult", { fetched: data?.fetched ?? 0, skipped: data?.skipped ?? 0 }));
+        const failed = data?.failed ?? 0;
+        setStatus(failed > 0 ? "partial" : "done");
+        setResult(failed > 0
+          ? t("adminManage.library.btn.warmResultFailed", { fetched: data?.fetched ?? 0, skipped: data?.skipped ?? 0, failed })
+          : t("adminManage.library.btn.warmResult", { fetched: data?.fetched ?? 0, skipped: data?.skipped ?? 0 }));
         router.refresh();
       }
     } catch {
@@ -77,7 +82,7 @@ export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
         <span
           role={status === "error" ? "alert" : "status"}
           aria-live={status === "error" ? "assertive" : "polite"}
-          className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}
+          className={`text-xs ${status === "error" ? "text-red-400" : status === "partial" ? "text-[var(--ds-warning)]" : "text-zinc-400"}`}
         >
           {result}
         </span>

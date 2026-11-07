@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, getAuditPiiRetentionDays, REDACTED_USER_NAME } from "@/lib/audit";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, SCRUB_AUDIT_PII_LOCK_ID } from "@/lib/advisory-lock";
 import { scrubTargetPiiFromAudit } from "@/lib/audit-scrub";
 
 export async function POST(request: NextRequest) {
@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
   }
 
   return withCronRunRecording("audit-log:pii-scrub", () => withAdvisoryLock(
-    2002,
+    SCRUB_AUDIT_PII_LOCK_ID,
     async () => {
       const retentionDays = await getAuditPiiRetentionDays();
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);

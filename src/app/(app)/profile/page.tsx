@@ -69,8 +69,10 @@ export default async function ProfilePage() {
       orderBy: { createdAt: "asc" },
     }),
     prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } }),
+    // A row past its deadline is dead but stays until the purge cron sweeps it
+    // (guardrail 6c) — list only live devices, as GET /api/sessions does.
     prisma.authSession.findMany({
-      where: { userId: session.user.id },
+      where: { userId: session.user.id, expiresAt: { gt: new Date() } },
       orderBy: { lastSeenAt: "desc" },
       select: {
         id: true, sessionId: true, deviceType: true, deviceLabel: true,
@@ -84,28 +86,25 @@ export default async function ProfilePage() {
   // permission check is free; the flag and token reads only run for them.
   const autoRequestPermitted =
     canAutoRequest(session.user.permissions, "MOVIE") || canAutoRequest(session.user.permissions, "TV");
-  const [autoRequestEnabled, plexAccount] = autoRequestPermitted
-    ? await Promise.all([
-        isFeatureEnabled(WATCHLIST_AUTO_REQUEST_FEATURE_KEY),
-        prisma.account.findFirst({ where: { userId: session.user.id, provider: "plex" }, select: { id: true } }),
-      ])
-    : [false, null];
-  const plexWatchlistConnection = autoRequestEnabled
-    ? await getPlexWatchlistConnection(
-        {
-          id: session.user.id,
-          plexWatchlistOptInAt: user?.plexWatchlistOptInAt ?? null,
-          plexWatchlistAutoRequest: user?.plexWatchlistAutoRequest ?? true,
-        },
-        plexAccount !== null,
-      )
-    : null;
+  const loadAutoRequest = async () => {
+    if (!autoRequestPermitted) return { autoRequestEnabled: false, plexConnected: false, plexWatchlistConnection: null };
+    const [autoRequestEnabled, plexAccount] = await Promise.all([
+      isFeatureEnabled(WATCHLIST_AUTO_REQUEST_FEATURE_KEY),
+      prisma.account.findFirst({ where: { userId: session.user.id, provider: "plex" }, select: { id: true } }),
+    ]);
+    const plexWatchlistConnection = autoRequestEnabled
+      ? await getPlexWatchlistConnection(
+          {
+            id: session.user.id,
+            plexWatchlistOptInAt: user?.plexWatchlistOptInAt ?? null,
+            plexWatchlistAutoRequest: user?.plexWatchlistAutoRequest ?? true,
+          },
+          plexAccount !== null,
+        )
+      : null;
+    return { autoRequestEnabled, plexConnected: plexAccount !== null, plexWatchlistConnection };
+  };
   const discordInviteUrl = discordInviteSetting?.value || null;
-  // The Trakt card: shown while the admin's Trakt app is configured and the
-  // user has a use for it — or while they are connected, so they can always
-  // disconnect even after the admin switched the uses off.
-  const trakt = await getTraktProfileState(session.user.id, session.user.permissions);
-  const showTrakt = trakt.available || trakt.connected || trakt.status === "reauth";
 
   // Jellyfin users verify a notification address by emailed link; the pending
   // address lives only in the VerificationToken row (/api/profile/notification-email
@@ -113,33 +112,48 @@ export default async function ProfilePage() {
   // shows "verification pending" with a resend instead of a blank field.
   const isJellyfinUser =
     session.user.provider === "jellyfin" || session.user.provider === "jellyfin-quickconnect";
-  const pendingVerification =
+
+  // Two-factor is offered only to local-credentials accounts (guardrail 6d).
+  const mfaAvailable = session.user.provider === "credentials" && hasPassword;
+
+  // The sections below read independently of each other, so they load together.
+  const [
+    { autoRequestEnabled, plexConnected, plexWatchlistConnection },
+    trakt,
+    pendingVerification,
+    [mfaState, requireMfaRow],
+    t,
+  ] = await Promise.all([
+    loadAutoRequest(),
+    // The Trakt card: shown while the admin's Trakt app is configured and the
+    // user has a use for it — or while they are connected, so they can always
+    // disconnect even after the admin switched the uses off.
+    getTraktProfileState(session.user.id, session.user.permissions),
     isJellyfinUser && emailEnabled
-      ? await prisma.verificationToken.findFirst({
+      ? prisma.verificationToken.findFirst({
           where: {
             identifier: { startsWith: verifyIdentifierPrefixFor(session.user.id) },
             expires: { gt: new Date() },
           },
           select: { identifier: true },
         })
-      : null;
+      : null,
+    mfaAvailable
+      ? Promise.all([
+          getMfaState(session.user.id),
+          prisma.setting.findUnique({ where: { key: REQUIRE_MFA_FOR_ADMINS_KEY } }),
+        ])
+      : ([null, null] as const),
+    getTranslator(),
+  ]);
+  const showTrakt = trakt.available || trakt.connected || trakt.status === "reauth";
   const pendingEmail = pendingVerification ? (parseVerifyIdentifier(pendingVerification.identifier)?.email ?? null) : null;
-
-  // Two-factor is offered only to local-credentials accounts (guardrail 6d).
-  const mfaAvailable = session.user.provider === "credentials" && hasPassword;
-  const [mfaState, requireMfaRow] = mfaAvailable
-    ? await Promise.all([
-        getMfaState(session.user.id),
-        prisma.setting.findUnique({ where: { key: REQUIRE_MFA_FOR_ADMINS_KEY } }),
-      ])
-    : [null, null];
   const mfaRequired =
     !!mfaState &&
     !mfaState.enabled &&
     adminMfaPolicyApplies({ role: session.user.role, provider: session.user.provider, settingValue: requireMfaRow?.value });
   const pushCap = parseRateLimit(maxPushSetting?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
   const currentSessionId = session.sessionId;
-  const t = await getTranslator();
 
   return (
     <div className="ds-page-enter">
@@ -302,19 +316,21 @@ export default async function ProfilePage() {
                     })
                   : null
               }
-              notifyOnApproved={user?.notifyOnApproved ?? true}
-              notifyOnAvailable={user?.notifyOnAvailable ?? true}
-              notifyOnDeclined={user?.notifyOnDeclined ?? true}
-              emailOnApproved={user?.emailOnApproved ?? false}
-              emailOnAvailable={user?.emailOnAvailable ?? false}
-              emailOnDeclined={user?.emailOnDeclined ?? false}
-              pushOnApproved={user?.pushOnApproved ?? true}
-              pushOnAvailable={user?.pushOnAvailable ?? true}
-              pushOnDeclined={user?.pushOnDeclined ?? true}
-              notifyOnIssue={user?.notifyOnIssue ?? true}
-              notifyOnComment={user?.notifyOnComment ?? true}
-              emailOnComment={user?.emailOnComment ?? false}
-              pushOnComment={user?.pushOnComment ?? true}
+              prefs={{
+                notifyOnApproved: user?.notifyOnApproved ?? true,
+                notifyOnAvailable: user?.notifyOnAvailable ?? true,
+                notifyOnDeclined: user?.notifyOnDeclined ?? true,
+                notifyOnComment: user?.notifyOnComment ?? true,
+                emailOnApproved: user?.emailOnApproved ?? false,
+                emailOnAvailable: user?.emailOnAvailable ?? false,
+                emailOnDeclined: user?.emailOnDeclined ?? false,
+                emailOnComment: user?.emailOnComment ?? false,
+                pushOnApproved: user?.pushOnApproved ?? true,
+                pushOnAvailable: user?.pushOnAvailable ?? true,
+                pushOnDeclined: user?.pushOnDeclined ?? true,
+                pushOnComment: user?.pushOnComment ?? true,
+                notifyOnIssue: user?.notifyOnIssue ?? true,
+              }}
             />
           </ProfileCard>
 
@@ -325,7 +341,7 @@ export default async function ProfilePage() {
             >
               <AutoRequestPrefs
                 initialPlexWatchlist={user?.plexWatchlistAutoRequest ?? true}
-                plexConnected={plexAccount !== null}
+                plexConnected={plexConnected}
                 serverSource={plexWatchlistConnection?.serverSource ?? false}
                 serverOptedIn={plexWatchlistConnection?.serverOptedIn ?? false}
                 serverStatus={plexWatchlistConnection?.serverStatus ?? null}

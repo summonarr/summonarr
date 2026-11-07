@@ -323,3 +323,52 @@ test("f48: tv never fetches /collection/", async () => {
   assert.equal((await res.json()).collection, null);
   assert.ok(!ops.some((o) => o.startsWith("fetch /3/collection/")));
 });
+
+// ── id parsing + the 4K visibility read ──────────────────────────────────────
+// The tmdbId path segment is accepted only in canonical digits: parseInt served
+// "550abc" and "550.9" as movie 550. And the 4K-visibility settings read sits
+// inside the handler's try like every other read, so its failure is the
+// localized 502, not a bare framework 500.
+
+for (const bad of ["27205abc", "1.5", "1e3", "0x3E8", " 27205", "027205", "-1", "0", "abc", ""]) {
+  test(`media: tmdbId ${JSON.stringify(bad)} is 400 and never reaches TMDB`, async () => {
+    const { token } = await mintSession();
+    const res = await mediaGet(token, "movie", bad);
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), { error: "tmdbId must be a positive integer" });
+    assert.ok(!ops.some((o) => o.startsWith("fetch ")), `TMDB was called: ${ops.join(", ")}`);
+  });
+}
+
+test("media: a canonical id past INT4 is the out-of-range 400", async () => {
+  const { token } = await mintSession();
+  const res = await mediaGet(token, "movie", "2147483648");
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "tmdbId is out of range" });
+  assert.ok(!ops.some((o) => o.startsWith("fetch ")));
+});
+
+test("media: a failing 4K-visibility settings read is the localized 502, not an escaped throw", async () => {
+  const { token } = await mintSession();
+  shadowPrismaModel(prisma, "setting", {
+    findUnique: async () => null,
+    findMany: async (args: { where?: { key?: { in?: string[] } } } = {}) => {
+      // Only getShow4kVisibility's read, so auth and the rest are untouched.
+      if (args.where?.key?.in?.includes("radarr4kUrl")) throw new Error("settings exploded");
+      return [];
+    },
+    upsert: async () => ({}), create: async () => ({}), update: async () => ({}), deleteMany: async () => ({ count: 0 }),
+  });
+  try {
+    const res = await mediaGet(token, "movie", "27205");
+    assert.equal(res.status, 502);
+    assert.deepEqual(await res.json(), { error: "Could not load this title" });
+    assert.ok(errors.some((e) => e.startsWith("[media] detail fetch failed")), `no scoped log: ${errors.join(" | ")}`);
+  } finally {
+    shadowPrismaModel(prisma, "setting", {
+      findUnique: async () => null,
+      findMany: async () => [],
+      upsert: async () => ({}), create: async () => ({}), update: async () => ({}), deleteMany: async () => ({ count: 0 }),
+    });
+  }
+});

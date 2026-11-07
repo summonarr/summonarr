@@ -5,9 +5,14 @@ import { getTVSeasonEpisodesLocalized, tmdbLanguageFor } from "@/lib/tmdb";
 import type { TmdbEpisode } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { settleLimit } from "@/lib/concurrency";
-import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
+import {
+  getVisibleServerInstances,
+  providerEpisodeSources,
+  summarizeEpisodeSources,
+  visibleEpisodeSourcesFor,
+} from "@/lib/media-visibility";
 import { localeForRequest, translatorForRequest } from "@/lib/i18n/server-locale";
-import { isTmdbIdInRange } from "@/lib/tmdb-id";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 
 export interface TVSeasonResponse {
   episodes: TmdbEpisode[];
@@ -26,9 +31,9 @@ export const GET = withAuth(async (
   }
 
   const { id: rawId, n: rawN } = await params;
-  const tmdbId = parseInt(rawId, 10);
+  const tmdbId = parseTmdbIdParam(rawId);
   const seasonNumber = parseInt(rawN, 10);
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+  if (tmdbId === null) {
     return NextResponse.json({ error: t("apiUser.common.idPositive") }, { status: 400 });
   }
   // INT4 ceiling shared with tv-availability and media/[type]/[tmdbId]: the
@@ -46,15 +51,14 @@ export const GET = withAuth(async (
   let english: TmdbEpisode[];
   try {
     ({ episodes, english } = await getTVSeasonEpisodesLocalized(tmdbId, seasonNumber, tmdbLanguageFor(localeForRequest(req))));
-  } catch {
+  } catch (err) {
+    // tmdbFetch throws without logging, so without this a run of TMDB failures
+    // here left no trace at all.
+    console.warn("[tv-season] TMDB season fetch failed:", tmdbId, seasonNumber, err instanceof Error ? err.message : err);
     return NextResponse.json({ error: t("apiUser.tv.seasonFetchFailed") }, { status: 502 });
   }
 
-  const provider = session.user.provider;
-  let providerSources: string[];
-  if (provider === "plex") providerSources = ["plex"];
-  else if (provider === "jellyfin" || provider === "jellyfin-quickconnect") providerSources = ["jellyfin"];
-  else providerSources = ["plex", "jellyfin"];
+  const providerSources = providerEpisodeSources(session.user.provider);
 
   // TVEpisodeCache has no serverInstance column, so `source` alone would report
   // a RESTRICTED server's per-episode holdings to an ungranted caller — as raw
@@ -127,10 +131,7 @@ export const GET = withAuth(async (
     sourcesPresent.add(row.source);
   }
 
-  let source: TVSeasonResponse["source"] = null;
-  if (sourcesPresent.has("plex") && sourcesPresent.has("jellyfin")) source = "both";
-  else if (sourcesPresent.has("plex")) source = "plex";
-  else if (sourcesPresent.has("jellyfin")) source = "jellyfin";
+  const source: TVSeasonResponse["source"] = summarizeEpisodeSources(sourcesPresent);
 
   return NextResponse.json({
     episodes,

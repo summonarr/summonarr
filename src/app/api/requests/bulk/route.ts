@@ -1,38 +1,32 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { runWithSerializableRetry } from "@/lib/serializable-retry";
-import { addMovieToRadarr, addSeriesToSonarr, arrWriteOutcomeUnknown, type AddProgress } from "@/lib/arr";
-import { alertAdminsNewRequest } from "@/lib/request-create";
-import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
-import { exceedsCap } from "@/lib/content-rating";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
-import { emitSSE } from "@/lib/sse-emitter";
-import { scheduleDownloadChecks, type DownloadCheckTarget } from "@/lib/download-check";
 import { maintenanceGuard } from "@/lib/maintenance";
-import { sanitizeForLog } from "@/lib/sanitize";
-import { resolveMediaMeta } from "@/lib/request-meta";
-import { getBlacklistSet } from "@/lib/blacklist";
-import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
-import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
-import {
-  canRequestInstance,
-  canAutoApproveInstance,
-  parseInstanceGrants,
-  parseMediaServerGrants,
-  hasPermission,
-  effectivePermissions,
-  Permission,
-} from "@/lib/permissions";
-import { getMediaInstanceAccessLists, visibleInstancesFor } from "@/lib/media-visibility";
-import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, quotaUsageWhere } from "@/lib/quota";
+import { hasPermission, effectivePermissions, parseInstanceGrants, Permission } from "@/lib/permissions";
+import { translateQuotaWindow } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
-import { mapLimit } from "@/lib/concurrency";
 import { readJsonCapped } from "@/lib/body-size";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
+import { BULK_REQUEST_MAX_ITEMS } from "@/lib/request-limits";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { greenlitPeerStatuses } from "@/lib/request-mirror";
-import { dropStaleDeclinedMany, restoreThread } from "@/lib/request-comment-carry";
+import { QuotaExceededError } from "@/lib/request-policy";
+import {
+  BULK_TARGET_SELECT,
+  applyRatingCaps,
+  bulkVisibleServers,
+  classifyItems,
+  clearRequestedDeletionVotes,
+  createRowsTx,
+  keyOf,
+  loadFiler,
+  prepareItems,
+  pushAutoApproved,
+  routeItems,
+  type BulkContext,
+  type CreatedRows,
+  type MediaType,
+} from "@/lib/request-bulk";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
 // "request on behalf of" flow. A single self-item or whole collection both go
@@ -48,56 +42,12 @@ import { dropStaleDeclinedMany, restoreThread } from "@/lib/request-comment-carr
 // the requester expected no review, so the call sends ONE admin alert for those
 // rows (phase 3) and marks each `pushFailed` in the results.
 
-const MAX_ITEMS = 50;
-const ARR_CONCURRENCY = 5;
+// The item pipeline (routing, classification, caps, the create transaction and
+// the Radarr/Sonarr push) is src/lib/request-bulk.ts; this handler keeps the
+// HTTP half: the body, the target, the refusals, the audit and the answer.
 
-type MediaType = "MOVIE" | "TV";
-type ItemResult =
-  | "created"
-  | "auto-approved"
-  | "already-available"
-  | "already-requested"
-  | "skipped-declined"
-  | "no-permission"
-  | "blacklisted"
-  | "rating-blocked"
-  | "error";
-
-interface CreateOutcome {
-  tmdbId: number;
-  mediaType: MediaType;
-  result: ItemResult;
-  // Additive: an auto-approval whose push failed; the row went back to PENDING
-  // (result "created").
-  pushFailed?: true;
-}
-
-const keyOf = (tmdbId: number, mediaType: string) => `${tmdbId}:${mediaType}`;
-
-// Thrown inside the quota transaction to roll it back and surface a 429 carrying
-// the offending media type's numbers.
-//
-// Fields are declared and assigned explicitly rather than via constructor
-// parameter properties: the unit suite runs source through Node's strip-only TS
-// mode, which rejects that sugar outright (same desugaring as backup-crypto.ts /
-// arr.ts / play-history.ts).
-class QuotaExceeded extends Error {
-  readonly mt: MediaType;
-  readonly limit: number;
-  readonly windowLabel: string;
-  readonly used: number;
-  // Whose quota ran out: the target's, or (on behalf) the FILER's own.
-  readonly whose: "target" | "filer";
-
-  constructor(mt: MediaType, limit: number, windowLabel: string, used: number, whose: "target" | "filer" = "target") {
-    super("QUOTA_EXCEEDED");
-    this.mt = mt;
-    this.limit = limit;
-    this.windowLabel = windowLabel;
-    this.used = used;
-    this.whose = whose;
-  }
-}
+// Shared with the collection "Request all" button, which chunks by it.
+const MAX_ITEMS = BULK_REQUEST_MAX_ITEMS;
 
 // The door check accepts ANY request grant, not just the umbrella bit.
 // REQUEST_MOVIE / REQUEST_TV narrow REQUEST rather than depending on it
@@ -191,22 +141,7 @@ export const POST = withPermission([
 
   const target = await prisma.user.findUnique({
     where: { id: targetUserId },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      role: true,
-      permissions: true,
-      discordId: true,
-      deactivatedAt: true,
-      movieQuotaLimit: true,
-      movieQuotaDays: true,
-      tvQuotaLimit: true,
-      tvQuotaDays: true,
-      maxContentRating: true,
-      instanceGrants: true,
-      mediaServerGrants: true,
-    },
+    select: BULK_TARGET_SELECT,
   });
   if (!target) return NextResponse.json({ error: t("apiUser.requests.bulk.targetNotFound") }, { status: 404 });
   // A deactivated account can't sign in and shouldn't accumulate requests via the
@@ -242,38 +177,20 @@ export const POST = withPermission([
     );
   }
 
-  // Named-instance grants and media-server grants are NOT permission bits, so the
-  // subset check above cannot see them. A non-ADMIN on-behalf filer may only use a
-  // named instance they could request on / auto-approve on themselves (grant only
-  // what you hold), and only sees "already available" for servers they can view
-  // themselves (the per-item results would otherwise leak a restricted library).
-  const filerChecked = isOnBehalf && !hasPermission(session.user.permissions, Permission.ADMIN);
-  const filerRow = filerChecked
-    ? await prisma.user.findUnique({
-        where: { id: session.user.id },
-        select: {
-          instanceGrants: true,
-          mediaServerGrants: true,
-          maxContentRating: true,
-          movieQuotaLimit: true,
-          movieQuotaDays: true,
-          tvQuotaLimit: true,
-          tvQuotaDays: true,
-        },
-      })
-    : null;
-  const filerGrants = parseInstanceGrants(filerRow?.instanceGrants);
-  const filerMay = (
-    inst: { slug: string; restricted: boolean; serverAll: boolean },
-    mediaType: MediaType,
-    serverAll4k: boolean,
-    autoApprove = false,
-  ) =>
-    !filerChecked ||
-    inst.slug === "" ||
-    (autoApprove
-      ? canAutoApproveInstance(session.user.permissions, inst, filerGrants, mediaType)
-      : canRequestInstance(session.user.permissions, inst, filerGrants, mediaType, serverAll4k));
+  // The on-behalf filer's own instance grants, server visibility, cap and quota
+  // (request-bulk.ts loadFiler): grant only what you hold.
+  const { filerChecked, filerRow, filerMay } = await loadFiler(session, isOnBehalf);
+  const ctx: BulkContext = {
+    session,
+    isOnBehalf,
+    target,
+    targetUserId,
+    targetPerms,
+    grants: parseInstanceGrants(target.instanceGrants),
+    filerChecked,
+    filerRow,
+    filerMay,
+  };
 
   // discordRequireLinkedAccountSite only gates SELF requests — an admin acting on
   // behalf is trusted and shouldn't be blocked by the target's link state.
@@ -289,434 +206,32 @@ export const POST = withPermission([
     }
   }
 
-  // Per-item instance routing (auto-route only — bulk has no explicit-instance
-  // input). Mirrors the single POST /api/requests: only pay the TMDB details
-  // fetch when at least one CONFIGURED non-default instance carries an autoRoute
-  // rule; otherwise every item targets the default instance exactly as before.
-  // The media-server registry rides along here (it's needed by the availability lookup
-  // below, and this block already pays a round-trip) so resolving the target's
-  // server visibility costs nothing extra.
-  const [radarrConfigured, sonarrConfigured, mediaAccess] = await Promise.all([
-    getSyncableArrInstances("radarr"),
-    getSyncableArrInstances("sonarr"),
-    getMediaInstanceAccessLists(),
-  ]);
-  const configuredByType = { MOVIE: radarrConfigured, TV: sonarrConfigured } as const;
-  const routingActive =
-    radarrConfigured.some((i) => i.slug !== "" && i.autoRoute) ||
-    sonarrConfigured.some((i) => i.slug !== "" && i.autoRoute);
-  const slugByKey = new Map<string, string>();
-  if (routingActive) {
-    await mapLimit(items, ARR_CONCURRENCY, async (it) => {
-      const candidates = configuredByType[it.mediaType];
-      if (!candidates.some((i) => i.slug !== "" && i.autoRoute)) return;
-      let routable: RoutableMedia = { genreIds: [], originalLanguage: null, originCountries: [] };
-      try {
-        const detail = it.mediaType === "MOVIE" ? await getMovieDetails(it.tmdbId) : await getTVDetails(it.tmdbId);
-        routable = {
-          genreIds: detail.genreList?.map((g) => g.id) ?? [],
-          originalLanguage: detail.originalLanguage ?? null,
-          // ISO codes from the normalized details (populated since the
-          // originCountryCodes field landed; older cached rows lack it and
-          // degrade to [] — exactly the previous behavior — until TTL refresh).
-          originCountries: detail.originCountryCodes ?? [],
-        };
-      } catch {
-        // TMDB details unavailable ⇒ fall back to the default instance.
-      }
-      const slug = routeMediaToSlug(candidates, routable);
-      if (slug !== "") slugByKey.set(keyOf(it.tmdbId, it.mediaType), slug);
-    });
-  }
-  const slugOf = (it: { tmdbId: number; mediaType: MediaType }) =>
-    slugByKey.get(keyOf(it.tmdbId, it.mediaType)) ?? "";
-  // Access metadata for the routed instance; the default instance is open to any
-  // base requester, so a missing registry entry safely degrades to that shape.
-  const DEFAULT_ACCESS = { slug: "", restricted: false, serverAll: false, skipLibraryCheck: false };
-  const instOf = (it: { tmdbId: number; mediaType: MediaType }) =>
-    configuredByType[it.mediaType].find((i) => i.slug === slugOf(it)) ?? DEFAULT_ACCESS;
-  const grants = parseInstanceGrants(target.instanceGrants);
-  const request4kAllRow = routingActive
-    ? await prisma.setting.findUnique({ where: { key: "request4kAll" } })
-    : null;
-  const serverAll4k = request4kAllRow?.value === "true";
+  const routing = await routeItems(ctx, items);
+  const visible = bulkVisibleServers(ctx, routing.mediaAccess);
+  const classified = await classifyItems(ctx, items, routing, visible);
+  const { skipped, staleDeclinedIdByKey } = classified;
+  const capped = await applyRatingCaps(ctx, classified.toCreate, routing, staleDeclinedIdByKey);
+  const { ratingBlocked } = capped;
 
-  // An auto-routed instance the target can't access falls back to the DEFAULT instance
-  // (parity with the single-request and Discord paths): a base requester is never
-  // blocked by a server-side routing decision. Remap HERE — before the availability,
-  // create, and arr-push lookups below all key off slugOf() — so the whole item runs on
-  // its effective (default) slug. Bulk items are always auto-routed (never an explicit
-  // target), so there is no explicit-choice case to preserve as a hard reject. An item
-  // the user can't request at all (missing the base media permission) still fails the
-  // per-item canRequestInstance gate below and is skipped "no-permission".
-  if (routingActive) {
-    for (const it of items) {
-      const key = keyOf(it.tmdbId, it.mediaType);
-      const routed = slugByKey.get(key);
-      if (routed === undefined || routed === "") continue;
-      const inst = configuredByType[it.mediaType].find((i) => i.slug === routed) ?? DEFAULT_ACCESS;
-      if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k) || !filerMay(inst, it.mediaType, serverAll4k)) {
-        slugByKey.delete(key); // slugOf() now returns "" (default instance)
-      }
-    }
-  }
-
-  // Media-server visibility of the TARGET, never the caller: every classification below
-  // decides what lands in the target's request list, so a restricted server the CALLER can
-  // see must not make an item read "already available" for a target who holds no grant on it
-  // (and vice versa — an admin bulk-requesting on behalf of a plain user must not have their
-  // own broader visibility silently swallow the items). Same targetPerms/target-grants rule
-  // the instance and quota gates above already follow.
-  const targetVisible = visibleInstancesFor(
-    targetPerms,
-    parseMediaServerGrants(target.mediaServerGrants),
-    mediaAccess.plex,
-    mediaAccess.jellyfin,
-  );
-  const filerVisible = filerChecked
-    ? visibleInstancesFor(
-        session.user.permissions,
-        parseMediaServerGrants(filerRow?.mediaServerGrants),
-        mediaAccess.plex,
-        mediaAccess.jellyfin,
-      )
-    : null;
-  const visible = filerVisible
-    ? {
-        plex: targetVisible.plex.filter((x) => filerVisible.plex.includes(x)),
-        jellyfin: targetVisible.jellyfin.filter((x) => filerVisible.jellyfin.includes(x)),
-      }
-    : targetVisible;
-
-  // Authoritative existing-state lookup — never trust client-supplied availability.
-  // Every mediaRequest / arr-availability query is scoped to each item's ROUTED
-  // instance, so a target who holds only a request for the same title on a
-  // different instance isn't wrongly classified "already-requested".
-  const orPairs = items.map((i) => ({ tmdbId: i.tmdbId, mediaType: i.mediaType }));
-  const instPairs = items.map((i) => ({ tmdbId: i.tmdbId, mediaType: i.mediaType, arrInstance: slugOf(i) }));
-  const movieItems = items.filter((i) => i.mediaType === "MOVIE");
-  const tvItems = items.filter((i) => i.mediaType === "TV");
-  const [existingReqs, plexItems, jellyfinItems, radarrAvail, sonarrAvail] = await Promise.all([
-    prisma.mediaRequest.findMany({
-      where: { requestedBy: targetUserId, OR: instPairs },
-      select: { id: true, tmdbId: true, mediaType: true, status: true, permanentlyDeclined: true },
-    }),
-    prisma.plexLibraryItem.findMany({
-      where: { OR: orPairs, serverInstance: { in: visible.plex } },
-      select: { tmdbId: true, mediaType: true },
-    }),
-    prisma.jellyfinLibraryItem.findMany({
-      where: { OR: orPairs, serverInstance: { in: visible.jellyfin } },
-      select: { tmdbId: true, mediaType: true },
-    }),
-    movieItems.length
-      ? prisma.radarrAvailableItem.findMany({
-          where: { OR: movieItems.map((i) => ({ tmdbId: i.tmdbId, arrInstance: slugOf(i) })) },
-          select: { tmdbId: true },
-        })
-      : Promise.resolve([]),
-    tvItems.length
-      ? prisma.sonarrAvailableItem.findMany({
-          where: { OR: tvItems.map((i) => ({ tmdbId: i.tmdbId, arrInstance: slugOf(i) })) },
-          select: { tmdbId: true },
-        })
-      : Promise.resolve([]),
-  ]);
-
-  const existingMap = new Map(existingReqs.map((r) => [keyOf(r.tmdbId, r.mediaType), r]));
-  const libraryAvailSet = new Set<string>();
-  for (const r of plexItems) libraryAvailSet.add(keyOf(r.tmdbId, r.mediaType));
-  for (const r of jellyfinItems) libraryAvailSet.add(keyOf(r.tmdbId, r.mediaType));
-  const arrAvailSet = new Set<string>();
-  for (const r of radarrAvail) arrAvailSet.add(keyOf(r.tmdbId, "MOVIE"));
-  for (const r of sonarrAvail) arrAvailSet.add(keyOf(r.tmdbId, "TV"));
-
-  // Classify each item; collect the ones to actually create.
-  const skipped: { tmdbId: number; mediaType: MediaType; result: ItemResult }[] = [];
-  let toCreate: { tmdbId: number; mediaType: MediaType }[] = [];
-  // Stale, non-permanent DECLINED rows to drop so a fresh request can be created
-  // (the @@unique constraint would otherwise make createMany skip them). Keyed by
-  // (tmdbId:mediaType) so the rating-cap gate below can EXCLUDE a rating-blocked
-  // re-request from the delete set — deleting a DECLINED row for an item we then
-  // reject on rating would erase the user's history with no replacement created.
-  const staleDeclinedIdByKey = new Map<string, string>();
-  const blacklistSet = await getBlacklistSet();
-  for (const it of items) {
-    const k = keyOf(it.tmdbId, it.mediaType);
-    if (blacklistSet.has(k)) {
-      skipped.push({ ...it, result: "blacklisted" });
-      continue;
-    }
-    const inst = instOf(it);
-    if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k) || !filerMay(inst, it.mediaType, serverAll4k)) {
-      skipped.push({ ...it, result: "no-permission" });
-      continue;
-    }
-    // skipLibraryCheck instances (e.g. 4K) ignore the shared Plex/Jellyfin
-    // library — only that instance's own arr availability short-circuits.
-    // The *arr-available cache short-circuits ONLY for a requester who would be
-    // auto-approved — exactly request-create.ts (`isAutoApprove && arrHasInstance`)
-    // and the Discord path (`mayAutoApprove && arrHasInstance`). Everyone else files a
-    // normal request, so the sync's arr marking pass can notify them when it lands.
-    const arrCounts = arrAvailSet.has(k) && canAutoApproveInstance(targetPerms, inst, grants, it.mediaType) && filerMay(inst, it.mediaType, serverAll4k, true);
-    if ((!inst.skipLibraryCheck && libraryAvailSet.has(k)) || arrCounts) {
-      skipped.push({ ...it, result: "already-available" });
-      continue;
-    }
-    const ex = existingMap.get(k);
-    if (ex) {
-      if (ex.permanentlyDeclined) {
-        skipped.push({ ...it, result: "skipped-declined" });
-        continue;
-      }
-      // An ordinary (non-permanent) decline is re-requestable: delete the stale
-      // row below and create fresh. APPROVED/AVAILABLE/PENDING stay blocked.
-      if (ex.status === "DECLINED") {
-        staleDeclinedIdByKey.set(k, ex.id);
-        toCreate.push(it);
-        continue;
-      }
-      skipped.push({ ...it, result: "already-requested" });
-      continue;
-    }
-    toCreate.push(it);
-  }
-
-  // Parental control — drop any item whose US certification exceeds the TARGET
-  // user's cap. This MUST run BEFORE the stale-DECLINED delete below (mirrors the
-  // single POST /api/requests, which gates blacklist + rating before deleting the
-  // stale row): otherwise a rating-blocked re-request would delete the user's
-  // DECLINED history row and then create nothing, silently erasing it. Only capped,
-  // non-admin targets pay the per-item certification fetch; unknown/unrated titles
-  // are allowed (see content-rating.ts).
-  //
-  // A non-ADMIN on-behalf filer's OWN cap applies too (the stricter wins): the
-  // permission-bit subset rule above can't see a cap, so a capped delegate could
-  // otherwise file titles above their own rating by naming an uncapped user —
-  // and with AUTO_APPROVE on both, straight into Radarr/Sonarr.
-  let ratingBlocked: CreateOutcome[] = [];
-  const caps = [
-    target.maxContentRating && !hasPermission(targetPerms, Permission.ADMIN) ? target.maxContentRating : null,
-    filerChecked ? filerRow?.maxContentRating ?? null : null,
-  ].filter((c): c is string => typeof c === "string" && c.length > 0);
-  if (caps.length > 0) {
-    const checked = await mapLimit(toCreate, ARR_CONCURRENCY, async (it) => {
-      let cert: string | undefined;
-      try {
-        const d = it.mediaType === "MOVIE" ? await getMovieDetails(it.tmdbId) : await getTVDetails(it.tmdbId);
-        cert = d.certification;
-      } catch {
-        cert = undefined;
-      }
-      return { it, blocked: caps.some((cap) => exceedsCap(cert, cap)) };
-    });
-    toCreate = checked.filter((c) => !c.blocked).map((c) => c.it);
-    ratingBlocked = checked
-      .filter((c) => c.blocked)
-      .map((c): CreateOutcome => ({ tmdbId: c.it.tmdbId, mediaType: c.it.mediaType, result: "rating-blocked" }));
-    // A rating-blocked title is NOT being (re)created — keep its stale DECLINED row.
-    for (const b of ratingBlocked) staleDeclinedIdByKey.delete(keyOf(b.tmdbId, b.mediaType));
-  }
-
-  if (toCreate.length === 0) {
+  if (capped.toCreate.length === 0) {
     return NextResponse.json({ results: [...skipped, ...ratingBlocked], created: 0 }, { status: 200 });
   }
 
-  // Phase 1 — resolve TMDB metadata up front (bounded) so the create transaction
-  // below holds no network calls. Items whose meta can't resolve become "error".
-  const resolved = await mapLimit(toCreate, ARR_CONCURRENCY, async (it) => {
-    try {
-      const meta = await resolveMediaMeta(it.tmdbId, it.mediaType);
-      return { it, meta };
-    } catch (err) {
-      console.error(`[requests/bulk] meta resolve failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
-      return { it, meta: null };
-    }
-  });
-  const prepared = resolved.flatMap((r) =>
-    r.meta
-      ? [{
-          tmdbId: r.it.tmdbId,
-          mediaType: r.it.mediaType,
-          arrInstance: slugOf(r.it),
-          title: r.meta.title,
-          posterPath: r.meta.posterPath,
-          releaseYear: r.meta.releaseYear,
-          autoApprove:
-            canAutoApproveInstance(targetPerms, instOf(r.it), grants, r.it.mediaType) &&
-            filerMay(instOf(r.it), r.it.mediaType, serverAll4k, true),
-        }]
-      : [],
-  );
-  const metaFailed = resolved
-    .filter((r) => !r.meta)
-    .map((r): CreateOutcome => ({ tmdbId: r.it.tmdbId, mediaType: r.it.mediaType, result: "error" }));
-  // A meta-failed title is NOT being (re)created — keep its stale DECLINED row (same
-  // compensation the rating gate applies above).
-  for (const m of metaFailed) staleDeclinedIdByKey.delete(keyOf(m.tmdbId, m.mediaType));
-  // Deleted INSIDE the transaction below, never before it: the delete has to roll back
-  // with the inserts. Committed up front, a QuotaExceeded throw (429) or a P2034
-  // retry-exhaustion would erase the admin's decline + adminNote with no replacement
-  // row created, and the title would read as never-requested.
-  const staleDeclinedIds = [...staleDeclinedIdByKey.values()];
+  const { prepared, metaFailed } = await prepareItems(ctx, capped.toCreate, routing, staleDeclinedIdByKey);
 
-  // Phase 2 — quota re-check + insert, atomic under Serializable. This closes the
-  // TOCTOU: a concurrent batch (or a single POST /api/requests) for the same target
-  // can't both pass the quota gate and overshoot — the two count→insert transactions
-  // form a read-write cycle and Postgres aborts one (retried below). createMany with
-  // skipDuplicates so a racing duplicate doesn't abort the batch (a P2002 inside a tx
-  // would); re-query to recover row ids for the *arr phase.
-  let createdRows: { id: string; tmdbId: number; mediaType: MediaType; status: string }[] = [];
-  // Keys (tmdbId:mediaType) whose status was mirrored from another user's already
-  // APPROVED/AVAILABLE request — already greenlit, so phase 3 must NOT re-push them to *arr.
-  const mirroredKeys = new Set<string>();
+  let created: CreatedRows = { createdRows: [], mirroredKeys: new Set() };
   if (prepared.length > 0) {
-    const enforceQuota = !hasPermission(targetPerms, Permission.QUOTA_UNLIMITED);
-    // A non-ADMIN on-behalf filer's OWN quota is charged too (guardrail 6g): the
-    // rows carry filedBy, and quotaUsageWhere counts what a user filed for others
-    // beside what was filed for them — so naming other users can't multiply what
-    // a delegate may file.
-    const enforceFilerQuota =
-      filerChecked && filerRow !== null && !hasPermission(session.user.permissions, Permission.QUOTA_UNLIMITED);
-    let gLimit = 0;
-    let gPeriod = "week";
-    if (enforceQuota || enforceFilerQuota) {
-      const qrows = await prisma.setting.findMany({ where: { key: { in: ["quotaLimit", "quotaPeriod"] } } });
-      const qmap = Object.fromEntries(qrows.map((s) => [s.key, s.value]));
-      gLimit = parseQuotaLimit(qmap.quotaLimit);
-      gPeriod = qmap.quotaPeriod ?? "week";
-    }
-    const pairs = prepared.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType }));
-    const createPairs = prepared.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType, arrInstance: p.arrInstance }));
     try {
-      createdRows = await runWithSerializableRetry(() =>
-        prisma.$transaction(
-          async (tx) => {
-            // First write: drop the stale, non-permanent DECLINED rows the inserts
-            // below would otherwise collide with on the unique
-            // (tmdbId, mediaType, requestedBy, arrInstance). CAS on status +
-            // permanentlyDeclined so an admin who re-approved or made the decline
-            // permanent since the snapshot keeps that row intact — createMany
-            // skipDuplicates then simply doesn't recreate it, rather than orphaning
-            // its ARR grab or evading a permanent ban. Each dropped row's comment
-            // thread is read first (it would cascade) and restored below onto the
-            // row created for the same key (request-comment-carry.ts).
-            const carriedThreads = await dropStaleDeclinedMany(tx, staleDeclinedIds);
-            for (const mt of ["MOVIE", "TV"] as MediaType[]) {
-              const n = prepared.filter((p) => p.mediaType === mt).length;
-              if (n === 0) continue;
-              if (enforceQuota) {
-                const rq = resolveUserQuota(mt, target, gLimit, gPeriod);
-                if (rq.limit > 0) {
-                  const used = await tx.mediaRequest.count({ where: quotaUsageWhere(targetUserId, mt, rq.since) });
-                  if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used);
-                }
-              }
-              if (enforceFilerQuota && filerRow) {
-                const rq = resolveUserQuota(mt, filerRow, gLimit, gPeriod);
-                if (rq.limit > 0) {
-                  const used = await tx.mediaRequest.count({ where: quotaUsageWhere(session.user.id, mt, rq.since) });
-                  if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used, "filer");
-                }
-              }
-            }
-            // Capture rows that existed BEFORE this insert so the side effects below
-            // (SSE + ARR push) fire ONLY for rows THIS request created. Two concurrent
-            // bulk requests with overlapping items would otherwise both re-query the
-            // same skipDuplicates rows and both push/notify. With Serializable + retry,
-            // a duplicate's retry re-snapshots, sees the other's committed rows in
-            // `before`, and emits nothing. (Bulk analog of the requests/route fix.)
-            const before = await tx.mediaRequest.findMany({
-              where: { requestedBy: targetUserId, OR: createPairs },
-              select: { id: true },
-            });
-            const beforeIds = new Set(before.map((r) => r.id));
-
-            // If another user's request for the same title ON THE SAME INSTANCE is
-            // already APPROVED or AVAILABLE, the content is greenlit/fulfilled — mirror
-            // that status so the bulk requester is tracked (and gets the "now available"
-            // ping) instead of queuing a duplicate PENDING for an admin to re-review.
-            // Matches the single POST /api/requests "mirror-approved" branch,
-            // including its `cleanedUpAt: null`: a stamped row records a
-            // deliberate removal, not a greenlight (guardrail 14b) — mirroring it
-            // as APPROVED would let the sync re-push the deleted title.
-            const greenlit = await tx.mediaRequest.findMany({
-              where: { status: { in: ["APPROVED", "AVAILABLE"] }, cleanedUpAt: null, OR: createPairs },
-              select: { tmdbId: true, mediaType: true, status: true },
-            });
-            // Which peers count is greenlitPeerStatuses, the single route's rule
-            // (request-create.ts): an APPROVED peer always; an AVAILABLE one only when
-            // the routed instance's *arr-available cache holds the title. Without that
-            // the peer may have been marked off a restricted server this target has no
-            // grant for (guardrail 35) or off the HD copy of a 4K request — not an
-            // approval, and an APPROVED copy of it would be re-pushed by the sync with
-            // no admin decision. Every item here has already been found absent from
-            // the target's visible libraries. A copy is always created APPROVED (never
-            // AVAILABLE): with the *arr holding the title the sync's arr marking pass
-            // promotes and notifies it, and the re-push skips it.
-            const greenlitKeys = new Set<string>();
-            for (const g of greenlit) {
-              const k = keyOf(g.tmdbId, g.mediaType);
-              if ((greenlitPeerStatuses(arrAvailSet.has(k)) as string[]).includes(g.status)) greenlitKeys.add(k);
-            }
-            mirroredKeys.clear();
-            const now = new Date();
-            await tx.mediaRequest.createMany({
-              data: prepared.map((p) => {
-                const k = keyOf(p.tmdbId, p.mediaType);
-                const mirror = greenlitKeys.has(k);
-                if (mirror) mirroredKeys.add(k);
-                const status = mirror || p.autoApprove ? "APPROVED" : "PENDING";
-                // Auto-approved (non-mirrored) rows arm the orchestrator's 90s
-                // download-pending backstop, matching the single POST route. Mirrored
-                // rows skip it — the original greenlit row drives notifications.
-                const isAutoApproved = !mirror && p.autoApprove;
-                return {
-                  tmdbId: p.tmdbId,
-                  mediaType: p.mediaType,
-                  arrInstance: p.arrInstance,
-                  title: p.title,
-                  posterPath: p.posterPath,
-                  releaseYear: p.releaseYear,
-                  note: null,
-                  requestedBy: targetUserId,
-                  // Who filed it, when on behalf — the filer's quota key (guardrail 6g).
-                  ...(isOnBehalf ? { filedBy: session.user.id } : {}),
-                  status,
-                  // No availableAt: a mirrored row is never created AVAILABLE (above).
-                  // Auto-approve is an approval (MediaRequest.approvedAt). A mirrored
-                  // row gets none of its own: the watch grade counts it through the
-                  // approval of the request it copied.
-                  ...(isAutoApproved ? { approvedAt: now, pendingNotifyAt: new Date(now.getTime() + 90_000) } : {}),
-                };
-              }),
-              skipDuplicates: true,
-            });
-            const after = await tx.mediaRequest.findMany({
-              where: { requestedBy: targetUserId, OR: createPairs },
-              select: { id: true, tmdbId: true, mediaType: true, status: true },
-            });
-            const created = after.filter((r) => !beforeIds.has(r.id));
-            // Only a row this call created can take a thread: while the old row
-            // still holds the key, skipDuplicates creates nothing for it.
-            for (const r of created) {
-              const staleId = staleDeclinedIdByKey.get(keyOf(r.tmdbId, r.mediaType));
-              if (staleId) await restoreThread(tx, r.id, carriedThreads.get(staleId));
-            }
-            return created;
-          },
-          { isolationLevel: "Serializable" },
-        ),
-      );
+      created = await createRowsTx(ctx, prepared, classified);
     } catch (err) {
-      if (err instanceof QuotaExceeded) {
+      if (err instanceof QuotaExceededError) {
         const remaining = Math.max(0, err.limit - err.used);
         return NextResponse.json(
           {
             error: t(
               err.whose === "filer"
-                ? err.mt === "MOVIE" ? "apiUser.requests.bulk.filerQuotaMovie" : "apiUser.requests.bulk.filerQuotaTv"
-                : err.mt === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv",
+                ? err.mediaType === "MOVIE" ? "apiUser.requests.bulk.filerQuotaMovie" : "apiUser.requests.bulk.filerQuotaTv"
+                : err.mediaType === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv",
               {
                 limit: err.limit,
                 window: translateQuotaWindow(t, err.windowLabel),
@@ -729,145 +244,10 @@ export const POST = withPermission([
       }
       throw err;
     }
-
-    // Clear delete-votes for the titles just requested — a request and a
-    // deletion vote are contradictory, and the vote route already blocks the
-    // reverse direction. On behalf, that includes the filer: they requested it
-    // too (filedBy), so their vote must go with the target's.
-    // .catch is required, not decorative: this is detached after the response is
-    // sent, so an unhandled rejection (pool timeout under a concurrent sync) has no
-    // request context to surface in and escapes as a process-level unhandledRejection.
-    // Every other fire-and-forget call in this route already terminates in a catch.
-    void prisma.deletionVote
-      .deleteMany({
-        where: {
-          userId: { in: isOnBehalf ? [targetUserId, session.user.id] : [targetUserId] },
-          OR: pairs,
-        },
-      })
-      .catch((err) =>
-        console.error(
-          `[requests/bulk] deletionVote cleanup failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
-        ),
-      );
+    clearRequestedDeletionVotes(ctx, prepared);
   }
 
-  // Phase 3 — push auto-approved rows to *arr (bounded, post-commit), rolling back
-  // to PENDING on a definite push failure like the single route (an unknown outcome
-  // stays APPROVED). Every created row emits request:new.
-  const rowByKey = new Map(createdRows.map((r) => [keyOf(r.tmdbId, r.mediaType), r]));
-  // Rows that armed pendingNotifyAt AND landed in *arr — collected here rather than
-  // derived from `outcomes`, which cannot distinguish an auto-approved row that was
-  // pushed from a mirrored one that deliberately skipped both the push and the flag.
-  const downloadChecks: DownloadCheckTarget[] = [];
-  // Auto-approvals whose push failed and rolled back to PENDING, row id by
-  // (tmdbId:mediaType) — for the one admin alert after the loop.
-  const rolledBack = new Map<string, string>();
-  const outcomes = await mapLimit(prepared, ARR_CONCURRENCY, async (p): Promise<CreateOutcome> => {
-    const row = rowByKey.get(keyOf(p.tmdbId, p.mediaType));
-    if (!row) return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "error" };
-
-    emitSSE({ type: "request:new", requestId: row.id, userId: targetUserId });
-
-    // Mirrored rows (greenlit by another user) are already in *arr — re-pushing
-    // would be a no-op at best; just track the row.
-    if (mirroredKeys.has(keyOf(p.tmdbId, p.mediaType))) {
-      // Mirrored rows are APPROVED by construction (never AVAILABLE — see the
-      // create tx), so they read as auto-approved, not already-available.
-      return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };
-    }
-
-    if (row.status !== "APPROVED") {
-      return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created" };
-    }
-    let pushedTvdbId: number | null = null;
-    const pushProgress: AddProgress = { sent: false };
-    try {
-      if (p.mediaType === "MOVIE") {
-        await addMovieToRadarr(p.tmdbId, p.arrInstance, undefined, targetUserId, pushProgress);
-      } else {
-        pushedTvdbId = await addSeriesToSonarr(p.tmdbId, p.arrInstance, undefined, targetUserId, pushProgress);
-      }
-    } catch (err) {
-      const message = sanitizeForLog(err instanceof Error ? err.message : String(err));
-      // Unknown only once the add itself was sent (AddProgress).
-      if (pushProgress.sent && arrWriteOutcomeUnknown(err)) {
-        // No definite answer (a timeout, a dropped connection, a gateway 502/504):
-        // the arr may have added it. Left APPROVED, like the single route; the sync
-        // re-pushes an APPROVED title the arr doesn't hold. Falls through to the
-        // auto-approved bookkeeping below (the armed backstop is still consumed).
-        console.error(`[requests/bulk] auto-approve push outcome unknown, left APPROVED: ${message}`);
-      } else {
-        console.error(`[requests/bulk] auto-approve push failed: ${message}`);
-        // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
-        // may have flipped this row to AVAILABLE. Clear pendingNotifyAt too.
-        const rb = await prisma.mediaRequest
-          .updateMany({ where: { id: row.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } })
-          .catch((rbErr: unknown) => {
-            console.error(`[requests/bulk] rollback to PENDING failed: ${sanitizeForLog(rbErr instanceof Error ? rbErr.message : String(rbErr))}`);
-            return { count: 0 };
-          });
-        // The client already saw request:new for an APPROVED row; emit a corrective
-        // update so it reflects the rolled-back PENDING state (mirrors the single route).
-        emitSSE({ type: "request:updated", requestId: row.id, status: "PENDING", userId: targetUserId });
-        // Only a row that really went back to PENDING is the admins' to review.
-        if (rb.count === 1) rolledBack.set(keyOf(p.tmdbId, p.mediaType), row.id);
-        return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created", pushFailed: true };
-      }
-    }
-
-    // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
-    // by this point, so a P2025 (row deleted mid-push) or transient DB error must not trip
-    // the APPROVED->PENDING rollback and leave Sonarr grabbing content the DB says is
-    // pending. updateMany no-ops on a concurrently deleted row instead of throwing.
-    // The task must still self-catch: mapLimit is a bounded Promise.all (guardrail 31),
-    // so an escaping error here would reject the whole bulk run.
-    if (pushedTvdbId !== null) {
-      await prisma.mediaRequest
-        .updateMany({ where: { id: row.id }, data: { tvdbId: pushedTvdbId } })
-        .catch((err) =>
-          console.error(
-            `[requests/bulk] tvdbId bookkeeping write failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
-          ),
-        );
-    }
-
-    downloadChecks.push({
-      requestId: row.id,
-      tmdbId: p.tmdbId,
-      mediaType: p.mediaType,
-      arrInstance: p.arrInstance,
-      requestedBy: targetUserId,
-      title: p.title,
-    });
-    return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };
-  });
-
-  // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
-  // orchestrator's next sweep. One batched job, not one per row — a 50-item bulk
-  // request would otherwise take half the delayed-job run queue on its own.
-  scheduleDownloadChecks(downloadChecks, { name: "requests/bulk:90s-download-check" });
-
-  // The rolled-back auto-approvals sit in the admin queue with their backstop
-  // cleared, and nothing else will tell an admin (the single route announces its
-  // one). ONE alert per call, never one per row — a failing arr would otherwise
-  // flood every admin channel on a 50-item "Request all" (header). It names the
-  // first in the caller's order; the queue lists them all.
-  const firstRolledBack = prepared.find((p) => rolledBack.has(keyOf(p.tmdbId, p.mediaType)));
-  if (firstRolledBack) {
-    alertAdminsNewRequest({
-      requestId: rolledBack.get(keyOf(firstRolledBack.tmdbId, firstRolledBack.mediaType))!,
-      tmdbId: firstRolledBack.tmdbId,
-      mediaType: firstRolledBack.mediaType,
-      instance: firstRolledBack.arrInstance,
-      title: firstRolledBack.title,
-      posterPath: firstRolledBack.posterPath ?? null,
-      releaseYear: firstRolledBack.releaseYear ?? null,
-      requestedBy: target.name ?? target.email ?? targetUserId,
-      note: null,
-      excludeUserId: session.user.id,
-    });
-  }
+  const outcomes = await pushAutoApproved(ctx, prepared, created);
 
   const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
   const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;

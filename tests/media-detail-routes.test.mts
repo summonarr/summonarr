@@ -347,7 +347,11 @@ test("person: an anonymous request is 401 and never reaches TMDB", async () => {
   assert.deepEqual(fetchCalls, []);
 });
 
-for (const [label, id] of [["a non-numeric id", "abc"], ["zero", "0"], ["a negative id", "-4"], ["an empty id", ""]] as const) {
+for (const [label, id] of [
+  ["a non-numeric id", "abc"], ["zero", "0"], ["a negative id", "-4"], ["an empty id", ""],
+  // Non-canonical spellings Number() accepted: "1e3" is the integer 1000.
+  ["a fractional id", "1.5"], ["an exponent id", "1e3"], ["a hex id", "0x1F"], ["a padded id", " 12 "], ["a leading-zero id", "012"],
+] as const) {
   test(`person: ${label} is 400 and never reaches TMDB`, async () => {
     const me = await mintSession();
     const res = await getPerson(me.token, id);
@@ -591,6 +595,9 @@ for (const [label, id, n] of [
   ["a non-numeric show id", "abc", "1"],
   ["a zero show id", "0", "1"],
   ["a negative show id", "-1", "1"],
+  // parseInt read these as 1399 and 1.
+  ["a show id with trailing garbage", "1399abc", "1"],
+  ["a fractional show id", "1.5", "1"],
   ["a non-numeric season", "1399", "abc"],
   ["a negative season", "1399", "-1"],
 ] as const) {
@@ -613,6 +620,10 @@ test("season: a TMDB failure is 502 and no episode rows are read", async () => {
   const res = await getSeason(me.token, "1399", "1");
   assert.equal(res.status, 502);
   assert.equal(opsOf("tVEpisodeCache.findMany").length, 0);
+  // tmdbFetch throws without logging, so the route's own line is the only trace.
+  const scoped = warns.filter((w) => w.startsWith("[tv-season]"));
+  assert.equal(scoped.length, 1, `expected one scoped warning: ${warns.join(" | ")}`);
+  assert.match(scoped[0], /1399/);
 });
 
 test("season: the 31st request in the window is 429", async () => {

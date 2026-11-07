@@ -17,7 +17,9 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
 import { readArrWatchNavBadges } from "@/lib/arr-watch-data";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
-import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
+import { parseHiddenRatingSources, type RatingSourceKey } from "@/lib/ratings-visibility";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import { sanitizeForLog } from "@/lib/sanitize";
 import { RatingsVisibilityProvider } from "@/components/media/ratings-visibility";
 import { DetailTitleProvider } from "@/components/layout/detail-title";
 import { NotificationStoreProvider } from "@/components/notifications/notification-store";
@@ -35,6 +37,22 @@ const LAYOUT_SETTING_KEYS = [
 const readLayoutSettings = cache(async () =>
   prisma.setting.findMany({ where: { key: { in: LAYOUT_SETTING_KEYS } } }),
 );
+
+type ReadFailure = { name: string; detail: string };
+
+// One layout read's value, or undefined with its failure noted under `name`.
+function readValue<T>(name: string, r: PromiseSettledResult<T>, failures: ReadFailure[]): T | undefined {
+  if (r.status === "fulfilled") return r.value;
+  failures.push({ name, detail: sanitizeForLog(r.reason instanceof Error ? r.reason.message : r.reason) });
+  return undefined;
+}
+
+// Every (app) page render reaches the layout, so a failing read would repeat
+// once per page view for the whole outage: log it on change only (guardrail 7b).
+const LAYOUT_READS_WARN_KEY = "layout:reads";
+function warnLayoutReads(failed: string, detail: string): void {
+  warnOnChange(LAYOUT_READS_WARN_KEY, failed, `[layout] read failed, rendering with defaults: ${detail}`);
+}
 
 export async function generateMetadata(): Promise<Metadata> {
   try {
@@ -68,13 +86,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let maintenanceEnabled = false;
   let maintenanceMessage = "";
   let featureFlags: FeatureFlags | undefined;
-  let hiddenRatingSources: string[] = [];
+  let hiddenRatingSources: RatingSourceKey[] = [];
   let navBadges: Awaited<ReturnType<typeof readArrWatchNavBadges>>;
   try {
     // The discordId lookup runs in parallel with the settings/flags reads
     // instead of after them, saving a full DB round-trip per page. The cost:
     // sites with no Discord invite do one small extra lookup they don't need.
-    const [rows, flags, user, badges] = await Promise.all([
+    // Settled one by one: a failed user or flags read must not discard the
+    // settings that WERE read (maintenance mode among them).
+    const [rowsRes, flagsRes, userRes, badgesRes] = await Promise.allSettled([
       readLayoutSettings(),
       getFeatureFlags(),
       prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true, locale: true } }),
@@ -82,24 +102,41 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       // monitor's last run) — one row read, admins only; never throws.
       isAdmin ? readArrWatchNavBadges() : Promise.resolve(undefined),
     ]);
-    navBadges = badges;
+    const failures: ReadFailure[] = [];
+    const rows = readValue("settings", rowsRes, failures) ?? [];
+    const flags = readValue("feature flags", flagsRes, failures);
+    const user = readValue("user", userRes, failures);
+    navBadges = readValue("nav badges", badgesRes, failures);
+    if (failures.length) {
+      warnLayoutReads(
+        failures.map((f) => f.name).join(","),
+        failures.map((f) => `${f.name}: ${f.detail}`).join("; "),
+      );
+    } else {
+      forgetWarnOnChange(LAYOUT_READS_WARN_KEY);
+    }
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     hiddenRatingSources = parseHiddenRatingSources(cfg.ratingsHiddenSources);
     motdBody            = cfg.motdEnabled === "true" ? (cfg.motdBody ?? "") : "";
     motdTitle           = cfg.motdTitle            ?? "";
     siteTitle           = cfg.siteTitle           ?? "";
-    discordInviteUrl    = cfg.discordInviteUrl    ?? "";
+    // With the user read failed, whether they already joined is unknown: skip
+    // the join prompt rather than nag a member.
+    discordInviteUrl    = userRes.status === "fulfilled" ? (cfg.discordInviteUrl ?? "") : "";
     maintenanceEnabled  = cfg.maintenanceEnabled === "true";
     maintenanceMessage  = cfg.maintenanceMessage  ?? "";
     // Auto-hide the Donate nav link when no donation methods are configured —
     // nothing to link to, regardless of the feature toggle.
-    featureFlags        = hasDonationLinks(cfg) ? flags : { ...flags, "feature.page.donate": false };
+    featureFlags        = flags && (hasDonationLinks(cfg) ? flags : { ...flags, "feature.page.donate": false });
     userDiscordId       = discordInviteUrl ? (user?.discordId ?? null) : null;
     storedLocale        = user?.locale ?? null;
-    localeKnown         = user !== null;
-  } catch {
+    // Only a successful read that found the row: a failed one must not look
+    // like "never stored".
+    localeKnown         = user != null;
+  } catch (err) {
     // A failed settings read keeps the defaults above, so a DB hiccup here
     // never takes down every page in the app.
+    warnLayoutReads("threw", sanitizeForLog(err instanceof Error ? err.message : err));
   }
 
   // Admins bypass maintenance mode so they can still manage settings during downtime.

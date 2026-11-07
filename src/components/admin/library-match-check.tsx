@@ -67,8 +67,22 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
   const [state, setState] = useState<"idle" | "confirm" | "running" | "error">("idle");
   const [progress, setProgress] = useState<FixMatchProgressView | null>(null);
   const [message, setMessage] = useState("");
+  // The confirm replaces the focused button: focus moves to its Cancel (the
+  // safe choice beside a live remap) and back to the button when the confirm
+  // closes — at once on Cancel, once the remap answers on Rematch.
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (state === "confirm") cancelRef.current?.focus();
+    else if (refocus.current && state !== "running") {
+      refocus.current = false;
+      triggerRef.current?.focus();
+    }
+  }, [state]);
 
   const run = useCallback(async () => {
+    refocus.current = true;
     setState("running");
     setMessage("");
     try {
@@ -102,7 +116,7 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
           <button type="button" onClick={run} className={button} style={{ ...style, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}>
             {t("adminManage.library.match.rematch")}
           </button>
-          <button type="button" onClick={() => setState("idle")} className={`${button} ds-hover-tint`} style={{ ...style, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" }}>
+          <button ref={cancelRef} type="button" onClick={() => { refocus.current = true; setState("idle"); }} className={`${button} ds-hover-tint`} style={{ ...style, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" }}>
             {t("adminManage.library.match.cancel")}
           </button>
         </div>
@@ -112,6 +126,7 @@ function FixOneButton({ flag, onFixed }: { flag: ClientMatchFlag & { arr: { tmdb
   return (
     <div className="flex flex-col items-end gap-1">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setState("confirm")}
         disabled={state === "running"}
@@ -138,19 +153,48 @@ function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr
   const t = useT();
   const router = useRouter();
   const [state, setState] = useState<"idle" | "confirm" | "running" | "done">("idle");
-  const [progress, setProgress] = useState({ done: 0, failed: 0, total: 0 });
+  const [progress, setProgress] = useState({ done: 0, failed: 0, total: 0, stopped: false });
   const [failures, setFailures] = useState<Array<{ key: string; title: string; error: string }>>([]);
+  // Stop request + unmount guard, as in the library diff's Fix all: the remap
+  // already running finishes on the server (its job is not cancelled), but no
+  // further one is started — and leaving the page stops the status poll.
+  const stopRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; stopRef.current = true; abortRef.current?.abort(); };
+  }, []);
+  // The confirm replaces the focused button: focus goes to its Cancel, to Stop
+  // while running, and back to the button when it is offered again.
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const stopButtonRef = useRef<HTMLButtonElement>(null);
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (state === "confirm") cancelRef.current?.focus();
+    else if (state === "running") stopButtonRef.current?.focus();
+    else if (refocus.current) {
+      refocus.current = false;
+      triggerRef.current?.focus();
+    }
+  }, [state]);
 
   const run = useCallback(async () => {
+    stopRef.current = false;
+    refocus.current = true;
     setState("running");
     const total = flags.length;
     let done = 0;
     let failed = 0;
     const collected: Array<{ key: string; title: string; error: string }> = [];
-    setProgress({ done, failed, total });
+    setProgress({ done, failed, total, stopped: false });
     setFailures([]);
     // One at a time: each remap finishes on the server before the next starts.
     for (const flag of flags) {
+      if (stopRef.current) break;
+      const ac = new AbortController();
+      abortRef.current = ac;
       try {
         const outcome = await runFixMatch({
           server: flag.server,
@@ -158,18 +202,22 @@ function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr
           correctTmdbId: flag.arr.tmdbId,
           itemKey: flag.itemKey,
           ...(flag.serverInstance ? { serverInstance: flag.serverInstance } : {}),
-        });
+        }, { signal: ac.signal });
         // The row keeps the warning (FlagRow); a bulk run that dropped it read
         // "N/N fixed" over a remap that was only partial.
         onFixed(flag, fixMatchWarningMessage(outcome, t) ?? undefined);
       } catch (err) {
+        // Unmounted mid-run: stop quietly — the job itself carries on.
+        if (err instanceof DOMException && err.name === "AbortError") break;
         failed++;
         collected.push({ key: flagKey(flag), title: titleWithYear(flag.title, flag.year, flag.folder ?? flag.itemKey), error: fixMatchErrorMessage(err, t) });
       }
       done++;
-      setProgress({ done, failed, total });
+      setProgress({ done, failed, total, stopped: false });
       setFailures([...collected]);
     }
+    if (!alive.current) return;
+    setProgress({ done, failed, total, stopped: done < total });
     setState("done");
     if (done > failed) router.refresh();
   }, [flags, onFixed, router, t]);
@@ -185,24 +233,34 @@ function FixAllButton({ flags, onFixed }: { flags: Array<ClientMatchFlag & { arr
           <button type="button" onClick={run} className={button} style={{ ...style, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}>
             {t("adminManage.library.match.rematchAll")}
           </button>
-          <button type="button" onClick={() => setState("idle")} className={`${button} ds-hover-tint`} style={{ ...style, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" }}>
+          <button ref={cancelRef} type="button" onClick={() => { refocus.current = true; setState("idle"); }} className={`${button} ds-hover-tint`} style={{ ...style, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" }}>
             {t("adminManage.library.match.cancel")}
           </button>
         </div>
       ) : (
-        <button
-          type="button"
-          onClick={() => setState("confirm")}
-          disabled={state === "running" || flags.length === 0}
-          className={button}
-          style={{ ...style, background: "color-mix(in oklab, var(--ds-success) 14%, transparent)", border: "1px solid color-mix(in oklab, var(--ds-success) 35%, var(--ds-border))", color: "var(--ds-success)" }}
-        >
-          {state === "running"
-            ? t("adminManage.library.match.fixingAll", { done: progress.done, total: progress.total })
-            : state === "done"
-              ? t("adminManage.library.match.fixedAll", { fixed: progress.total - progress.failed, total: progress.total })
-              : t("adminManage.library.match.fixAll", { count: flags.length })}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            ref={triggerRef}
+            type="button"
+            onClick={() => setState("confirm")}
+            disabled={state === "running" || flags.length === 0}
+            className={button}
+            style={{ ...style, background: "color-mix(in oklab, var(--ds-success) 14%, transparent)", border: "1px solid color-mix(in oklab, var(--ds-success) 35%, var(--ds-border))", color: "var(--ds-success)" }}
+          >
+            {state === "running"
+              ? t("adminManage.library.match.fixingAll", { done: progress.done, total: progress.total })
+              : state === "done"
+                ? (progress.stopped
+                  ? t("adminManage.library.diff.fixStopped", { fixed: progress.done - progress.failed, total: progress.total })
+                  : t("adminManage.library.match.fixedAll", { fixed: progress.total - progress.failed, total: progress.total }))
+                : t("adminManage.library.match.fixAll", { count: flags.length })}
+          </button>
+          {state === "running" && (
+            <button ref={stopButtonRef} type="button" onClick={() => { stopRef.current = true; }} className={`${button} ds-hover-tint`} style={{ ...style, border: "1px solid var(--ds-border)", color: "var(--ds-fg-muted)" }}>
+              {t("adminManage.library.diff.stop")}
+            </button>
+          )}
+        </div>
       )}
       {failures.length > 0 && (
         <ul role="status" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35 }}>
@@ -353,7 +411,9 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
         setError(typeof msg === "string" && msg ? msg : t("adminManage.library.match.checkFailed"));
         return;
       }
-      setFixes(noMatchFixes());
+      // No reset of `fixes` here: the refreshed report carries a new checkedAt,
+      // which voids them (matchCheckView). Clearing first brought every row
+      // fixed this session back, with a live Fix button, until it arrived.
       router.refresh();
     } catch {
       setError(t("adminManage.library.match.checkFailed"));
@@ -415,28 +475,33 @@ export function LibraryMatchCheck({ report, mediaType }: { report: ClientMatchRe
           {note && <p role="status" style={{ fontSize: 12, margin: "4px 0 0", color: "var(--ds-fg-muted)" }}>{note}</p>}
           {error && <p role="alert" className="text-red-400" style={{ fontSize: 12, margin: "4px 0 0" }}>{error}</p>}
         </div>
-        <button
-          type="button"
-          onClick={check}
-          disabled={checking}
-          className="ds-tap inline-flex shrink-0 items-center gap-1.5 self-start font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          style={{ padding: "5px 12px", fontSize: 12, borderRadius: 6, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
-        >
-          {checking && <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />}
-          {checking ? t("adminManage.library.match.checking") : t("adminManage.library.match.check")}
-        </button>
+        <div className="flex shrink-0 flex-col items-start gap-2 self-start sm:items-end">
+          <button
+            type="button"
+            onClick={check}
+            disabled={checking}
+            className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ padding: "5px 12px", fontSize: 12, borderRadius: 6, background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
+          >
+            {checking && <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />}
+            {checking ? t("adminManage.library.match.checking") : t("adminManage.library.match.check")}
+          </button>
+          {/* Here, not beside the list: a run that fixes every flag empties the
+              list, and its summary (and its run) must outlive that. It hides
+              itself while idle with nothing to fix. */}
+          <FixAllButton flags={fixable} onFixed={onFixed} />
+        </div>
       </div>
 
       {flags.length > 0 && (
         <>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between" style={{ padding: "0 16px 10px" }}>
+          <div style={{ padding: "0 16px 10px" }}>
             <div className="ds-no-scrollbar flex overflow-x-auto max-w-full" style={{ gap: 2 }}>
               {chip("all", t("adminManage.library.match.filter.all", { count: flags.length }))}
               {byKind.wrongMatch > 0 && chip("wrongMatch", t("adminManage.library.match.filter.wrongMatch", { count: byKind.wrongMatch }))}
               {byKind.noTmdbId > 0 && chip("noTmdbId", t("adminManage.library.match.filter.noTmdbId", { count: byKind.noTmdbId }))}
               {byKind.yearMismatch > 0 && chip("yearMismatch", t("adminManage.library.match.filter.yearMismatch", { count: byKind.yearMismatch }))}
             </div>
-            <FixAllButton flags={fixable} onFixed={onFixed} />
           </div>
           <ul className="m-0 list-none p-0">
             {shown.slice(0, RENDER_CAP).map((f) => <FlagRow key={flagKey(f)} flag={f} onFixed={onFixed} fixedWarning={fixed.get(flagKey(f))} />)}

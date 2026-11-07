@@ -6,6 +6,7 @@ import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
 import { parseActiveSessionId } from "@/lib/media-instances";
 import { bitrateToKbps } from "@/lib/bitrate";
+import { formatSeasonEpisode } from "@/lib/episode-label";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Loader2, X } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
@@ -128,7 +129,9 @@ function NetworkBadges({ s }: { s: ActiveSessionLive }) {
           {s.location}
         </span>
       )}
-      {s.relayed && (
+      {/* A Plex Relay session usually reports both location "relay" and
+          relayed=true; the location badge already says RELAY then. */}
+      {s.relayed && s.location !== "relay" && (
         <span
           className="ds-mono"
           style={{ color: "var(--ds-warning, #c84)" }}
@@ -208,7 +211,10 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
       // unmount first this timer dies with it.
       terminateFallback.current = setTimeout(() => setBusy(false), 10_000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // A thrown fetch is the browser's own English ("Failed to fetch"): log
+      // it, and show the dialog's translated copy instead.
+      console.error("[activity-now-playing] terminate failed:", err);
+      setError(t("adminActivity.terminate.networkError"));
       setBusy(false);
     }
   }
@@ -360,16 +366,20 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
   // "650 kbps" here and there, not "0.7 Mbps" on one and "650 kbps" on the other.
   const bitrateLabel = fmtBitrate(s.bitrate, s.source);
   const paused = s.state === "paused";
-  // Composed exactly like recent-plays' `sub`: an unknown season/episode is
+  // The same helper recent-plays' `sub` uses: an unknown season/episode is
   // dropped, never rendered as "S00 · E00".
-  const seasonEpisode = isTV
-    ? [
-        s.seasonNumber != null ? `S${String(s.seasonNumber).padStart(2, "0")}` : null,
-        s.episodeNumber != null ? `E${String(s.episodeNumber).padStart(2, "0")}` : null,
-      ]
-        .filter(Boolean)
-        .join(" · ")
-    : "";
+  const seasonEpisode = isTV ? formatSeasonEpisode(s.seasonNumber, s.episodeNumber) : "";
+
+  const poster = (
+    <Poster
+      src={s.posterUrl}
+      letter={(s.title[0] ?? "?").toUpperCase()}
+      accent={accent}
+      w={50}
+      h={75}
+      radius={5}
+    />
+  );
 
   const userNode = s.serverUsername ? (
     <span
@@ -427,24 +437,10 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
       <div style={{ display: "flex", gap: 12, position: "relative" }}>
         {mediaHref ? (
           <Link href={mediaHref} style={{ display: "block" }}>
-            <Poster
-              src={s.posterUrl}
-              letter={(s.title[0] ?? "?").toUpperCase()}
-              accent={accent}
-              w={50}
-              h={75}
-              radius={5}
-            />
+            {poster}
           </Link>
         ) : (
-          <Poster
-            src={s.posterUrl}
-            letter={(s.title[0] ?? "?").toUpperCase()}
-            accent={accent}
-            w={50}
-            h={75}
-            radius={5}
-          />
+          poster
         )}
         <div
           style={{

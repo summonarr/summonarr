@@ -18,7 +18,9 @@ export function DeletePlayButton({ id }: { id: string }) {
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState(false);
+  // The message to show: the route's own (translated) text, such as its
+  // rate-limit answer, else the generic failure.
+  const [error, setError] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const stepped = useRef(false);
@@ -33,20 +35,25 @@ export function DeletePlayButton({ id }: { id: string }) {
     setConfirming(next);
   }
 
+  // `deleting` is cleared on the failure paths only. After a success both
+  // buttons stay disabled until the navigation lands: re-enabled, a second
+  // click sent a DELETE for the row that was already gone and showed "failed".
   async function handleDelete() {
     setDeleting(true);
-    setError(false);
+    setError(null);
     try {
       const res = await fetch(withBasePath(`/api/play-history/${id}`), { method: "DELETE" });
       if (!res.ok) {
-        setError(true);
+        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        setError(typeof body?.error === "string" ? body.error : t("adminActivity.deletePlay.failed"));
+        setDeleting(false);
         return;
       }
       router.push("/admin/activity/history");
       router.refresh();
-    } catch {
-      setError(true);
-    } finally {
+    } catch (err) {
+      console.error("[delete-play] delete failed:", err);
+      setError(t("adminActivity.deletePlay.failed"));
       setDeleting(false);
     }
   }
@@ -83,7 +90,7 @@ export function DeletePlayButton({ id }: { id: string }) {
         {deleting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
         {t("adminActivity.common.delete")}
       </button>
-      {error && <span className="text-xs text-red-400">{t("adminActivity.deletePlay.failed")}</span>}
+      {error && <span className="text-xs text-red-400">{error}</span>}
     </div>
   );
 }

@@ -94,50 +94,6 @@ function hkdfExpand(prk: Uint8Array, info: Uint8Array, len: number): Uint8Array 
   return new Uint8Array(out);
 }
 
-// ---------- DER-encoded ECDSA signature → raw r||s ----------
-
-function derSignatureToRaw(der: Uint8Array): Uint8Array {
-  // Node signs ECDSA in DER form: SEQUENCE { INTEGER r, INTEGER s }, i.e. the
-  // bytes 0x30 len 0x02 rlen r... 0x02 slen s... A JWT (ES256) needs the raw
-  // 64-byte form instead: r and s, each left-padded to 32 bytes.
-  if (der.length < 8 || der[0] !== 0x30) {
-    throw new Error("Invalid DER signature: missing SEQUENCE tag");
-  }
-  let cursor = 2;
-  // Handle long-form length on the SEQUENCE itself (rare for ECDSA-P256 but cheap to support)
-  if ((der[1] & 0x80) !== 0) {
-    cursor = 2 + (der[1] & 0x7f);
-  }
-  if (der[cursor] !== 0x02) throw new Error("Invalid DER signature: missing INTEGER (r)");
-  const rLen = der[cursor + 1];
-  const rStart = cursor + 2;
-  const rEnd = rStart + rLen;
-  const rBytes = der.subarray(rStart, rEnd);
-
-  if (der[rEnd] !== 0x02) throw new Error("Invalid DER signature: missing INTEGER (s)");
-  const sLen = der[rEnd + 1];
-  const sStart = rEnd + 2;
-  const sEnd = sStart + sLen;
-  const sBytes = der.subarray(sStart, sEnd);
-
-  const raw = new Uint8Array(64);
-  // Strip leading zero pad and left-pad to 32 bytes
-  const rTrim = stripLeadingZeros(rBytes);
-  const sTrim = stripLeadingZeros(sBytes);
-  if (rTrim.length > 32 || sTrim.length > 32) {
-    throw new Error("Invalid DER signature: r/s exceeds 32 bytes");
-  }
-  raw.set(rTrim, 32 - rTrim.length);
-  raw.set(sTrim, 64 - sTrim.length);
-  return raw;
-}
-
-function stripLeadingZeros(buf: Uint8Array): Uint8Array {
-  let i = 0;
-  while (i < buf.length - 1 && buf[i] === 0x00) i += 1;
-  return buf.subarray(i);
-}
-
 // ---------- VAPID key generation ----------
 
 export function generateVapidKeys(): VapidKeys {
@@ -148,19 +104,15 @@ export function generateVapidKeys(): VapidKeys {
   const jwkPriv = privateKey.export({ format: "jwk" }) as { d?: string };
   if (!jwkPriv.d) throw new Error("Failed to extract VAPID private scalar");
   const d = base64UrlDecode(jwkPriv.d);
-  if (d.length !== 32) {
-    // Some keys can have leading-zero stripping in JWK; left-pad to 32.
-    const padded = new Uint8Array(32);
-    padded.set(d, 32 - d.length);
-    return {
-      publicKey: base64UrlEncode(exportUncompressedPoint(publicKey)),
-      privateKey: base64UrlEncode(padded),
-    };
-  }
+  // Node pads `d` to the curve size, but left-pad defensively so the stored
+  // scalar is always exactly 32 bytes; a longer one is not a P-256 key.
+  if (d.length > 32) throw new Error("VAPID private scalar exceeds 32 bytes");
+  const scalar = new Uint8Array(32);
+  scalar.set(d, 32 - d.length);
 
   return {
     publicKey: base64UrlEncode(exportUncompressedPoint(publicKey)),
-    privateKey: base64UrlEncode(d),
+    privateKey: base64UrlEncode(scalar),
   };
 }
 
@@ -208,8 +160,9 @@ function buildVapidJwt(opts: { audience: string; contact: string; publicKey: str
   const signer = createSign("sha256");
   signer.update(signingInput);
   signer.end();
-  const derSig = signer.sign(keyObj);
-  const rawSig = derSignatureToRaw(new Uint8Array(derSig));
+  // ES256 wants the raw 64-byte r||s (each left-padded to 32 bytes), not
+  // Node's default DER encoding; ieee-p1363 produces exactly that.
+  const rawSig = signer.sign({ key: keyObj, dsaEncoding: "ieee-p1363" });
 
   return `${signingInput}.${base64UrlEncode(rawSig)}`;
 }

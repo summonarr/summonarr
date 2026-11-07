@@ -5,7 +5,7 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
 import Link from "next/link";
 import Image from "next/image";
-import { posterUrl } from "@/lib/tmdb-types";
+import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { Chip, PageHeader, EmptyState } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { Film, Tv2 } from "@/components/icons";
@@ -47,16 +47,22 @@ export default async function RecentlyAddedPage() {
     }),
   ]);
 
+  // One pass over both libraries. A title held by two servers is two rows
+  // (library rows are keyed by serverInstance too), and one held by Plex and
+  // Jellyfin carries both tags: keep the newest addedAt (with its title and year)
+  // and union the sources rather than letting a later row overwrite them.
+  const rows = [
+    ...plexItems.map((i) => ({ ...i, src: "plex" as const })),
+    ...jellyfinItems.map((i) => ({ ...i, src: "jellyfin" as const })),
+  ].filter((i): i is typeof i & { addedAt: Date } => i.addedAt !== null);
   const merged = new Map<string, RecentItem>();
-  for (const item of plexItems) {
+  for (const item of rows) {
     const key = `${item.mediaType}:${item.tmdbId}`;
     const existing = merged.get(key);
     if (existing) {
-      // A title held by two Plex servers is two rows (PlexLibraryItem is keyed
-      // by serverInstance too), and they arrive addedAt desc — so keep the
-      // newest rather than letting the older row overwrite it.
-      if (item.addedAt!.getTime() > existing.addedAt.getTime()) {
-        existing.addedAt = item.addedAt!;
+      existing.sources[item.src] = true;
+      if (item.addedAt.getTime() > existing.addedAt.getTime()) {
+        existing.addedAt = item.addedAt;
         existing.title = item.title ?? existing.title;
         existing.year = item.year ?? existing.year;
       }
@@ -65,63 +71,22 @@ export default async function RecentlyAddedPage() {
     merged.set(key, {
       tmdbId: item.tmdbId,
       title: item.title ?? t("adminActivity.common.unknownTitle"),
-      mediaType: item.mediaType as "MOVIE" | "TV",
+      mediaType: item.mediaType,
       year: item.year ?? null,
-      addedAt: item.addedAt!,
-      sources: { plex: true, jellyfin: false },
+      addedAt: item.addedAt,
+      sources: { plex: item.src === "plex", jellyfin: item.src === "jellyfin" },
       posterPath: null,
     });
-  }
-  for (const item of jellyfinItems) {
-    const key = `${item.mediaType}:${item.tmdbId}`;
-    const existing = merged.get(key);
-    if (existing) {
-      // Already seen from Plex — union the Jellyfin tag and surface the most
-      // recent addedAt/title rather than dropping one source.
-      existing.sources.jellyfin = true;
-      if (item.addedAt!.getTime() > existing.addedAt.getTime()) {
-        existing.addedAt = item.addedAt!;
-        existing.title = item.title ?? existing.title;
-        existing.year = item.year ?? existing.year;
-      }
-    } else {
-      merged.set(key, {
-        tmdbId: item.tmdbId,
-        title: item.title ?? t("adminActivity.common.unknownTitle"),
-        mediaType: item.mediaType as "MOVIE" | "TV",
-        year: item.year ?? null,
-        addedAt: item.addedAt!,
-        sources: { plex: false, jellyfin: true },
-        posterPath: null,
-      });
-    }
   }
   let items = Array.from(merged.values())
     .sort((a, b) => b.addedAt.getTime() - a.addedAt.getTime())
     .slice(0, 60);
 
   if (items.length > 0) {
-    const cacheKeys = items.map((i) =>
-      `${i.mediaType === "TV" ? "tv" : "movie"}:${i.tmdbId}:details`,
-    );
-    const cacheRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: cacheKeys } },
-      select: { key: true, data: true },
-    });
-    const posterByKey = new Map<string, string | null>();
-    for (const row of cacheRows) {
-      try {
-        const parsed = JSON.parse(row.data) as { poster_path?: string | null; posterPath?: string | null };
-        const path = parsed.poster_path ?? parsed.posterPath ?? null;
-        posterByKey.set(row.key, posterUrl(path, "w342"));
-      } catch {
-        // A corrupt cache row just means this title shows no poster.
-      }
-    }
-    items = items.map((i) => ({
-      ...i,
-      posterPath: posterByKey.get(`${i.mediaType === "TV" ? "tv" : "movie"}:${i.tmdbId}:details`) ?? null,
-    }));
+    // The shared lookup (TmdbMediaCore first, then the :details cache), each
+    // title in its own media type's namespace.
+    const posters = await resolvePosterMap(items);
+    items = items.map((i) => ({ ...i, posterPath: posters[posterPathKey(i.tmdbId, i.mediaType)] ?? null }));
   }
 
   return (

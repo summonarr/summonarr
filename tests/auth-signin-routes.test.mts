@@ -48,6 +48,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import dns from "node:dns/promises";
+import { readFileSync } from "node:fs";
 
 (globalThis as { AsyncLocalStorage?: unknown }).AsyncLocalStorage = AsyncLocalStorage;
 
@@ -71,19 +72,41 @@ const fetchCalls: Array<{ url: URL; method: string; headers: Headers }> = [];
 let plexPinCreate: { id?: number; code?: string } | null = { id: 4242, code: "ABCD" };
 let plexPinStatus = 200;
 let plexPinCreateThrows: Error | null = null;
+let plexPinPollThrows: Error | null = null;
 let plexPinToken: string | null = null;
+// When set, plex.tv's pin endpoints answer 200 with exactly this body text
+// (an HTML proxy page, `null`, …) instead of the scripted JSON.
+let plexPinRawBody: string | null = null;
 let plexUserOk = false;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchCalls.push({ url, method: init?.method ?? "GET", headers: new Headers(init?.headers) });
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
+  if (url.hostname === "plex.tv" && /^\/api\/v2\/pins(\/\d+)?$/.test(url.pathname) && plexPinRawBody !== null) {
+    return new Response(plexPinRawBody, { status: 200 });
+  }
   if (url.hostname === "plex.tv" && url.pathname === "/api/v2/pins") {
     if (plexPinCreateThrows) throw plexPinCreateThrows;
     return plexPinStatus === 200 ? json(plexPinCreate ?? {}) : json({ error: "nope" }, plexPinStatus);
   }
   if (url.hostname === "plex.tv" && /^\/api\/v2\/pins\/\d+$/.test(url.pathname)) {
+    if (plexPinPollThrows) throw plexPinPollThrows;
     return plexPinStatus === 200 ? json({ authToken: plexPinToken }) : json({ error: "nope" }, plexPinStatus);
+  }
+  // Discovery for the one test issuer that is meant to work (the remember-me
+  // pins at the end of this file; discovery is cached for the process).
+  if (url.hostname === "idp-remember.example.com" && url.pathname === "/.well-known/openid-configuration") {
+    const iss = "https://idp-remember.example.com";
+    return json({
+      issuer: iss,
+      authorization_endpoint: `${iss}/authorize`,
+      token_endpoint: `${iss}/token`,
+      jwks_uri: `${iss}/jwks`,
+      response_types_supported: ["code"],
+      subject_types_supported: ["public"],
+      id_token_signing_alg_values_supported: ["RS256"],
+    });
   }
   if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user" && plexUserOk) {
     return json({ id: 9001, email: "owner@example.com", username: "owner" });
@@ -264,7 +287,9 @@ beforeEach(() => {
   plexPinCreate = { id: 4242, code: "ABCD" };
   plexPinStatus = 200;
   plexPinCreateThrows = null;
+  plexPinPollThrows = null;
   plexPinToken = null;
+  plexPinRawBody = null;
   plexUserOk = false;
   delete process.env.OIDC_ISSUER;
   delete process.env.OIDC_CLIENT_ID;
@@ -635,6 +660,22 @@ test("plex start maps a malformed upstream response to 502", async () => {
   assert.equal(res.status, 502);
 });
 
+for (const [label, raw] of [
+  ["an HTML proxy page", "<html><body>502 Bad Gateway</body></html>"],
+  ["an empty body", ""],
+  ["a JSON null", "null"],
+  ["a fractional pin id", JSON.stringify({ id: 1.5, code: "X" })],
+  ["a non-positive pin id", JSON.stringify({ id: 0, code: "X" })],
+] as const) {
+  test(`plex start maps a 2xx with ${label} to the pinMalformed 502, never a 500, and sets no cookie`, async () => {
+    plexPinRawBody = raw;
+    const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
+    assert.equal(res.status, 502);
+    assert.equal((await res.json()).error, "Plex PIN response malformed");
+    assert.ok(!setCookies(res).some((c) => c.startsWith(`${PLEX_FLOW_COOKIE}=`)));
+  });
+}
+
 test("plex start is IP rate-limited", async () => {
   const ip = "203.0.113.77";
   for (let i = 0; i < 20; i++) {
@@ -660,6 +701,18 @@ test("plex start rejects an oversized body before reaching plex.tv", async () =>
 test("plex start rejects malformed JSON", async () => {
   const res = await inScope(() => plexStart.POST(startPost("{nope")));
   assert.equal(res.status, 400);
+});
+
+test("plex start answers 400 — never a 500 — for an empty body or one that is not a JSON object, and never reaches plex.tv", async () => {
+  // An empty body has no clientId; `null`, an array or a bare number would
+  // otherwise reach the property reads on an unauthenticated route.
+  for (const raw of [undefined, "", "   ", "null", "[]", "42", "\"clientId\""]) {
+    const res = await inScope(() => plexStart.POST(startPost(raw)));
+    assert.equal(res.status, 400, `body ${JSON.stringify(raw)}`);
+    assert.equal(typeof (await res.json()).error, "string");
+    assert.ok(!setCookies(res).some((c) => c.startsWith(`${PLEX_FLOW_COOKIE}=`)));
+  }
+  assert.deepEqual(fetchCalls, []);
 });
 
 // ── /api/auth/plex/pin (admin-only "Connect Plex") ───────────────────────────
@@ -726,6 +779,26 @@ test("plex pin PATCH polls ONLY the cookie-bound pin with the cookie's identifie
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].url.pathname, "/api/v2/pins/4242", "must poll the bound pin, not ?id=");
   assert.equal(fetchCalls[0].headers.get("x-plex-client-identifier"), clientId);
+});
+
+// safeFetchTrusted THROWS on a DNS failure, a non-public address or a timeout.
+// Unhandled, that was a 500 with no log line; it is the same "plex.tv didn't
+// answer" 502 a refusal gets.
+test("plex pin POST and PATCH answer a thrown plex.tv fetch with a logged 502, never a 500", async () => {
+  const t = await mintAdminSession();
+  plexPinCreateThrows = new Error("getaddrinfo ENOTFOUND plex.tv");
+  const failedCreate = await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined));
+  assert.equal(failedCreate.status, 502);
+  assert.ok(!setCookies(failedCreate).some((c) => c.startsWith(`${PLEX_CONNECT_COOKIE}=`)), "no connect cookie for a PIN that was never made");
+  assert.ok(errors.some((e) => e.includes("[auth/plex/pin]") && e.includes("ENOTFOUND")), "the create failure is logged");
+
+  plexPinCreateThrows = null;
+  const created = await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined));
+  const bound = connectCookieFrom(created);
+  plexPinPollThrows = new Error("plex.tv timed out after 15000ms");
+  const failedPoll = await inScope(() => plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}; ${bound}` }), undefined));
+  assert.equal(failedPoll.status, 502);
+  assert.ok(errors.some((e) => e.includes("[auth/plex/pin]") && e.includes("timed out")), "the poll failure is logged");
 });
 
 test("plex pin PATCH without a connect cookie never reaches plex.tv", async () => {
@@ -806,6 +879,24 @@ test("plex pin maps upstream failures to 502", async () => {
   assert.equal(p.status, 502);
   assert.equal(g.status, 502);
 });
+
+for (const [label, raw] of [
+  ["an HTML proxy page", "<html>oops</html>"],
+  ["a JSON null", "null"],
+] as const) {
+  test(`plex pin POST and PATCH map a 2xx with ${label} to 502, never a 500`, async () => {
+    const t = await mintAdminSession();
+    const bound = connectCookieFrom(
+      await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined)));
+    plexPinRawBody = raw;
+    const p = await inScope(() => plexPin.POST(post("/api/auth/plex/pin", undefined, { cookie: `${COOKIE}=${t}` }), undefined));
+    const g = await inScope(() => plexPin.PATCH(patchPin({ cookie: `${COOKIE}=${t}; ${bound}` }), undefined));
+    assert.equal(p.status, 502);
+    assert.ok(!setCookies(p).some((c) => c.startsWith(`${PLEX_CONNECT_COOKIE}=`)), "a malformed create sets no cookie");
+    assert.equal(g.status, 502);
+    assert.equal(ops.filter((o) => o.op === "setting.upsert").length, 0);
+  });
+}
 
 // ── /api/auth/plex/client-id ─────────────────────────────────────────────────
 
@@ -1100,4 +1191,58 @@ test("a signed OIDC state round-trips its returnTo", async () => {
   const back = await verifyOidcStateCookie(signed);
   assert.ok(back);
   assert.equal(back.returnTo, "/requests");
+});
+
+// ── OIDC remember-me ─────────────────────────────────────────────────────────
+// Kept LAST: these configure an issuer whose discovery succeeds, and discovery
+// is cached for the rest of the process.
+
+function oidcStateFrom(res: Response): string {
+  const raw = setCookies(res).find((c) => c.startsWith(`${OIDC_STATE_COOKIE}=`));
+  assert.ok(raw, "start must set the state cookie");
+  return raw.split(";")[0].slice(OIDC_STATE_COOKIE.length + 1);
+}
+
+test("oidc start carries the web form's remember-me into the signed state, and only when asked", async () => {
+  process.env.OIDC_ISSUER = "https://idp-remember.example.com";
+  process.env.OIDC_CLIENT_ID = "cid";
+  process.env.OIDC_CLIENT_SECRET = "secret";
+  const remembered = await inScope(() =>
+    oidcStart.GET(get("/api/auth/oidc/start?callbackUrl=%2Frequests&rememberMe=1", { "x-forwarded-for": "203.0.113.120" })));
+  assert.equal(remembered.status, 307);
+  assert.ok((remembered.headers.get("location") ?? "").startsWith("https://idp-remember.example.com/authorize"));
+  const on = await verifyOidcStateCookie(oidcStateFrom(remembered));
+  assert.ok(on);
+  assert.equal(on.rememberMe, true);
+  assert.equal(on.returnTo, "/requests");
+
+  const plain = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", { "x-forwarded-for": "203.0.113.121" })));
+  const off = await verifyOidcStateCookie(oidcStateFrom(plain));
+  assert.ok(off);
+  assert.equal(off.rememberMe, undefined);
+});
+
+test("oidc start never puts remember-me in a native flow's state (its session never expires either way)", async () => {
+  process.env.OIDC_ISSUER = "https://idp-remember.example.com";
+  process.env.OIDC_CLIENT_ID = "cid";
+  process.env.OIDC_CLIENT_SECRET = "secret";
+  const res = await inScope(() =>
+    oidcStart.GET(get("/api/auth/oidc/start?rememberMe=1", { "x-forwarded-for": "203.0.113.122", ...NATIVE })));
+  assert.equal(res.status, 200);
+  const state = await verifyOidcStateCookie((await res.json()).flowState);
+  assert.ok(state);
+  assert.equal(state.rememberMe, undefined);
+});
+
+test("a signed OIDC state round-trips remember-me, and the callback hands it to the mint", async () => {
+  const signed = await signOidcStateCookie({
+    state: "s", nonce: "n", codeVerifier: "v",
+    redirectUri: "http://localhost:3000/api/auth/oidc/callback", rememberMe: true,
+  });
+  assert.equal((await verifyOidcStateCookie(signed))?.rememberMe, true);
+  // The callback's success path needs a live IdP (see the header), so its
+  // wiring is pinned at the source: the flag becomes the same rememberMe:"true"
+  // every other provider passes to initializeTokenOnSignIn.
+  const callbackSrc = readFileSync(new URL("../src/app/api/auth/oidc/callback/route.ts", import.meta.url), "utf8");
+  assert.match(callbackSrc, /user: \{ \.\.\.dbUser, \.\.\.device, \.\.\.\(flowState\.rememberMe \? \{ rememberMe: "true" \} : \{\}\) \}/);
 });

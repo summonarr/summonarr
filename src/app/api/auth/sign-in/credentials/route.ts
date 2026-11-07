@@ -38,9 +38,9 @@ export async function POST(req: NextRequest) {
   // token, redeemed at POST /api/auth/sign-in/mfa. Null ⇒ no 2FA ⇒ the flow
   // below is unchanged.
   const challenge = await mfaChallengeFor(req, {
-    id: user.id as string,
-    rememberMe: user.rememberMe as string | undefined,
-    passwordVersion: user._passwordVersion as string,
+    id: user.id,
+    rememberMe: user.rememberMe,
+    passwordVersion: user._passwordVersion,
   });
   if (challenge) return challenge;
 

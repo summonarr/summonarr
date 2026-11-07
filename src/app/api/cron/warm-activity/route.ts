@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { clearActivityCache, warmActivityCache } from "@/lib/play-history";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, WARM_ACTIVITY_LOCK_ID } from "@/lib/advisory-lock";
-import { cronSkippedResponse, getCronActor, recordCronRun } from "@/lib/cron-auth";
+import { cronSkippedResponse, getCronActor, withCronRunRecording } from "@/lib/cron-auth";
 
 export async function POST(request: NextRequest) {
   const authCtx = await getCronActor(request);
@@ -10,28 +10,19 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  return withAdvisoryLock(
+  // withCronRunRecording saves every run to the cron history (Admin ->
+  // Settings -> System) for both admin and cron triggers — a throw, a lock
+  // connection that fails or a lock timeout as a failed run — and leaves a busy-lock skip
+  // unrecorded. It is kept in the Setting table, not AuditLog, so scheduled
+  // runs don't flood the audit log. This warm has no partial-failure count: it
+  // either finishes (ok) or throws.
+  return withCronRunRecording("activity", () => withAdvisoryLock(
     WARM_ACTIVITY_LOCK_ID,
     async () => {
       clearActivityCache();
       const startTime = Date.now();
-      let warmed: number;
-      try {
-        ({ warmed } = await warmActivityCache());
-      } catch (err) {
-        // Record the failed run before re-throwing. Otherwise the cron history
-        // would still show the last successful run and look healthy.
-        await recordCronRun("activity", Date.now() - startTime, false);
-        throw err;
-      }
-
+      const { warmed } = await warmActivityCache();
       const durationMs = Date.now() - startTime;
-
-      // Save this run to the cron history (Admin -> Settings -> System) for
-      // both admin and cron triggers. It is kept in the Setting table, not
-      // AuditLog, so scheduled runs don't flood the audit log. This warm has no
-      // partial-failure count: it either finishes (ok) or throws (handled above).
-      await recordCronRun("activity", durationMs);
 
       // Only manual (admin) runs get an audit row, so scheduled runs don't flood the table.
       if (authCtx.trigger !== "cron") {
@@ -51,5 +42,5 @@ export async function POST(request: NextRequest) {
       });
     },
     () => cronSkippedResponse(),
-  );
+  ));
 }

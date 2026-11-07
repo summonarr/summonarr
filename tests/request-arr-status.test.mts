@@ -855,7 +855,8 @@ test("the panel never reads without a click, never acts on a stale verdict, and 
   const panel = src("request-arr-status.tsx");
   const list = src("admin-request-list.tsx");
   // C073: the delete confirm and a status other than APPROVED unmount the panel, so both close it.
-  assert.match(actions, /onClick=\{\(\) => \{ setShowStatus\(false\); setShowDeleteConfirm\(true\); \}\}/);
+  assert.match(actions, /onAskDelete=\{\(\) => \{ setShowStatus\(false\); setShowDeleteConfirm\(true\); \}\}/);
+  assert.match(actions, /onClick=\{onAskDelete\}/, "the Delete button asks through that handler");
   assert.match(actions, /useEffect\(\(\) => \{\s*if \(status !== "APPROVED"\) setShowStatus\(false\);\s*\}, \[status\]\);/);
   // C075: a new representative request starts from no verdict.
   assert.match(actions, /<RequestArrStatusPanel[\s\S]*?key=\{requestId\}[\s\S]*?\/>/);

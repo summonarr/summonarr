@@ -7,21 +7,28 @@
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { episodeLabel } from "@/lib/episode-label";
+import { foldStreamMethods } from "@/lib/activity-stream-mix";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import {
   ActivityCard,
   AreaChart,
   Avatar,
   DetailHeader,
+  Empty,
   HeaderStat,
   HorizontalBars,
+  LeaderboardRow,
   MethodPill,
   Poster,
   SectionHeader,
+  SourceDot,
   StreamTypeBars,
+  Td,
   Th,
   fmtDuration,
   methodLabel,
+  streamTypeSegments,
 } from "@/components/admin/activity-ui";
 
 export interface TitleDetailData {
@@ -69,12 +76,14 @@ export interface TitleDetailData {
   }[];
 }
 
-// `labelKey` is a catalog key, translated at render.
-const STREAM_META: Record<string, { labelKey: string; color: string }> = {
-  DirectPlay: { labelKey: "adminActivity.method.directPlay", color: "var(--ds-success)" },
-  DirectStream: { labelKey: "adminActivity.method.remux", color: "var(--ds-info)" },
-  Transcode: { labelKey: "adminActivity.method.transcode", color: "var(--ds-warning)" },
-};
+// Average completion at or above these reads as healthy ("ok") or middling
+// ("info"); anything lower is flagged ("warn").
+const COMPLETION_OK_PCT = 75;
+const COMPLETION_INFO_PCT = 50;
+
+function completionTone(pct: number): "ok" | "info" | "warn" {
+  return pct >= COMPLETION_OK_PCT ? "ok" : pct >= COMPLETION_INFO_PCT ? "info" : "warn";
+}
 
 function absTime(iso: string, locale: string): string {
   // Format in UTC so the server (its own time zone) and the browser (the
@@ -96,11 +105,11 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
   const accent = "oklch(0.36 0.08 60)";
   const isTV = s.mediaType === "TV";
 
-  const streamTypes = ["DirectPlay", "DirectStream", "Transcode"].map((m) => ({
-    label: t(STREAM_META[m].labelKey),
-    count: s.transcodeRatio.find((r) => r.method === m)?.count ?? 0,
-    color: STREAM_META[m].color,
-  }));
+  // Any other method the server recorded is one "Other" segment, as on the
+  // Stats tab, so the shares divide by every session.
+  const streamMix = foldStreamMethods(s.transcodeRatio);
+  const streamTypes = streamTypeSegments(t, streamMix);
+  const pct0 = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 });
   const playsByDay = s.playsByDay.map((d) => d.count);
   const maxViewer = s.topViewers[0]?.count ?? 1;
 
@@ -148,14 +157,8 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
             />
             <HeaderStat
               label={t("adminActivity.popover.completion")}
-              value={`${s.avgCompletion}%`}
-              tone={
-                s.avgCompletion >= 75
-                  ? "ok"
-                  : s.avgCompletion >= 50
-                    ? "info"
-                    : "warn"
-              }
+              value={pct0.format(s.avgCompletion / 100)}
+              tone={completionTone(s.avgCompletion)}
             />
           </div>
         }
@@ -225,107 +228,24 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {s.topViewers.map((v, i) => (
-              <div
+              <LeaderboardRow
                 key={v.id}
-                style={{ display: "flex", alignItems: "center", gap: 10 }}
-              >
-                <span
-                  className="ds-mono"
-                  style={{
-                    width: 16,
-                    textAlign: "right",
-                    fontSize: 10.5,
-                    color: "var(--ds-fg-subtle)",
-                  }}
-                >
-                  {(i + 1).toString().padStart(2, "0")}
-                </span>
-                <Avatar
-                  letter={(v.username[0] ?? "?").toUpperCase()}
-                  size={22}
-                />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "baseline",
-                      marginBottom: 3,
-                      gap: 8,
-                    }}
-                  >
-                    <Link
-                      href={`/admin/activity/user/${v.id}`}
-                      style={{
-                        fontSize: 12.5,
-                        color: "var(--ds-fg)",
-                        textDecoration: "none",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        gap: 6,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {v.username}
-                      <span
-                        style={{
-                          width: 5,
-                          height: 5,
-                          borderRadius: 999,
-                          background:
-                            v.source === "plex"
-                              ? "var(--ds-plex)"
-                              : "var(--ds-jellyfin)",
-                        }}
-                      />
-                    </Link>
-                    <span
-                      className="ds-mono"
-                      style={{
-                        fontSize: 11,
-                        color: "var(--ds-fg-muted)",
-                        fontVariantNumeric: "tabular-nums",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {v.count}{" "}
-                      <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        · {t("adminActivity.common.hoursShort", { n: v.hours.toLocaleString(locale, { maximumFractionDigits: 1 }) })}
-                      </span>
-                    </span>
-                  </div>
-                  <div
-                    style={{
-                      height: 4,
-                      background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
-                      borderRadius: 999,
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: `${(v.count / maxViewer) * 100}%`,
-                        height: "100%",
-                        background: "var(--ds-accent)",
-                        borderRadius: 999,
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
+                href={`/admin/activity/user/${v.id}`}
+                rank={i + 1}
+                avatar={
+                  <Avatar
+                    letter={(v.username[0] ?? "?").toUpperCase()}
+                    size={22}
+                  />
+                }
+                title={v.username}
+                source={v.source}
+                primary={v.count.toLocaleString(locale)}
+                secondary={t("adminActivity.common.hoursShort", { n: v.hours.toLocaleString(locale, { maximumFractionDigits: 1 }) })}
+                pct={(v.count / maxViewer) * 100}
+              />
             ))}
-            {s.topViewers.length === 0 && (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "var(--ds-fg-subtle)",
-                  padding: "20px 0",
-                  textAlign: "center",
-                }}
-              >
-                {t("adminActivity.title.noViewers")}
-              </div>
-            )}
+            {s.topViewers.length === 0 && <Empty description={t("adminActivity.title.noViewers")} />}
           </div>
         </ActivityCard>
         <ActivityCard>
@@ -361,7 +281,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
               label: r.resolution,
               count: r.count,
             }))}
-            color="oklch(0.68 0.16 158)"
+            color="var(--ds-chart-2)"
             labelWidth={70}
           />
         </ActivityCard>
@@ -372,7 +292,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
           />
           <HorizontalBars
             items={s.platforms.slice(0, 6)}
-            color="oklch(0.62 0.14 295)"
+            color="var(--ds-chart-3)"
             labelWidth={110}
           />
         </ActivityCard>
@@ -449,9 +369,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                             : "none",
                       }}
                     >
-                      <td
-                        style={{ padding: "10px 14px", whiteSpace: "nowrap" }}
-                      >
+                      <Td>
                         <Link
                           href={`/admin/activity/user/${p.mediaServerUserId}`}
                           style={{
@@ -469,42 +387,15 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                           <span style={{ color: "var(--ds-fg)" }}>
                             {p.username}
                           </span>
-                          <span
-                            style={{
-                              width: 4,
-                              height: 4,
-                              borderRadius: 999,
-                              background:
-                                p.userSource === "plex"
-                                  ? "var(--ds-plex)"
-                                  : "var(--ds-jellyfin)",
-                            }}
-                          />
+                          <SourceDot source={p.userSource} size={4} />
                         </Link>
-                      </td>
+                      </Td>
                       {isTV && (
-                        <td
-                          className="ds-mono"
-                          style={{
-                            padding: "10px 14px",
-                            color: "var(--ds-fg-muted)",
-                            fontSize: 11,
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {p.seasonNumber != null
-                            ? `S${String(p.seasonNumber).padStart(2, "0")} · E${String(p.episodeNumber ?? 0).padStart(2, "0")}`
-                            : "—"}
-                        </td>
+                        <Td mono color="var(--ds-fg-muted)" fontSize={11}>
+                          {episodeLabel(p.seasonNumber, p.episodeNumber) ?? "—"}
+                        </Td>
                       )}
-                      <td
-                        className="ds-mono"
-                        style={{
-                          padding: "10px 14px",
-                          color: "var(--ds-fg-muted)",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
+                      <Td mono color="var(--ds-fg-muted)">
                         {p.resolution ?? "—"}
                         {p.videoCodec && (
                           <span style={{ color: "var(--ds-fg-subtle)" }}>
@@ -512,44 +403,17 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                             · {p.videoCodec}
                           </span>
                         )}
-                      </td>
-                      <td
-                        style={{
-                          padding: "10px 14px",
-                          color: "var(--ds-fg-muted)",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {p.platform ?? "—"}
-                      </td>
-                      <td
-                        style={{ padding: "10px 14px", whiteSpace: "nowrap" }}
-                      >
+                      </Td>
+                      <Td color="var(--ds-fg-muted)">{p.platform ?? "—"}</Td>
+                      <Td>
                         <MethodPill method={ml.label} methodClass={ml.cls} />
-                      </td>
-                      <td
-                        className="ds-mono"
-                        style={{
-                          padding: "10px 14px",
-                          color: "var(--ds-fg-muted)",
-                          textAlign: "right",
-                          fontVariantNumeric: "tabular-nums",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
+                      </Td>
+                      <Td mono color="var(--ds-fg-muted)" align="right" tabular>
                         {fmtDuration(p.playDuration, locale)}
-                      </td>
-                      <td
-                        className="ds-mono"
-                        style={{
-                          padding: "10px 14px",
-                          color: "var(--ds-fg-subtle)",
-                          textAlign: "right",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
+                      </Td>
+                      <Td mono color="var(--ds-fg-subtle)" align="right">
                         {when(p.startedAtIso)}
-                      </td>
+                      </Td>
                     </tr>
                   );
                 })}

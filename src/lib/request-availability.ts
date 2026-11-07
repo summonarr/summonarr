@@ -53,3 +53,21 @@ export async function attachRequestedStatus(items: TmdbMedia[], userId?: string)
     };
   });
 }
+
+// The titles THIS viewer can never re-request on the default instance: their
+// PERMANENTLY declined requests (an ordinary decline is re-requestable — the
+// request routes drop the stale row and file a fresh one). The collection
+// "Request all" button leaves these out; it used to count and send them on
+// every visit, and the bulk route answered `skipped-declined` each time.
+// Keyed `${mediaType}:${id}` in TmdbMedia's own lowercase mediaType, so a
+// client component rebuilds the key from the item it holds. Default instance
+// only, like attachRequestedStatus.
+export async function permanentlyDeclinedKeys(items: TmdbMedia[], userId: string): Promise<string[]> {
+  const baseWhere = buildMediaTypeWhere(items);
+  if (!baseWhere) return [];
+  const rows = await prisma.mediaRequest.findMany({
+    where: { requestedBy: userId, arrInstance: "", permanentlyDeclined: true, ...baseWhere },
+    select: { tmdbId: true, mediaType: true },
+  });
+  return rows.map((r) => `${r.mediaType === "MOVIE" ? "movie" : "tv"}:${r.tmdbId}`);
+}

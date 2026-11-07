@@ -24,7 +24,7 @@ export interface IssueDrawerPayload {
   id: string;
   title: string;
   posterUrl: string | null;
-  mediaType: "MOVIE" | "TV" | string;
+  mediaType: "MOVIE" | "TV";
   status: string;
   issueType: string;
   scope: string;

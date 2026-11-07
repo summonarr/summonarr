@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { verifyTmdbMedia } from "@/lib/tmdb";
+import { tmdbDetailsKey } from "@/lib/tmdb-cache";
 
 // Resolves title/poster/releaseYear for a request row. Prefers the pre-warmed
 // TmdbMediaCore table, falls back to the TmdbCache details blob, then a live
@@ -18,7 +19,7 @@ export async function resolveMediaMeta(
     return { title: core.title, posterPath: core.posterPath ?? null, releaseYear: core.releaseYear ?? "" };
   }
 
-  const cacheKey = `${mediaType === "MOVIE" ? "movie" : "tv"}:${tmdbId}:details`;
+  const cacheKey = tmdbDetailsKey(mediaType, tmdbId);
   const cacheRow = await prisma.tmdbCache
     .findUnique({ where: { key: cacheKey }, select: { data: true, expiresAt: true } })
     .catch(() => null);

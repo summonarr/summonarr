@@ -24,13 +24,13 @@ import { ArrowDown, ArrowUp, ArrowUpDown, FileX, Loader2, RefreshCw, Shield, Shi
 import {
   CleanupPlanPanel,
   CleanupResultPanel,
-  arrInstanceLabel as instanceLabel,
+  arrSlugLabel as instanceLabel,
   cleanupKeyOf as keyOf,
   dayFormatter,
   formatBytesIn,
-  readApiError as readError,
   useCleanupDelete,
 } from "@/components/admin/cleanup-delete";
+import { readApiError } from "@/lib/client/api-error";
 import {
   CLEANUP_EXCLUSION_LABELS,
   CLEANUP_MAX_ITEMS,
@@ -173,7 +173,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
       const res = await fetch(withBasePath("/api/admin/cleanup"));
       if (seq !== loadSeq.current) return;
       if (!res.ok) {
-        const msg = await readError(res, t("adminManage.cleanup.error.load"));
+        const msg = await readApiError(res, t("adminManage.cleanup.error.load"));
         if (seq === loadSeq.current) setLoadError(msg);
         return;
       }
@@ -268,7 +268,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
         body: JSON.stringify(draft),
       });
       if (!res.ok) {
-        setActionError(await readError(res, t("adminManage.cleanup.error.save")));
+        setActionError(await readApiError(res, t("adminManage.cleanup.error.save")));
         return;
       }
       // Saved: these ARE the settings now. Installed before the reload, so Save
@@ -297,7 +297,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
           })
         : await fetch(withBasePath(`/api/admin/cleanup/protect?tmdbId=${row.tmdbId}&mediaType=${row.mediaType}`), { method: "DELETE" });
       if (!res.ok) {
-        setActionError(await readError(res, on ? t("adminManage.cleanup.error.protect") : t("adminManage.cleanup.error.unprotect")));
+        setActionError(await readApiError(res, on ? t("adminManage.cleanup.error.protect") : t("adminManage.cleanup.error.unprotect")));
         return;
       }
       del.clearPlan();

@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { signInServerOptions } from "@/lib/sign-in-servers";
 import { redirect } from "next/navigation";
 import { CheckCircle, Smartphone, Wrench } from "@/components/icons";
 import { AuthBrandHeader } from "@/components/auth/auth-brand-header";
@@ -22,12 +23,16 @@ export default async function LoginPage({
   // the admin account is created locally first; Jellyfin/OIDC are wired up from Settings afterwards.
   if (count === 0) redirect("/setup");
 
-  const [plexInstances, jellyfinInstances, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
+  // Independent reads, one round of them. getMaintenanceStatus keeps its own
+  // fail-closed catch.
+  const [plexInstances, jellyfinInstances, siteTitleRow, siteUrlRow, disableLocalRow, maintenance, t] = await Promise.all([
     getSyncableMediaInstances("plex"),
     getSyncableMediaInstances("jellyfin"),
     prisma.setting.findUnique({ where: { key: "siteTitle" } }),
     prisma.setting.findUnique({ where: { key: "siteUrl" } }),
     prisma.setting.findUnique({ where: { key: "disableLocalLogin" } }),
+    getMaintenanceStatus(),
+    getTranslator(),
   ]);
   // Fully DB-configured, like Jellyfin below: the Plex tab appears once at least
   // one instance has BOTH its ServerUrl and AdminToken stored. Deliberately
@@ -49,8 +54,6 @@ export default async function LoginPage({
   const localLoginDisabled = disableLocalRow?.value === "true";
   const siteTitle = siteTitleRow?.value || "Summonarr";
   const siteUrl = siteUrlRow?.value || process.env.AUTH_URL || "";
-  const maintenance = await getMaintenanceStatus();
-  const t = await getTranslator();
   // The Playfair wordmark above the icon already says "Summonarr"; repeating it
   // as the h1 read as a stutter on every default install. When the title IS the
   // default, the wordmark becomes the page's h1 instead so the heading outline
@@ -129,7 +132,7 @@ export default async function LoginPage({
             </p>
           </AuthBrandHeader>
 
-          <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} jellyfinInstances={jellyfinInstances} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
+          <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} jellyfinInstances={signInServerOptions(jellyfinInstances)} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
         </div>
 
         <div className="flex flex-col items-center text-center" style={{ marginTop: 18, gap: 4 }}>

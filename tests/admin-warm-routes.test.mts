@@ -160,7 +160,10 @@ shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async (sql: string) => {
 
 let backfillCounts = { total_rows: 0n, candidate_rows: 0n, watched_flips: 0n };
 let backfillUpdatedRows = 0;
+// Every read statement in full (the ops log keeps a 40-char prefix).
+let rawQueries: string[] = [];
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string) => {
+  rawQueries.push(sql.replace(/\s+/g, " ").trim());
   rec("$queryRawUnsafe", sql.replace(/\s+/g, " ").trim().slice(0, 40));
   if (sql.includes("total_rows")) return [backfillCounts];
   return []; // the 5-row sample
@@ -259,6 +262,7 @@ const callBackfill = (token: string | null, query = "", body?: string) =>
 
 beforeEach(() => {
   ops = [];
+  rawQueries = [];
   pgLockCalls = [];
   afterTasks.length = 0;
   warns.length = 0;
@@ -425,7 +429,9 @@ test("the locking warms use DISTINCT lock ids from each other", () => {
 test("library-warm threads the lock's AbortSignal into the walk (guardrail 41)", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../src/app/api/admin/library-warm/route.ts", import.meta.url), "utf8");
-  assert.match(src, /withAdvisoryLock\(\s*WARM_LIBRARY_LOCK_ID,\s*async \(signal\)/);
+  // runAdminWarm (warm-cooldown.ts) takes the lock and hands its signal to run.
+  assert.match(src, /runAdminWarm\(\{\s*lockId: WARM_LIBRARY_LOCK_ID,/);
+  assert.match(src, /run: async \(signal\) =>/);
   assert.match(src, /prewarmLibraryCache\(\{ signal \}\)/);
 });
 
@@ -640,6 +646,28 @@ test("the backfill UPDATE stays bounded to the rows that actually need clamping"
     "the UPDATE must skip rows whose playDuration is already within wall-clock",
   );
   assert.match(sql, /AND "stoppedAt" > "startedAt"/, "the UPDATE must skip rows with no positive wall-clock span");
+});
+
+test("execute reads no preview sample, and its count covers exactly the rows the UPDATE writes", async () => {
+  const t = await mintSession();
+  const res = await callBackfill(t, "?execute=true", JSON.stringify({ confirmAffectedRows: 7 }));
+  assert.equal(res.status, 200);
+  assert.equal(rawQueries.filter((q) => /LIMIT 5\b/.test(q)).length, 0, "the five-row sample is a dry-run read only");
+  const count = rawQueries.find((q) => q.includes("candidate_rows"));
+  assert.ok(count, "the confirmation gate still reads the live count");
+  const update = opsOf("$executeRawUnsafe")[0].args as string;
+  const whereOf = (sql: string) => sql.slice(sql.lastIndexOf("WHERE "));
+  assert.equal(whereOf(count!), whereOf(update), "the gate's count and the write select the same rows");
+});
+
+test("the dry run's sample selects the same rows its count does", async () => {
+  const t = await mintSession();
+  await callBackfill(t);
+  const count = rawQueries.find((q) => q.includes("candidate_rows"))!;
+  const sample = rawQueries.find((q) => /LIMIT 5\b/.test(q));
+  assert.ok(sample, "the dry run previews a sample");
+  const where = count.slice(count.lastIndexOf("WHERE "));
+  assert.ok(sample!.includes(`${where} ORDER BY "startedAt" DESC LIMIT 5`), "same WHERE as the count");
 });
 
 test("a successful backfill is audited and never 500s on a failing audit write (guardrail 26)", async () => {

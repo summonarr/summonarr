@@ -3,7 +3,7 @@
 // avatar plus Discord / password / sessions cards on the left, notification
 // preferences + push devices on the right. Cards are ProfileCard's
 // padding-20 radius-10 box.
-import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 function Card({ title = true, lines = 2, button = false }: { title?: boolean; lines?: number; button?: boolean }) {
   return (
@@ -21,7 +21,7 @@ function Card({ title = true, lines = 2, button = false }: { title?: boolean; li
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <div className="max-w-2xl lg:max-w-6xl lg:grid lg:grid-cols-2 lg:gap-6">
         <div className="flex flex-col" style={{ gap: 20 }}>
@@ -41,6 +41,6 @@ export default function Loading() {
           <Card lines={2} />
         </div>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

@@ -1,4 +1,5 @@
 import { escapeIlike, SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
+import { zonedMidnightSql } from "@/lib/stats-time-zone";
 
 // Shared query-string → SQL translation for the admin play-history surfaces:
 // the list route's grouped and ungrouped paths (src/app/api/play-history/
@@ -24,59 +25,122 @@ import { escapeIlike, SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
 // term; `?` placeholders are renumbered to `$N` at composition time.
 export type SqlFragment = { sql: string; binds: unknown[] };
 
-// The recognized PlayHistory.playMethod values. Exported so the export route's
-// audit row can log the VALIDATED filter rather than the raw param.
+// The recognized PlayHistory.playMethod values; anything else narrows nothing.
 export const PLAY_METHODS: readonly string[] = ["DirectPlay", "DirectStream", "Transcode"];
+
+// The filters as they actually narrow the query: each is the recognised value,
+// or null when the param is absent or not one this module understands. The
+// export's audit row records THESE, so it never claims a scope the export did
+// not have (`source=plexx` exports every row, so it must log source: null).
+export interface PlayHistoryFilterValues {
+  source: "plex" | "jellyfin" | null;
+  tmdbId: number | null;
+  mediaType: "MOVIE" | "TV" | null;
+  watched: "true" | "false" | null;
+  userId: string | null;
+  playMethod: string | null;
+  platform: string | null;
+  startAt: Date | null;
+  endAt: Date | null;
+  // Whole days (YYYY-MM-DD) in the statistics zone, as the activity calendar
+  // buckets them: a calendar cell's "view these plays" link lists exactly the
+  // plays it counted. `timeZone` is the zone they are read in.
+  fromDay: string | null;
+  toDay: string | null;
+  timeZone: string;
+  search: string | null;
+}
+
+// An unparseable date is ignored like any other unrecognized param — binding an
+// Invalid Date makes the driver throw (a 500 for a malformed query string).
+function parseDateParam(raw: string | null): Date | null {
+  const at = raw ? new Date(raw) : null;
+  return at && !isNaN(at.getTime()) ? at : null;
+}
+
+// A real calendar day as YYYY-MM-DD, or null. 2026-02-30 is refused here:
+// Postgres would reject it mid-query (a 500), where the route answers a 400.
+function parseDayParam(raw: string | null): string | null {
+  const m = raw ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw) : null;
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const at = new Date(Date.UTC(y, mo - 1, d));
+  return at.getUTCFullYear() === y && at.getUTCMonth() === mo - 1 && at.getUTCDate() === d ? raw : null;
+}
+
+// `timeZone` is the statistics zone (getStatsTimeZone): the fromDay/toDay
+// filters are whole days there.
+export function normalizePlayHistoryFilters(params: URLSearchParams, timeZone: string): PlayHistoryFilterValues {
+  const source = params.get("source");
+  const tmdbIdRaw = params.get("tmdbId");
+  const tmdbId = tmdbIdRaw ? parseInt(tmdbIdRaw, 10) : NaN;
+  const mediaType = params.get("mediaType");
+  const watched = params.get("watched");
+  const playMethod = params.get("playMethod");
+  return {
+    source: source === "plex" || source === "jellyfin" ? source : null,
+    tmdbId: isNaN(tmdbId) ? null : tmdbId,
+    mediaType: mediaType === "MOVIE" || mediaType === "TV" ? mediaType : null,
+    watched: watched === "true" || watched === "false" ? watched : null,
+    userId: params.get("userId") || null,
+    playMethod: playMethod && PLAY_METHODS.includes(playMethod) ? playMethod : null,
+    platform: params.get("platform") || null,
+    startAt: parseDateParam(params.get("startDate")),
+    endAt: parseDateParam(params.get("endDate")),
+    fromDay: parseDayParam(params.get("fromDay")),
+    toDay: parseDayParam(params.get("toDay")),
+    timeZone,
+    search: params.get("search")?.trim().slice(0, SEARCH_TERM_MAX_LEN) || null,
+  };
+}
+
+// The first date param that is present but unparseable, or null. The list and
+// export routes answer it with a 400 before any query or audit write.
+export function invalidDateParam(params: URLSearchParams): "startDate" | "endDate" | "fromDay" | "toDay" | null {
+  for (const name of ["startDate", "endDate"] as const) {
+    const value = params.get(name);
+    if (value && isNaN(new Date(value).getTime())) return name;
+  }
+  for (const name of ["fromDay", "toDay"] as const) {
+    const value = params.get(name);
+    if (value && parseDayParam(value) === null) return name;
+  }
+  return null;
+}
 
 // Translate the query-string filters into a flat list of SQL fragments.
 // Fragments reference the PlayHistory table as `h`, so every caller must alias
 // it that way. Absent/unrecognized params contribute nothing.
-export function parsePlayHistoryFilters(params: URLSearchParams): SqlFragment[] {
+export function parsePlayHistoryFilters(params: URLSearchParams, timeZone: string): SqlFragment[] {
+  return playHistoryFilterFragments(normalizePlayHistoryFilters(params, timeZone));
+}
+
+// The fragments for already-normalized values. A caller that decides one filter
+// itself (the grouped list applies `watched` per CHAIN) passes it as null here.
+export function playHistoryFilterFragments(v: PlayHistoryFilterValues): SqlFragment[] {
   const fragments: SqlFragment[] = [];
 
-  const source = params.get("source");
-  if (source === "plex" || source === "jellyfin") {
-    fragments.push({ sql: `h."source" = ?`, binds: [source] });
+  if (v.source) fragments.push({ sql: `h."source" = ?`, binds: [v.source] });
+  if (v.tmdbId !== null) fragments.push({ sql: `h."tmdbId" = ?`, binds: [v.tmdbId] });
+  if (v.mediaType) fragments.push({ sql: `h."mediaType" = CAST(? AS "MediaType")`, binds: [v.mediaType] });
+  if (v.watched === "true") fragments.push({ sql: `h."watched" = TRUE`, binds: [] });
+  else if (v.watched === "false") fragments.push({ sql: `h."watched" = FALSE`, binds: [] });
+  if (v.userId) fragments.push({ sql: `h."mediaServerUserId" = ?`, binds: [v.userId] });
+  if (v.playMethod) fragments.push({ sql: `h."playMethod" = ?`, binds: [v.playMethod] });
+  if (v.platform) fragments.push({ sql: `h."platform" = ?`, binds: [v.platform] });
+  if (v.startAt) fragments.push({ sql: `h."startedAt" >= ?`, binds: [v.startAt] });
+  if (v.endAt) fragments.push({ sql: `h."startedAt" <= ?`, binds: [v.endAt] });
+  // A day runs from its midnight to the next one in the zone (23 or 25 hours
+  // across a DST change), compared on the bare column so its indexes serve it.
+  // Placeholders in order: the day, then the zone.
+  if (v.fromDay) {
+    fragments.push({ sql: `h."startedAt" >= ${zonedMidnightSql("CAST(? AS date)", "?")}`, binds: [v.fromDay, v.timeZone] });
+  }
+  if (v.toDay) {
+    fragments.push({ sql: `h."startedAt" < ${zonedMidnightSql("CAST(? AS date) + 1", "?")}`, binds: [v.toDay, v.timeZone] });
   }
 
-  const tmdbIdRaw = params.get("tmdbId");
-  if (tmdbIdRaw) {
-    const tmdbId = parseInt(tmdbIdRaw, 10);
-    if (!isNaN(tmdbId)) {
-      fragments.push({ sql: `h."tmdbId" = ?`, binds: [tmdbId] });
-    }
-  }
-
-  const mediaType = params.get("mediaType");
-  if (mediaType === "MOVIE" || mediaType === "TV") {
-    fragments.push({ sql: `h."mediaType" = CAST(? AS "MediaType")`, binds: [mediaType] });
-  }
-
-  const watched = params.get("watched");
-  if (watched === "true") fragments.push({ sql: `h."watched" = TRUE`, binds: [] });
-  else if (watched === "false") fragments.push({ sql: `h."watched" = FALSE`, binds: [] });
-
-  const userId = params.get("userId");
-  if (userId) fragments.push({ sql: `h."mediaServerUserId" = ?`, binds: [userId] });
-
-  const playMethod = params.get("playMethod");
-  if (playMethod && PLAY_METHODS.includes(playMethod)) {
-    fragments.push({ sql: `h."playMethod" = ?`, binds: [playMethod] });
-  }
-
-  const platform = params.get("platform");
-  if (platform) fragments.push({ sql: `h."platform" = ?`, binds: [platform] });
-
-  const startDate = params.get("startDate");
-  // An unparseable date is ignored like any other unrecognized param — binding
-  // an Invalid Date makes the driver throw (a 500 for a malformed query string).
-  const startAt = startDate ? new Date(startDate) : null;
-  if (startAt && !isNaN(startAt.getTime())) fragments.push({ sql: `h."startedAt" >= ?`, binds: [startAt] });
-  const endDate = params.get("endDate");
-  const endAt = endDate ? new Date(endDate) : null;
-  if (endAt && !isNaN(endAt.getTime())) fragments.push({ sql: `h."startedAt" <= ?`, binds: [endAt] });
-
-  const search = params.get("search")?.trim().slice(0, SEARCH_TERM_MAX_LEN);
+  const search = v.search;
   if (search) {
     // Username search needs the MediaServerUser table, which is a JOIN on some
     // of these paths and not on others; keep this filter self-contained by

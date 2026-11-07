@@ -19,6 +19,10 @@
   "settings.cron.error": "Errore",
   "settings.cron.running": "In esecuzione",
   "settings.cron.run": "Esegui",
+  "settings.cron.runNamed": "Esegui {name}",
+  "settings.cron.runningNamed": "{name} in esecuzione",
+  "settings.cron.skipped": "Saltato, non è stato eseguito nulla: {reason}",
+  "settings.cron.skippedNoReason": "Saltato, non è stato eseguito nulla",
   "settings.cron.interval.hourly": "ogni ora",
   "settings.cron.interval.daily": "ogni giorno",
   "settings.cron.interval.weekly": "ogni settimana",
@@ -42,6 +46,8 @@
   "settings.cron.job.warmLibrary.description": "Metadati TMDB per l'intera libreria + il grafo dei suggerimenti \"Per te\"",
   "settings.cron.job.purgeSessions.name": "Elimina sessioni",
   "settings.cron.job.purgeSessions.description": "Elimina le sessioni di autenticazione scadute",
+  "settings.cron.job.purgeNotifications.name": "Elimina notifiche",
+  "settings.cron.job.purgeNotifications.description": "Elimina le notifiche in-app più vecchie del periodo di conservazione",
   "settings.cron.job.scrubAuditPii.name": "Pulisci dati personali dell'audit",
   "settings.cron.job.scrubAuditPii.description": "Rimuove IP/UA dalle voci di audit oltre il periodo di conservazione (predefinito 90 giorni)",
   "settings.cron.job.trashSync.name": "Sincronizzazione TRaSH",
@@ -438,6 +444,8 @@
   "settings.featureDesc.behavior_requestComments": "Consente a chi richiede e a chi gestisce le richieste di scambiarsi commenti su una richiesta («serve un'altra versione?»). Ogni parte riceve notifiche in base alle proprie preferenze. Se disattivato, le conversazioni vengono nascoste e i nuovi commenti dei richiedenti sono rifiutati; i gestori possono comunque scrivere.",
   "settings.playHistory.concurrentLimit": "Avviso di stream simultanei",
   "settings.playHistory.concurrentLimitHelp": "Avvisa quando una persona riproduce più titoli contemporaneamente di questo valore (Plex e Jellyfin si sommano). 0 lo disattiva. Notifica solo gli amministratori (posta in arrivo e i tuoi canali di notifica); nulla viene interrotto. Gli account proprietari del server non vengono mai contati.",
+  "settings.playHistory.timeZone": "Fuso orario delle statistiche",
+  "settings.playHistory.timeZoneHelp": "Il fuso orario in cui le statistiche attività, le mappe di calore e il calendario, Le mie statistiche e l'Anno in rassegna contano ore e giorni: un nome IANA come America/New_York o Europe/Berlin. Lascia vuoto per usare il fuso del server ({zone}).",
   "settings.featureLabel.behavior_issueAutoResolve": "Risolvi i problemi automaticamente",
   "settings.featureDesc.behavior_issueAutoResolve": "Quando il sostituto richiesto da un amministratore (Ripara file, Scegli release o Ripeti) viene importato da Radarr/Sonarr, il problema è segnato come risolto e chi l'ha segnalato viene avvisato. Solo film e problemi di un singolo episodio: un problema di stagione o di serie intera resta aperto per un amministratore. Se chi ha segnalato risponde, si riapre."
 }

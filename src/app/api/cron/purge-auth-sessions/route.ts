@@ -2,7 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { cronSkippedResponse, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, PURGE_AUTH_SESSIONS_LOCK_ID } from "@/lib/advisory-lock";
+
+// Each purge leg once, by the key it reports under in `deleted`: the failure
+// log names that key, so an operator can tell which table failed.
+type PurgeKey =
+  | "authSessions" | "discordLinkTokens" | "discordMergeCodes" | "discordSearchCache"
+  | "webhookReplays" | "plexTokensExpired" | "plexTokensLegacy" | "tmdbMediaCore"
+  | "ipLookupCache" | "auditLogs";
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -10,7 +17,7 @@ export async function POST(request: NextRequest) {
   }
 
   return withCronRunRecording("auth-sessions:purge-expired", () => withAdvisoryLock(
-    2001,
+    PURGE_AUTH_SESSIONS_LOCK_ID,
     async () => {
       const now = new Date();
       // IpLookupCache uses age-based eviction (no expiresAt). 90 days matches
@@ -27,72 +34,58 @@ export async function POST(request: NextRequest) {
       // incident review window.
       const auditCutoff = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
 
-      const [
-        authSessionResult,
-        discordLinkTokenResult,
-        discordMergeCodeResult,
-        discordSearchCacheResult,
-        webhookReplayResult,
-        plexTokenExpiredResult,
-        plexTokenLegacyResult,
-        tmdbMediaCoreResult,
-        ipLookupResult,
-        auditLogResult,
-      ] = await Promise.allSettled([
-        prisma.authSession.deleteMany({ where: { expiresAt: { lt: now } } }),
-        prisma.discordLinkToken.deleteMany({ where: { expiresAt: { lt: now } } }),
-        prisma.discordMergeCode.deleteMany({ where: { expiresAt: { lt: now } } }),
-        prisma.discordSearchCache.deleteMany({ where: { expiresAt: { lt: now } } }),
-        prisma.webhookReplay.deleteMany({ where: { expiresAt: { lt: now } } }),
-        prisma.plexTokenCache.deleteMany({ where: { expiresAt: { lt: now } } }),
-        prisma.plexTokenCache.deleteMany({
-          where: { expiresAt: null, verifiedAt: { lt: plexTokenLegacyCutoff } },
-        }),
-        prisma.tmdbMediaCore.deleteMany({ where: { expiresAt: { lt: now } } }),
-        prisma.ipLookupCache.deleteMany({ where: { fetchedAt: { lt: ipLookupCutoff } } }),
-        prisma.auditLog.deleteMany({ where: { createdAt: { lt: auditCutoff } } }),
-      ]);
-
-      const allResults = [
-        authSessionResult, discordLinkTokenResult, discordMergeCodeResult,
-        discordSearchCacheResult, webhookReplayResult, plexTokenExpiredResult,
-        plexTokenLegacyResult, tmdbMediaCoreResult, ipLookupResult, auditLogResult,
+      const legs: Array<{ key: PurgeKey; run: () => Promise<{ count: number }> }> = [
+        { key: "authSessions", run: () => prisma.authSession.deleteMany({ where: { expiresAt: { lt: now } } }) },
+        { key: "discordLinkTokens", run: () => prisma.discordLinkToken.deleteMany({ where: { expiresAt: { lt: now } } }) },
+        { key: "discordMergeCodes", run: () => prisma.discordMergeCode.deleteMany({ where: { expiresAt: { lt: now } } }) },
+        { key: "discordSearchCache", run: () => prisma.discordSearchCache.deleteMany({ where: { expiresAt: { lt: now } } }) },
+        { key: "webhookReplays", run: () => prisma.webhookReplay.deleteMany({ where: { expiresAt: { lt: now } } }) },
+        { key: "plexTokensExpired", run: () => prisma.plexTokenCache.deleteMany({ where: { expiresAt: { lt: now } } }) },
+        {
+          key: "plexTokensLegacy",
+          run: () => prisma.plexTokenCache.deleteMany({
+            where: { expiresAt: null, verifiedAt: { lt: plexTokenLegacyCutoff } },
+          }),
+        },
+        { key: "tmdbMediaCore", run: () => prisma.tmdbMediaCore.deleteMany({ where: { expiresAt: { lt: now } } }) },
+        { key: "ipLookupCache", run: () => prisma.ipLookupCache.deleteMany({ where: { fetchedAt: { lt: ipLookupCutoff } } }) },
+        { key: "auditLogs", run: () => prisma.auditLog.deleteMany({ where: { createdAt: { lt: auditCutoff } } }) },
       ];
-      const failures = allResults
-        .map((r, i) => r.status === "rejected" ? { i, reason: r.reason instanceof Error ? r.reason.message : String(r.reason) } : null)
-        .filter((x): x is { i: number; reason: string } => x !== null);
-      for (const f of failures) {
-        console.error(`[cron/purge-auth-sessions] delete #${f.i} failed:`, f.reason);
-      }
 
-      const deleted = {
-        authSessions: authSessionResult.status === "fulfilled" ? authSessionResult.value.count : 0,
-        discordLinkTokens: discordLinkTokenResult.status === "fulfilled" ? discordLinkTokenResult.value.count : 0,
-        discordMergeCodes: discordMergeCodeResult.status === "fulfilled" ? discordMergeCodeResult.value.count : 0,
-        discordSearchCache: discordSearchCacheResult.status === "fulfilled" ? discordSearchCacheResult.value.count : 0,
-        webhookReplays: webhookReplayResult.status === "fulfilled" ? webhookReplayResult.value.count : 0,
-        plexTokensExpired: plexTokenExpiredResult.status === "fulfilled" ? plexTokenExpiredResult.value.count : 0,
-        plexTokensLegacy: plexTokenLegacyResult.status === "fulfilled" ? plexTokenLegacyResult.value.count : 0,
-        tmdbMediaCore: tmdbMediaCoreResult.status === "fulfilled" ? tmdbMediaCoreResult.value.count : 0,
-        ipLookupCache: ipLookupResult.status === "fulfilled" ? ipLookupResult.value.count : 0,
-        auditLogs: auditLogResult.status === "fulfilled" ? auditLogResult.value.count : 0,
-      };
+      // allSettled: one failing leg never stops the others.
+      const results = await Promise.allSettled(legs.map((leg) => leg.run()));
+
+      const deleted = {} as Record<PurgeKey, number>;
+      let errorCount = 0;
+      results.forEach((r, i) => {
+        const { key } = legs[i];
+        if (r.status === "fulfilled") {
+          deleted[key] = r.value.count;
+          return;
+        }
+        deleted[key] = 0;
+        errorCount++;
+        console.error(
+          `[cron/purge-auth-sessions] ${key} delete failed:`,
+          r.reason instanceof Error ? r.reason.message : String(r.reason),
+        );
+      });
 
       await logAudit({
         userId: "system",
         userName: "cron",
         action: "SETTINGS_CHANGE",
         target: "auth-sessions:purge-expired",
-        details: { ...deleted, errorCount: failures.length },
+        details: { ...deleted, errorCount },
       });
 
       // Non-2xx on any failure so withCronRunRecording marks the run ok=false —
       // the body still ships the per-table counts that did succeed.
-      const status = failures.length > 0 ? 500 : 200;
+      const status = errorCount > 0 ? 500 : 200;
       return NextResponse.json({
-        ok: failures.length === 0,
+        ok: errorCount === 0,
         deleted,
-        errorCount: failures.length,
+        errorCount,
         timestamp: new Date().toISOString(),
       }, { status });
     },

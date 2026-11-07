@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useT } from "@/components/i18n/i18n-provider";
+import { activeSectionId } from "@/lib/client/section-spy";
 
 export interface NavItem {
   id: string;
@@ -17,32 +18,52 @@ export interface NavItem {
 // on `.settings-sections > [id]` in globals.css. Plain links also give real
 // deep links and work from the keyboard or without JS.
 //
-// The scroll listener below only moves the highlighted pill. It listens on
-// <main> because the (app) layout makes <main> the scrolling element.
+// The scroll listener below only moves the highlighted pill (the rule is
+// activeSectionId in section-spy.ts). It listens on <main> because the (app)
+// layout makes <main> the scrolling element.
 export function SettingsNav({ items }: { items: NavItem[] }) {
   const t = useT();
   const [activeId, setActiveId] = useState<string>(items[0]?.id ?? "");
+  // The entry last clicked. At the end of the page it beats "the last section"
+  // while it is on screen, until the user scrolls by hand.
+  const clickedRef = useRef<string | null>(null);
 
   useEffect(() => {
     const main = document.querySelector("main");
     if (!main) return;
+    const scroller: HTMLElement = main;
+    let frame = 0;
 
-    function onScroll() {
-      const mainRect = main!.getBoundingClientRect();
-      let current = items[0]?.id ?? "";
-      for (const { id } of items) {
+    function update() {
+      frame = 0;
+      const scrollerTop = scroller.getBoundingClientRect().top;
+      const sections = items.map(({ id }) => {
         const el = document.getElementById(id);
-        if (!el) continue;
-        if (el.getBoundingClientRect().top - mainRect.top <= 80) {
-          current = id;
-        }
-      }
-      setActiveId(current);
+        return { id, top: el ? el.getBoundingClientRect().top - scrollerTop : null };
+      });
+      setActiveId(activeSectionId(sections, scroller, clickedRef.current));
+    }
+    // One measurement per frame, however fast scroll events arrive.
+    function onScroll() {
+      if (frame === 0) frame = requestAnimationFrame(update);
+    }
+    // Anchor scrolling fires no wheel, touch, pointer or key event, so any of
+    // these means the user is moving the page themselves.
+    function onUserScroll() {
+      clickedRef.current = null;
     }
 
-    main.addEventListener("scroll", onScroll, { passive: true });
-    onScroll();
-    return () => main.removeEventListener("scroll", onScroll);
+    const userEvents = ["wheel", "touchstart", "pointerdown"] as const;
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    for (const type of userEvents) scroller.addEventListener(type, onUserScroll, { passive: true });
+    window.addEventListener("keydown", onUserScroll);
+    update();
+    return () => {
+      if (frame !== 0) cancelAnimationFrame(frame);
+      scroller.removeEventListener("scroll", onScroll);
+      for (const type of userEvents) scroller.removeEventListener(type, onUserScroll);
+      window.removeEventListener("keydown", onUserScroll);
+    };
   }, [items]);
 
   const groups = items.reduce<Record<string, NavItem[]>>((acc, item) => {
@@ -67,7 +88,7 @@ export function SettingsNav({ items }: { items: NavItem[] }) {
                 // The spy would set this on the next scroll event anyway, but
                 // doing it on click makes the pill move with the page rather
                 // than a frame behind it.
-                onClick={() => setActiveId(id)}
+                onClick={() => { clickedRef.current = id; setActiveId(id); }}
                 aria-current={activeId === id ? "true" : undefined}
                 className={`block w-full text-left text-sm px-3 py-1.5 rounded-md transition-colors ${
                   activeId === id

@@ -18,6 +18,11 @@ export type FixMatchRequest = {
   correctTmdbId: number;
   canonicalGuid?: string;
   serverInstance?: string;
+  // The issue dialog: the WRONG_MATCH issue this fix answers, closed by the
+  // server's job when the remap succeeds (title mode only), and the corrected
+  // title its resolution note names.
+  issueId?: string;
+  issueTitle?: string;
 } & (
   | { tmdbId: number; itemKey?: undefined }
   // Item mode: one item the library match check flagged; the server reads its
@@ -29,7 +34,9 @@ export type FixMatchRequest = {
 // identical remap was already running server-side and this call attached to it
 // — i.e. THIS caller's candidate pick (if different) was not used. It is a flag
 // rather than text so the consumer can render it in its own language.
-export type FixMatchOutcome = { ok: true; warning?: string; joined?: boolean };
+// `issueResolved` (a fix sent with `issueId`): whether the server's job closed
+// that issue; absent when it can't say — a joined job closes it separately.
+export type FixMatchOutcome = { ok: true; warning?: string; joined?: boolean; issueResolved?: boolean };
 
 // What the UI gets on every poll while the job runs: the server's phase plus
 // wall-clock elapsed since the job started, so "Applying…" can become
@@ -56,7 +63,8 @@ export type FixMatchErrorCode =
   | "failed"
   // Status read 404'd: the server restarted and lost the in-memory job.
   | "jobLost"
-  // Too many consecutive status-read failures (network or non-2xx).
+  // Too many consecutive status-read failures (network, non-2xx, or an answer
+  // that is not the status route's JSON).
   | "pollLost"
   // The job was still running at MAX_WAIT_MS.
   | "timedOut";
@@ -96,6 +104,7 @@ export function fixMatchWarningMessage(outcome: FixMatchOutcome, t: Translator):
 }
 
 type StartBody = { ok?: boolean; jobId?: string; warning?: string; error?: string; joined?: boolean };
+const JOB_STATUSES = new Set(["queued", "running", "done", "failed"]);
 type StatusBody = {
   status?: "queued" | "running" | "done" | "failed";
   queueAhead?: number;
@@ -156,6 +165,8 @@ export async function runFixMatch(
 
   // Only a caller that PICKED a candidate can have had its pick ignored.
   const joined = Boolean(started.joined && body.canonicalGuid);
+  // A joined job's result speaks for the issue of whoever started it.
+  const ownIssueFlag = !started.joined;
   // Tell the job tray there is something new to show without waiting for its poll.
   if (typeof window !== "undefined") window.dispatchEvent(new Event(FIX_MATCH_STARTED_EVENT));
 
@@ -183,17 +194,27 @@ export async function runFixMatch(
     if (pollRes.status === 404) {
       throw new FixMatchClientError("jobLost", { status: 404 });
     }
-    if (!pollRes.ok) {
+    // A 200 that is not the status route's JSON — an auth proxy's login page
+    // after a redirect — never reached the job: a failed poll, not "running".
+    let job: StatusBody | null = null;
+    if (pollRes.ok && !pollRes.redirected) {
+      const parsed = await pollRes.json().catch(() => null) as StatusBody | null;
+      if (parsed && typeof parsed === "object" && JOB_STATUSES.has(parsed.status ?? "")) job = parsed;
+    }
+    if (!job) {
       if (++consecutiveFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
         throw new FixMatchClientError("pollLost", { status: pollRes.status });
       }
       continue;
     }
     consecutiveFailures = 0;
-    const job = await pollRes.json().catch(() => ({})) as StatusBody;
     if (job.status === "done") {
-      const result = job.result ?? { ok: true };
-      return joined ? { ...result, joined: true } : result;
+      const { issueResolved, ...result }: FixMatchOutcome = job.result ?? { ok: true };
+      return {
+        ...result,
+        ...(joined ? { joined: true } : {}),
+        ...(ownIssueFlag && issueResolved !== undefined ? { issueResolved } : {}),
+      };
     }
     if (job.status === "failed") throw new FixMatchClientError("failed", { message: job.error ?? "" });
     // Waiting for a slot is not a stall, however long the jobs ahead take.

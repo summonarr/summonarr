@@ -47,3 +47,10 @@ test("the two files the regex scanner mis-tokenized now yield their real tokens"
   const m = toast.match(/bottom-\[calc\([^\s"'`]*\]/);
   if (m) assert.ok(t.has(m[0]), m[0]);
 });
+
+test("tokens are stripped with twMerge's own parse: compound variants and a leading !", () => {
+  const src = 'const c = "has-data-[icon=inline-end]:pr-2 group-data-[size=sm]/card:px-3 !h-[30px] *:data-[slot=avatar]:ring-2 p-1!";';
+  const used = classTokensInSource(src, "d.ts");
+  for (const t of ["pr-2", "px-3", "h-[30px]", "ring-2", "p-1"]) assert.ok(used.has(t), t);
+  assert.ok(![...used].some((t) => t.includes(":") && !t.startsWith("[")), "no variant left on a token");
+});

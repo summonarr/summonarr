@@ -24,7 +24,10 @@ import {
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { clearCandidateCache } from "@/lib/fix-match-candidate-cache";
-import { plexAdminHeaders, tmdbDetailsCacheKey } from "@/lib/fix-match-shared";
+import { cachedTmdbTitle, plexAdminHeaders, tmdbDetailsCacheKey } from "@/lib/fix-match-shared";
+import { resolveIssueAfterAction } from "@/lib/issue-transitions";
+import { maintenanceGuard } from "@/lib/maintenance";
+import { sanitizeOptional } from "@/lib/sanitize";
 import { carryMeta, JELLYFIN_META_KEYS, LIBRARY_META_KEYS, remainingOnOldRow, unionKeys } from "@/lib/fix-match-rows";
 import { dropMatchFlagInTx, findMatchFlag, moveItemToTitleInTx, readLibraryMatchReport } from "@/lib/library-match-data";
 
@@ -51,7 +54,18 @@ type FixMatchBody = {
   // The item's current id, media type and path come from the stored report —
   // `tmdbId` is ignored, and an item the check didn't flag is refused.
   itemKey?: string;
+  // Background title mode only: the WRONG_MATCH issue this fix answers (the
+  // issue dialog). The job closes it when the remap succeeds, with a note
+  // naming `issueTitle` (the title picked, display only).
+  issueId?: string;
+  issueTitle?: string;
 };
+
+// Cuid-shaped; the issue itself is read (and bound to the title) at close time.
+const ISSUE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ISSUE_TITLE_MAX = 200;
+// The PATCH route's resolution cap.
+const RESOLUTION_MAX = 1000;
 
 interface PlexSearchResult {
   guid:   string;
@@ -1323,6 +1337,31 @@ async function libraryTitleFor(input: FixMatchInput): Promise<string | null> {
   }
 }
 
+// The issue a background fix answers. `allowed` is false when closing it is
+// refused (maintenance, like the PATCH); the fix itself still runs.
+type IssueClose = { issueId: string; title: string | null; allowed: boolean };
+
+// Closes the issue a successful fix answers, from the job itself, so it no
+// longer depends on the browser staying until the remap ends. The note is in
+// the starting request's language — what the dialog used to PATCH. Never
+// throws: the remap has already landed.
+async function closeIssueAfterFix(close: IssueClose, input: FixMatchInput, actor: FixMatchActor, t: Translator): Promise<boolean> {
+  if (!close.allowed) return false;
+  try {
+    const title = close.title ?? await cachedTmdbTitle(input.mediaType, input.correctTmdbId) ?? `TMDB #${input.correctTmdbId}`;
+    return await resolveIssueAfterAction({
+      issueId: close.issueId,
+      about: { tmdbId: input.tmdbId, mediaType: input.mediaType },
+      resolution: t("adminQueue.fixMatch.resolutionNote", { title }).slice(0, RESOLUTION_MAX),
+      trigger: "fix-match",
+      actor: { userId: actor.userId, userName: actor.userName ?? null, ctx: actor.ctx },
+    });
+  } catch (err) {
+    console.error("[fix-match] closing the issue failed:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
 // withIssueAdmin, not withAdmin: an ISSUE_ADMIN may fix a wrong match to
 // resolve a reported issue without holding full admin rights.
 export const POST = withIssueAdmin(async (request, _ctx, session) => {
@@ -1398,16 +1437,48 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   // browser polls instead of holding the request. An identical job already
   // running is returned as-is, never started twice.
   if (body.async === true) {
-    // Join detection before start (both synchronous, so atomic per request):
+    let issueClose: IssueClose | null = null;
+    if (body.issueId !== undefined) {
+      if (
+        itemMode || typeof body.issueId !== "string" || !ISSUE_ID_RE.test(body.issueId) ||
+        (body.issueTitle !== undefined && typeof body.issueTitle !== "string")
+      ) {
+        return NextResponse.json({ error: t("apiAdmin.common.invalidBody") }, { status: 400 });
+      }
+      // Closing an issue is an issue write: refused during maintenance exactly
+      // like the PATCH, while the fix itself still runs.
+      issueClose = {
+        issueId: body.issueId,
+        title: sanitizeOptional(body.issueTitle)?.slice(0, ISSUE_TITLE_MAX) ?? null,
+        allowed: (await maintenanceGuard(session)) === null,
+      };
+    }
     // `joined: true` tells the client its submission attached to an
     // already-running identical remap — whose candidate selection may differ.
-    const existing = findRunningFixMatchJob(key);
-    if (existing) {
+    // A joined job closes this caller's issue too, once it succeeds.
+    const joinedAnswer = (existing: { id: string; status: string }) => {
+      const close = issueClose;
+      if (close) {
+        void awaitFixMatchJob(existing.id).then((settled) =>
+          settled?.status === "done" ? closeIssueAfterFix(close, input, actor, t) : false);
+      }
       return NextResponse.json({ ok: true, jobId: existing.id, status: existing.status, joined: true }, { status: 202 });
-    }
+    };
+    const existing = findRunningFixMatchJob(key);
+    if (existing) return joinedAnswer(existing);
     try {
       const title = flaggedTitle ?? await libraryTitleFor(input);
-      const job = startFixMatchJob(key, (report) => runFixMatch(input, actor, { background: true, report }, t), Date.now(), t, title);
+      // Re-checked after the await, synchronously with the start below, so a
+      // job started meanwhile is joined (and closes the issue) as well.
+      const raced = findRunningFixMatchJob(key);
+      if (raced) return joinedAnswer(raced);
+      const close = issueClose;
+      const job = startFixMatchJob(key, async (report) => {
+        const result = await runFixMatch(input, actor, { background: true, report }, t);
+        // Closed inside the job, before it reads as done, so the poll that
+        // sees "done" also learns whether the issue closed.
+        return close ? { ...result, issueResolved: await closeIssueAfterFix(close, input, actor, t) } : result;
+      }, Date.now(), t, title);
       return NextResponse.json({ ok: true, jobId: job.id, status: job.status }, { status: 202 });
     } catch (err) {
       // The registry's concurrent-running cap (429) — map like the sync branch.
@@ -1435,7 +1506,11 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     throw err;
   }
   const settled = await awaitFixMatchJob(job.id);
-  if (settled?.status === "done" && settled.result) return NextResponse.json(settled.result);
+  if (settled?.status === "done" && settled.result) {
+    // A joined background job may carry its issue's flag; this body never does.
+    const { issueResolved: _issueResolved, ...syncResult } = settled.result;
+    return NextResponse.json(syncResult);
+  }
   // runFixMatch maps every failure to a client-safe FixMatchError; the
   // registry stores its message and status (or the generic 502 for anything
   // unmapped).

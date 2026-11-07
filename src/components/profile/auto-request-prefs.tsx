@@ -81,7 +81,10 @@ export function AutoRequestPrefs({
           <p className="text-sm font-medium text-zinc-200">{t("profile.autoRequest.plexLabel")}</p>
           <p className="text-xs text-zinc-500 mt-0.5">{hint}</p>
         </div>
-        <Switch checked={on} disabled={saving} onCheckedChange={toggle} aria-label={t("profile.autoRequest.plexLabel")} />
+        {/* loading, not disabled: a natively disabled switch drops the focus
+            of the keyboard user who just flipped it; toggle() ignores a flip
+            while saving. */}
+        <Switch checked={on} loading={saving} onCheckedChange={toggle} aria-label={t("profile.autoRequest.plexLabel")} />
       </div>
       {error && (
         <p role="alert" className="text-xs text-red-400">

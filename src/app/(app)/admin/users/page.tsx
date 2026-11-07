@@ -1,7 +1,8 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { hasPermission, Permission, parseInstanceGrants, parseMediaServerGrants } from "@/lib/permissions";
+import { hasPermission, mergeNamedInstanceAccess, Permission, parseInstanceGrants, parseMediaServerGrants } from "@/lib/permissions";
+import type { Prisma } from "@/generated/prisma";
 import { UserTable, type NamedInstance, type RestrictedMediaInstance } from "@/components/admin/user-table";
 import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
@@ -22,12 +23,30 @@ export const dynamic = "force-dynamic";
 // the slice length as the registered total (the subtitle and the on-behalf
 // picker both used to). Auxiliary queries below are scoped to this page's ids.
 const USER_LIST_CAP = 1000;
+// The same budget for media-server identities: a large shared server keeps every
+// departed account that still holds history, and every row is serialized into
+// the client table.
+const SERVER_USER_LIST_CAP = 1000;
+
+// Active users, PLUS departed (soft-deleted) ones that still hold play history.
+// A departed row's history outlives their removal from the server (guardrail
+// 28), so it still needs to be attributable — hiding it here strands that
+// history with no UI able to re-link it. A departed row with no history is
+// genuinely irrelevant and stays hidden.
+const SERVER_USER_WHERE: Prisma.MediaServerUserWhereInput = { OR: [{ active: true }, { playHistory: { some: {} } }] };
+
+// A synced account can carry an empty (or blank) display name; every surface
+// then falls back to the email instead of rendering nothing.
+const displayName = (name: string | null): string | null => name?.trim() || null;
 
 export default async function UsersPage() {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_USERS)) redirect("/");
 
-  const [users, userCount, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
+  const [
+    users, userCount, serverUsers, serverUserCount, autoDisableRow, radarr4kConfigured, sonarr4kConfigured,
+    sonarrInstances, radarrInstances, plexInstances, jellyfinInstances,
+  ] = await Promise.all([
     prisma.user.findMany({
       select: {
         id: true,
@@ -71,12 +90,7 @@ export default async function UsersPage() {
     }),
     prisma.user.count(),
     prisma.mediaServerUser.findMany({
-      // Active users, PLUS departed (soft-deleted) ones that still hold play
-      // history. A departed row's history outlives their removal from the server
-      // (guardrail 28), so it still needs to be attributable — hiding it here
-      // strands that history with no UI able to re-link it. A departed row with
-      // no history is genuinely irrelevant and stays hidden.
-      where: { OR: [{ active: true }, { playHistory: { some: {} } }] },
+      where: SERVER_USER_WHERE,
       select: {
         id: true,
         source: true,
@@ -95,10 +109,16 @@ export default async function UsersPage() {
         user: { select: { name: true, email: true } },
       },
       orderBy: [{ source: "asc" }, { username: "asc" }],
+      take: SERVER_USER_LIST_CAP,
     }),
+    prisma.mediaServerUser.count({ where: SERVER_USER_WHERE }),
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
     isArrConfigured("radarr", "4k"),
     isArrConfigured("sonarr", "4k"),
+    getArrInstances("sonarr"),
+    getArrInstances("radarr"),
+    getMediaInstances("plex"),
+    getMediaInstances("jellyfin"),
   ]);
   const userIds = users.map((u) => u.id);
   // Scoped to the listed slice — an unbounded related read of every local-auth /
@@ -129,7 +149,6 @@ export default async function UsersPage() {
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
   const oidcAuthIds = new Set(oidcAccountRows.map((r) => r.userId));
 
-  const hasPlex = serverUsers.some((u) => u.source === "plex");
   const hasJellyfin = serverUsers.some((u) => u.source === "jellyfin");
   const autoDisableNew = autoDisableRow?.value === "true";
   // Show the 4K capability toggles in the permission editor only when a 4K
@@ -137,21 +156,14 @@ export default async function UsersPage() {
   const has4k = radarr4kConfigured || sonarr4kConfigured;
 
   // Named (non-default, non-4K) instances for the per-user grants editor.
-  // Union across both services; a slug on both keeps one entry. 4K stays on
-  // its permission bits (REQUEST_4K*), so it is excluded here.
-  const namedInstanceMap = new Map<string, NamedInstance>();
-  for (const service of ["sonarr", "radarr"] as const) {
-    for (const inst of await getArrInstances(service)) {
-      if (inst.slug === "" || inst.slug === FOURK_ARR_INSTANCE) continue;
-      namedInstanceMap.set(inst.slug, {
-        slug: inst.slug,
-        name: inst.name,
-        restricted: inst.restricted,
-        serverAll: inst.serverAll,
-      });
-    }
-  }
-  const namedInstances = [...namedInstanceMap.values()];
+  // Union across both services; a slug on both keeps one entry, open only when
+  // both twins are (mergeNamedInstanceAccess). 4K stays on its permission bits
+  // (REQUEST_4K*), so it is excluded here.
+  const namedInstances: NamedInstance[] = mergeNamedInstanceAccess(
+    [...sonarrInstances, ...radarrInstances]
+      .filter((inst) => inst.slug !== "" && inst.slug !== FOURK_ARR_INSTANCE)
+      .map((inst) => ({ slug: inst.slug, name: inst.name, restricted: inst.restricted, serverAll: inst.serverAll })),
+  );
 
   // RESTRICTED Plex/Jellyfin servers for the per-user visibility editor. NOT
   // unioned by slug like the arr list above: grants are service-namespaced, so
@@ -161,8 +173,8 @@ export default async function UsersPage() {
   // empty list makes the whole section disappear (the case on any deployment
   // that has never restricted a server). The default ("") is never restricted.
   const mediaInstances: RestrictedMediaInstance[] = [];
-  for (const service of ["plex", "jellyfin"] as const) {
-    for (const inst of await getMediaInstances(service)) {
+  for (const [service, instances] of [["plex", plexInstances], ["jellyfin", jellyfinInstances]] as const) {
+    for (const inst of instances) {
       if (!inst.restricted) continue;
       mediaInstances.push({ service, slug: inst.slug, name: inst.name });
     }
@@ -200,7 +212,7 @@ export default async function UsersPage() {
         <UserTable
           users={users.map((u) => ({
             id: u.id,
-            name: u.name,
+            name: displayName(u.name),
             email: u.email,
             role: u.role,
             createdAt: u.createdAt.toISOString(),
@@ -247,28 +259,35 @@ export default async function UsersPage() {
         />
       </div>
 
-      {(hasPlex || hasJellyfin || serverUsers.length === 0) && (
-        <div className="mt-10">
-          <SectionHeader
-            title={t("adminManage.serverUsers.title")}
-            subtitle={t("adminManage.serverUsers.subtitle")}
-          />
-          <ServerUserTable
-            users={serverUsers}
-            hasJellyfin={hasJellyfin}
-            autoDisableNew={autoDisableNew}
-            canLink={canLinkServerUsers}
-            // Link targets for the manual account picker (admins only). Purged
-            // accounts are excluded — they have no identity left to attribute
-            // history to (the route rejects them too).
-            accounts={canLinkServerUsers
-              ? users
-                  .filter((u) => !isPurgedRow(u))
-                  .map((u) => ({ id: u.id, name: u.name, email: u.email }))
-              : []}
-          />
-        </div>
-      )}
+      <div className="mt-10">
+        <SectionHeader
+          title={t("adminManage.serverUsers.title")}
+          subtitle={t("adminManage.serverUsers.subtitle")}
+        />
+        {serverUserCount > serverUsers.length && (
+          <p
+            role="status"
+            className="ds-mono"
+            style={{ fontSize: 11, color: "var(--ds-fg-subtle)", marginBottom: 10 }}
+          >
+            {t("adminManage.serverUsers.capped", { cap: SERVER_USER_LIST_CAP, total: serverUserCount })}
+          </p>
+        )}
+        <ServerUserTable
+          users={serverUsers.map((u) => (u.user ? { ...u, user: { ...u.user, name: displayName(u.user.name) } } : u))}
+          hasJellyfin={hasJellyfin}
+          autoDisableNew={autoDisableNew}
+          canLink={canLinkServerUsers}
+          // Link targets for the manual account picker (admins only). Purged
+          // accounts are excluded — they have no identity left to attribute
+          // history to (the route rejects them too).
+          accounts={canLinkServerUsers
+            ? users
+                .filter((u) => !isPurgedRow(u))
+                .map((u) => ({ id: u.id, name: displayName(u.name), email: u.email }))
+            : []}
+        />
+      </div>
     </div>
   );
 }

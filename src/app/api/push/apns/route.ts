@@ -9,6 +9,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { isFeatureEnabled } from "@/lib/features";
 import { apnsEndpointFor, legacyApnsEndpointFor } from "@/lib/apns-endpoint";
+import { evictOldestForCapInTx, lockUserPushRegistrationsInTx } from "@/lib/push-registration";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 // APNs device tokens are 32 bytes (64 hex) today; Apple reserves the right to
@@ -63,7 +64,6 @@ export const POST = withAuth(async (req, _ctx, session) => {
     prisma.pushSubscription.findUnique({ where: { endpoint } }),
     prisma.pushSubscription.findUnique({ where: { endpoint: legacyEndpoint } }),
   ]);
-  const existing = hashedRow ?? legacyRow;
   if ([hashedRow, legacyRow].some((row) => row && row.userId !== session.user.id)) {
     // APNs tokens are per-device, but the prior row's ownership is proof the
     // device was registered by another account. Silently reassigning it (no
@@ -72,7 +72,6 @@ export const POST = withAuth(async (req, _ctx, session) => {
     // legitimate device handoff goes through sign-out (mirrors /api/push/subscribe).
     return NextResponse.json({ error: t("apiUser.push.deviceTaken") }, { status: 409 });
   }
-  const alreadyOwns = existing?.userId === session.user.id;
 
   // typeof-guard BEFORE the string method: readJsonCapped<T>'s generic is a
   // compile-time cast only, so `{"label":123}` reached .replace on a number and
@@ -101,9 +100,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const capRow = await prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } });
   const cap = parseRateLimit(capRow?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
 
-  // Cap-check + oldest-eviction + upsert in one transaction so concurrent
-  // registrations can't push the user one-over-cap (mirrors /api/push/subscribe).
+  // Cap-check + oldest-eviction + upsert in one transaction under the per-user
+  // lock (push-registration.ts, shared with /api/push/subscribe), so concurrent
+  // registrations can't push the user one over the cap.
   await prisma.$transaction(async (tx) => {
+    await lockUserPushRegistrationsInTx(tx, session.user.id);
     // The caller's own legacy-handle row: rename it onto the hashed handle (so
     // the upsert below updates it, keeping its createdAt for the cap's
     // oldest-first eviction), or drop it if the hashed row already exists. A
@@ -113,21 +114,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
       if (hashedRow) await tx.pushSubscription.deleteMany({ where: { id: legacyRow.id, userId: session.user.id } });
       else await tx.pushSubscription.updateMany({ where: { id: legacyRow.id, userId: session.user.id }, data: { endpoint } });
     }
-    if (!alreadyOwns && cap > 0) {
-      const count = await tx.pushSubscription.count({ where: { userId: session.user.id } });
-      if (count >= cap) {
-        const oldest = await tx.pushSubscription.findFirst({
-          where: { userId: session.user.id },
-          orderBy: { createdAt: "asc" },
-        });
-        if (oldest) {
-          // deleteMany (not delete) — a concurrent delete of the same row throws
-          // P2025 inside a top-level tx (no SAVEPOINT) and silently rolls back
-          // the upsert (guardrail 23). deleteMany returns count:0 instead.
-          await tx.pushSubscription.deleteMany({ where: { id: oldest.id } });
-        }
-      }
-    }
+    // Re-read under the lock: a device already registered here never evicts.
+    const current = await tx.pushSubscription.findUnique({ where: { endpoint }, select: { userId: true } });
+    if (current?.userId !== session.user.id) await evictOldestForCapInTx(tx, session.user.id, cap);
 
     await tx.pushSubscription.upsert({
       where: { endpoint },

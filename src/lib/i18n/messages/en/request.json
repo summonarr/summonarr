@@ -16,6 +16,7 @@
   "request.requestTv": "Request TV Show",
   "request.qualityProfile": "Quality profile",
   "request.serverDefaultQuality": "Server default quality",
+  "request.profilesLoadFailed": "Couldn't load quality profiles — the server default will be used",
   "request.availableOn": "Available on {server}",
   "request.alreadyAvailable": "Already available",
   "request.queued": "Queued",
@@ -29,6 +30,7 @@
   "request.usersLoadFailed": "Couldn't load users — try again",
   "request.selectUserLabel": "Select a user to request for",
   "request.loadingUsers": "Loading users…",
+  "request.noEligibleUsers": "No users you can request for",
   "request.selectUser": "Select a user…",
   "request.requestForUser": "Request for User",
   "request.submitting": "Submitting…",
@@ -88,6 +90,7 @@
   "request.report.submit": "Submit Report",
   "request.collection.partial": "Requested {created} of {total} — {reason}",
   "request.collection.done": "Requested {created} of {total}",
+  "request.collection.doneSkipped": "Requested {created} of {total} — {skipped} can't be requested",
   "request.collection.networkErrorLower": "network error, please try again",
   "request.collection.requested": "Requested",
   "request.collection.requestAll": "Request All ({count})"

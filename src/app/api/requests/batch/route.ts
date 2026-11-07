@@ -1,16 +1,11 @@
 import { NextResponse } from "next/server";
-import { emitNotificationEvents } from "@/lib/notify-agents";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrErrorMessageForClient, arrWriteOutcomeUnknown, type AddProgress } from "@/lib/arr";
-import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/discord-notify";
-import { notifyUsersRequestsApprovedPush, notifyUsersRequestsDeclinedPush } from "@/lib/push";
-import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail } from "@/lib/email";
-import { resolveUserNotificationEmail } from "@/lib/notification-email";
-import { buildNotificationData } from "@/lib/notification-data";
+import { notifyRequestStatusChanges } from "@/lib/request-notifications";
 import { emitSSE } from "@/lib/sse-emitter";
-import { scheduleDownloadChecks } from "@/lib/download-check";
+import { DOWNLOAD_CHECK_DELAY_MS, scheduleDownloadChecks } from "@/lib/download-check";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -18,6 +13,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { settleLimit } from "@/lib/concurrency";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { ADMIN_NOTE_MAX } from "@/lib/request-limits";
 import type { Translator } from "@/lib/i18n/translate";
 
 // Cap concurrent ARR pushes (guardrail 31) — mirrors the bulk route's
@@ -27,124 +23,6 @@ const ARR_CONCURRENCY = 5;
 
 const VALID_STATUSES = ["APPROVED", "DECLINED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
-
-interface EmailTarget {
-  requestedBy: string;
-  title: string;
-  mediaType: string;
-  posterPath?: string | null;
-  tmdbId?: number | null;
-}
-
-// Mirrors the single-request route's email channel (notifyRequestStatusChange):
-// resolve each owner's notification email + per-status opt-in pref, then fan out.
-// Fire-and-forget; per-row failures are swallowed by the email helpers.
-async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLINED", adminNote?: string | null): Promise<void> {
-  if (targets.length === 0) return;
-  try {
-    const userIds = [...new Set(targets.map((t) => t.requestedBy))];
-    const users = await prisma.user.findMany({
-      // deactivatedAt: null — account removal disables rather than scrubs
-      // (guardrail 33), so a removed user keeps a live notification email and
-      // would otherwise still get emailed by a later batch approve/decline.
-      // Mirrors the same guard just added to the Discord/push plural notifiers.
-      where: { id: { in: userIds }, deactivatedAt: null },
-      select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
-    });
-    const userMap = new Map(users.map((u) => [u.id, u]));
-    for (const t of targets) {
-      const u = userMap.get(t.requestedBy);
-      if (!u) continue;
-      const to = resolveUserNotificationEmail(u);
-      if (!to) continue;
-      if (status === "APPROVED") {
-        if (!u.emailOnApproved) continue;
-        void notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale: u.locale });
-      } else {
-        if (!u.emailOnDeclined) continue;
-        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, tmdbId: t.tmdbId ?? undefined, adminNote: adminNote ?? null, posterPath: t.posterPath, locale: u.locale });
-      }
-    }
-  } catch (err) {
-    console.error("[requests/batch] email fan-out failed:", err instanceof Error ? err.message : err);
-  }
-}
-
-// Mirrors the single-request path's inbox write (writeInAppNotification →
-// createInAppNotification in request-notifications.ts): the header bell /
-// /notifications inbox must record a REQUEST_APPROVED / REQUEST_DECLINED row for
-// every batch transition too. The batch route previously fanned out only
-// Discord/push/email and left the inbox empty. One bounded createMany (guardrail
-// 31) instead of per-user creates; body copy matches inAppBodyFor. Unconditional —
-// the inbox is a passive record the user pulls, not a channel to opt out of.
-// Fire-and-forget; a failed inbox write must never break the batch action.
-async function writeBatchInboxRows(
-  targets: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null; posterPath?: string | null }>,
-  type: "REQUEST_APPROVED" | "REQUEST_DECLINED",
-): Promise<void> {
-  if (targets.length === 0) return;
-  const bodyFor = (mediaType: string) => {
-    const label = mediaType === "MOVIE" ? "movie" : "TV show";
-    return type === "REQUEST_APPROVED"
-      ? `Your ${label} request was approved and is downloading.`
-      : `Your ${label} request was declined.`;
-  };
-  try {
-    // Guardrail 33: account removal disables rather than scrubs — mirror the
-    // deactivatedAt gate the email/Discord/push fan-outs already apply, or a
-    // later re-enabled account signs in to a bell full of stale batch rows for
-    // requests it never saw actioned.
-    const activeIds = new Set(
-      (
-        await prisma.user.findMany({
-          where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
-          select: { id: true },
-        })
-      ).map((u) => u.id),
-    );
-    const liveTargets = targets.filter((t) => activeIds.has(t.requestedBy));
-    if (liveTargets.length === 0) return;
-    await prisma.notification.createMany({
-      data: liveTargets.map((t) =>
-        buildNotificationData(t.requestedBy, {
-          type,
-          title: t.title,
-          body: bodyFor(t.mediaType),
-          tmdbId: t.tmdbId ?? null,
-          mediaType: t.mediaType,
-          posterPath: t.posterPath ?? null,
-          // Re-rendered from type + mediaType in the reader's language.
-          data: { v: 1 },
-        }),
-      ),
-    });
-  } catch (err) {
-    console.error("[requests/batch] in-app inbox write failed:", err instanceof Error ? err.message : err);
-  }
-}
-
-// Guardrail 33 / 14c: account removal DISABLES, so a removed requester's leftover
-// PENDING row still has a live email, Discord link and push subscriptions — and
-// the outbound channels (webhook/ntfy/Gotify) have no per-user gate of their own.
-// Every channel below must therefore start from the SAME already-filtered set,
-// resolved once per batch; the per-channel `deactivatedAt: null` predicates the
-// legacy notifiers carry stay as belt-and-braces. A failed lookup drops the
-// whole fan-out rather than guessing — the transition itself is already durable,
-// and telling a disabled account about it is the thing we must not do.
-async function filterActiveOwners<T extends { requestedBy: string }>(targets: T[]): Promise<T[]> {
-  if (targets.length === 0) return targets;
-  try {
-    const active = await prisma.user.findMany({
-      where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
-      select: { id: true },
-    });
-    const activeIds = new Set(active.map((u) => u.id));
-    return targets.filter((t) => activeIds.has(t.requestedBy));
-  } catch (err) {
-    console.error("[requests/batch] active-owner lookup failed; skipping notifications:", err instanceof Error ? err.message : err);
-    return [];
-  }
-}
 
 export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -170,7 +48,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   if (!VALID_STATUSES.includes(status as ValidStatus)) {
     return NextResponse.json({ error: t("apiUser.requests.batch.statusInvalid") }, { status: 400 });
   }
-  if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > 1000)) {
+  if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > ADMIN_NOTE_MAX)) {
     return NextResponse.json({ error: t("apiUser.common.adminNoteTooLong") }, { status: 400 });
   }
   if (permanent !== undefined && typeof permanent !== "boolean") {
@@ -193,7 +71,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     );
   }
 
-  const pendingNotifyAt = typedStatus === "APPROVED" ? new Date(Date.now() + 90_000) : null;
+  const pendingNotifyAt = typedStatus === "APPROVED" ? new Date(Date.now() + DOWNLOAD_CHECK_DELAY_MS) : null;
 
   // Atomically CLAIM the rows (PENDING -> typedStatus) in ONE `UPDATE … WHERE id IN
   // (…) AND status = 'PENDING' RETURNING id, requestedBy`. The returned rows are
@@ -320,44 +198,27 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     // Notify only the ones that actually made it into ARR — otherwise users get
     // a misleading "Approved!" ping for a request that's actually back to PENDING.
     // Skip rows the acting admin owns — no self-notification for one's own request.
-    // Then drop DISABLED owners once, for every channel (filterActiveOwners).
-    const notifyTargets = await filterActiveOwners(
+    // The fan-out is the single decision's, for many rows: disabled owners are
+    // dropped once there, for every channel (guardrails 14c, 33).
+    void notifyRequestStatusChanges(
+      "APPROVED",
       approved.filter((r) => !failedIds.has(r.id) && r.requestedBy !== session.user.id),
+      "requests/batch",
     );
-    if (notifyTargets.length > 0) {
-      notifyUsersRequestsApproved(notifyTargets).catch(() => {});
-      notifyUsersRequestsApprovedPush(notifyTargets).catch(() => {});
-      void fanOutEmails(notifyTargets, "APPROVED");
-      void writeBatchInboxRows(notifyTargets, "REQUEST_APPROVED");
-      emitNotificationEvents(notifyTargets.map((r) => ({
-        event: "request.approved" as const,
-        media: { type: r.mediaType === "MOVIE" ? "MOVIE" as const : "TV" as const, tmdbId: r.tmdbId, title: r.title, posterPath: r.posterPath ?? null },
-        request: { id: r.id, instance: r.arrInstance },
-      })));
-    }
   }
 
   if (typedStatus === "DECLINED") {
     // Mirror the APPROVED path: notify only the rows this batch actually transitioned
     // (PENDING → DECLINED), not ids that were already DECLINED before the call — those
     // were left untouched by the claim above and must not get a duplicate decline ping.
+    // Each row's note as the decline left it — the one this call wrote, else the
+    // one already stored — exactly what the single decline sends.
     const declined = await prisma.mediaRequest.findMany({
       where: { id: { in: [...pendingBeforeIds] }, status: "DECLINED" },
-      select: { id: true, requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true, arrInstance: true },
+      select: { id: true, requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true, arrInstance: true, adminNote: true },
     });
     // Skip rows the acting admin owns — no self-notification for one's own request.
-    // Then drop DISABLED owners once, for every channel (filterActiveOwners).
-    const declineTargets = await filterActiveOwners(declined.filter((r) => r.requestedBy !== session.user.id));
-    notifyUsersRequestsDeclined(declineTargets, typedAdminNote).catch(() => {});
-    notifyUsersRequestsDeclinedPush(declineTargets).catch(() => {});
-    void fanOutEmails(declineTargets, "DECLINED", typedAdminNote);
-    void writeBatchInboxRows(declineTargets, "REQUEST_DECLINED");
-    emitNotificationEvents(declineTargets.map((r) => ({
-      event: "request.declined" as const,
-      media: { type: r.mediaType === "MOVIE" ? "MOVIE" as const : "TV" as const, tmdbId: r.tmdbId, title: r.title, posterPath: r.posterPath ?? null },
-      request: { id: r.id, instance: r.arrInstance },
-      text: typedAdminNote ?? null,
-    })));
+    void notifyRequestStatusChanges("DECLINED", declined.filter((r) => r.requestedBy !== session.user.id), "requests/batch");
   }
 
   // Emit only for rows THIS call actually transitioned (claimedIds) — an

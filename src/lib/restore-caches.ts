@@ -18,6 +18,7 @@ import { clearActivityCache } from "@/lib/play-history";
 import { clearRecentlyAddedCache } from "@/lib/recently-added";
 import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 import { clearCandidateCache } from "@/lib/fix-match-candidate-cache";
+import { invalidateStatsTimeZone } from "@/lib/stats-time-zone-data";
 
 export function invalidateCachesAfterRestore(): void {
   invalidatePublicKeyCache();
@@ -29,6 +30,7 @@ export function invalidateCachesAfterRestore(): void {
   invalidateMdblistPlanCache();
   invalidateArrLibraryIndexCache();
   clearActivityCache();
+  invalidateStatsTimeZone();
   clearRecentlyAddedCache();
   invalidateNeverWatchedReport();
   clearCandidateCache();

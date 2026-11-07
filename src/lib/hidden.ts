@@ -16,6 +16,11 @@ import { prisma } from "./prisma";
 // list; a user past it simply won't have their oldest hides filtered (cosmetic).
 const MAX_HIDDEN_SET = 10_000;
 
+// The set's key for a title — the one spelling every caller filters with.
+export function hiddenKeyOf(item: { id: number; mediaType: string }): string {
+  return `${item.id}:${item.mediaType}`;
+}
+
 export async function getUserHiddenSet(userId: string): Promise<Set<string>> {
   const rows = await prisma.hiddenItem.findMany({
     where: { userId },

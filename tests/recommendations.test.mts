@@ -110,7 +110,7 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS, mergeHistorySeedRows, tasteFactor, isQuitShow, TASTE_MEH_FACTOR, TASTE_LOVED_FACTOR, QUIT_SHOW_SETTLE_MS } =
+const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS, mergeHistorySeedRows, tasteFactor, isQuitShow, TASTE_MEH_FACTOR, TASTE_LOVED_FACTOR, QUIT_SHOW_SETTLE_MS, applyCorroboration, applyLanguageProfile, applyAbandonDamp } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
@@ -693,10 +693,23 @@ shadowPrismaModel(prisma, "titleSuggestion", {
     return { count: before - edgeRows.length };
   },
   createMany: async (args: { data: EdgeRow[] }) => {
+    for (const row of args.data) assertFitsEdgeColumns(row);
     edgeRows.push(...args.data);
     return { count: args.data.length };
   },
 });
+
+// Postgres refuses a value wider than its VarChar column, which fails the whole
+// INSERT (and with it the page's transaction). The stubs refuse it the same way,
+// so an unclamped write fails here exactly as it would against the database.
+function tooLong(value: string | null | undefined, max: number): boolean {
+  return typeof value === "string" && Array.from(value).length > max;
+}
+function assertFitsEdgeColumns(row: { title: string; posterPath: string | null; backdropPath: string | null; releaseDate: string | null; originalLanguage: string | null }): void {
+  if (tooLong(row.title, 500) || tooLong(row.posterPath, 500) || tooLong(row.backdropPath, 500) || tooLong(row.releaseDate, 16) || tooLong(row.originalLanguage, 16)) {
+    throw new Error("value too long for type character varying");
+  }
+}
 
 // The server's co-watch edges (guardrail 40c) — same row shape as an edge, plus
 // the viewer count.
@@ -727,6 +740,7 @@ shadowPrismaModel(prisma, "coWatchSuggestion", {
     return { count: n };
   },
   createMany: async (args: { data: (EdgeRow & { viewers: number })[] }) => {
+    for (const row of args.data) assertFitsEdgeColumns(row);
     coWatchRows.push(...args.data);
     return { count: args.data.length };
   },
@@ -767,12 +781,18 @@ shadowPrismaModel(prisma, "recommendationTitle", {
       OR?: (KeyPair | { qualityRatedAt: null | { lt: Date } })[];
       suggestionsRefreshedAt?: { not: null };
     };
+    orderBy?: { suggestionsRefreshedAt?: "asc" };
     take?: number;
   }) => {
     const or = args.where.OR;
-    // sweepOrphanSources' scan: every BUILT source, no key filter at all.
+    // sweepOrphanSources' scan: every BUILT source, no key filter at all. The
+    // order is honoured (oldest stamp first) because WHICH slice a capped take
+    // returns is the point of it.
     if (or === undefined) {
-      const rows = nodeRows.filter((n) => n.suggestionsRefreshedAt !== null);
+      let rows = nodeRows.filter((n) => n.suggestionsRefreshedAt !== null);
+      if (args.orderBy?.suggestionsRefreshedAt === "asc") {
+        rows = [...rows].sort((a, b) => a.suggestionsRefreshedAt!.getTime() - b.suggestionsRefreshedAt!.getTime());
+      }
       return args.take != null ? rows.slice(0, args.take) : rows;
     }
     if (or.length > 0 && "qualityRatedAt" in or[0]) {
@@ -801,6 +821,7 @@ shadowPrismaModel(prisma, "recommendationTitle", {
     ).length,
   groupBy: async () => [],
   createMany: async (args: { data: { tmdbId: number; mediaType: MT; releaseDate: string | null }[] }) => {
+    if (args.data.some((row) => tooLong(row.releaseDate, 16))) throw new Error("value too long for type character varying");
     let count = 0;
     for (const row of args.data) {
       if (nodeRows.some((n) => n.tmdbId === row.tmdbId && n.mediaType === row.mediaType)) continue;
@@ -992,6 +1013,9 @@ const fetchCalls: string[] = [];
 // and return [], which is exactly why an outage is indistinguishable from "no
 // suggestions" one layer up and why the conclusive flag has to exist.
 let tmdbOutage = false;
+// An outage that ends partway through a run: the next N suggestion requests
+// fail, then TMDB answers again.
+let tmdbSuggestionFailures = 0;
 let omdbTimesOut = false;
 // MDBList (only reachable once mdblistKeyConfigured is set): "timeout" throws
 // the shape safe-fetch turns into SafeFetchError("timeout"); "answer" replies
@@ -1021,6 +1045,10 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     });
   }
   if (tmdbOutage) throw new TypeError("fetch failed");
+  if (tmdbSuggestionFailures > 0 && /\/(similar|recommendations)$/.test(url.pathname)) {
+    tmdbSuggestionFailures--;
+    throw new TypeError("fetch failed");
+  }
   // Not anchored to the start: TMDB's real paths carry a version prefix
   // (/3/movie/{id}/similar) — match the suffix shape regardless of it.
   const listed = [...listFixtures.entries()].find(([path]) => url.pathname.endsWith(path));
@@ -1153,6 +1181,7 @@ beforeEach(() => {
   ratingRows = [];
   fetchCalls.length = 0;
   tmdbOutage = false;
+  tmdbSuggestionFailures = 0;
   transactionCalls = 0;
   userRecTransactionCalls = 0;
   userRecDeletes = 0;
@@ -2825,6 +2854,47 @@ test("getUserRecommendations: drift re-filtering drops a cached candidate the us
   assert.equal(only.releaseYear, "2020"); // derived from releaseDate, not stored separately
 });
 
+test("getUserRecommendations asks about the STORED titles only — every user-scoped read is narrowed to their ids", async () => {
+  // The read-time filter only ever decides about the stored shelf, so reading a
+  // heavy viewer's whole history on every home and /for-you render was waste.
+  // The compute-time exclusion still reads everything (same reader, no list).
+  linkUser();
+  userRecRows = [storedRec("u1", 500), { ...storedRec("u1", 700), id: "r700", mediaType: "TV", rank: 1 }];
+  type Where = { where?: { tmdbId?: unknown } };
+  const reads: { name: string; tmdbId: unknown }[] = [];
+  const spies: [Record<string, unknown>, string, string][] = [
+    [prisma.watchlistItem as never, "findMany", "watchlist"],
+    [prisma.playHistory as never, "groupBy", "playHistory"],
+    [prisma.hiddenItem as never, "findMany", "hidden"],
+    [prisma.mediaRequest as never, "findMany", "requests"],
+    [prisma.deletionVote as never, "findMany", "votes"],
+    [prisma.traktWatchedItem as never, "findMany", "traktHistory"],
+    [prisma.serverWatchedTitle as never, "findMany", "serverHistory"],
+    [prisma.traktRating as never, "findMany", "traktRatings"],
+  ];
+  const originals = spies.map(([model, method]) => model[method]);
+  spies.forEach(([model, method, name], i) => {
+    const real = originals[i] as (a: Where) => unknown;
+    model[method] = (args: Where) => {
+      reads.push({ name, tmdbId: args.where?.tmdbId });
+      return real(args);
+    };
+  });
+  try {
+    await getUserRecommendations("u1");
+    assert.deepEqual(reads.map((r) => r.name).sort(), spies.map(([, , name]) => name).sort(), "every user-scoped reader ran once");
+    for (const r of reads) assert.deepEqual(r.tmdbId, { in: [500, 700] }, `${r.name} is narrowed to the stored ids`);
+
+    reads.length = 0;
+    await computeRecommendationsForUser("u1");
+    const exclusion = reads.filter((r) => r.name === "hidden" || r.name === "votes");
+    assert.ok(exclusion.length > 0);
+    for (const r of exclusion) assert.equal(r.tmdbId, undefined, `the compute-time ${r.name} read is not narrowed`);
+  } finally {
+    spies.forEach(([model, method], i) => { model[method] = originals[i]; });
+  }
+});
+
 // ── inconclusive vs legitimately-empty ──────────────────────────────────────
 
 function storedRec(userId: string, tmdbId: number): UserRecRow {
@@ -3573,17 +3643,190 @@ test("edge write: a healthy page logs nothing", async () => {
   assert.equal(edgeWriteLines(errors, "edge write failed").length, 0);
 });
 
+test("edge write: an over-long title is cut to its column and an unfit path, date or language dropped — the page still writes", async () => {
+  // One value wider than its VarChar column failed the whole page, every run:
+  // the page's sources are never stamped, so they sort first again.
+  suggestionsFor.set("movie:10", [{
+    ...movieItem(500),
+    title: "x".repeat(600),
+    backdrop_path: `/${"b".repeat(600)}.jpg`,
+    release_date: "2020-01-01T00:00:00.000Z",
+    original_language: "x".repeat(20),
+  }]);
+  const graph = await refreshRecommendationGraph({ required: [{ tmdbId: 10, mediaType: "MOVIE" }] });
+  assert.equal(graph.sourcesFailed, 0);
+  assert.equal(graph.sourcesRefreshed, 1);
+  const edge = edgeRows.find((e) => e.tmdbId === 500)!;
+  assert.equal(edge.title, "x".repeat(500));
+  assert.equal(edge.backdropPath, null);
+  assert.equal(edge.releaseDate, null);
+  assert.equal(edge.originalLanguage, null);
+  assert.equal(edge.posterPath, "/poster500.jpg", "a value that fits is kept as is");
+  assert.ok(nodeRows.find((n) => n.tmdbId === 10)?.suggestionsRefreshedAt, "the source is stamped");
+});
+
+test("a never-built block of sources TMDB has nothing for is stamped once a later page answers — not re-fetched every run", async () => {
+  // Never-built sources sort first, so fifty of them filled the first page, which
+  // came back all-empty and read as an outage: nothing stamped, two uncached TMDB
+  // calls per source, every run, forever.
+  const empties = Array.from({ length: 50 }, (_, i) => ({ tmdbId: 7000 + i, mediaType: "MOVIE" as MT }));
+  suggestionsFor.set("movie:7100", [movieItem(800)]);
+  suggestionsFor.set("movie:7101", [movieItem(801)]);
+  const required = [...empties, { tmdbId: 7100, mediaType: "MOVIE" as MT }, { tmdbId: 7101, mediaType: "MOVIE" as MT }];
+
+  const graph = await refreshRecommendationGraph({ required });
+
+  assert.equal(graph.requiredCovered, 52, "the empty block is covered, as known-empty");
+  for (const e of empties) {
+    const node = nodeRows.find((n) => n.tmdbId === e.tmdbId);
+    assert.ok(node?.suggestionsRefreshedAt, `${e.tmdbId} is stamped`);
+    assert.equal(node.suggestionCount, 0);
+  }
+  fetchCalls.length = 0;
+  await refreshRecommendationGraph({ required });
+  assert.equal(fetchCalls.some((p) => /\/(similar|recommendations)$/.test(p)), false, "the next run asks TMDB nothing");
+});
+
+test("an outage that ends between pages stamps no false zero — the carried sources are asked again and get their real lists", async () => {
+  // Every suggestion request of the first page fails (getMovieSuggestions turns
+  // that into []), then TMDB answers. Judging those empties by the next page's
+  // answers WITHOUT asking again would stamp fifty wrong "nothing"s for a week.
+  const first = Array.from({ length: 50 }, (_, i) => ({ tmdbId: 7200 + i, mediaType: "MOVIE" as MT }));
+  for (const s of first) suggestionsFor.set(`movie:${s.tmdbId}`, [movieItem(s.tmdbId + 10_000)]);
+  suggestionsFor.set("movie:7300", [movieItem(17_300)]);
+  tmdbSuggestionFailures = 100;
+
+  const graph = await refreshRecommendationGraph({ required: [...first, { tmdbId: 7300, mediaType: "MOVIE" }] });
+
+  assert.equal(tmdbSuggestionFailures, 0, "precondition: the whole first page failed");
+  for (const s of first) {
+    assert.ok(edgeRows.some((e) => e.sourceTmdbId === s.tmdbId && e.tmdbId === s.tmdbId + 10_000), `${s.tmdbId} got its real list`);
+  }
+  assert.equal(nodeRows.filter((n) => n.suggestionsRefreshedAt !== null && n.suggestionCount === 0).length, 0, "no zero was stamped");
+  assert.equal(graph.requiredCovered, 51);
+});
+
+test("the orphan sweep reads OLDEST stamps first — an orphan past the read cap is still reached", async () => {
+  // More built sources than the sweep reads at once (MAX_GRAPH_SOURCES, 20k):
+  // an unordered take examined an arbitrary slice, so an orphan could sit past
+  // it run after run. Every node here is an orphan (nothing lists any of them),
+  // so the sweep takes its first MAX_ORPHAN_SWEEP_PER_RUN (2k) in scan order —
+  // and the oldest, appended LAST, must be among them.
+  for (let i = 0; i < 20_000; i++) {
+    nodeRows.push({
+      tmdbId: 100_000 + i, mediaType: "MOVIE", releaseDate: null, suggestionsRefreshedAt: new Date(T0 - DAY_MS),
+      suggestionCount: 1, quality: null, evidence: 0, qualityRatedAt: new Date(T0),
+    });
+  }
+  nodeRows.push({
+    tmdbId: 99, mediaType: "MOVIE", releaseDate: null, suggestionsRefreshedAt: new Date(T0 - 90 * DAY_MS),
+    suggestionCount: 1, quality: 0.7, evidence: 2, qualityRatedAt: new Date(T0),
+  });
+
+  const result = await refreshRecommendationGraph();
+
+  assert.equal(result.sourcesSwept, 2_000);
+  const oldest = nodeRows.find((n) => n.tmdbId === 99)!;
+  assert.equal(oldest.suggestionsRefreshedAt, null, "the oldest orphan is swept");
+  assert.equal(oldest.quality, 0.7, "and keeps its verdict");
+});
+
+test("the orphan sweep observes the lock's signal: an aborted run sweeps nothing (guardrail 41)", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [{ tmdbId: 500, mediaType: "MOVIE" }]);
+  seedGraph({ tmdbId: 11, mediaType: "MOVIE" }, [{ tmdbId: 501, mediaType: "MOVIE" }]);
+
+  const result = await refreshRecommendationGraph({ signal: AbortSignal.abort() });
+
+  assert.equal(result.sourcesSwept, 0);
+  assert.ok(nodeRows.find((n) => n.tmdbId === 11)?.suggestionsRefreshedAt, "the departed source is left for a later run");
+  assert.ok(edgeRows.some((e) => e.sourceTmdbId === 11));
+
+  // Aborted DURING the sweep: the page in flight finishes, the next is not started.
+  nodeRows = [];
+  edgeRows = [];
+  for (let i = 0; i < 100; i++) seedGraph({ tmdbId: 2000 + i, mediaType: "MOVIE" }, []);
+  const controller = new AbortController();
+  const realUpdateMany = prisma.recommendationTitle.updateMany;
+  (prisma.recommendationTitle as { updateMany: unknown }).updateMany = async (args: never) => {
+    controller.abort();
+    return (realUpdateMany as (a: never) => Promise<unknown>)(args);
+  };
+  try {
+    const midway = await refreshRecommendationGraph({ signal: controller.signal });
+    assert.equal(midway.sourcesSwept, 50, "one page of the two, then it returns");
+  } finally {
+    (prisma.recommendationTitle as { updateMany: unknown }).updateMany = realUpdateMany;
+  }
+});
+
+test("a failed orphan sweep is reported, not fatal — the verdicts run and every user is still recomputed", async () => {
+  // The sweep is cleanup after the required edges are already written; a
+  // transient error in it used to throw out of the refresh, which recomputes
+  // nobody. (A throw from the BUILD still aborts the run — see the
+  // library-read test above.)
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  authSessions = [{ userId: "u1", lastSeenAt: daysAgo(1) }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  seedGraph({ tmdbId: 11, mediaType: "MOVIE" }, [{ tmdbId: 501, mediaType: "MOVIE" }]); // departed
+
+  const realUpdateMany = prisma.recommendationTitle.updateMany;
+  (prisma.recommendationTitle as { updateMany: unknown }).updateMany = async () => {
+    throw new Error("Unable to start a transaction in the given time");
+  };
+  let result!: Awaited<ReturnType<typeof warmRecommendationsCache>>;
+  const { warns } = await withConsole(async () => {
+    try {
+      result = await warmRecommendationsCache();
+    } finally {
+      (prisma.recommendationTitle as { updateMany: unknown }).updateMany = realUpdateMany;
+    }
+  });
+
+  assert.equal(result.graphFailed, false);
+  assert.equal(result.graph.sweepFailed, true, "the failure is reported in the run's result");
+  assert.equal(result.usersUpdated, 1);
+  assert.deepEqual(userRecRows.map((r) => r.tmdbId), [500]);
+  assert.equal(edgeWriteLines(warns, "orphan sweep failed").length, 1);
+});
+
 // ═══ guardrail 40c: the viewer's other records, taste, quit shows, co-watch ══
 
 // The co-watch build's one aggregate runs in Postgres; here it is scripted.
 // Accepts both $queryRaw call shapes (guardrail 23a).
 let coWatchQueryRows: { srcId: number; srcType: string; dstId: number; dstType: string; together: number; position: number }[] = [];
 let coWatchQueries = 0;
-shadowPrismaClientMethod(prisma, "$queryRaw", async () => {
+let lastCoWatchQuery: { text: string; values: unknown[] } | null = null;
+shadowPrismaClientMethod(prisma, "$queryRaw", async (q: unknown) => {
   coWatchQueries++;
+  const query = q as { text?: unknown; values?: unknown[] };
+  if (typeof query.text === "string") lastCoWatchQuery = { text: query.text, values: query.values ?? [] };
   return coWatchQueryRows;
 });
-shadowPrismaClientMethod(prisma, "$executeRaw", async () => 0);
+// The verdict pass writes each batch with ONE UPDATE … FROM (VALUES …), passed
+// as a single Prisma.sql value (guardrail 23a). Applied to nodeRows here, so the
+// verdict tests read real stamps; every other statement (the SET LOCAL
+// timeouts, set_config) is a no-op. verdictWrites records the rows per statement.
+let verdictWrites: number[] = [];
+shadowPrismaClientMethod(prisma, "$executeRaw", async (q: unknown) => {
+  const query = q as { text?: unknown; values?: unknown[] };
+  if (typeof query.text !== "string" || !query.text.includes('UPDATE "RecommendationTitle"')) return 0;
+  const [ratedAt, ...rest] = query.values ?? [];
+  let updated = 0;
+  verdictWrites.push(rest.length / 4);
+  for (let i = 0; i < rest.length; i += 4) {
+    const [tmdbId, mediaType, quality, evidence] = rest.slice(i, i + 4) as [number, MT, number | null, number];
+    const node = nodeRows.find((n) => n.tmdbId === tmdbId && n.mediaType === mediaType);
+    if (!node) continue;
+    node.quality = quality;
+    node.evidence = evidence;
+    node.qualityRatedAt = ratedAt as Date;
+    updated++;
+  }
+  return updated;
+});
 
 function linkUser(): void {
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
@@ -3747,6 +3990,28 @@ test("40c co-watch ON: an edge adds a pick under the viewer's own seed, from loc
   }
 });
 
+test("40c co-watch SQL: each person pairs only a capped set of titles, and a capped run holds the non-viewer floor on the uncapped counts", async () => {
+  // Pairing is a per-person self-join, so its cost is the sum of (titles per
+  // person)². The cap can only under-count `together`, which is safe for the
+  // "≥ 3 watched both" floor but NOT for "≥ 2 did not": once anyone is capped,
+  // that floor must read the uncapped viewer counts. The SQL runs in Postgres
+  // (verified there); here its shape is pinned.
+  setCoWatch(true);
+  lastCoWatchQuery = null;
+  await refreshRecommendationGraph();
+  const q = lastCoWatchQuery as { text: string; values: unknown[] } | null;
+  assert.ok(q, "the co-watch aggregate ran");
+  const sql = q.text.replace(/\s+/g, " ");
+  assert.match(sql, /ROW_NUMBER\(\) OVER \( PARTITION BY p\.person ORDER BY p\.at DESC NULLS LAST/);
+  const cap = sql.match(/FROM ranked_pt WHERE rn <= \$(\d+)/);
+  assert.ok(cap, "pt keeps only the ranked prefix");
+  assert.equal(q.values[Number(cap[1]) - 1], 500);
+  assert.match(sql, /pairs AS \( .* FROM pt a JOIN pt b ON a\.person = b\.person/, "pairs are built from the CAPPED set");
+  assert.match(sql, /AND \(NOT capped\.hit OR LEAST\(ps\.viewers, pd\.viewers\) <= people\.total - \$\d+\)/);
+  // Inlined, the one-row aggregate was re-run once per candidate pair.
+  assert.match(sql, /people AS MATERIALIZED \(/);
+});
+
 test("40c co-watch never counts toward seed coverage — it cannot make a TMDB-outage shelf look complete", async () => {
   linkUser();
   setCoWatch(true);
@@ -3757,6 +4022,32 @@ test("40c co-watch never counts toward seed coverage — it cannot make a TMDB-o
   const result = await computeRecommendationsForUser("u1");
   assert.equal(result.conclusive, false, "an uncovered seed stays uncovered");
   assert.ok(result.candidates.some((c) => c.tmdbId === 601), "the co-watch vote itself still counts");
+});
+
+test("scoring passes: the decay-sum is strongest-first and bounded; language and abandon are per-title multipliers", () => {
+  // The three post-accumulation passes, on their own.
+  const a = { score: 0, contributions: [1, 2] };
+  const flood = { score: 0, contributions: Array.from({ length: 200 }, () => 1) };
+  applyCorroboration([a, flood]);
+  assert.equal(a.score, 2 + 1 * 0.75, "sorted strongest first before decaying");
+  assert.ok(flood.score < 4 && flood.score > 3.9, `200 equal agreements stay under 4x one: ${flood.score}`);
+
+  const en = { score: 1, language: "en" };
+  const ko = { score: 1, language: "ko" };
+  const unknown = { score: 1 };
+  applyLanguageProfile([en, ko, unknown], new Map([["en", 9], ["ko", 1]]), 10);
+  assert.equal(en.score, 1, "a language at or past the full share is untouched");
+  assert.ok(ko.score < 1 && ko.score > 0.35, `a minor language is damped toward the floor, never cut: ${ko.score}`);
+  assert.equal(unknown.score, 1, "no language recorded is not evidence");
+  const untouched = { score: 1, language: "ko" };
+  applyLanguageProfile([untouched], new Map(), 0);
+  assert.equal(untouched.score, 1, "no profile, no damp");
+
+  const bailed = { score: 1, tmdbId: 5, mediaType: "MOVIE" as MT };
+  const kept = { score: 1, tmdbId: 5, mediaType: "TV" as MT };
+  applyAbandonDamp([bailed, kept], new Set(["5:MOVIE"]));
+  assert.equal(bailed.score, 0.3);
+  assert.equal(kept.score, 1, "keyed by title AND type");
 });
 
 test("40c pure: tasteFactor tiers, and a rating outranks a favorite", () => {
@@ -3815,11 +4106,13 @@ function useMdblistOnly(reply: "timeout" | "answer"): void {
 test("verdict pass: MDBList answered with no ratings ⇒ the null verdict IS stamped", async () => {
   useMdblistOnly("answer");
   nodeRows.push(unratedNode(910, "MOVIE"), unratedNode(911, "TV"));
+  verdictWrites = [];
   try {
     const result = await refreshRecommendationGraph();
     assert.ok(mdblistCalls > 0, "precondition: MDBList was asked");
     assert.equal(result.verdictsDeferred, 0);
     assert.equal(result.titlesRated, 2, "MDBList answered — 'asked, nobody had ratings' is a verdict");
+    assert.deepEqual(verdictWrites, [2], "ONE statement writes the whole batch, never a round trip per title");
     for (const node of nodeRows) {
       assert.ok(node.qualityRatedAt, "stamped");
       assert.equal(node.quality, null);
@@ -3832,8 +4125,10 @@ test("verdict pass: MDBList answered with no ratings ⇒ the null verdict IS sta
 test("verdict pass: MDBList timing out in the FIRST batch of a storm, breaker not yet tripped ⇒ nothing is stamped", async () => {
   useMdblistOnly("timeout");
   nodeRows.push(unratedNode(920, "MOVIE"), unratedNode(921, "TV"));
+  verdictWrites = [];
   try {
     const result = await refreshRecommendationGraph();
+    assert.deepEqual(verdictWrites, [], "a batch whose verdicts are all deferred writes nothing at all");
     assert.equal(mdblistCalls, 3, "a movie POST, a TV POST and one probe — all timed out");
     assert.equal(isMdblistQuotaLocked({ background: true }), false, "precondition: three failures do not trip the breaker");
     assert.equal(result.titlesRated, 0);

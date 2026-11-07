@@ -190,9 +190,12 @@ shadowPrismaModel(prisma, "watchlistItem", {
       .map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType, title: w.title }));
   },
 });
+// Every key the cache reads asked for, in order.
+const cacheKeysRead: string[] = [];
 shadowPrismaModel(prisma, "tmdbCache", {
   findMany: async (args: { where: { key: { in: string[] }; expiresAt?: { gt: Date } } }) => {
     reads.push("tmdbCache.findMany");
+    cacheKeysRead.push(...args.where.key.in);
     return args.where.key.in.flatMap((k) => {
       const r = cache.get(k);
       if (!r) return [];
@@ -313,6 +316,7 @@ beforeEach(() => {
   requests = [];
   watchlist = [];
   cache.clear();
+  cacheKeysRead.length = 0;
   settings.clear();
   reads.length = 0;
   fetchCalls.length = 0;
@@ -568,6 +572,36 @@ test("buildCalendarFeed: end-to-end from cache rows; declined title absent; link
   assert.ok(es.includes("X-WR-CALNAME:Summonarr – Mis estrenos"), es.slice(0, 400));
   assert.ok(es.includes("SUMMARY:Keep\\, Me (Digital)"));
   assert.ok(ics.includes("X-WR-CALNAME:Summonarr – My releases"), "no locale ⇒ English, as before");
+});
+
+test("buildCalendarFeed reads a full :details blob only as the fallback for a title its small date blob can't place", async () => {
+  const me = addUser();
+  const now = new Date();
+  requests = [
+    { requestedBy: me.id, tmdbId: 40, mediaType: "MOVIE", title: "Has Release Info", status: "APPROVED", createdAt: now },
+    { requestedBy: me.id, tmdbId: 41, mediaType: "MOVIE", title: "Details Only", status: "APPROVED", createdAt: now },
+    { requestedBy: me.id, tmdbId: 42, mediaType: "MOVIE", title: "No Primary", status: "APPROVED", createdAt: now },
+    { requestedBy: me.id, tmdbId: 50, mediaType: "TV", title: "Calendar Show", status: "APPROVED", createdAt: now },
+    { requestedBy: me.id, tmdbId: 51, mediaType: "TV", title: "Details Show", status: "APPROVED", createdAt: now },
+  ];
+  putCache("movie:40:release-info:v2", { primary: iso(3), digital: null, physical: null });
+  putCache("movie:40:details", { releaseDate: iso(9) });
+  putCache("movie:41:details", { releaseDate: iso(4) });
+  putCache("movie:42:release-info:v2", { digital: iso(20) });
+  putCache("movie:42:details", { releaseDate: iso(5) });
+  putCache("tv:50:calendar:v1", { status: "Returning Series", lastAirDate: null, seasons: [], nextEpisode: { airDate: iso(6), seasonNumber: 2, episodeNumber: 1, name: "Back" } });
+  putCache("tv:50:details", { status: "Returning Series", seasons: [], nextEpisodeAirDate: iso(8) });
+  putCache("tv:51:details", { status: "Returning Series", seasons: [], nextEpisodeAirDate: iso(7) });
+
+  const unfolded = (await buildCalendarFeed({ kind: "user", userId: me.id })).replace(/\r\n /g, "");
+  assert.ok(!cacheKeysRead.includes("movie:40:details"), "a primary date in the release info makes the details blob unnecessary");
+  assert.ok(!cacheKeysRead.includes("tv:50:details"), "a calendar blob makes the details blob unnecessary");
+  assert.ok(cacheKeysRead.includes("movie:41:details") && cacheKeysRead.includes("movie:42:details") && cacheKeysRead.includes("tv:51:details"));
+  assert.ok(unfolded.includes("SUMMARY:Has Release Info (Theatrical)"));
+  assert.ok(unfolded.includes("SUMMARY:Details Only (Theatrical)"), "no release info ⇒ the details date still places it");
+  assert.ok(unfolded.includes("SUMMARY:No Primary (Theatrical)") && unfolded.includes("SUMMARY:No Primary (Digital)"), "a missing primary falls back to details; the digital date stays");
+  assert.ok(unfolded.includes("SUMMARY:Calendar Show S02E01 – Back"), "the calendar blob wins over details");
+  assert.equal((unfolded.match(/Details Show/g) ?? []).length, 1, "a show with only a details blob is still placed");
 });
 
 test("resolveCalendarToken re-checks the found row's hash (a lookup that returns the wrong row is refused)", async () => {

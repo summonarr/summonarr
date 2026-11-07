@@ -2,9 +2,25 @@ import { Client } from "pg";
 
 // Lock IDs assigned to long-running cron / admin operations. The same id is reused across the cron
 // route and admin routes that mutate the same external state, so admin actions cannot race a cron run.
+// Every single-key session lock is named here — never pass a literal to withAdvisoryLock — so a new
+// id is checked against the whole list (tests/cron-routes.test.mts pins them distinct). The two-key
+// xact locks (2001,n library swap, 2002,n episode cache, 2101,n registry saves) live in Postgres's
+// separate (int, int) key space and never meet these.
+//
+// The /api/sync orchestrator's run lock.
+export const SYNC_ORCHESTRATOR_LOCK_ID = 2000;
+export const PURGE_AUTH_SESSIONS_LOCK_ID = 2001;
+export const SCRUB_AUDIT_PII_LOCK_ID = 2002;
 export const WARM_ACTIVITY_LOCK_ID = 2003;
 export const WARM_OMDB_LOCK_ID = 2004;
 export const WARM_MDBLIST_LOCK_ID = 2005;
+export const WARM_LIST_CACHE_LOCK_ID = 2006;
+export const UPCOMING_CACHE_LOCK_ID = 2007;
+export const RATINGS_SYNC_LOCK_ID = 2008;
+// Shared ON PURPOSE by the orchestrator's download-policy pass and the
+// standalone sync-download-policies cron: their read-then-reconcile prunes must
+// not race, so whichever runs second skips.
+export const DOWNLOAD_POLICIES_LOCK_ID = 2009;
 export const TRASH_SYNC_LOCK_ID = 2010;
 export const WARM_RECOMMENDATIONS_LOCK_ID = 2011;
 export const WARM_LIBRARY_LOCK_ID = 2012;

@@ -4,7 +4,8 @@ import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
 import Link from "next/link";
-import { posterUrl } from "@/lib/tmdb-types";
+import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
+import { episodeLabel } from "@/lib/episode-label";
 import { User, CheckCircle2, Circle } from "@/components/icons";
 // Same card + section-title + detail-header + method-pill primitives the
 // user/title detail views and the history table use, so the three Activity
@@ -104,29 +105,17 @@ export default async function PlayDetailPage({
   const mediaHref = play.tmdbId
     ? `/admin/activity/media/${play.tmdbId}${play.mediaType ? `?type=${play.mediaType}` : ""}`
     : null;
-  const episodeStr = isTV && play.seasonNumber != null
-    ? `S${String(play.seasonNumber).padStart(2, "0")}E${String(play.episodeNumber ?? 0).padStart(2, "0")}`
-    : null;
+  // The label the History row and its detail panel show ("S01 · E05"); a
+  // missing episode number shows the season alone, never "E00".
+  const episodeStr = isTV ? episodeLabel(play.seasonNumber, play.episodeNumber) : null;
 
+  // The shared lookup (TmdbMediaCore first, then the :details cache). TMDB
+  // numbers movies and TV separately, so a play's own media type is looked up
+  // in its own namespace only; a play with no recorded type consults both.
   let posterPath: string | null = null;
   if (play.tmdbId) {
-    // The play's OWN media type first: TMDB numbers movies and TV separately, so
-    // a show can share its id with a cached movie, and findMany has no defined
-    // order — first-row-wins rendered whichever of the two came back first.
-    const own = `${isTV ? "tv" : "movie"}:${play.tmdbId}:details`;
-    const other = `${isTV ? "movie" : "tv"}:${play.tmdbId}:details`;
-    const cacheRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: [own, other] } },
-      select: { key: true, data: true },
-    });
-    cacheRows.sort((a, b) => (a.key === own ? 0 : 1) - (b.key === own ? 0 : 1));
-    for (const row of cacheRows) {
-      try {
-        const parsed = JSON.parse(row.data) as { posterPath?: string | null; poster_path?: string | null };
-        const path = parsed.posterPath ?? parsed.poster_path ?? null;
-        if (path) { posterPath = posterUrl(path, "w342"); break; }
-      } catch { }
-    }
+    const posters = await resolvePosterMap([{ tmdbId: play.tmdbId, mediaType: play.mediaType }]);
+    posterPath = posters[posterPathKey(play.tmdbId, play.mediaType)] ?? null;
   }
 
   const playDurationS = play.playDuration;

@@ -489,3 +489,53 @@ test("QuickConnect finalize: no flow cookie at all is refused (400), regardless 
   assert.equal(res.status, 400);
   assert.deepEqual(await bodyOf(res), { error: "QuickConnect flow expired" });
 });
+
+// ── QuickConnect: terminal vs transient upstream failures ──────────────────
+
+function qcPoll(secret: string): Req {
+  return new NextRequest(`http://localhost:3000/api/auth/jellyfin/quickconnect?instance=remote&secret=${secret}`, {
+    method: "GET",
+    headers: { "user-agent": uniqueUa() },
+  });
+}
+
+test("QuickConnect poll: Jellyfin's 401 answers 502 with the quickconnect_disabled marker so clients stop polling", async () => {
+  settings.set("jellyfinRemoteUrl", "http://10.20.0.8:8096");
+  respond = (url) => {
+    if (url.pathname === "/QuickConnect/Connect") return new Response("", { status: 401 });
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const res = await qcPollGet(qcPoll("qc-disabled-secret"));
+  assert.equal(res.status, 502, "the status is a wire contract native clients read");
+  const body = await bodyOf(res);
+  assert.equal(body.code, "quickconnect_disabled");
+  assert.equal(typeof body.error, "string");
+});
+
+test("QuickConnect poll: any other upstream failure answers 502 WITHOUT the terminal marker", async () => {
+  settings.set("jellyfinRemoteUrl", "http://10.20.0.9:8096");
+  respond = (url) => {
+    if (url.pathname === "/QuickConnect/Connect") return new Response("", { status: 500 });
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const res = await qcPollGet(qcPoll("qc-transient-secret"));
+  assert.equal(res.status, 502);
+  const body = await bodyOf(res);
+  assert.equal(body.code, undefined, "a transient failure must not tell the client to stop");
+});
+
+test("QuickConnect initiate: Jellyfin's 401 carries the quickconnect_disabled marker too", async () => {
+  settings.set("jellyfinRemoteUrl", "http://10.20.0.11:8096");
+  respond = (url) => {
+    if (url.pathname === "/QuickConnect/Initiate") return new Response("", { status: 401 });
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const res = await qcInitiatePost(
+    new NextRequest("http://localhost:3000/api/auth/jellyfin/quickconnect?instance=remote", {
+      method: "POST",
+      headers: { "user-agent": uniqueUa() },
+    }),
+  );
+  assert.equal(res.status, 502);
+  assert.equal((await bodyOf(res)).code, "quickconnect_disabled");
+});

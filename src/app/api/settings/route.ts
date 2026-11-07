@@ -33,6 +33,8 @@ import { MDBLIST_PLAN_SETTING_KEY, isMdblistPlanSetting } from "@/lib/mdblist-pl
 import { invalidateMdblistPlanCache } from "@/lib/mdblist";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { isOidcConfigured } from "@/lib/oidc";
+import { STATS_TIME_ZONE_KEY, normalizeTimeZone } from "@/lib/stats-time-zone";
+import { databaseKnowsTimeZone, invalidateStatsTimeZone } from "@/lib/stats-time-zone-data";
 
 // The settings this route writes that the never-watched report reads (guardrail
 // 14d): a tracking switch (and its stamp) moves a server's coverage, retention
@@ -179,6 +181,9 @@ const SETTINGS_SCHEMA = [
   ["playHistoryArcGapDays",          false],
   ["playHistoryPollingInterval",     false],
   ["playHistoryRetentionDays",       false],
+  // The zone the activity statistics bucket hours and days in (an IANA name;
+  // blank = the server process's own zone). stats-time-zone.ts.
+  ["statsTimeZone",                  false],
   // Request watch grades (src/lib/watch-grade.ts). Bounds are validated below
   // against the same table the read side parses with.
   ["watchGradeGraceDays",            false],
@@ -597,6 +602,8 @@ const CLEARABLE_KEYS: ReadonlySet<string> = new Set([
   "sessionDefaultDuration",
   "sessionMobileDuration",
   "sessionMaxDuration",
+  // Blank = the server process's own zone (resolveStatsTimeZone).
+  "statsTimeZone",
 ]);
 
 // Connection tests, run against the config a PATCH is about to save (submitted
@@ -1009,6 +1016,19 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
       body[key] = trimmed; // the write filter below reads `body`, not this loop's snapshot
     }
+
+    // The statistics zone is bound into every hour/day bucket of the activity
+    // SQL. Only a zone that Intl knows by name AND Postgres can use is stored,
+    // in Intl's canonical spelling ("america/new_york" → "America/New_York"); a
+    // bare offset is refused, as Postgres reads "+05:00" with east and west
+    // swapped. Blank clears it (CLEARABLE_KEYS): back to the process zone.
+    if (key === STATS_TIME_ZONE_KEY) {
+      const zone = normalizeTimeZone(value);
+      if (!zone || !(await databaseKnowsTimeZone(zone))) {
+        return NextResponse.json({ error: t("apiAdmin.settings.timeZoneInvalid", { key }) }, { status: 400 });
+      }
+      body[key] = zone;
+    }
   }
 
   // Never leave the machine-session API enabled with an empty IP allowlist. The
@@ -1251,6 +1271,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   invalidateApnsRelayCache();
   // The MDBList plan is memoized for 30s too (mdblist.ts); a new plan applies now.
   if (changedKeys.includes(MDBLIST_PLAN_SETTING_KEY)) invalidateMdblistPlanCache();
+  // A new statistics zone applies on the next request: the zone is part of every
+  // bucketed aggregate's cache key, so dropping the zone memo is enough.
+  if (changedKeys.includes(STATS_TIME_ZONE_KEY)) invalidateStatsTimeZone();
   if (changedKeys.some((k) => k === "sessionDefaultDuration" || k === "sessionMobileDuration" || k === "sessionMaxDuration")) {
     invalidateSessionDurationsCache();
   }

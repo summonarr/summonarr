@@ -328,7 +328,7 @@ test("fetchAndCacheOmdbForTmdb: bearer-authed TMDB external_ids resolve (wire pi
     rottenTomatoes: "91%",
     metacritic: "77/100",
   };
-  const result = await fetchAndCacheOmdbForTmdb(550, "movie", "omdb:tmdb:movie:550", "1999-10-15");
+  const result = await fetchAndCacheOmdbForTmdb(550, "movie", "1999-10-15");
   assert.deepEqual(result, { found: true, data: expected });
 
   assert.equal(fetchCalls.length, 2);
@@ -348,7 +348,7 @@ test("fetchAndCacheOmdbForTmdb: bearer-authed TMDB external_ids resolve (wire pi
 
 test("TMDB reports no imdb_id: the tmdb key gets an age-scaled not-found sentinel and OMDB is never called", async () => {
   route({ tmdb: () => jsonResponse({ imdb_id: null }) });
-  const result = await fetchAndCacheOmdbForTmdb(603, "movie", "omdb:tmdb:movie:603", "2003-05-15");
+  const result = await fetchAndCacheOmdbForTmdb(603, "movie", "2003-05-15");
   assert.deepEqual(result, { found: false, keyConfigured: true }); // authoritative absence — no transient flag
   assert.equal(fetchCalls.length, 1); // external_ids only
 
@@ -364,7 +364,7 @@ test("TMDB reports no imdb_id: the tmdb key gets an age-scaled not-found sentine
 test("a FRESH release absent from OMDB keeps the fast 24h negative TTL (late indexing heals within a day)", async () => {
   const currentYear = new Date().getFullYear(); // mocked — 2026
   route({ tmdb: () => jsonResponse({ imdb_id: null }) });
-  await fetchAndCacheOmdbForTmdb(605, "movie", "omdb:tmdb:movie:605", `${currentYear}-01-01`);
+  await fetchAndCacheOmdbForTmdb(605, "movie", `${currentYear}-01-01`);
   const row = cacheRows.get("omdb:tmdb:movie:605");
   assert.ok(row);
   assert.equal(row.expiresAt.getTime(), Date.now() + DAY_MS);
@@ -372,7 +372,7 @@ test("a FRESH release absent from OMDB keeps the fast 24h negative TTL (late ind
 
 test("a failed external_ids fetch is transient: warned, nothing cached, no OMDB call", async () => {
   route({ tmdb: () => new Response("upstream broke", { status: 500 }) });
-  const result = await fetchAndCacheOmdbForTmdb(604, "tv", "omdb:tmdb:tv:604");
+  const result = await fetchAndCacheOmdbForTmdb(604, "tv");
   assert.deepEqual(result, { found: false, keyConfigured: true, transient: true });
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].url.toString(), "https://api.themoviedb.org/3/tv/604/external_ids"); // tv path
@@ -384,14 +384,21 @@ test("a failed external_ids fetch is transient: warned, nothing cached, no OMDB 
 });
 
 test("an OMDB transient error inside the chain maps to { transient: true } with NOTHING cached at either key", async () => {
-  route({
-    tmdb: () => jsonResponse({ imdb_id: "tt0000200" }),
-    omdb: () => jsonResponse({ Response: "False", Error: "Invalid API key!" }),
-  });
-  const result = await fetchAndCacheOmdbForTmdb(605, "movie", "omdb:tmdb:movie:605");
-  assert.deepEqual(result, { found: false, keyConfigured: true, transient: true });
-  assert.equal(cacheUpserts.length, 0); // neither omdb:tt0000200 nor the tmdb key
-  assert.ok(errors.some((e) => e.includes("[omdb]")), "the swallowed throw must be logged");
+  // OMDb's "Invalid API key!" latches THAT key (pinned in omdb-quota.test.mts),
+  // so this runs on a key of its own and the tests below keep the default one.
+  resetApiKey("key-omdb-refuses");
+  try {
+    route({
+      tmdb: () => jsonResponse({ imdb_id: "tt0000200" }),
+      omdb: () => jsonResponse({ Response: "False", Error: "Invalid API key!" }),
+    });
+    const result = await fetchAndCacheOmdbForTmdb(605, "movie");
+    assert.deepEqual(result, { found: false, keyConfigured: true, transient: true });
+    assert.equal(cacheUpserts.length, 0); // neither omdb:tt0000200 nor the tmdb key
+    assert.ok(warns.some((w) => w.includes("[omdb] OMDb refused the API key")), "the swallowed throw must be said");
+  } finally {
+    resetApiKey(DEFAULT_KEY);
+  }
 });
 
 test("no TMDB read token: keyConfigured-only miss — NO transient flag, no fetch, no cache write", async () => {
@@ -400,7 +407,7 @@ test("no TMDB read token: keyConfigured-only miss — NO transient flag, no fetc
   // exists. deepEqual pins the exact shape (transient must be ABSENT).
   delete process.env.TMDB_READ_TOKEN;
   try {
-    const result = await fetchAndCacheOmdbForTmdb(606, "movie", "omdb:tmdb:movie:606");
+    const result = await fetchAndCacheOmdbForTmdb(606, "movie");
     assert.deepEqual(result, { found: false, keyConfigured: true, tmdbUnconfigured: true });
     assert.equal(fetchCalls.length, 0);
     assert.equal(cacheUpserts.length, 0);
@@ -560,7 +567,7 @@ test("a stale hinted imdbId that OMDB no longer knows re-resolves live ONCE and 
         : jsonResponse({ Response: "False", Error: "Incorrect IMDb ID." }),
   });
 
-  const r = await fetchAndCacheOmdbForTmdb(760, "movie", "omdb:tmdb:movie:760", null, "tt0000OLD");
+  const r = await fetchAndCacheOmdbForTmdb(760, "movie", null, "tt0000OLD");
   assert.equal(r.found, true);
   assert.equal(r.found && r.data.imdbId, "tt0000NEW");
   // Chain: OMDB(old id, miss) → TMDB re-resolve → OMDB(new id, hit) = 3 calls,

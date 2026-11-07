@@ -1,13 +1,13 @@
 import Link from "next/link";
 import { requireAppSession } from "@/lib/require-app-session";
-import { getMyWrapped } from "@/lib/my-watch-history";
-import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
-import { posterUrl } from "@/lib/tmdb-types";
+import { getMyWrapped, isMediaServerProvider } from "@/lib/my-watch-history";
+import { resolvePosterMap, posterSrcFor } from "@/lib/poster-cache";
 import { ChevronLeft, Sparkles } from "@/components/icons";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { WrappedView, type WrappedData } from "@/components/watch-history/wrapped-view";
 import { TrackingOffState } from "@/components/watch-history/tracking-off-state";
 import { isPlayHistoryEnabled } from "@/lib/play-history";
+import { zonedDayKey } from "@/lib/stats-time-zone";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getTranslator } from "@/lib/i18n/server";
 
@@ -64,9 +64,7 @@ export default async function WrappedPage({
   const requested = sp.year && /^\d{4}$/.test(sp.year) ? parseInt(sp.year, 10) : undefined;
   const { linked, years, year, data } = await getMyWrapped(session.user.id, requested);
 
-  const provider = session.user.provider ?? "";
-  const serverProvider =
-    provider === "plex" || provider === "jellyfin" || provider === "jellyfin-quickconnect";
+  const serverProvider = isMediaServerProvider(session.user.provider);
 
   let view: WrappedData | null = null;
   if (data && year != null) {
@@ -75,21 +73,22 @@ export default async function WrappedPage({
     const posterItems = [...data.topTitles, ...(data.longestSitting ? [data.longestSitting] : [])];
     const posters = await resolvePosterMap(posterItems);
     const src = (tmdbId: number | null, mediaType: string | null, posterPath: string | null) =>
-      (tmdbId != null ? posters[posterPathKey(tmdbId, mediaType)] : undefined) ??
-      (posterPath ? posterUrl(posterPath, "w342") : null);
+      posterSrcFor(posters, tmdbId, mediaType, posterPath);
     view = {
       year,
-      isCurrentYear: year === new Date().getUTCFullYear(),
+      // The year runs on the statistics zone's calendar, like the data.
+      isCurrentYear: year === Number(zonedDayKey(new Date(), data.timeZone).slice(0, 4)),
+      timeZone: data.timeZone,
       totals: data.totals,
       movies: data.movies,
       tv: data.tv,
-      topTitles: data.topTitles.map((t) => ({
-        title: t.title,
-        tmdbId: t.tmdbId,
-        mediaType: t.mediaType,
-        count: t.count,
-        hours: t.hours,
-        posterSrc: src(t.tmdbId, t.mediaType, t.posterPath),
+      topTitles: data.topTitles.map((top) => ({
+        title: top.title,
+        tmdbId: top.tmdbId,
+        mediaType: top.mediaType,
+        count: top.count,
+        hours: top.hours,
+        posterSrc: src(top.tmdbId, top.mediaType, top.posterPath),
       })),
       biggestDay: data.biggestDay,
       busiestMonth: data.busiestMonth,

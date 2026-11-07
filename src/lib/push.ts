@@ -11,6 +11,7 @@ import { titleResolver, type TitleResolver } from "@/lib/tmdb-localize";
 import type { Locale } from "@/lib/i18n/locales";
 import type { Translator } from "@/lib/i18n/translate";
 import { issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
 
 type VapidKeys = { publicKey: string; privateKey: string; contact: string };
 
@@ -102,11 +103,16 @@ export function buildVapidContact(smtpFrom?: string | null, smtpUser?: string | 
   return `mailto:${addr || "admin@localhost"}`;
 }
 
+const VAPID_UNREADABLE_WARN_KEY = "push:vapid-unreadable";
+
 export async function getOrCreateVapidPublicKey(): Promise<string> {
   // VAPID keys must never change once subscriptions exist: new keys would
   // invalidate every stored browser subscription.
   const existing = await getVapidKeysRaw();
-  if (existing) return existing.publicKey;
+  if (existing) {
+    forgetWarnOnChange(VAPID_UNREADABLE_WARN_KEY); // a repaired pair re-arms the warning below
+    return existing.publicKey;
+  }
 
   const generated = generateVapidKeys();
   try {
@@ -154,7 +160,20 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
   }
 
   const keys = await getVapidKeysRaw();
-  return keys?.publicKey ?? generated.publicKey;
+  if (keys) return keys.publicKey;
+  // Both rows exist but a value reads empty — blank, or undecryptable (the
+  // Prisma extension hands back "" for a value it can't decrypt, e.g. a restore
+  // under another TOKEN_ENCRYPTION_KEY). The locked check above saw two rows and
+  // wrote nothing, so the generated pair was never stored: handing out its
+  // public half would let a browser subscribe to a key nothing can sign for.
+  // "" makes the vapid-key route answer 503. Logged once per state (7b): every
+  // subscribe attempt lands here.
+  warnOnChange(
+    VAPID_UNREADABLE_WARN_KEY,
+    "unreadable",
+    "[push] VAPID key Settings exist but a value is empty or could not be decrypted — repair vapidPublicKey/vapidPrivateKey (or TOKEN_ENCRYPTION_KEY); web push is disabled until then",
+  );
+  return "";
 }
 
 // ── iOS (APNs via the central relay) ─────────────────────────────────────────
@@ -258,15 +277,18 @@ async function getApnsRelayConfig(): Promise<{ url: string; key: string }> {
   if (apnsRelayCache && now - apnsRelayCache.at < APNS_RELAY_TTL_MS) return apnsRelayCache.value;
   if (apnsRelayInflight) return apnsRelayInflight;
   const epochAtStart = apnsRelayEpoch;
-  apnsRelayInflight = readApnsRelayConfig()
+  const load: Promise<{ url: string; key: string }> = readApnsRelayConfig()
     .then((value) => {
       if (apnsRelayEpoch === epochAtStart) apnsRelayCache = { value, at: Date.now() };
       return value;
     })
     .finally(() => {
-      apnsRelayInflight = null;
+      // Only clear our own slot: after an invalidation a newer load owns it, and
+      // dropping that one would send the next caller to a redundant third read.
+      if (apnsRelayInflight === load) apnsRelayInflight = null;
     });
-  return apnsRelayInflight;
+  apnsRelayInflight = load;
+  return load;
 }
 
 async function readApnsRelayConfig(): Promise<{ url: string; key: string }> {
@@ -462,44 +484,50 @@ async function pushContext(): Promise<{ keys: VapidKeys | null } | null> {
   return { keys: await getVapidKeysRaw() };
 }
 
-async function getAdminSubscriptions(excludeUserId?: string, userWhere: { pushOnComment?: true } = {}) {
-  // Recipients are users whose permissions include MANAGE_REQUESTS (used for
-  // new requests, deletion votes and manual *arr imports).
-  const subs = await prisma.pushSubscription.findMany({
+// The devices of every active user holding `permission`. Permissions are a
+// BigInt bitmask that the ADMIN role and bit widen (effectivePermissions), which
+// SQL can't filter, so the check runs in JS — over the small user rows, never
+// over every user's subscriptions and their encrypted key columns. Read fresh on
+// every send: a revoked permission must stop pushes at once.
+async function permissionHolderSubscriptions(
+  permission: bigint,
+  userWhere: { pushOnComment?: true; notifyOnIssue?: true; id?: string | { not: string } },
+) {
+  const users = await prisma.user.findMany({
     // A disabled account keeps its PushSubscription rows (guardrail 33 — the
     // deactivate write set is exactly two fields), so its devices would keep
     // buzzing with other people's requests indefinitely.
-    where: { user: { deactivatedAt: null, ...userWhere }, ...(excludeUserId ? { userId: { not: excludeUserId } } : {}) },
-    include: { user: { select: { role: true, permissions: true, locale: true } } },
+    where: { deactivatedAt: null, ...userWhere },
+    select: { id: true, role: true, permissions: true },
   });
-  return subs.filter((s) => {
-    const p = s.user?.permissions ?? 0;
-    const r = s.user?.role ?? "USER";
-    const perms = effectivePermissions(r, parsePermissions(String(p)));
-    return hasPermission(perms, Permission.MANAGE_REQUESTS);
+  const ids = users
+    .filter((u) => hasPermission(effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0))), permission))
+    .map((u) => u.id);
+  if (ids.length === 0) return [];
+  return prisma.pushSubscription.findMany({
+    // deactivatedAt again: an account disabled between the two reads.
+    where: { userId: { in: ids }, user: { deactivatedAt: null } },
+    include: WITH_LOCALE,
   });
 }
 
+// Holders of MANAGE_REQUESTS (new requests, deletion votes, manual *arr imports).
+async function getAdminSubscriptions(excludeUserId?: string, userWhere: { pushOnComment?: true } = {}) {
+  return permissionHolderSubscriptions(Permission.MANAGE_REQUESTS, {
+    ...userWhere,
+    ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
+  });
+}
+
+// Holders of MANAGE_ISSUES who keep issue notifications on.
 async function getIssueAdminSubscriptions(opts: { excludeUserId?: string; restrictToUserId?: string } = {}) {
   if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return [];
-  const userIdFilter = opts.restrictToUserId
-    ? { userId: opts.restrictToUserId }
+  const idFilter = opts.restrictToUserId
+    ? { id: opts.restrictToUserId }
     : opts.excludeUserId
-      ? { userId: { not: opts.excludeUserId } }
+      ? { id: { not: opts.excludeUserId } }
       : {};
-  const subs = await prisma.pushSubscription.findMany({
-    where: {
-      ...userIdFilter,
-      user: { notifyOnIssue: true, deactivatedAt: null }, // see getAdminSubscriptions
-    },
-    include: { user: { select: { role: true, permissions: true, locale: true } } },
-  });
-  return subs.filter((s) => {
-    const p = s.user?.permissions ?? 0;
-    const r = s.user?.role ?? "USER";
-    const perms = effectivePermissions(r, parsePermissions(String(p)));
-    return hasPermission(perms, Permission.MANAGE_ISSUES);
-  });
+  return permissionHolderSubscriptions(Permission.MANAGE_ISSUES, { notifyOnIssue: true, ...idFilter });
 }
 
 async function sendPush(
@@ -537,6 +565,12 @@ async function sendPush(
     }
     return false;
   }
+}
+
+// Clips free text (a message, a resolution) to a push-sized line: at most `max`
+// characters, the last three of a longer one replaced by an ellipsis.
+function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max - 3) + "…" : text;
 }
 
 // Builds the encrypted-only media deep link (/media/<type>/<tmdbId>). Undefined
@@ -606,7 +640,7 @@ export async function notifyUserIssueMessagePush(data: {
     const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
     const payloadFor = localizedPayloads((t, locale) => ({
       title: t("notify.push.userIssueMessage.title", { title: resolve(data, locale) }),
-      body: data.body.length > 100 ? data.body.slice(0, 97) + "…" : data.body,
+      body: truncate(data.body, 100),
       url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
       category: "issue_reply",
     }));
@@ -638,7 +672,7 @@ export async function notifyUserRequestCommentPush(data: {
     const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
     const payloadFor = localizedPayloads((t, locale) => ({
       title: t("notify.push.userRequestComment.title", { title: resolve(data, locale) }),
-      body: data.body.length > 100 ? data.body.slice(0, 97) + "…" : data.body,
+      body: truncate(data.body, 100),
       url: `/requests?comments=${data.requestId}`,
       category: "request_comment",
       deepLink: requestDeepLink(data.requestId),
@@ -669,7 +703,7 @@ export async function notifyAdminsRequestCommentPush(data: {
     const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
     const payloadFor = localizedPayloads((t, locale) => ({
       title: t("notify.push.adminRequestComment.title", { title: resolve(data, locale) }),
-      body: `${data.userName}: ${data.body.length > 80 ? data.body.slice(0, 77) + "…" : data.body}`,
+      body: `${data.userName}: ${truncate(data.body, 80)}`,
       url: `/admin?comments=${data.requestId}`,
       category: "request_comment",
       deepLink: requestDeepLink(data.requestId),
@@ -703,11 +737,7 @@ export async function notifyUserIssueResolvedPush(data: {
     const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
     const payloadFor = localizedPayloads((t, locale) => ({
       title: t("notify.push.issueResolved.title", { title: resolve(data, locale) }),
-      body: resolution
-        ? resolution.length > 100
-          ? resolution.slice(0, 97) + "…"
-          : resolution
-        : t("notify.push.issueResolved.body"),
+      body: resolution ? truncate(resolution, 100) : t("notify.push.issueResolved.body"),
       url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
       category: "issue_resolved",
     }));
@@ -744,7 +774,7 @@ export async function notifyAdminsIssueMessagePush(data: {
       title: data.fromAdmin
         ? t("notify.push.adminIssueMessage.titleFromAdmin", { title: resolve(data, locale) })
         : t("notify.push.adminIssueMessage.title", { title: resolve(data, locale) }),
-      body: `${data.userName}: ${data.body.length > 80 ? data.body.slice(0, 77) + "…" : data.body}`,
+      body: `${data.userName}: ${truncate(data.body, 80)}`,
       url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
       category: "issue_reply",
     }));
@@ -819,7 +849,7 @@ export async function notifyAdminGrabCompletedPush(data: {
   }
 }
 
-type RequestPushInfo = { title: string; mediaType: string; tmdbId?: number };
+type RequestPushInfo = { title: string; mediaType: string; tmdbId?: number | null };
 
 function approvedPayloads(r: RequestPushInfo, resolve: TitleResolver) {
   return localizedPayloads((t, locale) => ({
@@ -851,63 +881,27 @@ function availablePayloads(r: RequestPushInfo, resolve: TitleResolver) {
   }));
 }
 
-export async function notifyUserRequestApprovedPush(data: {
-  userId: string;
-  title: string;
-  mediaType: string;
-  tmdbId?: number;
-}) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
+type RequestStatusPushFlag = "pushOnApproved" | "pushOnDeclined" | "pushOnAvailable";
 
-    const user = await prisma.user.findUnique({
-      where: { id: data.userId },
-      select: { pushOnApproved: true, locale: true },
-    });
-    if (!user?.pushOnApproved) return;
+type RequestPayloads = (r: RequestPushInfo, resolve: TitleResolver) => ReturnType<typeof localizedPayloads>;
 
-    const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
-    if (!subs.length) return;
+const REQUESTERS_PUSH_WHERE = {
+  pushOnApproved: { pushOnApproved: true },
+  pushOnDeclined: { pushOnDeclined: true },
+  pushOnAvailable: { pushOnAvailable: true },
+} as const;
 
-    const payload = approvedPayloads(data, await titleResolver([data], recipientLocales([user])))(user);
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
-  } catch (err) {
-    console.error("[push] Failed to notify user (approved):", err);
-  }
-}
-
-export async function notifyUserRequestDeclinedPush(data: {
-  userId: string;
-  title: string;
-  mediaType: string;
-  tmdbId?: number;
-}) {
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const user = await prisma.user.findUnique({
-      where: { id: data.userId },
-      select: { pushOnDeclined: true, locale: true },
-    });
-    if (!user?.pushOnDeclined) return;
-
-    const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
-    if (!subs.length) return;
-
-    const payload = declinedPayloads(data, await titleResolver([data], recipientLocales([user])))(user);
-
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
-  } catch (err) {
-    console.error("[push] Failed to notify user (declined):", err);
-  }
-}
-
-export async function notifyUsersRequestsAvailablePush(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number }>
-) {
+// The batch request-status push: requesters who opted in (`flag`) and are not
+// disabled — account removal keeps the PushSubscription rows (guardrail 33) —
+// every device each of them registered, titles resolved once in every
+// recipient's language (guardrail 40a). Bounded fan-out (guardrail 31): a sync
+// can flip a backlog, and a batch approve covers many requests, each × devices.
+async function notifyRequestersPush(
+  requests: Array<{ requestedBy: string } & RequestPushInfo>,
+  flag: RequestStatusPushFlag,
+  payloads: RequestPayloads,
+  logLabel: string,
+): Promise<void> {
   if (requests.length === 0) return;
   try {
     const ctx = await pushContext();
@@ -915,7 +909,7 @@ export async function notifyUsersRequestsAvailablePush(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, pushOnAvailable: true },
+      where: { id: { in: userIds }, ...REQUESTERS_PUSH_WHERE[flag], deactivatedAt: null },
       select: { id: true, locale: true },
     });
     const eligibleIds = new Set(users.map((u) => u.id));
@@ -939,110 +933,33 @@ export async function notifyUsersRequestsAvailablePush(
 
     const jobs = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
-      if (!userSubs.length) return [];
-      const payload = availablePayloads(r, resolve)(userById.get(r.requestedBy));
-      // Send to every one of the user's devices, like the approved/declined pushes.
+      const payload = payloads(r, resolve)(userById.get(r.requestedBy));
       return userSubs.map((s) => ({ sub: s, payload }));
     });
-    // Bounded fan-out (guardrail 31): a large sync can flip a whole backlog to
-    // available at once (requests × devices) — cap in-flight sends like the
-    // APNs broadcast path.
     await settleLimit(jobs, 8, (j) => sendPush(ctx.keys, j.sub, j.payload));
   } catch (err) {
-    console.error("[push] Failed to notify users (available):", err);
+    console.error(`[push] Failed to notify users (${logLabel}):`, err);
   }
+}
+
+// Callers pass only claimed, deliverable rows (request-notifications.ts); the
+// shared deactivatedAt filter keeps the three batch notifiers alike.
+export async function notifyUsersRequestsAvailablePush(
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
+) {
+  await notifyRequestersPush(requests, "pushOnAvailable", availablePayloads, "available");
 }
 
 export async function notifyUsersRequestsApprovedPush(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number }>
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
 ) {
-  if (requests.length === 0) return;
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const userIds = [...new Set(requests.map((r) => r.requestedBy))];
-    const users = await prisma.user.findMany({
-      // deactivatedAt: null — account removal disables rather than scrubs
-      // (guardrail 33), so a removed user keeps live push subscriptions and
-      // would otherwise still get pinged by a later batch approve/decline.
-      where: { id: { in: userIds }, pushOnApproved: true, deactivatedAt: null },
-      select: { id: true, locale: true },
-    });
-    const eligibleIds = new Set(users.map((u) => u.id));
-    const userById = new Map(users.map((u) => [u.id, u]));
-
-    const eligible = requests.filter((r) => eligibleIds.has(r.requestedBy));
-    if (!eligible.length) return;
-
-    const subs = await prisma.pushSubscription.findMany({
-      where: { userId: { in: [...eligibleIds] } },
-    });
-    if (!subs.length) return;
-
-    const resolve = await titleResolver(eligible, recipientLocales(users));
-    const subsByUser = new Map<string, typeof subs>();
-    for (const s of subs) {
-      const arr = subsByUser.get(s.userId) ?? [];
-      arr.push(s);
-      subsByUser.set(s.userId, arr);
-    }
-
-    const jobs = eligible.flatMap((r) => {
-      const userSubs = subsByUser.get(r.requestedBy) ?? [];
-      const payload = approvedPayloads(r, resolve)(userById.get(r.requestedBy));
-      return userSubs.map((s) => ({ sub: s, payload }));
-    });
-    // Bounded fan-out (guardrail 31): batch approvals fan out requests × devices.
-    await settleLimit(jobs, 8, (j) => sendPush(ctx.keys, j.sub, j.payload));
-  } catch (err) {
-    console.error("[push] Failed to notify users (approved):", err);
-  }
+  await notifyRequestersPush(requests, "pushOnApproved", approvedPayloads, "approved");
 }
 
 export async function notifyUsersRequestsDeclinedPush(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number }>
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
 ) {
-  if (requests.length === 0) return;
-  try {
-    const ctx = await pushContext();
-    if (!ctx) return;
-
-    const userIds = [...new Set(requests.map((r) => r.requestedBy))];
-    const users = await prisma.user.findMany({
-      // deactivatedAt: null — see notifyUsersRequestsApprovedPush.
-      where: { id: { in: userIds }, pushOnDeclined: true, deactivatedAt: null },
-      select: { id: true, locale: true },
-    });
-    const eligibleIds = new Set(users.map((u) => u.id));
-    const userById = new Map(users.map((u) => [u.id, u]));
-
-    const eligible = requests.filter((r) => eligibleIds.has(r.requestedBy));
-    if (!eligible.length) return;
-
-    const subs = await prisma.pushSubscription.findMany({
-      where: { userId: { in: [...eligibleIds] } },
-    });
-    if (!subs.length) return;
-
-    const resolve = await titleResolver(eligible, recipientLocales(users));
-    const subsByUser = new Map<string, typeof subs>();
-    for (const s of subs) {
-      const arr = subsByUser.get(s.userId) ?? [];
-      arr.push(s);
-      subsByUser.set(s.userId, arr);
-    }
-
-    const jobs = eligible.flatMap((r) => {
-      const userSubs = subsByUser.get(r.requestedBy) ?? [];
-      const payload = declinedPayloads(r, resolve)(userById.get(r.requestedBy));
-      return userSubs.map((s) => ({ sub: s, payload }));
-    });
-    // Bounded fan-out (guardrail 31): batch declines fan out requests × devices.
-    await settleLimit(jobs, 8, (j) => sendPush(ctx.keys, j.sub, j.payload));
-  } catch (err) {
-    console.error("[push] Failed to notify users (declined):", err);
-  }
+  await notifyRequestersPush(requests, "pushOnDeclined", declinedPayloads, "declined");
 }
 
 export async function notifyAdminsNewIssuePush(data: {
@@ -1093,7 +1010,7 @@ export async function notifyAdminsManualInteractionRequiredPush(data: {
     const subs = await getAdminSubscriptions();
     if (!subs.length) return;
 
-    const title = data.title.length > 100 ? data.title.slice(0, 97) + "…" : data.title;
+    const title = truncate(data.title, 100);
     const name = data.instanceName?.trim();
     const where = name && name !== "Default" ? `${data.service} (${name})` : data.service;
     const payloadFor = localizedPayloads((t) => ({

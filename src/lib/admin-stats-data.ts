@@ -14,6 +14,7 @@ import { REQUEST_APPROVAL_BACKFILL_KEY } from "./request-approval";
 import { getCachedArrLibraryIndex, type ArrLibraryEntry } from "./library-cleanup-arr";
 import { CLEANUP_FEATURE_KEY, computeCleanupReport } from "./library-cleanup-data";
 import { getWatchGradeSummaries } from "./watch-grade-data";
+import type { AutoRequestSource } from "./auto-request";
 import { watchGradeSpread, type WatchGradeSpread } from "./watch-grade";
 import {
   AUTO_APPROVE_WINDOW_SECONDS,
@@ -345,22 +346,30 @@ export async function getStuckRequests(limit = 10): Promise<StuckRequests> {
       FROM "MediaRequest" r
       WHERE r."approvedAt" IS NOT NULL AND r.status IN ('PENDING', 'APPROVED')
     )`;
-  const [counts, oldest] = await Promise.all([
-    prisma.$queryRaw<Array<{ reason: StuckReason; count: bigint }>>(Prisma.sql`
-      ${classified}
-      SELECT reason, COUNT(*)::bigint AS count FROM c WHERE reason IS NOT NULL GROUP BY reason
-    `),
-    prisma.$queryRaw<Array<{
-      id: string; tmdbId: number; mediaType: Media; title: string; arrInstance: string;
-      reason: StuckReason; approvedAt: Date; lastArrPushAt: Date | null;
-    }>>(Prisma.sql`
-      ${classified}
-      SELECT * FROM c WHERE reason IS NOT NULL ORDER BY "approvedAt" ASC, id ASC LIMIT ${limit}::int
-    `),
-  ]);
+  // ONE pass over the classification (its EXISTS probes run once per row): the
+  // oldest `limit` rows, plus each reason's first row to carry that reason's
+  // FULL count past the list's cut.
+  const rows = await prisma.$queryRaw<Array<{
+    id: string; tmdbId: number; mediaType: Media; title: string; arrInstance: string;
+    reason: StuckReason; approvedAt: Date; lastArrPushAt: Date | null;
+    reason_count: bigint; rn: bigint;
+  }>>(Prisma.sql`
+    ${classified}
+    SELECT * FROM (
+      SELECT c.*,
+             COUNT(*) OVER (PARTITION BY c.reason)::bigint AS reason_count,
+             ROW_NUMBER() OVER (ORDER BY c."approvedAt" ASC, c.id ASC) AS rn,
+             ROW_NUMBER() OVER (PARTITION BY c.reason ORDER BY c."approvedAt" ASC, c.id ASC) AS rn_reason
+      FROM c
+      WHERE c.reason IS NOT NULL
+    ) t
+    WHERE t.rn <= ${limit}::int OR t.rn_reason = 1
+    ORDER BY t.rn ASC
+  `);
+  const all = Array.isArray(rows) ? rows : [];
   const out: StuckRequests = { counts: { "push-failed": 0, "not-in-arr": 0, "slow-download": 0 }, oldest: [] };
-  for (const r of Array.isArray(counts) ? counts : []) out.counts[r.reason] = num(r.count);
-  out.oldest = (Array.isArray(oldest) ? oldest : []).map((r) => ({
+  for (const r of all) out.counts[r.reason] = num(r.reason_count);
+  out.oldest = all.filter((r) => num(r.rn) <= limit).map((r) => ({
     id: r.id,
     tmdbId: r.tmdbId,
     mediaType: r.mediaType,
@@ -373,16 +382,31 @@ export async function getStuckRequests(limit = 10): Promise<StuckRequests> {
   return out;
 }
 
-export interface RequestSources {
-  // Filed by the watchlist auto-request, per AutoRequestLedger source.
+// Filed by the watchlist auto-request, per AutoRequestLedger source.
+export interface AutoRequestSources {
+  // The in-app (Summonarr) watchlist.
   watchlist: number;
   plexWatchlist: number;
+  traktWatchlist: number;
+}
+
+export interface RequestSources extends AutoRequestSources {
   // Everything else: the web app, the iOS app, Discord and bulk requests, which
   // nothing records apart.
   other: number;
 }
 
-export async function getRequestSources(since: Date | null, total: number): Promise<RequestSources> {
+// Typed on AutoRequestSource, so a new ledger source fails to compile until it
+// has a bucket of its own here.
+const SOURCE_BUCKET: Record<AutoRequestSource, keyof AutoRequestSources> = {
+  watchlist: "watchlist",
+  "plex-watchlist": "plexWatchlist",
+  "trakt-watchlist": "traktWatchlist",
+};
+
+// Independent of the window's total, so it runs alongside the other aggregates;
+// requestSources() derives `other` once both are in.
+export async function getAutoRequestSources(since: Date | null): Promise<AutoRequestSources> {
   const rows = await prisma.$queryRaw<Array<{ source: string; count: bigint }>>(Prisma.sql`
     SELECT l.source, COUNT(DISTINCT r.id)::bigint AS count
     FROM "MediaRequest" r
@@ -390,13 +414,19 @@ export async function getRequestSources(since: Date | null, total: number): Prom
     WHERE TRUE ${sinceClause(since)}
     GROUP BY l.source
   `);
-  let watchlist = 0;
-  let plexWatchlist = 0;
+  const out: AutoRequestSources = { watchlist: 0, plexWatchlist: 0, traktWatchlist: 0 };
   for (const r of Array.isArray(rows) ? rows : []) {
-    if (r.source === "plex-watchlist") plexWatchlist += num(r.count);
-    else watchlist += num(r.count);
+    // A value no AutoRequestSource names (none is written today) stays in `other`
+    // rather than being credited to a source it isn't.
+    const bucket = Object.hasOwn(SOURCE_BUCKET, r.source) ? SOURCE_BUCKET[r.source as AutoRequestSource] : null;
+    if (bucket) out[bucket] += num(r.count);
   }
-  return { watchlist, plexWatchlist, other: Math.max(0, total - watchlist - plexWatchlist) };
+  return out;
+}
+
+// `total` is the window's request count (getRequestOverview).
+export function requestSources(auto: AutoRequestSources, total: number): RequestSources {
+  return { ...auto, other: Math.max(0, total - auto.watchlist - auto.plexWatchlist - auto.traktWatchlist) };
 }
 
 export interface InstanceCount {
@@ -868,10 +898,11 @@ async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
 // Letter spread across every active account that has filed a request. null
 // while grades are unavailable (feature off, tracking off) or on failure.
 export async function getWatchGradeSpreadForStats(): Promise<WatchGradeSpread | null> {
-  const rows = await prisma.mediaRequest.findMany({
+  // groupBy, not findMany + distinct: Prisma applies `distinct` in memory, so
+  // that shape sent every request row to Node to find the requesters.
+  const rows = await prisma.mediaRequest.groupBy({
+    by: ["requestedBy"],
     where: { user: { deactivatedAt: null } },
-    distinct: ["requestedBy"],
-    select: { requestedBy: true },
   });
   if (rows.length === 0) return null;
   const summaries = await getWatchGradeSummaries(rows.map((r) => r.requestedBy));

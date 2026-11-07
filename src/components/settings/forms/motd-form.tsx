@@ -1,14 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave } from "./shared";
 import { Switch } from "@/components/ui/switch";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -23,40 +22,13 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
   const [enabled, setEnabled] = useState(initialEnabled);
   const [title,  setTitle]  = useState(initialTitle);
   const [body,   setBody]   = useState(initialBody);
-  const [motdStatus, setMotdStatus] = useState<SaveStatus>("idle");
-  // The route's own reason (too long, a 429 cooldown) — shown in place of the
-  // bare "Failed to save".
-  const [errorMessage, setErrorMessage] = useState("");
-  // An earlier save's idle timer must not fire into a later save (it would
-  // re-enable Save mid-flight or hide the new result early).
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-  }, []);
+  // `errorMessage` is the route's own reason (too long, a 429 cooldown), shown
+  // in place of the bare "Failed to save".
+  const { status: motdStatus, message: errorMessage, save, edited } = useSettingsSave();
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    setMotdStatus("saving");
-    setErrorMessage("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ motdEnabled: enabled ? "true" : "false", motdTitle: title, motdBody: body }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setMotdStatus("ok");
-      } else {
-        setErrorMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setMotdStatus("error");
-      }
-    } catch {
-      setMotdStatus("error");
-    }
-    // Only an "ok" fades; an error stays until the next edit or save.
-    idleTimer.current = setTimeout(() => setMotdStatus((s) => (s === "ok" ? "idle" : s)), 3000);
+    await save({ motdEnabled: enabled ? "true" : "false", motdTitle: title, motdBody: body });
   }
 
   return (
@@ -68,7 +40,7 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
         </div>
         <Switch
           checked={enabled}
-          onCheckedChange={() => { setEnabled(!enabled); setMotdStatus("idle"); }}
+          onCheckedChange={() => { setEnabled(!enabled); edited(); }}
           aria-labelledby="motd-enabled-label"
           aria-describedby="motd-enabled-desc"
           className="shrink-0"
@@ -79,7 +51,7 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
         <Input
           id="motd-title"
           value={title}
-          onChange={(e) => { setTitle(e.target.value); setMotdStatus("idle"); }}
+          onChange={(e) => { setTitle(e.target.value); edited(); }}
           placeholder={t("settings.form.motd.titlePlaceholder")}
           className="bg-zinc-800 border-zinc-700"
         />
@@ -89,7 +61,7 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
         <Textarea
           id="motd-body"
           value={body}
-          onChange={(e) => { setBody(e.target.value); setMotdStatus("idle"); }}
+          onChange={(e) => { setBody(e.target.value); edited(); }}
           placeholder={t("settings.form.motd.messagePlaceholder")}
           rows={4}
           className="resize-none"

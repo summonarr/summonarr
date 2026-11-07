@@ -104,9 +104,27 @@ test("a TMDB details failure maps to notFound() ONLY on a genuine 404", () => {
     assert.ok(fetchAt > 0, `${rel}: expected a ${detailsFn}() call`);
     const catchBlock = src.slice(fetchAt, src.indexOf("});", fetchAt));
     assert.match(catchBlock, /throw err;/, `${rel}: the non-404 branch must rethrow to the error boundary`);
-    // Number(id) on "abc" is NaN and on "" is 0 — neither should reach TMDB.
-    assert.match(src, /Number\.isFinite\(tmdbId\)\s*\|\|\s*tmdbId <= 0\)\s*notFound\(\)/, `${rel}: malformed ids short-circuit to notFound()`);
+    // A malformed or non-canonical id ("abc", "", "1.5", "1e3", " 12 ") is a
+    // not-found BEFORE TMDB is asked — parseTmdbIdParam accepts canonical
+    // digits only (tests/tmdb-id.test.mts pins the parser itself).
+    const guard = /const tmdbId = parseTmdbIdParam\(id\);\s*if \(tmdbId === null \|\| !isTmdbIdInRange\(tmdbId\)\) notFound\(\);/.exec(src);
+    assert.ok(guard, `${rel}: malformed ids short-circuit to notFound() through parseTmdbIdParam`);
+    assert.ok(guard.index < fetchAt, `${rel}: the id guard must run before ${detailsFn}()`);
+    assert.doesNotMatch(src, /Number\(id\)/, `${rel}: Number(id) accepts "1e3", "0x3E8" and " 12 "`);
   }
+});
+
+test("the person page and GET /api/person/[id] parse the id the same strict way", () => {
+  const page = read("person/[id]/page.tsx");
+  const guard = /const personId = parseTmdbIdParam\(id\);\s*if \(personId === null \|\| !isTmdbIdInRange\(personId\)\) notFound\(\);/.exec(page);
+  assert.ok(guard, "person page: malformed ids short-circuit to notFound() through parseTmdbIdParam");
+  assert.ok(guard.index < page.indexOf("getEnrichedPerson(personId"), "the guard precedes the TMDB-backed read");
+  assert.ok(page.indexOf("await requireAppSession()") < guard.index, "the login gate still runs first");
+  // The 404-by-message policy is unchanged.
+  assert.match(page, /failed: 404\\b/);
+  const route = readFileSync(join(process.cwd(), "src", "app", "api", "person", "[id]", "route.ts"), "utf-8");
+  assert.match(route, /const personId = parseTmdbIdParam\(id\);/);
+  assert.doesNotMatch(route, /Number\(id\)/);
 });
 
 test("requireAppSession() precedes the TMDB fetch and leaves no nullable-session dead code", () => {
@@ -131,4 +149,74 @@ test("the notifications page always reads the caller's own rows (no nullable-ses
   assert.ok(src.includes("await requireAppSession()"));
   assert.doesNotMatch(src, /\bsession\s*\?\s/, "the `session ? … : [[], 0]` branch is unreachable after requireAppSession()");
   assert.match(src, /prisma\.notification\.findMany\(\{\s*where: \{ userId: session\.user\.id \}/);
+});
+
+// Both pages read their viewer-scoped state through ONE loader
+// (src/lib/detail-page-data.ts), so the rules below are pinned there once.
+const LOADER = readFileSync(join(process.cwd(), "src", "lib", "detail-page-data.ts"), "utf-8");
+
+test("both detail pages load their state through the shared loader, after the gate-first details read", () => {
+  for (const [rel, loader, type] of [["movie/[id]/page.tsx", "loadMovie", "MOVIE"], ["tv/[id]/page.tsx", "loadShow", "TV"]] as const) {
+    const src = read(rel);
+    const detailsAt = src.indexOf(`await ${loader}(id)`);
+    const stateAt = src.indexOf(`loadDetailPageState(session, media, "${type}")`);
+    assert.ok(detailsAt > 0 && stateAt > 0, `${rel}: expected the details read and the shared loader`);
+    // Keyed on media.id, after TMDB's 404 check — never on the URL id.
+    assert.ok(detailsAt < stateAt, `${rel}: the state read must follow the gate + details read`);
+    // No positional tuple in the page body: a swapped boolean slot compiles
+    // and mis-gates the UI. (The details loader's two-slot localize read is fine.)
+    const body = src.slice(src.indexOf("export default async function"));
+    assert.ok(!/\] = await Promise\.all\(\[/.test(body), `${rel}: a positional Promise.all destructure is back`);
+  }
+  assert.ok(!/\] = await Promise\.all\(\[/.test(LOADER), "the loader reads by name");
+});
+
+test("the 4K gate is getShow4kVisibility, not a page-local copy of it", () => {
+  assert.match(LOADER, /show4k: getShow4kVisibility\(session, isMovie \? "movie" : "tv"\)/);
+  for (const src of [LOADER, read("movie/[id]/page.tsx"), read("tv/[id]/page.tsx")]) {
+    assert.doesNotMatch(src, /request4kAll/, "the server-wide 4K flag is read inside getShow4kVisibility only");
+    assert.doesNotMatch(src, /isArrConfigured\(/, "'configured' is decided inside getShow4kVisibility only");
+  }
+  // 4K availability/queue state is shown only with the gate.
+  assert.match(LOADER, /arr4kAvailable: reads\.show4k && /);
+  assert.match(LOADER, /arr4kPending: reads\.show4k && /);
+});
+
+test("the library reads are scoped to the viewer's visible servers and never load the on-disk path", () => {
+  for (const [model, scope, select] of [
+    ["plexLibraryItem", "v.plex", "{ tmdbId: true }"],
+    ["jellyfinLibraryItem", "v.jellyfin", "{ communityRating: true }"],
+  ] as const) {
+    const at = LOADER.indexOf(`prisma.${model}.findFirst({`);
+    assert.ok(at > 0, `expected the ${model} read`);
+    const call = LOADER.slice(at, LOADER.indexOf("}),", at));
+    assert.ok(call.includes(`serverInstance: { in: ${scope} }`), `${model}: scoped to the visible instances (guardrail 35)`);
+    assert.ok(call.includes(`select: ${select}`), `${model}: a narrow select keeps filePath (guardrail 37f) out of the page`);
+  }
+});
+
+test("one request token per title, shared by every request action", () => {
+  assert.equal((LOADER.match(/generateRequestToken\(/g) ?? []).length, 1);
+  assert.match(LOADER, /requestToken: generateRequestToken\(tmdbId, mediaType, userId\)/);
+  const row = readFileSync(join(process.cwd(), "src", "components", "media", "detail-actions.tsx"), "utf-8");
+  assert.doesNotMatch(row, /generateRequestToken/);
+  assert.equal((row.match(/requestToken=\{state\.requestToken\}/g) ?? []).length, 4, "RequestButton, 4K, each named instance, and the vote");
+  for (const rel of Object.keys(PAGES)) assert.doesNotMatch(read(rel), /generateRequestToken/);
+});
+
+test("a failed side read on either detail page is logged under its source, then degrades to empty", () => {
+  const movie = read("movie/[id]/page.tsx");
+  assert.doesNotMatch(movie, /\.catch\(\(\) => \[\]\)/, "a silent swallow is back");
+  for (const source of ["credits", "suggestions", "collection", "genres"]) {
+    assert.ok(movie.includes(`.catch(warnEmpty("${source}"))`), `the ${source} read logs its failure`);
+  }
+  assert.match(movie, /emptyOnFailure\("movie-page", source, media\.id\)/);
+  const tv = read("tv/[id]/page.tsx");
+  assert.doesNotMatch(tv, /\.catch\(\(\) => \[\]\)/, "a silent swallow is back on the TV page");
+  for (const source of ["credits", "suggestions", "genres"]) {
+    assert.ok(tv.includes(`.catch(warnEmpty("${source}"))`), `the TV ${source} read logs its failure`);
+  }
+  assert.match(tv, /emptyOnFailure\("tv-page", source, media\.id\)/);
+  // The admin arr links log under each page's own scope.
+  assert.match(LOADER, /arrInstancesForTitle\(service, tmdbId\)\.catch\(emptyOnFailure\(isMovie \? "movie-page" : "tv-page", "arr-links", tmdbId\)\)/);
 });

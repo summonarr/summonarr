@@ -1,7 +1,6 @@
 "use client";
 
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 import type { Genre, WatchProvider } from "@/lib/tmdb-types";
 import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
@@ -9,28 +8,22 @@ import { FilterBar as SortSegments } from "@/components/ui/design";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { CERTIFICATION_CAPS } from "@/lib/studio-list";
+import {
+  hasActiveFilters,
+  overlayBrowseFilters,
+  type BrowseFilters,
+  type PendingDelta,
+} from "@/lib/browse-filters";
+import { usePendingFilters } from "./use-pending-filters";
 
 interface FilterBarProps {
   genres: Genre[];
   watchProviders?: WatchProvider[];
-  activeGenreId?: string;
-  activeKeywordId?: string;
-  activeKeywordName?: string;
-  activeCompanyId?: string;
-  activeCompanyName?: string;
-  activeNetworkId?: string;
-  activeNetworkName?: string;
-  activeCertification?: string;
+  // The COMMITTED filters (parseBrowseFilters over the URL). What the controls
+  // show is these overlaid with the changes still in flight.
+  filters: BrowseFilters;
   // Movies only: TMDB cannot cap a TV discover by content rating.
   showCertification?: boolean;
-  activeMinRating?: string;
-  activeRatingFilter?: string;
-  activeMinVoteCount?: string;
-  activeFromYear?: string;
-  activeToYear?: string;
-  activeSortBy?: string;
-  activeWatchProvider?: string;
-  activeHideAvailable?: boolean;
   // Latest year for the From/To Year dropdowns. Computed server-side so SSR
   // and hydration share one value — see the comment over `buildYears` below.
   maxYear: number;
@@ -130,91 +123,25 @@ const TOP_PROVIDER_IDS = new Set([
 export function FilterBar({
   genres,
   watchProviders,
-  activeGenreId,
-  activeKeywordId,
-  activeKeywordName,
-  activeCompanyId,
-  activeCompanyName,
-  activeNetworkId,
-  activeNetworkName,
-  activeCertification,
+  filters,
   showCertification = false,
-  activeMinRating,
-  activeRatingFilter,
-  activeMinVoteCount,
-  activeFromYear,
-  activeToYear,
-  activeSortBy,
-  activeWatchProvider,
-  activeHideAvailable,
   maxYear,
   navigate,
 }: FilterBarProps) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
   const t = useT();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
-  // Filter changes we have pushed but that the URL has not caught up with yet.
-  //
-  // `searchParams` reflects the COMMITTED url, and router.push is async — so
-  // changing two filters in quick succession used to rebuild the second query
-  // string from a snapshot that still held the first filter's OLD value, wiping
-  // the change the user had just made. It presented as a dropdown reverting to
-  // a year nobody picked, with the chip agreeing, so nothing on screen showed
-  // that a change had been dropped. Waiting ~2s between changes worked because
-  // the first navigation had committed by then.
-  //
-  // Keeping a DELTA rather than a full snapshot is what makes this correct for
-  // a third change too: every not-yet-committed change is reapplied on top of
-  // whatever `searchParams` currently says.
-  const pendingRef = useRef<Record<string, string | undefined>>({});
-  const committed = searchParams.toString();
+  // Pushing, the in-flight delta, and its reconciliation with the URL live in
+  // usePendingFilters (shared with TopFilterBar). Every control reads `f`, the
+  // committed filters with that delta applied, so a pick shows at once instead
+  // of snapping back until the server render lands.
+  const { pending, push, clearAll } = usePendingFilters(navigate);
+  const f = overlayBrowseFilters(filters, pending);
 
-  // Drop deltas the URL has caught up with; anything still in flight stays.
-  useEffect(() => {
-    const current = new URLSearchParams(committed);
-    for (const [k, v] of Object.entries(pendingRef.current)) {
-      const landed = v === undefined || v === "" ? current.get(k) === null : current.get(k) === v;
-      if (landed) delete pendingRef.current[k];
-    }
-  }, [committed]);
-
-  // Back/forward replaces the query string wholesale, so any optimistic delta
-  // is void — without this it would be reapplied on the next filter change and
-  // silently undo the user's Back.
-  useEffect(() => {
-    const onPop = () => { pendingRef.current = {}; };
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
-
-  const push = useCallback((updates: Record<string, string | undefined>) => {
-    Object.assign(pendingRef.current, updates);
-    const params = new URLSearchParams(searchParams.toString());
-    for (const [k, v] of Object.entries(pendingRef.current)) {
-      if (v === undefined || v === "") params.delete(k);
-      else params.set(k, v);
-    }
-    params.delete("page");
-    // Wrapped by the parent's transition so the grid can show a pending
-    // overlay for the whole navigation, not just its tail.
-    navigate(() => router.push(`${pathname}?${params.toString()}`));
-  }, [router, pathname, searchParams, navigate]);
-
-  // Clearing bypasses `push` (it drops every param rather than editing some),
-  // so it has to drop the delta too or the next change resurrects the filters
-  // that were just cleared.
-  const clearAll = useCallback(() => {
-    pendingRef.current = {};
-    navigate(() => router.push(pathname));
-  }, [router, pathname, navigate]);
-
-  const activeRatingValue = activeRatingFilter
-    ? activeRatingFilter
-    : activeMinRating
-    ? `tmdb:${activeMinRating}`
+  const activeRatingValue = f.ratingFilter
+    ? f.ratingFilter
+    : f.minRating
+    ? `tmdb:${f.minRating}`
     : "";
 
   function handleRatingChange(value: string) {
@@ -227,8 +154,8 @@ export function FilterBar({
     }
   }
 
-  const hasFilters = !!(activeGenreId || activeKeywordId || activeCompanyId || activeNetworkId || activeCertification || activeMinRating || activeRatingFilter || activeMinVoteCount || activeFromYear || activeToYear || activeSortBy || activeWatchProvider || activeHideAvailable);
-  const chipLabel = ratingChipLabel(t, activeMinRating, activeRatingFilter);
+  const hasFilters = hasActiveFilters(f);
+  const chipLabel = ratingChipLabel(t, f.minRating, f.ratingFilter);
 
   const sortedProviders = (watchProviders ?? []).slice().sort((a, b) => {
     const aTop = TOP_PROVIDER_IDS.has(a.provider_id);
@@ -244,13 +171,60 @@ export function FilterBar({
     // is written around the clock, but locale is the same class of bug.
     return a.provider_name.localeCompare(b.provider_name, "en");
   });
-  const activeProviderName = sortedProviders.find((p) => String(p.provider_id) === activeWatchProvider)?.provider_name;
+  const activeProviderName = sortedProviders.find((p) => String(p.provider_id) === f.watchProvider)?.provider_name;
+
+  // The chips, built from the same conditions their JSX used to test inline,
+  // so the row only renders when it has something in it. A provider id the
+  // list doesn't name (the provider fetch failed, or a stale id) still gets a
+  // chip: otherwise that filter was active with no way to see or remove it.
+  const chips: { key: string; label: string; remove: PendingDelta }[] = [];
+  if (f.genreId) {
+    chips.push({ key: "genre", label: genres.find((g) => String(g.id) === f.genreId)?.name ?? f.genreId, remove: { genreId: undefined } });
+  }
+  if (f.keywordId) {
+    chips.push({ key: "keyword", label: f.keywordName ?? t("media.filter.keyword"), remove: { keywordId: undefined, keywordName: undefined } });
+  }
+  if (f.companyId) {
+    chips.push({ key: "company", label: f.companyName ?? t("media.filter.studio"), remove: { companyId: undefined, companyName: undefined } });
+  }
+  if (f.networkId) {
+    chips.push({ key: "network", label: f.networkName ?? t("media.filter.network"), remove: { networkId: undefined, networkName: undefined } });
+  }
+  if (f.certification && showCertification) {
+    chips.push({ key: "cert", label: t("media.filter.certUpTo", { rating: f.certification }), remove: { certification: undefined } });
+  }
+  if (chipLabel) {
+    chips.push({ key: "rating", label: chipLabel, remove: { minRating: undefined, ratingFilter: undefined } });
+  }
+  if (f.minVoteCount) {
+    chips.push({ key: "votes", label: voteCountLabel(t, f.minVoteCount), remove: { minVoteCount: undefined } });
+  }
+  if (f.fromYear) {
+    chips.push({ key: "from", label: t("media.filter.fromChip", { year: f.fromYear }), remove: { fromYear: undefined } });
+  }
+  if (f.toYear) {
+    chips.push({ key: "to", label: t("media.filter.toChip", { year: f.toYear }), remove: { toYear: undefined } });
+  }
+  if (f.watchProvider) {
+    chips.push({
+      key: "provider",
+      label: activeProviderName ?? t("media.filter.serviceChip", { id: f.watchProvider }),
+      remove: { watchProvider: undefined },
+    });
+  }
+  if (f.sortBy && f.sortBy !== "popularity.desc") {
+    const o = SORT_OPTIONS.find((x) => x.value === f.sortBy);
+    chips.push({ key: "sort", label: o ? t(o.labelKey) : f.sortBy, remove: { sortBy: undefined } });
+  }
+  if (f.hideAvailable) {
+    chips.push({ key: "hide", label: t("media.filter.hidingAvailable"), remove: { hideAvailable: undefined } });
+  }
 
   return (
     <div className="flex flex-col gap-3 mb-6">
       <SortSegments
         segments={SORT_OPTIONS.map((o) => ({ value: o.value, label: t(o.labelKey) }))}
-        active={activeSortBy ?? "popularity.desc"}
+        active={f.sortBy ?? "popularity.desc"}
         onChange={(v) =>
           push({ sortBy: v === "popularity.desc" ? undefined : v })
         }
@@ -265,7 +239,7 @@ export function FilterBar({
         <StyledSelect
           compact
           aria-label={t("media.filter.genreLabel")}
-          value={activeGenreId ?? ""}
+          value={f.genreId ?? ""}
           onChange={(e) => push({ genreId: e.target.value || undefined })}
         >
           <option value="">{t("media.filter.allGenres")}</option>
@@ -278,7 +252,7 @@ export function FilterBar({
           <StyledSelect
             compact
             aria-label={t("media.filter.serviceLabel")}
-            value={activeWatchProvider ?? ""}
+            value={f.watchProvider ?? ""}
             onChange={(e) => push({ watchProvider: e.target.value || undefined })}
           >
             <option value="">{t("media.filter.allServices")}</option>
@@ -292,7 +266,7 @@ export function FilterBar({
           <StyledSelect
             compact
             aria-label={t("media.filter.certLabel")}
-            value={activeCertification ?? ""}
+            value={f.certification ?? ""}
             onChange={(e) => push({ certification: e.target.value || undefined })}
           >
             <option value="">{t("media.filter.certAny")}</option>
@@ -316,7 +290,7 @@ export function FilterBar({
         <StyledSelect
           compact
           aria-label={t("media.filter.minVotesLabel")}
-          value={activeMinVoteCount ?? ""}
+          value={f.minVoteCount ?? ""}
           onChange={(e) => push({ minVoteCount: e.target.value || undefined })}
         >
           {VOTE_COUNT_OPTIONS.map((v) => (
@@ -327,7 +301,7 @@ export function FilterBar({
         <StyledSelect
           compact
           aria-label={t("media.filter.fromYearLabel")}
-          value={activeFromYear ?? ""}
+          value={f.fromYear ?? ""}
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
         >
           <option value="">{t("media.filter.fromYear")}</option>
@@ -339,7 +313,7 @@ export function FilterBar({
         <StyledSelect
           compact
           aria-label={t("media.filter.toYearLabel")}
-          value={activeToYear ?? ""}
+          value={f.toYear ?? ""}
           onChange={(e) => push({ toYear: e.target.value || undefined })}
         >
           <option value="">{t("media.filter.toYear")}</option>
@@ -350,21 +324,21 @@ export function FilterBar({
 
         <button
           type="button"
-          onClick={() => push({ hideAvailable: activeHideAvailable ? undefined : "1" })}
-          aria-pressed={!!activeHideAvailable}
+          onClick={() => push({ hideAvailable: f.hideAvailable ? undefined : "1" })}
+          aria-pressed={f.hideAvailable}
           className="ds-tap ds-hover-tint inline-flex items-center gap-1.5 font-medium"
           style={{
             padding: "5px 12px",
             minHeight: 32,
             borderRadius: 8,
             fontSize: 12,
-            background: activeHideAvailable
+            background: f.hideAvailable
               ? "var(--ds-accent-soft)"
               : "var(--ds-bg-2)",
-            color: activeHideAvailable
+            color: f.hideAvailable
               ? "var(--ds-accent-text)"
               : "var(--ds-fg-muted)",
-            border: `1px solid ${activeHideAvailable ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
+            border: `1px solid ${f.hideAvailable ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
           }}
         >
           {t("media.hideAvailable")}
@@ -391,47 +365,11 @@ export function FilterBar({
         )}
       </div>
 
-      {hasFilters && (
+      {chips.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
-          {activeGenreId && (
-            <Chip label={genres.find((g) => String(g.id) === activeGenreId)?.name ?? activeGenreId} onRemove={() => push({ genreId: undefined })} />
-          )}
-          {activeKeywordId && (
-            <Chip label={activeKeywordName ?? t("media.filter.keyword")} onRemove={() => push({ keywordId: undefined, keywordName: undefined })} />
-          )}
-          {activeCompanyId && (
-            <Chip label={activeCompanyName ?? t("media.filter.studio")} onRemove={() => push({ companyId: undefined, companyName: undefined })} />
-          )}
-          {activeNetworkId && (
-            <Chip label={activeNetworkName ?? t("media.filter.network")} onRemove={() => push({ networkId: undefined, networkName: undefined })} />
-          )}
-          {activeCertification && showCertification && (
-            <Chip label={t("media.filter.certUpTo", { rating: activeCertification })} onRemove={() => push({ certification: undefined })} />
-          )}
-          {chipLabel && (
-            <Chip label={chipLabel} onRemove={() => push({ minRating: undefined, ratingFilter: undefined })} />
-          )}
-          {activeMinVoteCount && (
-            <Chip
-              label={voteCountLabel(t, activeMinVoteCount)}
-              onRemove={() => push({ minVoteCount: undefined })}
-            />
-          )}
-          {activeFromYear && (
-            <Chip label={t("media.filter.fromChip", { year: activeFromYear })} onRemove={() => push({ fromYear: undefined })} />
-          )}
-          {activeToYear && (
-            <Chip label={t("media.filter.toChip", { year: activeToYear })} onRemove={() => push({ toYear: undefined })} />
-          )}
-          {activeProviderName && (
-            <Chip label={activeProviderName} onRemove={() => push({ watchProvider: undefined })} />
-          )}
-          {activeSortBy && activeSortBy !== "popularity.desc" && (
-            <Chip label={(() => { const o = SORT_OPTIONS.find((x) => x.value === activeSortBy); return o ? t(o.labelKey) : activeSortBy; })()} onRemove={() => push({ sortBy: undefined })} />
-          )}
-          {activeHideAvailable && (
-            <Chip label={t("media.filter.hidingAvailable")} onRemove={() => push({ hideAvailable: undefined })} />
-          )}
+          {chips.map((c) => (
+            <Chip key={c.key} label={c.label} onRemove={() => push(c.remove)} />
+          ))}
         </div>
       )}
     </div>

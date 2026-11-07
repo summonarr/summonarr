@@ -18,7 +18,19 @@
 // the Spanish/French wordings asserted here are stable across ICU releases.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { posterUrl, backdropUrl, stillUrl, languageName, regionName, localizedProductionCountry } from "../src/lib/tmdb-types.ts";
+import { posterUrl, backdropUrl, stillUrl, profileUrl, logoUrl, languageName, regionName, localizedProductionCountry } from "../src/lib/tmdb-types.ts";
+
+// The cast grid, the person page and the provider logos built these URLs by
+// hand and skipped the leading-"/" gate.
+test("profileUrl and logoUrl build sized URLs and refuse non-TMDB paths", () => {
+  assert.equal(profileUrl("/x.jpg"), "https://image.tmdb.org/t/p/w185/x.jpg");
+  assert.equal(profileUrl("/x.jpg", "w342"), "https://image.tmdb.org/t/p/w342/x.jpg");
+  assert.equal(logoUrl("/x.jpg"), "https://image.tmdb.org/t/p/w92/x.jpg");
+  for (const bad of [null, "", "abc", "https://evil.example/x.jpg"]) {
+    assert.equal(profileUrl(bad), null, String(bad));
+    assert.equal(logoUrl(bad), null, String(bad));
+  }
+});
 
 test("posterUrl builds the default w342 URL from a valid path", () => {
   assert.equal(posterUrl("/abc123.jpg"), "https://image.tmdb.org/t/p/w342/abc123.jpg");

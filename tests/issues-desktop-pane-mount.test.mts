@@ -68,3 +68,44 @@ test("desktop wrapper and mobile drawer gate on complementary media queries via 
   assert.equal(DESKTOP_QUERY, "(min-width: 1280px)");
   assert.equal(MOBILE_QUERY, "(max-width: 1279.98px)");
 });
+
+// /admin/issues had the same double mount: the selected card's thread (below
+// xl, CSS only) or the standalone mobile detail's, plus the aside's (xl and up,
+// CSS only) — two messages GETs and two live reloads per viewport.
+test("/admin/issues mounts each thread through a media-query wrapper, never IssueThread directly", () => {
+  const page = readFileSync(new URL("../src/app/(app)/admin/issues/page.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(page, /from "@\/components\/issues\/issue-thread"/);
+  assert.doesNotMatch(page, /<IssueThread\b/);
+  assert.match(page, /<DesktopIssueThread key=\{selectedIssue\.id\} issueId=\{selectedIssue\.id\} \/>/, "the aside");
+  assert.match(page, /<MobileIssueThread key=\{sel\.id\} issueId=\{sel\.id\} \/>/, "the standalone mobile detail");
+
+  const shell = readFileSync(new URL("../src/components/admin/issue-card-shell.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(shell, /<IssueThread\b/);
+  assert.match(shell, /<MobileIssueThread issueId=\{issueId\} \/>/, "the card's thread");
+
+  const wrappers = readFileSync(new URL("../src/components/issues/desktop-issue-thread.tsx", import.meta.url), "utf8");
+  const mobile = wrappers.slice(wrappers.indexOf("export function MobileIssueThread("));
+  assert.match(mobile, /useMediaQuery\("\(max-width: 1279\.98px\)"\) === true/, "null (SSR/hydration) is 'not mounted'");
+  assert.match(mobile, /if \(!isMobile\) return null;/);
+});
+
+test("/issues keeps the desktop pane when the page's list is empty but an issue is selected", () => {
+  const page = readFileSync(new URL("../src/app/(app)/issues/page.tsx", import.meta.url), "utf8");
+  // Only an empty list WITH nothing selected skips the grid (and its <aside>).
+  assert.match(page, /\{issues\.length === 0 && !selectedIssue \? \(\s*emptyState\s*\) : \(\s*<div className="xl:grid/);
+  assert.doesNotMatch(page, /\{issues\.length === 0 \? \(/, "the old gate dropped the aside with the list");
+  assert.match(page, /\{issues\.length === 0 && emptyState\}/, "the empty state sits in the list column instead");
+});
+
+test("/issues marks the selected row for assistive tech, not only with its border", () => {
+  const page = readFileSync(new URL("../src/app/(app)/issues/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /href=\{issueHref\(issue\.id\)\}\s*scroll=\{false\}\s*aria-current=\{isSelected \? "true" : undefined\}/);
+});
+
+// A huge or repeated ?page= used to reach Prisma's skip unclamped (a number
+// Postgres refuses, so the page 500'd). /issues clamps it like every paged list.
+test("/issues clamps ?page= through the shared parsePageNumber", () => {
+  const page = readFileSync(new URL("../src/app/(app)/issues/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /const page = parsePageNumber\(pageParam\);/);
+  assert.doesNotMatch(page, /parseInt\(pageParam/, "no unclamped page parse");
+});

@@ -13,6 +13,26 @@ import { Input } from "@/components/ui/input";
 import { Chip } from "@/components/ui/design";
 import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
 import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
+import { PLAUSIBLE_EMAIL_RE } from "@/lib/email-normalize";
+
+// The stored on/off preference per channel × event (User columns, and the body
+// PATCH /api/profile/notifications takes).
+export interface NotificationPrefValues {
+  notifyOnApproved: boolean;
+  notifyOnAvailable: boolean;
+  notifyOnDeclined: boolean;
+  notifyOnComment: boolean;
+  emailOnApproved: boolean;
+  emailOnAvailable: boolean;
+  emailOnDeclined: boolean;
+  emailOnComment: boolean;
+  pushOnApproved: boolean;
+  pushOnAvailable: boolean;
+  pushOnDeclined: boolean;
+  pushOnComment: boolean;
+  notifyOnIssue: boolean;
+}
+type PrefKey = keyof NotificationPrefValues;
 
 interface NotificationPrefsProps {
   // Worked out on the server: true only when the email feature is on, the
@@ -26,47 +46,39 @@ interface NotificationPrefsProps {
   // Jellyfin only: an address with a verification link outstanding (the page
   // reads it from the pending VerificationToken), so a reload still shows it.
   pendingEmail?: string | null;
-  notifyOnApproved: boolean;
-  notifyOnAvailable: boolean;
-  notifyOnDeclined: boolean;
-  emailOnApproved: boolean;
-  emailOnAvailable: boolean;
-  emailOnDeclined: boolean;
-  pushOnApproved: boolean;
-  pushOnAvailable: boolean;
-  pushOnDeclined: boolean;
-  notifyOnIssue: boolean;
-  notifyOnComment: boolean;
-  emailOnComment: boolean;
-  pushOnComment: boolean;
+  prefs: NotificationPrefValues;
 }
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-type AllPrefs = Omit<NotificationPrefsProps, "emailEnabled" | "discordLinked" | "isAdminRole" | "isJellyfin" | "notificationEmail" | "pendingEmail">;
+interface PrefRow {
+  key: PrefKey;
+  label: string;
+  hint: string;
+}
 
 function ToggleRow({
   label,
   description,
   checked,
   onChange,
-  disabled,
+  busy,
 }: {
   label: string;
   description: string;
   checked: boolean;
   onChange: () => void;
-  disabled: boolean;
+  busy: boolean;
 }) {
   // The switch has no text of its own; name it from the row label.
   const labelId = useId();
+  // Never natively disabled while a save runs: the switch a keyboard user just
+  // flipped would lose focus to the page. A flip during a save is queued.
   return (
     <div className="flex items-start justify-between gap-4 py-3 border-b border-zinc-800 last:border-0">
       <div>
         <p id={labelId} className="text-sm font-medium text-zinc-200">{label}</p>
         <p className="text-xs text-zinc-500 mt-0.5">{description}</p>
       </div>
-      <Switch aria-labelledby={labelId} checked={checked} disabled={disabled} onCheckedChange={onChange} />
+      <Switch aria-labelledby={labelId} aria-busy={busy || undefined} checked={checked} onCheckedChange={onChange} />
     </div>
   );
 }
@@ -82,37 +94,11 @@ export function NotificationPrefs({
   isJellyfin,
   notificationEmail,
   pendingEmail = null,
-  notifyOnApproved,
-  notifyOnAvailable,
-  notifyOnDeclined,
-  emailOnApproved,
-  emailOnAvailable,
-  emailOnDeclined,
-  pushOnApproved,
-  pushOnAvailable,
-  pushOnDeclined,
-  notifyOnIssue,
-  notifyOnComment,
-  emailOnComment,
-  pushOnComment,
+  prefs: initialPrefs,
 }: NotificationPrefsProps) {
   const t = useT();
   const router = useRouter();
-  const [prefs, setPrefs] = useState<AllPrefs>({
-    notifyOnApproved,
-    notifyOnAvailable,
-    notifyOnDeclined,
-    emailOnApproved,
-    emailOnAvailable,
-    emailOnDeclined,
-    pushOnApproved,
-    pushOnAvailable,
-    pushOnDeclined,
-    notifyOnIssue,
-    notifyOnComment,
-    emailOnComment,
-    pushOnComment,
-  });
+  const [prefs, setPrefs] = useState<NotificationPrefValues>(initialPrefs);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -131,9 +117,12 @@ export function NotificationPrefs({
   const [stepUpError, setStepUpError] = useState<string | null>(null);
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingPrefsRef = useRef<AllPrefs | null>(null);
+  const pendingPrefsRef = useRef<NotificationPrefValues | null>(null);
   // Last state the server confirmed — the toggles revert here if a save fails.
-  const savedPrefsRef = useRef<AllPrefs>(prefs);
+  const savedPrefsRef = useRef<NotificationPrefValues>(prefs);
+  // One save at a time: a flip made while a save is in flight waits for it, so
+  // an older answer can never land after a newer one and move savedPrefsRef back.
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
     // Copy the ref objects themselves (not their .current values) so the
@@ -169,9 +158,12 @@ export function NotificationPrefs({
   }
 
   async function flush() {
+    // The save in flight sends this one when it settles (see finally).
+    if (inFlightRef.current) return;
     const updated = pendingPrefsRef.current;
     if (!updated) return;
     pendingPrefsRef.current = null;
+    inFlightRef.current = true;
     setSaving(true);
     setSaved(false);
     setSaveError(null);
@@ -194,17 +186,24 @@ export function NotificationPrefs({
       rollBack();
       setSaveError(t("profile.error.network"));
     } finally {
+      inFlightRef.current = false;
       setSaving(false);
+      // Flips made during this save whose debounce already ran: send them now
+      // (they carry the full set). One still debouncing flushes on its own.
+      if (pendingPrefsRef.current && !saveTimerRef.current) void flush();
     }
   }
 
-  function toggle(key: keyof AllPrefs) {
+  function toggle(key: PrefKey) {
     const updated = { ...(pendingPrefsRef.current ?? prefs), [key]: !(pendingPrefsRef.current ?? prefs)[key] };
     setPrefs(updated);
     setSaveError(null);
     pendingPrefsRef.current = updated;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(flush, 400);
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      void flush();
+    }, 400);
   }
 
   // Jellyfin: email a one-time verification link to the entered address. The
@@ -213,7 +212,7 @@ export function NotificationPrefs({
   // `address` is set by "Resend" for the pending address; otherwise the input.
   async function sendVerification(address?: string, confirmPassword?: string) {
     const trimmed = (address ?? emailInput).trim();
-    if (trimmed === "" || !EMAIL_RE.test(trimmed)) {
+    if (trimmed === "" || !PLAUSIBLE_EMAIL_RE.test(trimmed)) {
       setEmailError(t("profile.notifications.error.invalidEmail"));
       setEmailSavingState("error");
       return;
@@ -276,6 +275,33 @@ export function NotificationPrefs({
     }
   }
 
+  // Literal keys per row, so the i18n usage and dead-string checks see them.
+  const discordRows: PrefRow[] = [
+    { key: "notifyOnApproved", label: t("profile.notifications.approved"), hint: t("profile.notifications.discord.approved") },
+    { key: "notifyOnAvailable", label: t("profile.notifications.available"), hint: t("profile.notifications.discord.available") },
+    { key: "notifyOnDeclined", label: t("profile.notifications.declined"), hint: t("profile.notifications.discord.declined") },
+    { key: "notifyOnComment", label: t("profile.notifications.comments"), hint: t("profile.notifications.discord.comments") },
+  ];
+  const emailRows: PrefRow[] = [
+    { key: "emailOnApproved", label: t("profile.notifications.approved"), hint: t("profile.notifications.email.approved") },
+    { key: "emailOnAvailable", label: t("profile.notifications.available"), hint: t("profile.notifications.email.available") },
+    { key: "emailOnDeclined", label: t("profile.notifications.declined"), hint: t("profile.notifications.email.declined") },
+    { key: "emailOnComment", label: t("profile.notifications.comments"), hint: t("profile.notifications.email.comments") },
+  ];
+  const pushRows: PrefRow[] = [
+    { key: "pushOnApproved", label: t("profile.notifications.approved"), hint: t("profile.notifications.push.approved") },
+    { key: "pushOnAvailable", label: t("profile.notifications.available"), hint: t("profile.notifications.push.available") },
+    { key: "pushOnDeclined", label: t("profile.notifications.declined"), hint: t("profile.notifications.push.declined") },
+    { key: "pushOnComment", label: t("profile.notifications.comments"), hint: t("profile.notifications.push.comments") },
+  ];
+  const issueRows: PrefRow[] = [
+    { key: "notifyOnIssue", label: t("profile.notifications.issues"), hint: t("profile.notifications.issuesHint") },
+  ];
+  const toggleRows = (rows: PrefRow[]) =>
+    rows.map((r) => (
+      <ToggleRow key={r.key} label={r.label} description={r.hint} checked={prefs[r.key]} onChange={() => toggle(r.key)} busy={saving} />
+    ));
+
   return (
     <div className="space-y-6">
       {!discordLinked && !emailEnabled && (
@@ -293,34 +319,7 @@ export function NotificationPrefs({
             <MessageCircle className="w-4 h-4 text-indigo-400" />
             <p className="text-sm font-semibold text-indigo-400">Discord</p>
           </div>
-          <ToggleRow
-            label={t("profile.notifications.approved")}
-            description={t("profile.notifications.discord.approved")}
-            checked={prefs.notifyOnApproved}
-            onChange={() => toggle("notifyOnApproved")}
-            disabled={saving}
-          />
-          <ToggleRow
-            label={t("profile.notifications.available")}
-            description={t("profile.notifications.discord.available")}
-            checked={prefs.notifyOnAvailable}
-            onChange={() => toggle("notifyOnAvailable")}
-            disabled={saving}
-          />
-          <ToggleRow
-            label={t("profile.notifications.declined")}
-            description={t("profile.notifications.discord.declined")}
-            checked={prefs.notifyOnDeclined}
-            onChange={() => toggle("notifyOnDeclined")}
-            disabled={saving}
-          />
-          <ToggleRow
-            label={t("profile.notifications.comments")}
-            description={t("profile.notifications.discord.comments")}
-            checked={prefs.notifyOnComment}
-            onChange={() => toggle("notifyOnComment")}
-            disabled={saving}
-          />
+          {toggleRows(discordRows)}
         </div>
       )}
 
@@ -425,34 +424,7 @@ export function NotificationPrefs({
             </div>
           )}
 
-          <ToggleRow
-            label={t("profile.notifications.approved")}
-            description={t("profile.notifications.email.approved")}
-            checked={prefs.emailOnApproved}
-            onChange={() => toggle("emailOnApproved")}
-            disabled={saving}
-          />
-          <ToggleRow
-            label={t("profile.notifications.available")}
-            description={t("profile.notifications.email.available")}
-            checked={prefs.emailOnAvailable}
-            onChange={() => toggle("emailOnAvailable")}
-            disabled={saving}
-          />
-          <ToggleRow
-            label={t("profile.notifications.declined")}
-            description={t("profile.notifications.email.declined")}
-            checked={prefs.emailOnDeclined}
-            onChange={() => toggle("emailOnDeclined")}
-            disabled={saving}
-          />
-          <ToggleRow
-            label={t("profile.notifications.comments")}
-            description={t("profile.notifications.email.comments")}
-            checked={prefs.emailOnComment}
-            onChange={() => toggle("emailOnComment")}
-            disabled={saving}
-          />
+          {toggleRows(emailRows)}
         </div>
       )}
 
@@ -461,34 +433,7 @@ export function NotificationPrefs({
           <Bell className="w-4 h-4 text-zinc-400" />
           <p className="text-sm font-semibold text-zinc-400">{t("profile.notifications.channel.push")}</p>
         </div>
-        <ToggleRow
-          label={t("profile.notifications.approved")}
-          description={t("profile.notifications.push.approved")}
-          checked={prefs.pushOnApproved}
-          onChange={() => toggle("pushOnApproved")}
-          disabled={saving}
-        />
-        <ToggleRow
-          label={t("profile.notifications.available")}
-          description={t("profile.notifications.push.available")}
-          checked={prefs.pushOnAvailable}
-          onChange={() => toggle("pushOnAvailable")}
-          disabled={saving}
-        />
-        <ToggleRow
-          label={t("profile.notifications.declined")}
-          description={t("profile.notifications.push.declined")}
-          checked={prefs.pushOnDeclined}
-          onChange={() => toggle("pushOnDeclined")}
-          disabled={saving}
-        />
-        <ToggleRow
-          label={t("profile.notifications.comments")}
-          description={t("profile.notifications.push.comments")}
-          checked={prefs.pushOnComment}
-          onChange={() => toggle("pushOnComment")}
-          disabled={saving}
-        />
+        {toggleRows(pushRows)}
         <p className="mt-2 flex items-start gap-2 text-xs text-zinc-500">
           <Smartphone className="mt-0.5 w-3.5 h-3.5 shrink-0" />
           <span>
@@ -506,23 +451,17 @@ export function NotificationPrefs({
             <AlertTriangle className="w-4 h-4 text-yellow-400" />
             <p className="text-sm font-semibold text-yellow-400">{t("profile.notifications.channel.issues")}</p>
           </div>
-          <ToggleRow
-            label={t("profile.notifications.issues")}
-            description={t("profile.notifications.issuesHint")}
-            checked={prefs.notifyOnIssue}
-            onChange={() => toggle("notifyOnIssue")}
-            disabled={saving}
-          />
+          {toggleRows(issueRows)}
         </div>
       )}
 
       {saveError ? (
-        <p className="text-xs text-red-400 flex items-center gap-1">
+        <p role="alert" className="text-xs text-red-400 flex items-center gap-1">
           <AlertTriangle className="w-3 h-3" />
           {saveError}
         </p>
       ) : (saving || saved) && (
-        <p className="text-xs text-zinc-500 flex items-center gap-1">
+        <p role="status" className="text-xs text-zinc-500 flex items-center gap-1">
           {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-green-400" />}
           {saving ? t("profile.common.saving") : t("profile.common.saved")}
         </p>

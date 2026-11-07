@@ -18,6 +18,7 @@ import { getUserRecommendations } from "@/lib/recommendations";
 import { getFeatureFlags } from "@/lib/features";
 import { getRecentlyAddedForViewer, RECENTLY_ADDED_SIZE } from "@/lib/recently-added";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { settleSources } from "@/lib/settle-sources";
 
 // The home feed for native clients, mirroring the web home page
 // (src/app/(app)/page.tsx): the trending "featured" titles plus the same rails
@@ -63,10 +64,6 @@ function project(
   return out;
 }
 
-function settled<T>(r: PromiseSettledResult<T[]>): T[] {
-  return r.status === "fulfilled" ? r.value : [];
-}
-
 export const GET = withAuth(async (request, _ctx, session) => {
   const t = translatorForRequest(request);
   if (!checkRateLimit(`home:${session.user.id}`, 30, 60_000)) {
@@ -84,84 +81,64 @@ export const GET = withAuth(async (request, _ctx, session) => {
     });
     const recentEnabled = flags["feature.page.recentlyAdded"] && !hideAvailable;
 
-    const [
-      trendingRes,
-      popMoviesRes,
-      popTVRes,
-      upMoviesRes,
-      upTVRes,
-      topMoviesRes,
-      topTVRes,
-      forYouRes,
-      recentRes,
-    ] = await Promise.allSettled([
-      getTrending(),
-      getPopularMovies(),
-      getPopularTV(),
-      getUpcomingMovies(),
-      getOnTheAirTV(),
-      getTopRatedMovies(),
-      getTopRatedTV(),
-      // The For You rail is gated at emit time below, so don't pay the
-      // recommendation read (~8 queries) plus the enrichment of its 20 extra
-      // titles for a rail the default (flag-off) configuration then discards.
-      // Keep the array slot so the sourceNames index mapping stays aligned.
-      flags["feature.page.forYou"]
-        ? getUserRecommendations(session.user.id)
-        : Promise.resolve([] as TmdbMedia[]),
-      // Library reads scoped to the servers this viewer may see (guardrail 35),
-      // cached per visible-server set. Every title on it is on the viewer's own
-      // server, so hideAvailable would always empty it — skip the read then.
-      recentEnabled
-        ? getRecentlyAddedForViewer(session, {
-            plex: flags["feature.integration.plex"],
-            jellyfin: flags["feature.integration.jellyfin"],
-          })
-        : Promise.resolve([] as TmdbMedia[]),
+    // A rail whose source rejected degrades to an omitted rail (better than
+    // 500ing the whole feed); settleSources logs each rejection by name. The
+    // 4K-visibility read runs alongside, and a failure there still 500s.
+    const [lists, show4k] = await Promise.all([
+      settleSources("home", {
+        trending: getTrending(),
+        "popular-movies": getPopularMovies(),
+        "popular-tv": getPopularTV(),
+        "upcoming-movies": getUpcomingMovies(),
+        "on-the-air-tv": getOnTheAirTV(),
+        "top-rated-movies": getTopRatedMovies(),
+        "top-rated-tv": getTopRatedTV(),
+        // The For You rail is gated at emit time below, so don't pay the
+        // recommendation read (~8 queries) plus the enrichment of its 20 extra
+        // titles for a rail the default (flag-off) configuration then discards.
+        "for-you": flags["feature.page.forYou"]
+          ? getUserRecommendations(session.user.id)
+          : Promise.resolve([] as TmdbMedia[]),
+        // Library reads scoped to the servers this viewer may see (guardrail 35),
+        // cached per visible-server set. Every title on it is on the viewer's own
+        // server, so hideAvailable would always empty it — skip the read then.
+        "recently-added": recentEnabled
+          ? getRecentlyAddedForViewer(session, {
+              plex: flags["feature.integration.plex"],
+              jellyfin: flags["feature.integration.jellyfin"],
+            })
+          : Promise.resolve([] as TmdbMedia[]),
+      }),
+      getShow4kVisibility(session),
     ]);
 
-    // A rail whose source rejected degrades to an omitted rail (better than
-    // 500ing the whole feed). Log each rejection so the missing rail is
-    // diagnosable rather than silently absent.
-    const sourceNames = [
-      "trending", "popular-movies", "popular-tv",
-      "upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv", "for-you",
-      "recently-added",
-    ];
-    [trendingRes, popMoviesRes, popTVRes, upMoviesRes, upTVRes, topMoviesRes, topTVRes, forYouRes, recentRes]
-      .forEach((r, i) => {
-        if (r.status === "rejected") {
-          console.error(`[home] source ${sourceNames[i]} failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
-        }
-      });
-
-    const trending = settled(trendingRes);
-    const popMovies = settled(popMoviesRes).slice(0, RAIL_OVERFETCH);
-    const popTV = settled(popTVRes).slice(0, RAIL_OVERFETCH);
-    const upMovies = settled(upMoviesRes).slice(0, RAIL_OVERFETCH);
-    const upTV = settled(upTVRes).slice(0, RAIL_OVERFETCH);
-    const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
-    const topTV = settled(topTVRes).slice(0, RAIL_OVERFETCH);
-    const forYou = settled(forYouRes).slice(0, RAIL_OVERFETCH);
-    const recent = settled(recentRes);
+    const trending = lists.trending;
+    const popMovies = lists["popular-movies"].slice(0, RAIL_OVERFETCH);
+    const popTV = lists["popular-tv"].slice(0, RAIL_OVERFETCH);
+    const upMovies = lists["upcoming-movies"].slice(0, RAIL_OVERFETCH);
+    const upTV = lists["on-the-air-tv"].slice(0, RAIL_OVERFETCH);
+    const topMovies = lists["top-rated-movies"].slice(0, RAIL_OVERFETCH);
+    const topTV = lists["top-rated-tv"].slice(0, RAIL_OVERFETCH);
+    const forYou = lists["for-you"].slice(0, RAIL_OVERFETCH);
+    const recent = lists["recently-added"];
 
     // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
     // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
     // tail must be in the enriched map too or rails under-fill when a filter is on.
+    // Each list above is already cut to that window.
     const candidateLists = [
       trending,
-      popMovies.slice(0, RAIL_OVERFETCH),
-      popTV.slice(0, RAIL_OVERFETCH),
-      upMovies.slice(0, RAIL_OVERFETCH),
-      upTV.slice(0, RAIL_OVERFETCH),
-      topMovies.slice(0, RAIL_OVERFETCH),
-      topTV.slice(0, RAIL_OVERFETCH),
-      forYou.slice(0, RAIL_OVERFETCH),
+      popMovies,
+      popTV,
+      upMovies,
+      upTV,
+      topMovies,
+      topTV,
+      forYou,
       // Last, so a title also on a TMDB rail keeps that richer record.
       recent,
     ];
     const displaySet = dedupeUnion(candidateLists);
-    const show4k = await getShow4kVisibility(session);
     const enriched = await attachAllAvailability(displaySet, session.user.id, { show4k });
     const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
 

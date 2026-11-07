@@ -10,6 +10,7 @@ import {
   signQcFlowCookie,
 } from "@/lib/jellyfin-flow-state";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isSecureCookieContext } from "@/lib/session-cookie";
 
 // `instance` travels as a query param on both the initiate (POST) and poll
 // (GET) requests — client-supplied here is fine for BOTH: this only resolves
@@ -21,13 +22,6 @@ function readInstanceParam(req: NextRequest): string | null {
   const raw = new URL(req.url).searchParams.get("instance");
   const instance = raw ?? DEFAULT_MEDIA_INSTANCE;
   return isValidMediaInstanceSlug(instance) ? instance : null;
-}
-
-function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? "";
-  if (url.startsWith("https://")) return true;
-  if (url.startsWith("http://")) return false;
-  return process.env.NODE_ENV === "production";
 }
 
 // Long-poll can hold the connection up to ~25s, so bump the route timeout above the default
@@ -63,10 +57,21 @@ const LONG_POLL_GLOBAL_CAP = 50;
 const inflightByIp = new Map<string, number>();
 let globalInflight = 0;
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, e] of pollCounts) if (e.expiresAt < now) pollCounts.delete(k);
-}, 60_000).unref();
+setInterval(() => sweepExpiredPollCounts(Date.now()), 60_000).unref();
+
+// The upstream status a Jellyfin helper attached to its error, or undefined.
+// Never cast: a thrown non-object (null, a string) must reach the generic 502,
+// not a TypeError that turns into a 500.
+function errorStatus(err: unknown): number | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const status = (err as { status?: unknown }).status;
+  return typeof status === "number" ? status : undefined;
+}
+
+// Machine-readable marker on the terminal "QuickConnect is disabled" 502, so a
+// client stops polling instead of retrying into the per-secret rate limit.
+// Additive: the status and `error` text are unchanged for native clients.
+const QUICKCONNECT_DISABLED_CODE = "quickconnect_disabled";
 
 export async function POST(req: NextRequest) {
   const t = translatorForRequest(req);
@@ -108,8 +113,11 @@ export async function POST(req: NextRequest) {
     console.error("[jellyfin quickconnect] initiate error:", err);
     // 401 from /QuickConnect/Initiate is Jellyfin's "the feature is disabled"
     // answer — surface it as such instead of the generic reachability message.
-    if ((err as { status?: number }).status === 401) {
-      return NextResponse.json({ error: t("apiAuth.quickConnect.disabled") }, { status: 502 });
+    if (errorStatus(err) === 401) {
+      return NextResponse.json(
+        { error: t("apiAuth.quickConnect.disabled"), code: QUICKCONNECT_DISABLED_CODE },
+        { status: 502 },
+      );
     }
     return NextResponse.json({ error: t("apiAuth.quickConnect.initiateFailed") }, { status: 502 });
   }
@@ -247,13 +255,16 @@ export async function GET(req: NextRequest) {
     // clients stop polling a dead secret: 404 = the secret expired server-side
     // (same 410 semantics as the MAX_POLLS cap above), 401 = QuickConnect is
     // disabled on the server.
-    const status = (err as { status?: number }).status;
+    const status = errorStatus(err);
     if (status === 404) {
       pollCounts.delete(countKey);
       return NextResponse.json({ error: t("apiAuth.quickConnect.sessionExpired") }, { status: 410 });
     }
     if (status === 401) {
-      return NextResponse.json({ error: t("apiAuth.quickConnect.disabled") }, { status: 502 });
+      return NextResponse.json(
+        { error: t("apiAuth.quickConnect.disabled"), code: QUICKCONNECT_DISABLED_CODE },
+        { status: 502 },
+      );
     }
     return NextResponse.json({ error: t("apiAuth.quickConnect.pollFailed") }, { status: 502 });
   }

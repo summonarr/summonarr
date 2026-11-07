@@ -119,6 +119,8 @@
   "browse.forYou.rebuild.failed": "Échec de la reconstruction (HTTP {status})",
   "browse.forYou.rebuild.done_one": "{updated} rangée reconstruite sur {count}",
   "browse.forYou.rebuild.done_other": "{updated} rangées reconstruites sur {count}",
+  "browse.forYou.rebuild.partial_one": "{updated} rangée reconstruite sur {count} ; {failed} en échec",
+  "browse.forYou.rebuild.partial_other": "{updated} rangées reconstruites sur {count} ; {failed} en échec",
   "browse.forYou.rebuild.label": "Reconstruire les suggestions",
   "browse.forYou.rebuild.labelWait": "Reconstruire les suggestions — patientez {seconds} s",
   "browse.forYou.rebuild.wait": "Patientez {seconds} s",

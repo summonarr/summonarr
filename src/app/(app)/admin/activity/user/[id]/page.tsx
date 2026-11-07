@@ -4,8 +4,8 @@ import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
 import { getUserPlayStats } from "@/lib/play-history";
-import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
-import { posterUrl } from "@/lib/tmdb-types";
+import { zonedTodayIso } from "@/lib/stats-time-zone";
+import { resolvePosterMap, posterSrcFor } from "@/lib/poster-cache";
 import { getTranslator } from "@/lib/i18n/server";
 import {
   addTitleResolutions,
@@ -21,6 +21,10 @@ import {
 } from "@/components/admin/activity-user-detail";
 
 export const dynamic = "force-dynamic";
+
+// The known-IP table lists the most recently seen addresses only: a mobile
+// viewer can collect hundreds, and every one was sent to the client as a row.
+const KNOWN_IPS_SHOWN = 50;
 
 export default async function UserActivityPage({
   params,
@@ -50,7 +54,7 @@ export default async function UserActivityPage({
     }),
   ]);
   if (!msUser) notFound();
-  const knownIps = ipGroups
+  const allKnownIps = ipGroups
     .filter((g): g is typeof g & { ipAddress: string } => !!g.ipAddress)
     .map((g) => ({
       ip: g.ipAddress,
@@ -62,6 +66,9 @@ export default async function UserActivityPage({
         (b.lastSeenIso ? Date.parse(b.lastSeenIso) : 0) -
         (a.lastSeenIso ? Date.parse(a.lastSeenIso) : 0),
     );
+  // The count stays exact (the group-by already has every address); only the
+  // rows sent to the client are capped, newest first.
+  const knownIps = allKnownIps.slice(0, KNOWN_IPS_SHOWN);
 
   // PlayHistory.tmdbId is null for plays unmapped at record time, so those rows
   // render with no media link (and no cover art). The same title was often
@@ -140,7 +147,8 @@ export default async function UserActivityPage({
     directPct,
     lastActiveIso: stats.recentPlays[0]?.startedAt.toISOString() ?? null,
     activityCalendar: stats.activityCalendar,
-    todayIso: new Date().toISOString(),
+    todayIso: zonedTodayIso(new Date(), stats.timeZone),
+    timeZone: stats.timeZone,
     playsByDay: stats.playsByDay,
     userHeatmap: stats.userHeatmap,
     platformBreakdown: stats.platformBreakdown,
@@ -157,11 +165,10 @@ export default async function UserActivityPage({
       // poster later changed. Prefer the cache, fall back to the snapshot only
       // for titles no longer cached. (f1d609a preferred the snapshot, which
       // regressed cover art here.)
-      posterSrc:
-        (m.tmdbId != null ? topMediaPosters[posterPathKey(m.tmdbId, m.mediaType)] : undefined) ??
-        (m.posterPath ? posterUrl(m.posterPath, "w342") : null),
+      posterSrc: posterSrcFor(topMediaPosters, m.tmdbId, m.mediaType, m.posterPath),
     })),
     knownIps,
+    knownIpTotal: allKnownIps.length,
     recentPlays: recentPlaysSlice.map((p) => {
       const r = resolveUnmappedEntry(p, titleResolved);
       return {

@@ -8,13 +8,15 @@ export type LiveEvent =
   // Client-synthesized (never sent by the server): the shared stream errored.
   | { type: "disconnected" }
   | { type: "request:new"; requestId: string }
-  | { type: "request:updated"; requestId: string; status: string }
+  // `own`: the event is about this viewer (set by /api/events on the frames
+  // that come with an inbox row — see inbox-live-events.ts).
+  | { type: "request:updated"; requestId: string; status: string; own?: boolean }
   | { type: "request:deleted"; requestId: string }
-  | { type: "request:comment"; requestId: string }
+  | { type: "request:comment"; requestId: string; own?: boolean }
   | { type: "issue:new"; issueId: string }
-  | { type: "issue:updated"; issueId: string; status: string }
+  | { type: "issue:updated"; issueId: string; status: string; own?: boolean }
   | { type: "issue:deleted"; issueId: string }
-  | { type: "issuemessage:created"; issueId: string }
+  | { type: "issuemessage:created"; issueId: string; own?: boolean }
   | { type: "activity:sessions"; sessions: ActiveSessionLive[] }
   | { type: "activity:history-updated" }
   | { type: "plex:reachability"; reachable: boolean; instance: string };

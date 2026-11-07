@@ -238,8 +238,13 @@ shadowPrismaModel(prisma, "tmdbCache", {
 // every other aggregate is null-safe over an empty result set.
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string) => {
   rec("$queryRawUnsafe", sql.slice(0, 60).replace(/\s+/g, " ").trim());
-  if (/EXTRACT\(YEAR FROM "startedAt"\)/.test(sql)) return years.map((y) => ({ y }));
+  if (/EXTRACT\(YEAR FROM /.test(sql)) return years.map((y) => ({ y }));
   return [];
+});
+// The statistics time zone the aggregates bucket in: unset, so the process zone.
+shadowPrismaModel(prisma, "setting", {
+  findUnique: async () => null,
+  findMany: async () => [],
 });
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => { rec("$queryRaw"); return []; });
 shadowPrismaModel(prisma, "activeSession", {

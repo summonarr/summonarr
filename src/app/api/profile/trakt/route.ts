@@ -4,6 +4,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { logAudit, auditContext } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 import { disconnectTrakt, getTraktProfileState } from "@/lib/trakt-user";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -23,7 +24,8 @@ export const GET = withAuth(async (_req, _ctx, session) => {
 
 // Flip either use. Turning the history off deletes the imported history at once
 // — it exists only to seed For You — and turning it back on re-imports it on
-// the next run.
+// the next run. Re-sending the value it already has changes nothing: only a real
+// flip resets the import bookkeeping (which would force a full re-import).
 export const PATCH = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
@@ -38,26 +40,36 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   ) {
     return NextResponse.json({ error: t("apiAuth.profile.trakt.toggleBoolean") }, { status: 400 });
   }
-  const conn = await prisma.traktConnection.findUnique({ where: { userId: session.user.id }, select: { userId: true } });
-  if (!conn) return NextResponse.json({ error: t("apiAuth.profile.trakt.notConnected") }, { status: 404 });
+  const userId = session.user.id;
 
-  await prisma.$transaction(async (tx) => {
-    await tx.traktConnection.update({
-      where: { userId: session.user.id },
+  // False: not connected. The row is read and written under one lock (FOR
+  // UPDATE, as the cron's history write takes it), so a disconnect racing this
+  // is a 404 rather than an update of a row that's gone, and the "is this a
+  // flip" read can't go stale before the write.
+  const updated = await prisma.$transaction(async (tx) => {
+    // One Prisma.sql value, never a tagged template with a fragment (23a).
+    const locked = await tx.$queryRaw<Array<{ historySeeds: boolean }>>(
+      Prisma.sql`SELECT "historySeeds" FROM "TraktConnection" WHERE "userId" = ${userId} FOR UPDATE`,
+    );
+    if (locked.length === 0) return false;
+    const historyFlipped = historySeeds !== undefined && historySeeds !== locked[0].historySeeds;
+    await tx.traktConnection.updateMany({
+      where: { userId },
       data: {
         ...(watchlistAutoRequest !== undefined ? { watchlistAutoRequest } : {}),
-        ...(historySeeds !== undefined
-          ? { historySeeds, historyActivityAt: null, historyImportedAt: null }
-          : {}),
+        ...(historySeeds !== undefined ? { historySeeds } : {}),
+        ...(historyFlipped ? { historyActivityAt: null, historyImportedAt: null } : {}),
       },
     });
     if (historySeeds === false) {
       // The ratings ride on the same switch (guardrail 40c): off drops both.
-      await tx.traktWatchedItem.deleteMany({ where: { userId: session.user.id } });
-      await tx.traktRating.deleteMany({ where: { userId: session.user.id } });
+      await tx.traktWatchedItem.deleteMany({ where: { userId } });
+      await tx.traktRating.deleteMany({ where: { userId } });
     }
+    return true;
   });
-  return NextResponse.json(await getTraktProfileState(session.user.id, session.user.permissions));
+  if (!updated) return NextResponse.json({ error: t("apiAuth.profile.trakt.notConnected") }, { status: 404 });
+  return NextResponse.json(await getTraktProfileState(userId, session.user.permissions));
 });
 
 // Disconnect: the grant, the connection and the imported history are deleted,

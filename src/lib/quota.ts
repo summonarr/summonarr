@@ -33,6 +33,10 @@ export interface ResolvedQuota {
   windowLabel: string;
 }
 
+// The global calendar window starts at local midnight (day), the 1st (month)
+// or Monday (ISO week) in the SERVER PROCESS's time zone: the container's `TZ`,
+// which is UTC unless the operator sets it (docker-compose.yml shows how).
+// Requests are counted against that one zone for every user, wherever they are.
 function globalWindow(period: string, now: Date): { since: Date; label: string } {
   if (period === "day") {
     return { since: new Date(now.getFullYear(), now.getMonth(), now.getDate()), label: "day" };

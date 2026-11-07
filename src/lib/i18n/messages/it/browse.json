@@ -119,6 +119,8 @@
   "browse.forYou.rebuild.failed": "Ricostruzione non riuscita (HTTP {status})",
   "browse.forYou.rebuild.done_one": "Ricostruito {updated} scaffale su {count}",
   "browse.forYou.rebuild.done_other": "Ricostruiti {updated} scaffali su {count}",
+  "browse.forYou.rebuild.partial_one": "Ricostruito {updated} scaffale su {count}; {failed} non riusciti",
+  "browse.forYou.rebuild.partial_other": "Ricostruiti {updated} scaffali su {count}; {failed} non riusciti",
   "browse.forYou.rebuild.label": "Ricostruisci i suggerimenti",
   "browse.forYou.rebuild.labelWait": "Ricostruisci i suggerimenti — attendi {seconds} s",
   "browse.forYou.rebuild.wait": "Attendi {seconds} s",

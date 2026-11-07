@@ -5,7 +5,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, rolePresetExceeds, presetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, presetExceeds, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
 import type { InstanceGrants, MediaServerGrants } from "@/lib/permissions";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -96,6 +96,29 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
   }
   const isSelf = id === session.user.id;
+  const notFound = () => NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+
+  // The shared tail of every single-field branch below: the write (a row deleted
+  // since the branch read it is a 404, not an unhandled P2025), the audit AFTER
+  // the commit (guardrail 26), the session re-sign when the field rides the JWT,
+  // and the `{ id, <field> }` answer the native client and OpenAPI pin. Each
+  // branch runs its own validation, subset and self/admin gates first.
+  const commitField = async (
+    write: () => Promise<unknown>,
+    audit: { action: "SETTINGS_CHANGE" | "USER_PERMISSIONS_CHANGE"; details: Record<string, unknown> },
+    response: Record<string, unknown>,
+    { invalidate = true }: { invalidate?: boolean } = {},
+  ): Promise<NextResponse> => {
+    try {
+      await write();
+    } catch (err) {
+      if (isPrismaErrorCode(err, "P2025")) return notFound();
+      throw err;
+    }
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: audit.action, target: `user:${id}`, details: audit.details, ...auditContext(req, session) });
+    if (invalidate) invalidateUserSession(id);
+    return NextResponse.json({ id, ...response });
+  };
 
   type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue" | "notifyOnComment" | "emailOnComment" | "pushOnComment";
   const notifKeys: NotifKey[] = ["notifyOnApproved", "notifyOnAvailable", "notifyOnDeclined", "emailOnApproved", "emailOnAvailable", "emailOnDeclined", "pushOnApproved", "pushOnAvailable", "pushOnDeclined", "notifyOnIssue", "notifyOnComment", "emailOnComment", "pushOnComment"];
@@ -179,18 +202,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       return NextResponse.json({ error: t("apiAdmin.users.mediaServerInvalid") }, { status: 400 });
     }
     const prevMediaServer = await prisma.user.findUnique({ where: { id }, select: { mediaServer: true } });
-    if (!prevMediaServer) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-    try {
-      await prisma.user.update({ where: { id }, data: { mediaServer: ms } });
-    } catch (err) {
-      if (isPrismaErrorCode(err, "P2025")) {
-        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-      }
-      throw err;
-    }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "SETTINGS_CHANGE", target: `user:${id}`, details: { field: "mediaServer", before: prevMediaServer.mediaServer, after: ms }, ...auditContext(req, session) });
-    invalidateUserSession(id);
-    return NextResponse.json({ id, mediaServer: ms });
+    if (!prevMediaServer) return notFound();
+    return commitField(
+      () => prisma.user.update({ where: { id }, data: { mediaServer: ms } }),
+      { action: "SETTINGS_CHANGE", details: { field: "mediaServer", before: prevMediaServer.mediaServer, after: ms } },
+      { mediaServer: ms },
+    );
   }
 
   if ("maxContentRating" in body) {
@@ -203,18 +220,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
     }
     const prev = await prisma.user.findUnique({ where: { id }, select: { maxContentRating: true } });
-    if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-    try {
-      await prisma.user.update({ where: { id }, data: { maxContentRating: mcr } });
-    } catch (err) {
-      if (isPrismaErrorCode(err, "P2025")) {
-        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-      }
-      throw err;
-    }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "SETTINGS_CHANGE", target: `user:${id}`, details: { field: "maxContentRating", before: prev.maxContentRating, after: mcr }, ...auditContext(req, session) });
-    invalidateUserSession(id);
-    return NextResponse.json({ id, maxContentRating: mcr });
+    if (!prev) return notFound();
+    return commitField(
+      () => prisma.user.update({ where: { id }, data: { maxContentRating: mcr } }),
+      { action: "SETTINGS_CHANGE", details: { field: "maxContentRating", before: prev.maxContentRating, after: mcr } },
+      { maxContentRating: mcr },
+    );
   }
 
   if (body.permissions !== undefined) {
@@ -238,7 +249,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       );
     }
     const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true } });
-    if (!targetUser) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+    if (!targetUser) return notFound();
 
     // A non-admin MANAGE_USERS holder must not edit an admin's permissions or grant
     // the ADMIN superbit. The lockstep guards below stop role/bit desync; this stops
@@ -275,19 +286,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       return NextResponse.json({ error: t("apiAdmin.users.promoteBeforeGrantingAdmin") }, { status: 400 });
     }
 
-    try {
-      await prisma.user.update({ where: { id }, data: { permissions: parsed } });
-    } catch (err) {
-      if (isPrismaErrorCode(err, "P2025")) {
-        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-      }
-      throw err;
-    }
     // The target is named by id (+ display name), never by email — here and on
     // the two grant rows below (audit-scrub.ts).
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { targetUserId: id, ...(targetUser.name ? { targetUser: targetUser.name } : {}), before: targetUser.permissions.toString(), after: parsed.toString() }, ...auditContext(req, session) });
-    invalidateUserSession(id);
-    return NextResponse.json({ id, permissions: parsed.toString() });
+    return commitField(
+      () => prisma.user.update({ where: { id }, data: { permissions: parsed } }),
+      { action: "USER_PERMISSIONS_CHANGE", details: { targetUserId: id, ...(targetUser.name ? { targetUser: targetUser.name } : {}), before: targetUser.permissions.toString(), after: parsed.toString() } },
+      { permissions: parsed.toString() },
+    );
   }
 
   // Per-instance grants for NAMED Radarr/Sonarr instances (multi-instance). A JSON
@@ -309,18 +314,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     }
     const grants = serializeInstanceGrants(parsedGrants);
     const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true } });
-    if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-    try {
-      await prisma.user.update({ where: { id }, data: { instanceGrants: grants } });
-    } catch (err) {
-      if (isPrismaErrorCode(err, "P2025")) {
-        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-      }
-      throw err;
-    }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "instanceGrants", targetUserId: id, ...(prev.name ? { targetUser: prev.name } : {}), after: grants }, ...auditContext(req, session) });
-    invalidateUserSession(id);
-    return NextResponse.json({ id, instanceGrants: grants });
+    if (!prev) return notFound();
+    return commitField(
+      () => prisma.user.update({ where: { id }, data: { instanceGrants: grants } }),
+      { action: "USER_PERMISSIONS_CHANGE", details: { field: "instanceGrants", targetUserId: id, ...(prev.name ? { targetUser: prev.name } : {}), after: grants } },
+      { instanceGrants: grants },
+    );
   }
 
   // Per-server VISIBILITY grants for RESTRICTED Plex/Jellyfin instances. A
@@ -353,18 +352,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     }
     const grants = serializeMediaServerGrants(parsedGrants);
     const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true } });
-    if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-    try {
-      await prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } });
-    } catch (err) {
-      if (isPrismaErrorCode(err, "P2025")) {
-        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-      }
-      throw err;
-    }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "mediaServerGrants", targetUserId: id, ...(prev.name ? { targetUser: prev.name } : {}), after: grants }, ...auditContext(req, session) });
-    invalidateUserSession(id);
-    return NextResponse.json({ id, mediaServerGrants: grants });
+    if (!prev) return notFound();
+    return commitField(
+      () => prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } }),
+      { action: "USER_PERMISSIONS_CHANGE", details: { field: "mediaServerGrants", targetUserId: id, ...(prev.name ? { targetUser: prev.name } : {}), after: grants } },
+      { mediaServerGrants: grants },
+    );
   }
 
   const quotaField = QUOTA_FIELDS.find((k) => k in body);
@@ -392,18 +385,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       where: { id },
       select: { movieQuotaLimit: true, movieQuotaDays: true, tvQuotaLimit: true, tvQuotaDays: true },
     });
-    if (!prevQuota) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-    try {
-      await prisma.user.update({ where: { id }, data: { [quotaField]: nextVal } });
-    } catch (err) {
-      if (isPrismaErrorCode(err, "P2025")) {
-        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-      }
-      throw err;
-    }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "SETTINGS_CHANGE", target: `user:${id}`, details: { field: quotaField, before: prevQuota[quotaField] ?? null, after: nextVal }, ...auditContext(req, session) });
-    invalidateUserSession(id);
-    return NextResponse.json({ id, [quotaField]: nextVal });
+    if (!prevQuota) return notFound();
+    return commitField(
+      () => prisma.user.update({ where: { id }, data: { [quotaField]: nextVal } }),
+      { action: "SETTINGS_CHANGE", details: { field: quotaField, before: prevQuota[quotaField] ?? null, after: nextVal } },
+      { [quotaField]: nextVal },
+    );
   }
 
   const notifKey = notifKeys.find(k => body[k] !== undefined);
@@ -412,17 +399,14 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       return NextResponse.json({ error: t("apiAdmin.users.notifBoolean", { field: notifKey }) }, { status: 400 });
     }
     const prevNotif = await prisma.user.findUnique({ where: { id }, select: { [notifKey]: true } });
-    if (!prevNotif) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-    try {
-      await prisma.user.update({ where: { id }, data: { [notifKey]: body[notifKey] } });
-    } catch (err) {
-      if (isPrismaErrorCode(err, "P2025")) {
-        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-      }
-      throw err;
-    }
-    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "SETTINGS_CHANGE", target: `user:${id}`, details: { field: notifKey, before: prevNotif[notifKey], after: body[notifKey] }, ...auditContext(req, session) });
-    return NextResponse.json({ id, [notifKey]: body[notifKey] });
+    if (!prevNotif) return notFound();
+    // Notification preferences don't ride the session token: no re-sign.
+    return commitField(
+      () => prisma.user.update({ where: { id }, data: { [notifKey]: body[notifKey] } }),
+      { action: "SETTINGS_CHANGE", details: { field: notifKey, before: prevNotif[notifKey], after: body[notifKey] } },
+      { [notifKey]: body[notifKey] },
+      { invalidate: false },
+    );
   }
 
   // If we reached here, none of the typed-field branches (mediaServer/permissions/
@@ -446,12 +430,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   // request bits. Checking management bits alone let a delegate without, say,
   // REQUEST_TV "re-set" a user an admin had restricted to movies back to USER and
   // hand them TV requests (a same-role PATCH is accepted and re-seeds too).
-  if (rolePresetExceeds(body.role, session.user.permissions) || presetExceeds(body.role, session.user.permissions)) {
+  if (presetExceeds(body.role, session.user.permissions)) {
     return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
   }
 
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, name: true, email: true } });
-  if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+  if (!target) return notFound();
 
   // Only a full admin may promote a user TO admin or change an account that is
   // already admin (demotion, re-seed). Without this, a MANAGE_USERS holder could
@@ -505,9 +489,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     });
     return { kind: "ok" as const };
   });
-  if (outcome.kind === "not-found") {
-    return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
-  }
+  if (outcome.kind === "not-found") return notFound();
   if (outcome.kind === "forbidden") {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminGrantAdmin") }, { status: 403 });
   }

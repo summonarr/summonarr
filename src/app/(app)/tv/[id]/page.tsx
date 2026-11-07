@@ -1,46 +1,31 @@
 import type { Metadata } from "next";
-import { cache, Fragment } from "react";
+import { cache } from "react";
 import { getTVDetails, tmdbLanguageFor, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
-import { RequestButton } from "@/components/media/request-button";
-import { Request4kButton } from "@/components/media/request-4k-button";
-import { RequestInstanceButton } from "@/components/media/request-instance-button";
-import { WatchlistButton } from "@/components/media/watchlist-button";
-import { HideButton } from "@/components/media/hide-button";
-import { isArrConfigured } from "@/lib/arr";
-import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { CastSection } from "@/components/media/cast-section";
 import { SimilarRow } from "@/components/media/similar-row";
 import { TVSeasons } from "@/components/media/tv-seasons";
 import Image from "next/image";
 import { notFound } from "next/navigation";
-import { TrailerButton } from "@/components/media/trailer-button";
-import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
-import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
-import { ArrAddButton } from "@/components/admin/arr-title/add-dialog";
-import { arrInstancesForTitle, parseManageLink } from "@/lib/arr-links-data";
-import { getAdminTitleNeverWatched } from "@/lib/never-watched-report";
+import { parseManageLink } from "@/lib/arr-links-data";
 import { NeverWatchedChip } from "@/components/admin/never-watched-chip";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 import { attachAllAvailability } from "@/lib/attach-all";
-import { getVisibleServerInstances, visibleEpisodeSourcesFrom } from "@/lib/media-visibility";
-import { getBadgeVisibility } from "@/lib/badge-visibility";
-import { generateRequestToken } from "@/lib/request-token";
-import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
+import { providerEpisodeSources, visibleEpisodeSourcesFrom } from "@/lib/media-visibility";
+import { allNamed, emptyOnFailure, loadDetailPageState } from "@/lib/detail-page-data";
+import { DetailActions } from "@/components/media/detail-actions";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName, localizedProductionCountry } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
-import { canRequest, hasPermission, Permission } from "@/lib/permissions";
-import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
-import { isBlacklisted } from "@/lib/blacklist";
+import { canRequest } from "@/lib/permissions";
 import { DetailTitle } from "@/components/layout/detail-title";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { localizeMedia } from "@/lib/tmdb-localize";
 import { translateTmdbStatus } from "@/components/media/detail-status";
-import { isFeatureEnabled } from "@/lib/features";
 
 // The gate + the details read, ONCE per request, shared by generateMetadata and
 // the page body (React `cache`, keyed on the route id — the idiom
@@ -61,8 +46,10 @@ const loadShow = cache(async (id: string) => {
   // propagates to (app)/error.tsx, which offers a retry. The old bare
   // catch-all-to-notFound showed "might have been removed" for an existing
   // title during a TMDB blip — same shape as person/[id]/page.tsx.
-  const tmdbId = Number(id);
-  if (!Number.isFinite(tmdbId) || tmdbId <= 0) notFound();
+  // Canonical digits only (parseTmdbIdParam): Number() let "1e3", "0x3E8" and
+  // " 1000 " render a title at a URL that isn't its own, and sent "1.5" to TMDB.
+  const tmdbId = parseTmdbIdParam(id);
+  if (tmdbId === null || !isTmdbIdInRange(tmdbId)) notFound();
   const englishMedia = await getTVDetails(tmdbId).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     if (/failed: 404\b/.test(message)) notFound();
@@ -101,105 +88,38 @@ export default async function TVDetailPage({
   const sp = await searchParams;
   const { session, t, locale, media } = await loadShow(id);
 
-  const provider = session.user.provider;
-  const providerSources =
-    provider === "plex"
-      ? ["plex"]
-      : provider === "jellyfin" || provider === "jellyfin-quickconnect"
-      ? ["jellyfin"]
-      : ["plex", "jellyfin"];
+  const providerSources = providerEpisodeSources(session.user.provider);
 
-  // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
-  // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
-  // in-library gates on the "report issue" / "vote to delete" actions — so scoping the
-  // QUERIES (not their results) is what keeps a restricted server invisible end to end.
-  const visible = await getVisibleServerInstances(session);
-
-  const [
-    plexItem,
-    jellyfinItem,
-    tvdbRequest,
-    userRequest,
-    userDeletionVote,
-    sonarrWanted,
-    cast,
-    rawSuggestions,
-    ownedEpisodes,
-    genreList,
-    blacklisted,
-    has4k,
-    userRequest4k,
-    request4kAllRow,
-    sonarr4kAvailable,
-    sonarr4kWanted,
-    votesEnabled,
-    issuesEnabled,
-    plexEnabled,
-    jellyfinEnabled,
-    onWatchlist,
-    onHidden,
-  ] = await Promise.all([
-    prisma.plexLibraryItem.findFirst({
-      where: { tmdbId: media.id, mediaType: "TV", serverInstance: { in: visible.plex } },
-    }),
-    prisma.jellyfinLibraryItem.findFirst({
-      where: { tmdbId: media.id, mediaType: "TV", serverInstance: { in: visible.jellyfin } },
-    }),
-    prisma.mediaRequest.findFirst({
+  // The viewer-scoped state (shared with the movie page) and this page's own
+  // reads, together.
+  const warnEmpty = (source: string) => emptyOnFailure("tv-page", source, media.id);
+  const { state, tvdbRequest, cast, rawSuggestions, ownedEpisodes, genreList } = await allNamed({
+    state: loadDetailPageState(session, media, "TV"),
+    tvdbRequest: prisma.mediaRequest.findFirst({
       where: { tmdbId: media.id, mediaType: "TV", tvdbId: { not: null } },
       select: { tvdbId: true },
     }),
-    prisma.mediaRequest.findFirst({
-      // Any non-4K instance: the main request button owns the default AND named
-      // (auto-routed, e.g. anime) requests; only 4K has its own separate button.
-      where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: { not: "4k" }, status: { not: "DECLINED" } },
-      select: { id: true },
-    }),
-    prisma.deletionVote.findFirst({
-      where: { tmdbId: media.id, mediaType: "TV", userId: session.user.id },
-      select: { id: true },
-    }),
-    prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "" } } }),
-    getTVCredits(media.id).catch(() => []),
-    getTVSuggestions(media.id).catch(() => []),
+    cast: getTVCredits(media.id).catch(warnEmpty("credits")),
+    rawSuggestions: getTVSuggestions(media.id).catch(warnEmpty("suggestions")),
     // Fetched for every source the viewer's PROVIDER allows, then filtered
-    // below against the scoped library rows resolved in this same Promise.all.
+    // below against the scoped library availability resolved alongside it.
     // TVEpisodeCache has no serverInstance column (guardrail 35), so `source`
     // alone would surface a RESTRICTED server's per-episode holdings; `source`
     // is selected here purely so that filter can run without a second query.
-    prisma.tVEpisodeCache.findMany({
+    ownedEpisodes: prisma.tVEpisodeCache.findMany({
       where: { tmdbId: media.id, source: { in: providerSources } },
       select: { seasonNumber: true, episodeNumber: true, source: true },
     }),
-    getTVGenres(tmdbLanguageFor(locale)).catch(() => []),
-    isBlacklisted(media.id, "TV"),
-    isArrConfigured("sonarr", "4k"),
-    prisma.mediaRequest.findFirst({
-      where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: "4k", status: { not: "DECLINED" } },
-      select: { id: true },
-    }),
-    prisma.setting.findUnique({ where: { key: "request4kAll" } }),
-    prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-    prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-    isFeatureEnabled("feature.page.votes"),
-    isFeatureEnabled("feature.page.issues"),
-    isFeatureEnabled("feature.integration.plex"),
-    isFeatureEnabled("feature.integration.jellyfin"),
-    prisma.watchlistItem
-      .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
-      .then((r) => !!r),
-    prisma.hiddenItem
-      .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
-      .then((r) => !!r),
-  ]);
+    genreList: getTVGenres(tmdbLanguageFor(locale)).catch(warnEmpty("genres")),
+  });
   const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
 
   // Report a source's episodes only when this viewer can see some server of
   // that type actually holding the show — the TVEpisodeCache gate described in
   // media-visibility.ts. Filtering here rather than in the query above keeps it
-  // to zero extra round-trips, since plexItem/jellyfinItem land in the same
-  // Promise.all.
-  const episodeSources = visibleEpisodeSourcesFrom(!!plexItem, !!jellyfinItem, providerSources);
+  // to zero extra round-trips, since the scoped library rows land in the same
+  // read.
+  const episodeSources = visibleEpisodeSourcesFrom(state.plexAvailable, state.jellyfinAvailable, providerSources);
   const ownedBySeason: Record<number, number[]> = {};
   const seen = new Set<string>();
   for (const row of ownedEpisodes) {
@@ -209,51 +129,12 @@ export default async function TVDetailPage({
     seen.add(key);
     (ownedBySeason[row.seasonNumber] ??= []).push(row.episodeNumber);
   }
-  const plexAvailable     = !!plexItem;
-  const jellyfinAvailable = !!jellyfinItem;
-  const arrPending        = !!sonarrWanted;
-  const requested         = !!userRequest;
   const tvdbId = tvdbRequest?.tvdbId ?? null;
-  const canOnBehalf = hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF);
-  const canChooseProfile = hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED);
-  const requested4k = !!userRequest4k;
+  const { showPlex, showJellyfin, show4k } = state;
   const canRequestTv = canRequest(session.user.permissions, "TV", false);
-  const canRequest4k = canRequest(session.user.permissions, "TV", true, request4kAllRow?.value === "true");
-  // Only surface 4K availability to viewers who can request 4K (instance configured + permission).
-  const show4k = has4k && canRequest4k;
-  const arr4kAvailable = show4k && !!sonarr4kAvailable;
-  const arr4kPending = show4k && !!sonarr4kWanted;
 
-  // Named instances (non-default, non-4K): render an explicit "Request on X"
-  // button for each configured one the viewer may target. Shared with the movie
-  // page and GET /api/requests/instances so the three can't drift — see
-  // resolveNamedInstanceTargets.
-  const [suggestions, namedTargets] = await Promise.all([
-    attachAllAvailability(rawSuggestions, session.user.id, { blockRatings: true, show4k }),
-    resolveNamedInstanceTargets({
-      tmdbId: media.id,
-      mediaType: "TV",
-      userId: session.user.id,
-      permissions: session.user.permissions,
-      blacklisted,
-    }),
-  ]);
-  // "Open in Sonarr" for an admin, one link per configured instance whose
-  // synced cache holds the title. A cosmetic shortcut (JWT-level session is
-  // fine — guardrail 29); the route behind it is ADMIN-gated itself.
-  const [arrLinks, neverWatched] = await Promise.all([
-    hasPermission(session.user.permissions, Permission.ADMIN)
-      // Nothing while the integration is switched off — every route behind
-      // the links would answer "integration disabled".
-      ? isFeatureEnabled("feature.integration.sonarr")
-        .then((on) => (on ? arrInstancesForTitle("sonarr", media.id) : []))
-        .catch(() => [])
-      : Promise.resolve([]),
-    // ADMIN-only "never watched" chip (guardrail 14d) — null for anyone else.
-    getAdminTitleNeverWatched(session.user.permissions, media.id, "TV"),
-  ]);
+  const suggestions = await attachAllAvailability(rawSuggestions, session.user.id, { blockRatings: true, show4k });
   const manageLink = parseManageLink(sp.manage, sp.tab, "sonarr");
-  const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -303,17 +184,17 @@ export default async function TVDetailPage({
             <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
               <Chip tone="accent">{t("detail.kindTv")}</Chip>
               <AvailabilityBadges
-                plexAvailable={plexAvailable}
-                jellyfinAvailable={jellyfinAvailable}
-                arrPending={arrPending}
-                requested={requested}
-                arr4kAvailable={arr4kAvailable}
-                arr4kPending={arr4kPending}
+                plexAvailable={state.plexAvailable}
+                jellyfinAvailable={state.jellyfinAvailable}
+                arrPending={state.arrPending}
+                requested={state.requestedAny}
+                arr4kAvailable={state.arr4kAvailable}
+                arr4kPending={state.arr4kPending}
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 show4k={show4k}
               />
-              <NeverWatchedChip info={neverWatched} t={t} locale={locale} />
+              <NeverWatchedChip info={state.neverWatched} t={t} locale={locale} />
             </div>
 
             <h1
@@ -405,8 +286,8 @@ export default async function TVDetailPage({
               malRating={media.malRating}
               rogerEbertRating={media.rogerEbertRating}
               jellyfinRating={
-                showJellyfin && jellyfinItem?.communityRating != null
-                  ? jellyfinItem.communityRating.toFixed(1)
+                showJellyfin && state.jellyfinCommunityRating != null
+                  ? state.jellyfinCommunityRating.toFixed(1)
                   : null
               }
               voteAverage={media.voteAverage}
@@ -426,121 +307,15 @@ export default async function TVDetailPage({
               </p>
             )}
 
-            {/* items-end, not items-center: RequestButton is a flex-col block
-                (availability/queue status line above its CTA), so centering
-                floated the sibling buttons above the CTA whenever a status
-                line rendered. */}
-            <div
-              className="flex items-end flex-wrap"
-              style={{ gap: 10, marginTop: 6 }}
-            >
-              <RequestButton
-                key={media.id}
-                tmdbId={media.id}
-                mediaType="TV"
-                title={media.title}
-                posterPath={media.posterPath}
-                releaseYear={media.releaseYear ?? undefined}
-                plexAvailable={plexAvailable}
-                jellyfinAvailable={jellyfinAvailable}
-                arrPending={arrPending}
-                requested={requested}
-                showPlex={showPlex}
-                showJellyfin={showJellyfin}
-                requestToken={generateRequestToken(media.id, "TV", session.user.id)}
-                canRequestOnBehalf={canOnBehalf}
-                canChooseProfile={canChooseProfile}
-                blacklisted={blacklisted}
-                canRequest={canRequestTv}
-              />
-              {has4k && canRequest4k && (
-                <Request4kButton
-                  key={`4k-${media.id}`}
-                  tmdbId={media.id}
-                  mediaType="TV"
-                  requestToken={generateRequestToken(media.id, "TV", session.user.id)}
-                  requested={requested4k}
-                  available={arr4kAvailable}
-                  blacklisted={blacklisted}
-                />
-              )}
-              {namedTargets.map((t) => (
-                <RequestInstanceButton
-                  key={`${media.id}:${t.slug}`}
-                  tmdbId={media.id}
-                  mediaType="TV"
-                  instance={t.slug}
-                  instanceName={t.name}
-                  requestToken={generateRequestToken(media.id, "TV", session.user.id)}
-                  requested={t.requested}
-                  available={t.available}
-                  blacklisted={blacklisted}
-                />
-              ))}
-              <WatchlistButton key={`watchlist-${media.id}`} tmdbId={media.id} mediaType="TV" initialOnWatchlist={onWatchlist} />
-              <HideButton
-                key={`hide-${media.id}`}
-                tmdbId={media.id}
-                mediaType="TV"
-                title={media.title}
-                posterPath={media.posterPath}
-                initialHidden={onHidden}
-              />
-              {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
-                <ReportIssueButton
-                  tmdbId={media.id}
-                  tvdbId={tvdbId}
-                  mediaType="TV"
-                  title={media.title}
-                  posterPath={media.posterPath}
-                />
-              )}
-              {votesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
-                <VoteDeleteButton
-                  key={`vote-${media.id}`}
-                  tmdbId={media.id}
-                  mediaType="TV"
-                  requestToken={generateRequestToken(media.id, "TV", session.user.id)}
-                  alreadyVoted={!!userDeletionVote}
-                />
-              )}
-              {(media.trailerKey || media.trailerUrl) && (
-                <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
-              )}
-              {arrLinks.map((inst) => {
-                const label = arrInstanceLabel("sonarr", inst.name, inst.slug);
-                const deep = manageLink !== null && manageLink.instance === inst.slug;
-                // An instance holding the title: manage it there. Any other
-                // configured one: add it there, with the arr's own choices. A
-                // ?manage= deep link (an external/bookmarked URL — nothing in the
-                // app emits one) opens the manager even on a non-holder: `holds`
-                // is the synced cache, and the manager resolves the title live, so
-                // a title added since the last sync still opens; a true non-holder
-                // gets the dialog's own not-found state.
-                return inst.holds || deep ? (
-                  <Fragment key={inst.slug || "default"}>
-                    <ArrManageButton
-                      service="sonarr"
-                      instance={inst.slug}
-                      tmdbId={media.id}
-                      instanceLabel={label}
-                      autoOpen={deep}
-                      initialTab={deep ? manageLink.tab : undefined}
-                    />
-                    {inst.holds && (
-                      <OpenInArrLink
-                        service="sonarr"
-                        instance={inst.slug}
-                        target={{ tmdbId: media.id }}
-                        label={t("adminManage.openIn", { name: label })}
-                      />
-                    )}
-                  </Fragment>
-                ) : (
-                  <ArrAddButton key={inst.slug || "default"} service="sonarr" instance={inst.slug} tmdbId={media.id} instanceLabel={label} />
-                );
-              })}
-            </div>
+            <DetailActions
+              media={media}
+              mediaType="TV"
+              state={state}
+              canRequest={canRequestTv}
+              tvdbId={tvdbId}
+              manageLink={manageLink}
+              t={t}
+            />
           </div>
         </div>
       </div>

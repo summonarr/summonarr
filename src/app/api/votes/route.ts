@@ -15,7 +15,7 @@ import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
 import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
 import { isFeatureEnabled } from "@/lib/features";
 import { getVisibleServerInstances, titlesHiddenFromViewer } from "@/lib/media-visibility";
-import { scopeVotesWhere } from "@/lib/votes-visibility";
+import { scopeVotesWhere, votesOnTitlesWhere } from "@/lib/votes-visibility";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
@@ -81,11 +81,13 @@ export const GET = withAuth(async (req, _ctx, session) => {
   // must not tell an ungranted user what a restricted server holds — nor show
   // them other voters' reasons about it. A title in no library at all stays (a
   // vote outlives the copy). The web /votes page applies the same scope.
-  const hidden = await titlesHiddenFromViewer(
-    session,
-    votedTitles.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType })),
-  );
-  const scopedWhere = scopeVotesWhere(where, hidden);
+  const votedKeys = votedTitles.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
+  const hidden = await titlesHiddenFromViewer(session, votedKeys);
+  // "My votes" by count pages over every voter's rows on the caller's titles,
+  // so `_count` is the real total and the sort follows it (votes-visibility).
+  // The recent sort stays caller-scoped: it orders by the caller's own vote.
+  const byTotalCount = mine && sort === "votes";
+  const scopedWhere = byTotalCount ? votesOnTitlesWhere(votedKeys, hidden) : scopeVotesWhere(where, hidden);
   const grouped = await prisma.deletionVote.groupBy({
     by: ["tmdbId", "mediaType"],
     where: scopedWhere,
@@ -130,12 +132,13 @@ export const GET = withAuth(async (req, _ctx, session) => {
       orderBy: { createdAt: "desc" },
       take: PAGE_SIZE * 6,
     }),
-    // Under `mine`, the paging `where` also scopes the aggregate — and
-    // @@unique([tmdbId, mediaType, userId]) means the caller owns exactly one row
-    // per group, so `g._count.id` would always be 1. That shipped a "1 vote"
-    // badge next to three reasons written by three other users, hiding titles
-    // already past the deletion threshold. Recount the page's pairs unscoped.
-    mine
+    // Under `mine` sorted by recent, the paging `where` also scopes the
+    // aggregate — and @@unique([tmdbId, mediaType, userId]) means the caller
+    // owns exactly one row per group, so `g._count.id` would always be 1. That
+    // shipped a "1 vote" badge next to three reasons written by three other
+    // users, hiding titles already past the deletion threshold. Recount the
+    // page's pairs unscoped. The by-count path's aggregate is already unscoped.
+    mine && !byTotalCount
       ? prisma.deletionVote.groupBy({ by: ["tmdbId", "mediaType"], where: { OR: pairsFilter }, _count: { id: true } })
       : Promise.resolve(null),
   ]);

@@ -9,8 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import { translatedRelativeTime } from "./relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
+import { localizeDeviceLabel } from "@/lib/ua-fingerprint";
 
 interface AuthSessionRow {
   id: string;
@@ -58,6 +59,12 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
     if (deviceType === "tablet") return t("profile.sessions.device.tablet");
     if (deviceType === "desktop") return t("profile.sessions.device.desktop");
     return t("profile.sessions.device.other", { type: deviceType });
+  }
+
+  // The stored label is English (native clients read it as-is); show it in the
+  // viewer's language.
+  function deviceName(s: AuthSessionRow): string {
+    return localizeDeviceLabel(s.deviceLabel, t) ?? deviceTypeLabel(s.deviceType);
   }
 
   async function revoke(sessionId: string, confirmPassword?: string) {
@@ -122,7 +129,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
             <div className="min-w-0 space-y-0.5">
               <div className="flex items-center gap-2 flex-wrap">
                 <p className="text-sm text-zinc-200 truncate">
-                  {s.deviceLabel ?? deviceTypeLabel(s.deviceType)}
+                  {deviceName(s)}
                 </p>
                 {s.isCurrent && (
                   <Badge>
@@ -138,7 +145,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   </span>
                 )}
                 <span className="flex items-center gap-1 text-xs text-zinc-500">
-                  <Clock className="w-3 h-3" />{t("profile.sessions.active", { time: mounted ? translatedRelativeTime(s.lastSeenAt, t) : "" })}
+                  <Clock className="w-3 h-3" />{t("profile.sessions.active", { time: mounted ? formatRelativeTimeLocalized(s.lastSeenAt, locale) : "" })}
                 </span>
               </div>
               <p className="text-xs text-zinc-500">
@@ -159,10 +166,10 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               // A 40x40 tap area, plus an aria-label so screen readers say
               // what this button does (sign that device out).
               aria-label={s.ipAddress
-                ? t("profile.sessions.revokeNamedFrom", { name: s.deviceLabel ?? deviceTypeLabel(s.deviceType), ip: s.ipAddress })
-                : t("profile.sessions.revokeNamed", { name: s.deviceLabel ?? deviceTypeLabel(s.deviceType) })}
+                ? t("profile.sessions.revokeNamedFrom", { name: deviceName(s), ip: s.ipAddress })
+                : t("profile.sessions.revokeNamed", { name: deviceName(s) })}
               title={t("profile.sessions.revoke")}
-              className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-10 w-10 p-0"
+              className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-10 w-10 px-0"
               disabled={revoking === s.sessionId}
               onClick={() => setConfirmingRevoke(s.sessionId)}
             >
@@ -190,7 +197,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 size="sm"
                 variant="ghost"
                 aria-label={t("profile.sessions.cancelRevoke")}
-                className="h-10 w-10 p-0 text-zinc-400 hover:text-zinc-200"
+                className="h-10 w-10 px-0 text-zinc-400 hover:text-zinc-200"
                 onClick={() => setConfirmingRevoke(null)}
               >
                 <X className="w-3.5 h-3.5" />
@@ -233,7 +240,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 size="sm"
                 variant="ghost"
                 aria-label={t("profile.sessions.cancelRevoke")}
-                className="h-10 w-10 p-0 text-zinc-400 hover:text-zinc-200"
+                className="h-10 w-10 px-0 text-zinc-400 hover:text-zinc-200"
                 onClick={() => { setPasswordFor(null); setPassword(""); setRevokeError(null); }}
               >
                 <X className="w-3.5 h-3.5" />

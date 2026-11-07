@@ -6,7 +6,7 @@
 // (hasConfiguredDonationLinks is DB-backed and is intentionally not covered.)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DONATION_SETTING_KEYS, hasDonationLinks } from "../src/lib/donations.ts";
+import { DONATION_SETTING_KEYS, configuredDonations, donationHref, hasDonationLinks } from "../src/lib/donations.ts";
 
 // The donations module imports @/lib/prisma; env reads there are lazy, but set
 // the required vars anyway so an incidental lazy read can never throw mid-test.
@@ -97,4 +97,52 @@ test("one configured method among otherwise-blank keys is enough", () => {
     }),
     true,
   );
+});
+
+// ── the /donate page's method list and links ────────────────────────────────
+// The settings route stores donation values as typed, and the page used to
+// render them raw: a whitespace-only value became a blank card, " alice " a
+// link to "%20alice%20", and a case-sensitive "http" check doubled the host
+// ("https://venmo.com/Https://venmo.com/a").
+
+test("configuredDonations trims each value and drops blank ones, in display order", () => {
+  assert.deepEqual(
+    configuredDonations({ donationBuyMeACoffee: " coffee ", donationVenmo: "   ", donationPaypal: "\talice\n", donationZelle: null }),
+    [
+      { key: "donationPaypal", value: "alice" },
+      { key: "donationBuyMeACoffee", value: "coffee" },
+    ],
+  );
+});
+
+test("donationHref reads a URL scheme case-insensitively and keeps the https-only rule", () => {
+  assert.equal(donationHref("donationPaypal", "Https://paypal.me/x"), "https://paypal.me/x");
+  assert.equal(donationHref("donationVenmo", "HTTPS://venmo.com/a"), "https://venmo.com/a");
+  assert.equal(donationHref("donationPatreon", "http://www.patreon.com/x"), null, "http stays plain text");
+  for (const key of DONATION_SETTING_KEYS) {
+    assert.equal(donationHref(key, "javascript:alert(1)"), null, key);
+    assert.equal(donationHref(key, "JavaScript:alert(1)"), null, key);
+  }
+});
+
+test("donationHref puts a handle on the method's base, stripping a pasted host or a leading @", () => {
+  assert.equal(donationHref("donationVenmo", " alice "), "https://venmo.com/alice");
+  assert.equal(donationHref("donationVenmo", "@alice"), "https://venmo.com/alice");
+  assert.equal(donationHref("donationVenmo", "venmo.com/alice"), "https://venmo.com/alice");
+  assert.equal(donationHref("donationVenmo", "WWW.Venmo.com/alice"), "https://venmo.com/alice");
+  assert.equal(donationHref("donationPaypal", "paypal.me/alice"), "https://paypal.me/alice");
+  assert.equal(donationHref("donationPaypal", "paypal.com/paypalme/alice"), "https://paypal.me/alice");
+  assert.equal(donationHref("donationPatreon", "patreon.com/alice"), "https://www.patreon.com/alice");
+  assert.equal(donationHref("donationBuyMeACoffee", "@alice"), "https://www.buymeacoffee.com/alice");
+});
+
+test("donationHref shows a PayPal email, Zelle, a bare Amazon value and an empty handle as text", () => {
+  assert.equal(donationHref("donationPaypal", "alice@example.com"), null);
+  assert.equal(donationHref("donationPaypal", "@alice"), "https://paypal.me/alice", "a leading @ is a handle, not an email");
+  assert.equal(donationHref("donationZelle", "555-0100"), null);
+  assert.equal(donationHref("donationZelle", "https://www.zellepay.com/"), null);
+  assert.equal(donationHref("donationAmazon", "amazon.com/hz/wishlist/ls/XYZ"), null);
+  assert.equal(donationHref("donationAmazon", "https://www.amazon.com/hz/wishlist/ls/XYZ"), "https://www.amazon.com/hz/wishlist/ls/XYZ");
+  assert.equal(donationHref("donationVenmo", "   "), null);
+  assert.equal(donationHref("donationVenmo", "venmo.com/"), null);
 });

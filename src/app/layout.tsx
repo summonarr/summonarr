@@ -11,14 +11,16 @@ import { I18nProvider } from "@/components/i18n/i18n-provider";
 import { getLocale } from "@/lib/i18n/server";
 import { clientCatalog } from "@/lib/i18n/catalogs";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { themeInitScript } from "@/lib/theme-constants";
 
 const EMPTY_MESSAGES = {};
 
 // Runs before first paint: applies the user's persisted theme/accent so there
-// is no flash. Mirrors the storage keys + validation in theme-provider.tsx.
-// Kept tiny and dependency-free; carries the CSP nonce so `strict-dynamic`
-// allows it.
-const THEME_INIT_SCRIPT = `(function(){try{var d=document.documentElement,t=localStorage.getItem("summonarr-theme"),a=localStorage.getItem("summonarr-accent");if(t==="light"||t==="dark"){d.setAttribute("data-theme",t);d.classList.toggle("dark",t==="dark");}if(a&&["indigo","amber","emerald","cyan","rose","mono"].indexOf(a)!==-1){d.setAttribute("data-accent",a);}}catch(e){}})();`;
+// is no flash. Built from the same storage keys + accent list ThemeProvider
+// uses (src/lib/theme-constants.ts), once, at module load — still a
+// module-level constant string, which the script tag's suppressHydrationWarning
+// below relies on. Carries the CSP nonce so `strict-dynamic` allows it.
+const THEME_INIT_SCRIPT = themeInitScript();
 
 const geist = Geist({
   variable: "--font-geist-sans",

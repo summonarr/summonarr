@@ -4,6 +4,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { normalizeEmail } from "@/lib/auth";
+import { PLAUSIBLE_EMAIL_RE } from "@/lib/email-normalize";
 import { checkRateLimit, peekRateLimit } from "@/lib/rate-limit";
 import { isNotificationEmailEnabled, sendNotificationEmailVerification } from "@/lib/email";
 import { localeForRequest } from "@/lib/i18n/server-locale";
@@ -16,9 +17,6 @@ import {
   VERIFY_TTL_MS,
 } from "@/lib/notification-email-verify";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-
-// RFC-5322-lite (matches the profile route). SMTP rejects the rest.
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // POST { email, confirmPassword? } — begin verifying a self-service notification
 // email for a Jellyfin user. A one-time link is mailed to the CANDIDATE address; the address
@@ -38,6 +36,17 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const parsed = await readJsonCapped<{ email?: string; confirmPassword?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
+
+  // Validated before the send budget and the step-up: a typo or a server with no
+  // transport must neither burn one of the three sends nor ask for a password.
+  const rawEmail = typeof parsed.email === "string" ? parsed.email.trim() : "";
+  if (!rawEmail || rawEmail.length > 320 || !PLAUSIBLE_EMAIL_RE.test(rawEmail)) {
+    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
+  }
+
+  if (!(await isNotificationEmailEnabled())) {
+    return NextResponse.json({ error: t("apiAuth.profile.emailNotConfigured") }, { status: 400 });
+  }
 
   // 3 sends / 15 min per user — an authenticated user can't weaponize this into
   // an email-bombing tool against an arbitrary mailbox. PEEKED before the
@@ -73,15 +82,6 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   if (!checkRateLimit(sendKey, 3, 15 * 60_000)) {
     return tooManyRequests(900, t("apiAuth.profile.tooManyVerificationEmails"));
-  }
-
-  const rawEmail = typeof parsed.email === "string" ? parsed.email.trim() : "";
-  if (!rawEmail || rawEmail.length > 320 || !EMAIL_RE.test(rawEmail)) {
-    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
-  }
-
-  if (!(await isNotificationEmailEnabled())) {
-    return NextResponse.json({ error: t("apiAuth.profile.emailNotConfigured") }, { status: 400 });
   }
 
   const email = normalizeEmail(rawEmail);

@@ -23,6 +23,28 @@ test("events that write no inbox row for the viewer do not reload it", () => {
   assert.equal(reloadsInbox({ type: "activity:sessions", sessions: [] }), false);
 });
 
+test("a frame about ANOTHER user (a manager's bypass delivers everyone's) does not reload the inbox; the viewer's own does", () => {
+  // Admins and request/issue managers receive every request:* / issue:* frame,
+  // but an inbox row is only ever written for the event's own user.
+  for (const event of [
+    { type: "request:updated" as const, requestId: "r1", status: "APPROVED" },
+    { type: "request:comment" as const, requestId: "r1" },
+    { type: "issue:updated" as const, issueId: "i1", status: "RESOLVED" },
+    { type: "issuemessage:created" as const, issueId: "i1" },
+  ]) {
+    assert.equal(reloadsInbox({ ...event, own: false }), false, `${event.type} own:false`);
+    assert.equal(reloadsInbox({ ...event, own: true }), true, `${event.type} own:true`);
+  }
+});
+
+test("the events route marks exactly the inbox event types `own`, from the same list", () => {
+  const route = readFileSync(new URL("../src/app/api/events/route.ts", import.meta.url), "utf-8");
+  assert.match(route, /from "@\/lib\/inbox-live-event-types"/);
+  assert.match(route, /isInboxLiveEventType\(event\.type\) \? \{ \.\.\.clientEvent, own: evtUserId === userId \}/);
+  const client = readFileSync(new URL("../src/components/notifications/inbox-live-events.ts", import.meta.url), "utf-8");
+  assert.match(client, /from "@\/lib\/inbox-live-event-types"/, "the client list and the route's must be one list");
+});
+
 test("the store decides through reloadsInbox, not an inline list that can drift", () => {
   const src = readFileSync(new URL("../src/components/notifications/notification-store.tsx", import.meta.url), "utf-8");
   assert.match(src, /useLiveEvents\(\(event\) => \{\s*if \(reloadsInbox\(event\)\)/);

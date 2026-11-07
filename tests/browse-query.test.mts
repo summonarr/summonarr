@@ -19,6 +19,10 @@
 //
 // The pins below are written so that reintroducing either one goes red.
 //
+// Also pinned: an EXTRA page of the window that fails still degrades to fewer
+// items (the response shape has no "partial" flag), but no longer silently —
+// it is logged under the [browse] scope, once per distinct error (7b).
+//
 // No DB and no network: the TMDB layer is reached through a scripted
 // globalThis.fetch (matching tests/tmdb.test.mts) and every Prisma delegate the
 // enrichment touches is shadowed in-memory via tests/_helpers.mts (matching
@@ -34,12 +38,18 @@ process.env.TMDB_READ_TOKEN = "test-token";
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { runBrowseQuery } = await import("../src/lib/browse-query.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+
+const warns: string[] = [];
+console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
 type SummonarrSession = import("../src/lib/api-auth.ts").SummonarrSession;
 
 // ── scripted TMDB ───────────────────────────────────────────────────────────
 
 /** Every TMDB page request this run made, in order, as page numbers. */
 let fetchedPages: number[] = [];
+/** TMDB pages that answer 500. */
+let failingPages = new Set<number>();
 /** Total TMDB pages the scripted API claims to have. */
 const TOTAL_TMDB_PAGES = 500;
 
@@ -66,6 +76,9 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(typeof input === "string" ? input : input.toString());
   const page = parseInt(url.searchParams.get("page") ?? "1", 10);
   fetchedPages.push(page);
+  if (failingPages.has(page)) {
+    return new Response(JSON.stringify({ status_message: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
+  }
   return new Response(JSON.stringify(pageBody(page)), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -146,8 +159,11 @@ function session(): SummonarrSession {
 
 beforeEach(() => {
   fetchedPages = [];
+  failingPages = new Set();
   plexHeld = new Set();
   settings = new Map();
+  warns.length = 0;
+  resetLogDedup();
 });
 
 // ── the window ──────────────────────────────────────────────────────────────
@@ -208,6 +224,27 @@ test("virtual pages 1 and 2 are disjoint, so a dropped survivor is reachable fro
   const union = new Set([...ids1, ...ids2]);
   assert.equal(union.size, expected.size, `expected ${expected.size} distinct items across two pages, got ${union.size}`);
   for (const id of expected) assert.ok(union.has(id), `id ${id} is unreachable from either page`);
+});
+
+test("a failed extra page degrades to fewer items and is logged once per distinct error, not per request", async () => {
+  failingPages = new Set([3]);
+  const r = await runBrowseQuery({
+    mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session(),
+  });
+  assert.equal(r.items.length, 80, "the other four pages' items are still served");
+  assert.ok(!r.items.some((i) => i.id >= 300 && i.id < 400), "nothing from the failed page");
+  const browseWarns = () => warns.filter((w) => w.startsWith("[browse]"));
+  assert.equal(browseWarns().length, 1, "the failure is not silent");
+  assert.match(browseWarns()[0], /failed: 500/);
+
+  await runBrowseQuery({ mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session() });
+  assert.equal(browseWarns().length, 1, "the same outage on the next request stays quiet");
+
+  failingPages = new Set();
+  await runBrowseQuery({ mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session() });
+  failingPages = new Set([4]);
+  await runBrowseQuery({ mediaType: "movie", page: 1, filters: {}, hideAvailable: true, session: session() });
+  assert.equal(browseWarns().length, 2, "once a window succeeds, a new failure is reported again");
 });
 
 test("hideAvailable actually removes held titles, and only those", async () => {

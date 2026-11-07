@@ -9,6 +9,8 @@ import {
   ACTIVITY_MAX_DAYS,
   ACTIVITY_MIN_DAYS,
   parseActivityDays,
+  parseActivityMediaType,
+  parseActivitySource,
 } from "@/lib/activity-days";
 
 const DATE_RANGES = [
@@ -46,6 +48,15 @@ const SUB_PAGES: { labelKey: string; href: string; exact?: boolean; filtered?: b
 ];
 const FILTER_PARAMS = ["days", "source", "mediaType"] as const;
 
+// One segment of the period / source / type toggles.
+function segBtnClass(selected: boolean): string {
+  return `inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
+    selected
+      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
+  }`;
+}
+
 // Sub-page nav tabs plus period/source/type filters for the admin activity
 // pages; filters are driven entirely through URL search params.
 export function ActivityFilterBar() {
@@ -57,8 +68,10 @@ export function ActivityFilterBar() {
   // The window the server actually rendered, not the raw string: `?days=0` or
   // `?days=abc` render 30 days, and the bar must say so rather than "Custom: 0".
   const currentDays = String(parseActivityDays(searchParams.get("days")));
-  const currentSource = searchParams.get("source") ?? "";
-  const currentMediaType = searchParams.get("mediaType") ?? "";
+  // Likewise for source and type: an unrecognised value renders every source /
+  // type, so "All" is the segment that reads as selected.
+  const currentSource = parseActivitySource(searchParams.get("source")) ?? "";
+  const currentMediaType = parseActivityMediaType(searchParams.get("mediaType")) ?? "";
   const isPreset = DATE_RANGES.some((r) => r.value === currentDays);
   const defaultDays = String(ACTIVITY_DEFAULT_DAYS);
 
@@ -134,10 +147,8 @@ export function ActivityFilterBar() {
     setParam("days", String(num));
   };
 
-  const showFilters =
-    pathname === "/admin/activity" ||
-    pathname === "/admin/activity/history" ||
-    pathname === "/admin/activity/stats";
+  // SUB_PAGES says which tabs read the filters; the bar shows them there only.
+  const showFilters = SUB_PAGES.some((p) => p.filtered && isSubPageActive(p));
 
   return (
     <div className="mb-6 space-y-3">
@@ -178,11 +189,7 @@ export function ActivityFilterBar() {
                     setShowCustom(false);
                     setParam("days", r.value === defaultDays ? "" : r.value);
                   }}
-                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
-                    selected
-                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
-                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
-                  }`}
+                  className={segBtnClass(selected)}
                 >
                   {r.label}
                 </button>
@@ -191,11 +198,7 @@ export function ActivityFilterBar() {
               <button
                 onClick={() => setShowCustom(true)}
                 aria-pressed={showCustom}
-                className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
-                  showCustom
-                    ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
-                    : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
-                }`}
+                className={segBtnClass(showCustom)}
               >
                 {t("adminActivity.filter.custom")}
               </button>
@@ -250,11 +253,7 @@ export function ActivityFilterBar() {
                   key={s.value}
                   onClick={() => setParam("source", s.value)}
                   aria-pressed={currentSource === s.value}
-                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
-                    currentSource === s.value
-                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
-                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
-                  }`}
+                  className={segBtnClass(currentSource === s.value)}
                 >
                   {s.labelKey ? t(s.labelKey) : s.label}
                 </button>
@@ -270,11 +269,7 @@ export function ActivityFilterBar() {
                   key={mt.value}
                   onClick={() => setParam("mediaType", mt.value)}
                   aria-pressed={currentMediaType === mt.value}
-                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
-                    currentMediaType === mt.value
-                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
-                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
-                  }`}
+                  className={segBtnClass(currentMediaType === mt.value)}
                 >
                   {t(mt.labelKey)}
                 </button>

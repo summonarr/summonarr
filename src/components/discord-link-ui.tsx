@@ -1,25 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useDelayed } from "@/hooks/use-delayed";
 import { useRouter } from "next/navigation";
 import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { safeExternalHref } from "@/lib/safe-url";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { rich } from "@/components/settings/forms/rich";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StepUpPasswordForm } from "@/components/profile/step-up-password-form";
 import { stepUpNeedOf, withStepUpPassword } from "@/lib/client/step-up";
-
-// Renders a translated template whose {name} placeholders are React nodes
-// (inline <code>/<strong>), so word order stays with the translation.
-function rich(template: string, nodes: Record<string, React.ReactNode>): React.ReactNode[] {
-  return template.split(/(\{\w+\})/).map((part, i) => {
-    const m = /^\{(\w+)\}$/.exec(part);
-    return m && m[1] in nodes ? <span key={i}>{nodes[m[1]]}</span> : part;
-  });
-}
 
 function TokenLinkFlow() {
   const t = useT();
@@ -29,14 +21,25 @@ function TokenLinkFlow() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // The server's link code lives 10 minutes; past its expiresAt it is dead, so
+  // it stops being offered for copying.
+  const [expired, setExpired] = useState(false);
   // Minting a link code needs a step-up (guardrail 6g): the server answers
   // "password-required" and this flow asks for the password inline.
   const [stepUp, setStepUp] = useState(false);
   const [stepUpError, setStepUpError] = useState<string | null>(null);
   const later = useDelayed();
 
+  // Its own timer, not `later`: scheduling here would cancel a pending "copied"
+  // reset. Date.now() is read in the effect, never in render (guardrail 16).
+  useEffect(() => {
+    if (!expiresAt) return;
+    const id = setTimeout(() => setExpired(true), Math.max(0, expiresAt.getTime() - Date.now()));
+    return () => clearTimeout(id);
+  }, [expiresAt]);
+
   async function copyToken() {
-    if (!token) return;
+    if (!token || expired) return;
     try {
       await navigator.clipboard.writeText(token);
       setCopied(true);
@@ -71,6 +74,7 @@ function TokenLinkFlow() {
       if (!data.token || !data.expiresAt) throw new Error(t("profile.discord.error.malformed"));
       setToken(data.token);
       setExpiresAt(new Date(data.expiresAt));
+      setExpired(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("profile.error.generic"));
     } finally {
@@ -109,23 +113,33 @@ function TokenLinkFlow() {
         <div className="rounded-md bg-zinc-800 border border-zinc-700 p-4 space-y-3">
           <p className="text-xs text-zinc-500 uppercase tracking-wide font-semibold">{t("profile.discord.yourToken")}</p>
           <div className="flex items-center gap-2">
-            <p className="ds-mono text-sm font-bold text-zinc-100 break-all flex-1">{token}</p>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={copyToken}
-              className="h-10 w-10 shrink-0 p-0 text-zinc-400 hover:text-zinc-100"
-              title={t("profile.discord.copyToken")}
-              aria-label={t("profile.discord.copyToken")}
-            >
-              {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-            </Button>
+            <p className={`ds-mono text-sm font-bold break-all flex-1 ${expired ? "text-zinc-500 line-through" : "text-zinc-100"}`}>
+              {token}
+            </p>
+            {!expired && (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={copyToken}
+                className="h-10 w-10 shrink-0 px-0 text-zinc-400 hover:text-zinc-100"
+                title={t("profile.discord.copyToken")}
+                aria-label={t("profile.discord.copyToken")}
+              >
+                {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+              </Button>
+            )}
           </div>
-          <p className="text-xs text-zinc-500">
-            {rich(t("profile.discord.expiresRun", { time: expiresAt.toLocaleTimeString(locale) }), {
-              command: <code className="ds-mono bg-zinc-700 px-1 rounded">/link token:{token}</code>,
-            })}
-          </p>
+          {expired ? (
+            <p role="status" className="text-xs text-amber-400">
+              {t("profile.discord.expired", { time: expiresAt.toLocaleTimeString(locale) })}
+            </p>
+          ) : (
+            <p className="text-xs text-zinc-500">
+              {rich(t("profile.discord.expiresRun", { time: expiresAt.toLocaleTimeString(locale) }), {
+                command: <code className="ds-mono bg-zinc-700 px-1 rounded">/link token:{token}</code>,
+              })}
+            </p>
+          )}
         </div>
       )}
     </div>

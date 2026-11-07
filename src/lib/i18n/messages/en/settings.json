@@ -19,6 +19,10 @@
   "settings.cron.error": "Error",
   "settings.cron.running": "Running",
   "settings.cron.run": "Run",
+  "settings.cron.runNamed": "Run {name}",
+  "settings.cron.runningNamed": "{name} is running",
+  "settings.cron.skipped": "Skipped, nothing ran: {reason}",
+  "settings.cron.skippedNoReason": "Skipped, nothing ran",
   "settings.cron.interval.hourly": "hourly",
   "settings.cron.interval.daily": "daily",
   "settings.cron.interval.weekly": "weekly",
@@ -42,6 +46,8 @@
   "settings.cron.job.warmLibrary.description": "TMDB metadata for entire library + the \"For You\" suggestion graph",
   "settings.cron.job.purgeSessions.name": "Purge Sessions",
   "settings.cron.job.purgeSessions.description": "Delete expired auth sessions",
+  "settings.cron.job.purgeNotifications.name": "Purge Notifications",
+  "settings.cron.job.purgeNotifications.description": "Delete old in-app notifications past their retention",
   "settings.cron.job.scrubAuditPii.name": "Scrub Audit PII",
   "settings.cron.job.scrubAuditPii.description": "Remove IP/UA from audit entries past the retention window (default 90 days)",
   "settings.cron.job.trashSync.name": "TRaSH Sync",
@@ -438,6 +444,8 @@
   "settings.featureDesc.behavior_requestComments": "Let a requester and the people who manage requests exchange comments on a request (\"need a different version?\"). Each side is notified through their notification preferences. Turn off to hide the threads and refuse new comments from requesters; managers can still post.",
   "settings.playHistory.concurrentLimit": "Simultaneous streams alert",
   "settings.playHistory.concurrentLimitHelp": "Alert when one person streams more titles at once than this (Plex and Jellyfin count together). 0 turns it off. It only notifies admins (inbox and your notification channels); nothing is stopped. Server owner accounts are never counted.",
+  "settings.playHistory.timeZone": "Statistics time zone",
+  "settings.playHistory.timeZoneHelp": "The time zone the activity statistics, heatmaps and calendar, My Stats and Year in Review count hours and days in: an IANA name such as America/New_York or Europe/Berlin. Leave blank to use the server's own zone ({zone}).",
   "settings.featureLabel.behavior_issueAutoResolve": "Auto-resolve issues",
   "settings.featureDesc.behavior_issueAutoResolve": "When the replacement an admin asked for (Fix file, Pick release or Refetch) is imported by Radarr/Sonarr, mark the issue resolved and tell the reporter. Movies and single-episode issues only — a season or whole-series issue stays open for an admin. The reporter replying reopens it."
 }

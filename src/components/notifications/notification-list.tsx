@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { Film, Tv2, Check, X, Bell, Trash2 } from "@/components/icons";
@@ -14,19 +14,10 @@ import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { EmptyState } from "@/components/ui/design";
-import { useNotifications } from "@/components/notifications/notification-store";
+import { useNotifications, type NotificationItem } from "@/components/notifications/notification-store";
 
-export interface NotificationListItem {
-  id: string;
-  type: string;
-  title: string;
-  body: string;
-  tmdbId: number | null;
-  mediaType: "MOVIE" | "TV" | null;
-  posterPath: string | null;
-  readAt: string | null;
-  createdAt: string;
-}
+// The same row the shared store holds (GET /api/notifications' item shape).
+export type NotificationListItem = NotificationItem;
 
 // The server already renders every row's body in the viewer's language
 // (renderNotification, from the row's stored data — issue replies and
@@ -63,7 +54,48 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   // re-fetches on its 60s poll / SSE request+issue events — none of which fire
   // for a read or a delete. Without this nudge, "Mark all read" here left the
   // bell showing the old unread count on the same screen for up to a minute.
-  const { reload: reloadStore } = useNotifications();
+  const { items: storeItems, readAllGen, reload: reloadStore } = useNotifications();
+  // Every row this list has ever held (shown, loaded, removed) and the newest
+  // createdAt among them. Only a store row newer than that and never seen is
+  // a NEW notification to prepend; a row this page removed, or cleared, is
+  // never brought back from a store that has not re-fetched yet.
+  const seen = useRef({ ids: new Set(initialItems.map((n) => n.id)), newest: initialItems[0]?.createdAt ?? "" });
+  const readAllGenSeen = useRef(readAllGen);
+
+  // The other direction (store → this page). The bell marks everything read
+  // and live events re-fetch the store; without this, this page kept showing
+  // rows as unread and missed new ones until a full reload. new Date() is in
+  // an effect, never in render (guardrail 16).
+  useEffect(() => {
+    if (readAllGen === readAllGenSeen.current) return;
+    readAllGenSeen.current = readAllGen;
+    // The server marked EVERY row read, including the older pages loaded here
+    // that the store (one page) doesn't hold.
+    setItems((cur) => {
+      if (!cur.some((n) => !n.readAt)) return cur;
+      const at = new Date().toISOString();
+      return cur.map((n) => (n.readAt ? n : { ...n, readAt: at }));
+    });
+  }, [readAllGen]);
+
+  useEffect(() => {
+    if (storeItems.length === 0) return;
+    const s = seen.current;
+    const fresh = storeItems.filter((n) => !s.ids.has(n.id) && n.createdAt > s.newest);
+    for (const n of fresh) {
+      s.ids.add(n.id);
+      if (n.createdAt > s.newest) s.newest = n.createdAt;
+    }
+    const readAt = new Map(storeItems.flatMap((n) => (n.readAt ? [[n.id, n.readAt] as const] : [])));
+    setItems((cur) => {
+      const marked = cur.some((n) => !n.readAt && readAt.has(n.id))
+        ? cur.map((n) => (!n.readAt && readAt.has(n.id) ? { ...n, readAt: readAt.get(n.id) ?? n.readAt } : n))
+        : cur;
+      // The store is newest-first, as this list is.
+      return fresh.length > 0 ? [...fresh, ...marked] : marked;
+    });
+    if (fresh.length > 0) setTotal((t) => t + fresh.length);
+  }, [storeItems]);
 
   const anyUnread = items.some((n) => !n.readAt);
 
@@ -141,14 +173,21 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     void reloadStore();
   }
   async function loadMore() {
+    // A clear-all while this page is in flight wins: its GET may have been
+    // served before the DELETE committed, and appending it would bring the
+    // deleted rows (and pagination) back.
+    const gen = listGen.current;
     setLoading(true);
     setError(null);
     try {
       const last = items[items.length - 1];
       const q = last ? `?cursor=${encodeURIComponent(`${last.createdAt}|${last.id}`)}` : "";
       const res = await fetch(withBasePath(`/api/notifications${q}`));
+      if (gen !== listGen.current) return;
       if (res.ok) {
         const data = (await res.json()) as { items: NotificationListItem[]; total: number; nextCursor: string | null };
+        if (gen !== listGen.current) return;
+        for (const n of data.items) seen.current.ids.add(n.id);
         // De-dup by id — a row could have shifted into an already-loaded page as
         // new notifications arrived since the last fetch.
         setItems((cur) => {
@@ -163,7 +202,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     } catch {
       // Always show an error on failure — otherwise a failed load looks the
       // same as having nothing more to load.
-      setError(t("personal.common.loadMoreError"));
+      if (gen === listGen.current) setError(t("personal.common.loadMoreError"));
     } finally {
       setLoading(false);
     }
@@ -211,7 +250,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
             </button>
           </div>
         ) : (
-          <Button type="button" variant="link" size="xs" onClick={() => setConfirmingClear(true)}>
+          <Button type="button" variant="link" size="xs" disabled={loading} onClick={() => setConfirmingClear(true)}>
             {t("personal.notifications.clearAll")}
           </Button>
         )}

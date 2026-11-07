@@ -134,6 +134,22 @@ test("negotiateLocale: primary subtag, q-values, q=0, fallback", () => {
   assert.equal(negotiateLocale("en,es"), "en");
 });
 
+test("negotiateLocale: Traditional Chinese never resolves to Simplified 'zh'", () => {
+  // Chrome's header for a Taiwan user: the bare zh after zh-TW means Traditional too.
+  assert.equal(negotiateLocale("zh-TW,zh;q=0.9,en;q=0.8"), "en");
+  assert.equal(negotiateLocale("zh-Hant-HK"), DEFAULT_LOCALE);
+  assert.equal(negotiateLocale("zh-HK,zh;q=0.9", "es"), "es");
+  assert.equal(negotiateLocale("zh-MO,fr;q=0.5"), "fr");
+  // Explicit Simplified still matches, alone or after a Traditional tag.
+  assert.equal(negotiateLocale("zh-Hans-CN,zh;q=0.9"), "zh");
+  assert.equal(negotiateLocale("zh-CN"), "zh");
+  assert.equal(negotiateLocale("zh-TW,zh-CN;q=0.8"), "zh");
+  assert.equal(negotiateLocale("zh-Hans-HK"), "zh");
+  // A bare zh ranked BEFORE any Traditional tag is still Simplified.
+  assert.equal(negotiateLocale("zh,zh-TW;q=0.9"), "zh");
+  assert.equal(negotiateLocale("zh"), "zh");
+});
+
 test("resolveLocale: a valid cookie wins, an invalid one is ignored", () => {
   assert.equal(resolveLocale("es", "en"), "es");
   assert.equal(resolveLocale("xx", "es"), "es");

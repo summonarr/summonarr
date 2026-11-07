@@ -100,6 +100,7 @@ import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, hkdfSync } from "node:crypto";
 import dns from "node:dns/promises";
+import type { AuthorizedSignIn } from "../src/lib/auth.ts";
 
 // Next's async-local-storage shim captures globalThis.AsyncLocalStorage at
 // module load — assign it BEFORE anything pulls in next/headers.
@@ -593,7 +594,7 @@ const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { checkRateLimit, peekRateLimit, recordFailure } = await import("../src/lib/rate-limit.ts");
 const { PRESETS, Permission } = await import("../src/lib/permissions.ts");
-const { hashPassword } = await import("../src/lib/password-hash.ts");
+const { hashPassword, scryptWorkDone } = await import("../src/lib/password-hash.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 
 // ── fixtures / helpers ──────────────────────────────────────────────────────
@@ -1210,6 +1211,24 @@ test("plex multi-instance: a stranger on NO instance is refused invalid_credenti
   assert.equal(fetchCalls.filter((c) => c.url.pathname === "/api/users").length, 2);
 });
 
+test("plex multi-instance: when every server's member list fails to load the refusal is audited membership_check_failed, not invalid_credentials", async () => {
+  const ua = chromeUa("plex-multi-all-down");
+  seedTwoPlexInstances();
+  respondTwoPlexServers(
+    { id: 4747, email: "member@example.com", username: "Member", thumb: "" },
+    {
+      "admin-token-default": () => new Response("upstream exploded", { status: 500 }),
+      "admin-token-remote": () => new Response("upstream exploded", { status: 503 }),
+    },
+  );
+
+  const result = await authorizeWithPlex({ plexToken: "plex-tok-all-down" }, makeReq(ua));
+  assert.equal(result, null, "fails closed: no member list, no sign-in");
+  await flushAsync();
+  assert.equal(auditDetails().reason, "membership_check_failed");
+  assert.ok(!users.some((u) => u.email === "member@example.com"));
+});
+
 test("plex multi-instance: a blank-config default (token without URL) is skipped, not fatal — the named instance still admits", async () => {
   const ua = chromeUa("plex-multi-skip");
   // The pre-generalization "tab shows but every attempt refuses" deployment
@@ -1665,8 +1684,10 @@ test("jellyfin QuickConnect (34e): a server the identity isn't bound to is refus
   settings.set("jellyfinRemoteRestrictSignIn", "false");
   seedUser({ id: "u-jf-qc", email: "jellyfin-jf-qc@jellyfin.local", jellyfinUserId: "jf-qc", jellyfinInstance: "" });
   jellyfinSignInAs("jf-qc");
+  const workBefore = scryptWorkDone();
   assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-bound-elsewhere" }, makeReq(chromeUa("qc-mismatch")), "remote"), null);
   await flushAsync();
+  assert.ok(scryptWorkDone() > workBefore, "an identity refusal is padded like the password path's");
   assert.equal(lastAudit().provider, "jellyfin-quickconnect");
   assert.equal(auditDetails().reason, "instance_mismatch");
 });
@@ -1708,6 +1729,42 @@ test("jellyfin QuickConnect: instance selects which server's URL is used, and it
   );
   assert.ok(result, "QuickConnect against a configured named instance must succeed");
   assert.equal(fetchCalls[0]?.url.origin, "http://10.77.10.7:8096");
+});
+
+test("jellyfin QuickConnect shares the password path's tail: unconfigured URL, a refused secret, and the membership gate each refuse under the quickconnect provider", async () => {
+  // (a) No URL for the instance: refused without a fetch.
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-nourl" }, makeReq(chromeUa("qc-nourl"))), null);
+  assert.equal(fetchCalls.length, 0);
+  assert.ok(errors.some((e) => e.includes("[jellyfin quickconnect auth] Jellyfin URL is not configured")));
+
+  // (b) The server refuses the secret: padded and audited exactly like the
+  // password path's refusal, so neither timing nor the audit reason tells the
+  // two sign-ins apart.
+  settings.set("jellyfinUrl", "http://10.77.12.1:8096");
+  respond = () => new Response("Unauthorized", { status: 401 });
+  const workBefore = scryptWorkDone();
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-refused" }, makeReq(chromeUa("qc-refused"))), null);
+  await flushAsync();
+  assert.ok(scryptWorkDone() > workBefore, "the refused secret is padded with a dummy password check");
+  assert.equal(lastAudit().provider, "jellyfin-quickconnect");
+  assert.equal(auditDetails().reason, "invalid_credentials");
+
+  // (c) A valid secret for an account that is no member of this instance.
+  jellyfinSignInAs("jf-qc-stranger");
+  assert.equal(await authorizeWithJellyfinQuickConnect({ secret: "qc-stranger" }, makeReq(chromeUa("qc-stranger"))), null);
+  await flushAsync();
+  assert.equal(lastAudit().provider, "jellyfin-quickconnect");
+  assert.equal(auditDetails().reason, "not_authorized");
+  assert.ok(warns.some((w) => w.includes("[jellyfin quickconnect auth] sign-in refused")));
+  assert.equal(users.length, 0, "nothing is provisioned on any refusal");
+
+  // (d) A member signs in with the device payload and the remember-me choice.
+  mediaServerUsers.push({ id: "msu-qc-member", source: "jellyfin", serverInstance: "", sourceUserId: "jf-qc-stranger", active: true });
+  const ok = await authorizeWithJellyfinQuickConnect({ secret: "qc-member", rememberMe: "true" }, makeReq(chromeUa("qc-member")));
+  assert.ok(ok);
+  assert.equal(ok.email, "jellyfin-jf-qc-stranger@jellyfin.local");
+  assert.equal(ok.rememberMe, "true");
+  assert.match(ok._sessionId, UUID_RE);
 });
 
 test("jellyfin QuickConnect: the per-secret bucket (hashed key) refuses brute redemption before any fetch", async () => {
@@ -1934,7 +1991,7 @@ test("oidc: email collision with an unbound row is REFUSED (SSO-takeover guard);
 
 // ── signInAndMintSession ────────────────────────────────────────────────────
 
-function mintableUser(id: string, opts: { ua?: string; rememberMe?: string } = {}): Record<string, unknown> {
+function mintableUser(id: string, opts: { ua?: string; rememberMe?: string } = {}): AuthorizedSignIn {
   const row = userById(id);
   const device = buildDeviceMeta(new Headers({ "user-agent": opts.ua ?? chromeUa(`mint-${id}`) }));
   return {

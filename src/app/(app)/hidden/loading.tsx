@@ -1,11 +1,11 @@
 // Skeleton for the Hidden list: PageHeader with subtitle, then HiddenGrid's
 // auto-fill 140px grid of 2:3 poster tiles (radius 8 + hairline, dimmed like
 // the real ones) with a one-line title under each.
-import { Bar, SKELETON_FILL, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_FILL, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
       <div>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
@@ -19,6 +19,6 @@ export default function Loading() {
           ))}
         </div>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

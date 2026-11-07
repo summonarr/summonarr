@@ -14,7 +14,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { NextRequest } from "next/server";
-import { buildSignInResponse } from "../src/lib/sign-in-response.ts";
+import { buildSignInResponse, disabledAccountResponse } from "../src/lib/sign-in-response.ts";
+import { translatorFor } from "../src/lib/i18n/server-locale.ts";
 import type { SignInResult } from "../src/lib/auth.ts";
 
 // serializeSessionCookie reads AUTH_URL at call time; pin an http:// URL so
@@ -182,4 +183,10 @@ test("secure context (https AUTH_URL): __Host- prefixed cookie with Secure", () 
   } finally {
     process.env.AUTH_URL = "http://localhost:3000";
   }
+});
+
+test("a disabled account answers 403 with the catalog's text — the wire body the apps show", async () => {
+  const res = disabledAccountResponse(translatorFor("en"));
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "This account has been disabled. Contact an administrator." });
 });

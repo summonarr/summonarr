@@ -6,8 +6,17 @@ import { prisma } from "@/lib/prisma";
 import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { composeWhere, parsePlayHistoryFilters } from "@/lib/play-history-filters";
+import {
+  composeWhere,
+  invalidDateParam,
+  normalizePlayHistoryFilters,
+  parsePlayHistoryFilters,
+  playHistoryFilterFragments,
+} from "@/lib/play-history-filters";
+import { getPlayHistoryPlatforms } from "@/lib/play-history";
+import { getStatsTimeZone } from "@/lib/stats-time-zone-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { PlayHistory } from "@/generated/prisma";
 
 export const dynamic = "force-dynamic";
 
@@ -28,12 +37,12 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, sessio
 
   const distinctMode = params.get("distinct");
   if (distinctMode === "platforms") {
-    const rows = await prisma.$queryRawUnsafe<{ platform: string }[]>(
-      `SELECT DISTINCT "platform" FROM "PlayHistory" WHERE "platform" IS NOT NULL ORDER BY "platform"`,
-    );
-    return NextResponse.json(rows.map((r) => r.platform));
+    // A whole-table DISTINCT, memoized in the activity cache (a finalize clears it).
+    return NextResponse.json(await getPlayHistoryPlatforms());
   }
   if (distinctMode === "users") {
+    // Deliberately uncapped: it fills the filter dropdown, and a departed
+    // identity (soft-deleted, guardrail 28) still owns history rows to filter by.
     // serverInstance is additive: the same username legitimately exists on two
     // same-type servers (the owner and every shared friend on two Plex instances,
     // guardrail 35), and the filter bar needs it to tell the two options apart.
@@ -51,11 +60,9 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, sessio
   // Validate date params up front — both the grouped and ungrouped paths feed
   // `new Date(param)` straight into a query, and an unparseable value yields an
   // Invalid Date that throws mid-query (uncaught 500 instead of a 400).
-  for (const name of ["startDate", "endDate"] as const) {
-    const value = params.get(name);
-    if (value && isNaN(new Date(value).getTime())) {
-      return NextResponse.json({ error: t("apiUser.playHistory.invalidDate", { name }) }, { status: 400 });
-    }
+  const badDate = invalidDateParam(params);
+  if (badDate) {
+    return NextResponse.json({ error: t("apiUser.playHistory.invalidDate", { name: badDate }) }, { status: 400 });
   }
 
   // Default: collapse continued watches (PlayHistory.referenceId chains) into
@@ -108,7 +115,7 @@ async function ungroupedQuery(
   // Same injection discipline as groupedQuery: filters are bound `$N`
   // parameters, and the ORDER BY column comes from the caller's safeSortBy
   // whitelist — no user data reaches SQL identifiers or structure.
-  const fragments = parsePlayHistoryFilters(params);
+  const fragments = parsePlayHistoryFilters(params, await getStatsTimeZone());
   const { whereSql, binds, nextBindIndex } = composeWhere(fragments);
 
   const dir = sortDir.toUpperCase();
@@ -210,8 +217,32 @@ async function groupedQuery(
   // safeSortBy whitelist only. No user data is interpolated into SQL identifiers
   // or structure. This is the complex dynamic-stats area; changes must preserve
   // the whitelist + parameterization discipline to avoid injection.
-  const fragments = parsePlayHistoryFilters(params);
-  const { whereSql, binds, nextBindIndex } = composeWhere(fragments);
+  //
+  // The filters pick CHAINS; the aggregates then cover every segment of a picked
+  // chain. Filtering segments before the window functions (as this did) cut a
+  // chain at a date-range edge and under-counted its segments and totals, and
+  // `watched=false` showed a chain finished in another segment as unwatched.
+  // `watched` is decided per chain (chain_watched, below), not per segment.
+  const filters = normalizePlayHistoryFilters(params, await getStatsTimeZone());
+  const { whereSql, binds, nextBindIndex } = composeWhere(
+    playHistoryFilterFragments({ ...filters, watched: null }),
+  );
+  const chainWatchedSql =
+    filters.watched === null ? "" : ` AND b.chain_watched = ${filters.watched === "true" ? "TRUE" : "FALSE"}`;
+  // With any segment filter, `matched` holds the chosen chain ids and `chainRows`
+  // pulls every segment of them: the OR lets Postgres serve it from the primary
+  // key and the referenceId index, and the COALESCE re-check keeps it exact.
+  // With none, every chain is chosen in full and the scan stays a plain one.
+  const matchedCte = `matched AS (
+      SELECT DISTINCT COALESCE(h."referenceId", h.id) AS chain_id
+      FROM "PlayHistory" h
+      WHERE 1=1 ${whereSql}
+    )`;
+  const withMatched = whereSql ? `${matchedCte},\n    ` : "";
+  const chainRows = whereSql
+    ? `(h.id IN (SELECT chain_id FROM matched) OR h."referenceId" IN (SELECT chain_id FROM matched))
+        AND COALESCE(h."referenceId", h.id) IN (SELECT chain_id FROM matched)`
+    : "1=1";
 
   // chain_id = COALESCE("referenceId", id) groups a continued-watch chain
   // (the finalize logic in src/lib/play-history.ts sets PlayHistory.referenceId
@@ -234,7 +265,7 @@ async function groupedQuery(
   const dataLimitBind = nextBindIndex;
   const dataOffsetBind = nextBindIndex + 1;
   const dataSql = `
-    WITH base AS (
+    WITH ${withMatched}base AS (
       SELECT h.*,
         COALESCE(h."referenceId", h.id) AS chain_id,
         ROW_NUMBER() OVER (
@@ -263,7 +294,7 @@ async function groupedQuery(
           PARTITION BY COALESCE(h."referenceId", h.id)
         ) AS chain_completed
       FROM "PlayHistory" h
-      WHERE 1=1 ${whereSql}
+      WHERE ${chainRows}
     )
     SELECT b.*,
       msu.username AS msu_username,
@@ -271,15 +302,30 @@ async function groupedQuery(
       msu."thumbUrl" AS msu_thumb_url
     FROM base b
     LEFT JOIN "MediaServerUser" msu ON msu.id = b."mediaServerUserId"
-    WHERE b.rn = 1
+    WHERE b.rn = 1${chainWatchedSql}
     ORDER BY b."${sortColumn}" ${sortDir.toUpperCase()} NULLS LAST, b.chain_id ${sortDir.toUpperCase()}
     LIMIT $${dataLimitBind} OFFSET $${dataOffsetBind}
   `;
 
-  const countSql = `
+  // The same chains the data query pages through: the chosen ones, narrowed by
+  // the chain-level `watched` when it is set.
+  const countSql =
+    filters.watched === null
+      ? `
     SELECT COUNT(DISTINCT COALESCE(h."referenceId", h.id))::int AS total
     FROM "PlayHistory" h
     WHERE 1=1 ${whereSql}
+  `
+      : `
+    WITH ${withMatched}chains AS (
+      SELECT bool_or(h."watched") AS chain_watched
+      FROM "PlayHistory" h
+      WHERE ${chainRows}
+      GROUP BY COALESCE(h."referenceId", h.id)
+    )
+    SELECT COUNT(*)::int AS total
+    FROM chains b
+    WHERE 1=1${chainWatchedSql}
   `;
 
   // Run data + count concurrently. They share the same bind list except
@@ -293,9 +339,7 @@ async function groupedQuery(
 
   // Resolve posters per (tmdbId, mediaType). Mirror the ungrouped path's
   // contract so the UI doesn't need a mode switch for posterUrl (or posterPath).
-  const livePaths = await resolvePosterPathMap(
-    rows as unknown as { tmdbId: number | null; mediaType: string | null }[],
-  );
+  const livePaths = await resolvePosterPathMap(rows);
 
   const items = rows.map((r) => {
     // Map snake_case raw columns to the camelCase shape the rest of the app
@@ -312,8 +356,6 @@ async function groupedQuery(
       msu_username: _msuUsername, msu_source: _msuSource, msu_thumb_url: _msuThumb,
       ...base
     } = r;
-    void _rn; void _chainId; void _segmentCount; void _totalPlay; void _totalPaused; void _firstStarted;
-    void _lastStopped; void _chainWatched; void _chainCompleted; void _msuUsername; void _msuSource; void _msuThumb;
     const mediaServerUser = r.msu_username != null
       ? {
           username: r.msu_username,
@@ -355,53 +397,9 @@ async function groupedQuery(
 
 // PlayHistory's own columns as they arrive from a `SELECT h.*` / `SELECT b.*`
 // (already camelCase — Prisma's column names are the field names). Shared by
-// both raw paths; each extends it with its own aliases.
-interface RawPlayHistoryRow {
-  id: string;
-  source: string;
-  serverInstance: string;
-  startedAt: Date;
-  stoppedAt: Date | null;
-  duration: number;
-  playDuration: number;
-  pausedDuration: number | null;
-  watched: boolean;
-  completed: boolean;
-  mediaServerUserId: string;
-  tmdbId: number | null;
-  mediaType: "MOVIE" | "TV" | null;
-  title: string;
-  year: string | null;
-  posterPath: string | null;
-  seasonNumber: number | null;
-  episodeNumber: number | null;
-  episodeTitle: string | null;
-  sourceSessionId: string | null;
-  sourceItemId: string | null;
-  platform: string | null;
-  player: string | null;
-  device: string | null;
-  ipAddress: string | null;
-  playMethod: string | null;
-  videoCodec: string | null;
-  audioCodec: string | null;
-  resolution: string | null;
-  bitrate: number | null;
-  videoDecision: string | null;
-  audioDecision: string | null;
-  container: string | null;
-  transcodeReason: string | null;
-  location: string | null;
-  bandwidth: number | null;
-  secure: boolean | null;
-  relayed: boolean | null;
-  introStartMs: number | null;
-  introEndMs: number | null;
-  creditsStartMs: number | null;
-  creditsEndMs: number | null;
-  referenceId: string | null;
-  createdAt: Date;
-}
+// both raw paths; each extends it with its own aliases. The generated model
+// type, so a schema change can't leave this behind.
+type RawPlayHistoryRow = PlayHistory;
 
 // groupedQuery's row: the representative segment plus the window-function
 // aliases (snake_case) and the joined MediaServerUser fields.
@@ -412,7 +410,7 @@ interface RawGroupedRow extends RawPlayHistoryRow {
   total_play_duration: number;
   total_paused_duration: number;
   first_started_at: Date;
-  last_stopped_at: Date | null;
+  last_stopped_at: Date;
   chain_watched: boolean;
   chain_completed: boolean;
   msu_username: string | null;

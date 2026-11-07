@@ -160,6 +160,20 @@ test("env configures both windows; the ceiling is never below the read window; f
   );
 });
 
+test("an oversized day count is capped, so the purge cutoffs stay valid Dates", () => {
+  // 999999999 days is past the Date range; the cutoff used to be an Invalid
+  // Date that Prisma refused on every run.
+  const huge = lib.notificationRetentionDays({
+    NOTIFICATION_READ_RETENTION_DAYS: "999999999",
+    NOTIFICATION_RETENTION_DAYS: "99999999999999999999",
+  } as unknown as NodeJS.ProcessEnv);
+  assert.deepEqual(huge, { readDays: lib.NOTIFICATION_RETENTION_MAX_DAYS, maxDays: lib.NOTIFICATION_RETENTION_MAX_DAYS });
+  const where = lib.notificationPurgeWhere(now, huge.readDays, huge.maxDays) as { OR: Array<{ createdAt: { lt: Date } }> };
+  for (const c of where.OR) assert.ok(Number.isFinite(c.createdAt.lt.getTime()), "purge cutoff is an Invalid Date");
+  // A value under the cap is kept as given.
+  assert.equal(lib.notificationRetentionDays({ NOTIFICATION_RETENTION_DAYS: "3650" } as unknown as NodeJS.ProcessEnv).maxDays, 3650);
+});
+
 test("deletes run in bounded id batches", async () => {
   const n = lib.NOTIFICATION_DELETE_BATCH * 2 + 5;
   rows = Array.from({ length: n }, (_, i) => ({ id: `n${i}`, createdAt: ago(500), readAt: null }));

@@ -3,10 +3,11 @@ import { after } from "next/server";
 import { getCacheStale, getCacheStaleMany } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { OmdbRatings } from "@/lib/omdb";
-import { getOmdbRatingsForTmdb, revalidateOmdbForTmdb } from "@/lib/omdb";
-import type { MdblistRatings, MdblistResult } from "@/lib/mdblist";
-import { getMdblistRatingsForTmdb, fetchMdblistBatch, isMdblistQuotaLocked } from "@/lib/mdblist";
+import { getOmdbRatingsForTmdb, omdbCacheKey, revalidateOmdbForTmdb } from "@/lib/omdb";
+import type { MdblistCallOptions, MdblistRatings, MdblistResult } from "@/lib/mdblist";
+import { getMdblistRatingsForTmdb, fetchMdblistBatch, isMdblistQuotaLocked, mdblistCacheKey } from "@/lib/mdblist";
 import { mapLimit } from "@/lib/concurrency";
+import { processSingleton } from "@/lib/process-singleton";
 
 // Cap concurrent OMDB fallback chains. Each chain does a TMDB external_ids lookup
 // + an OMDB fetch + cache reads/writes; an unbounded Promise.all over the miss set
@@ -99,7 +100,7 @@ export async function fetchUnifiedRatings(
     // (serve-stale) — this branch never pays an OMDB fetch for the overlay.
     const d = mdb.data;
     if (d.imdbId == null || d.imdbRating == null || d.imdbVotes == null || d.rottenTomatoes == null || d.metacritic == null) {
-      const { value } = await getCacheStale<OmdbRatings | { _notFound: true }>(`omdb:tmdb:${mediaType}:${tmdbId}`);
+      const { value } = await getCacheStale<OmdbRatings | { _notFound: true }>(omdbCacheKey(mediaType, tmdbId));
       if (value && !("_notFound" in value)) {
         return { found: true, keyConfigured: true, data: overlayOmdb(d, value) };
       }
@@ -174,12 +175,27 @@ export async function fetchUnifiedRatings(
 //
 // `background: true` marks a cron caller: MDBList then stops at the reserve the
 // plan setting keeps for pages, and reads as paused once it does (mdblist-plan.ts).
+//
+// `maxBlockingMisses` (blocking only) lowers the count of OMDB chains awaited in
+// the request; the rest are deferred like the stale refreshes.
+//
+// `admitMiss` is asked once per genuine miss before anything upstream is sent
+// for it; a refused miss is served from the warm cache only (which has nothing
+// for it) this time. It is how a caller holds a user to a budget of cold
+// lookups (the ratings batch route).
+export interface AttachRatingsOptions {
+  blocking?: boolean;
+  deferToAfter?: boolean;
+  background?: boolean;
+  maxBlockingMisses?: number;
+  admitMiss?: () => boolean;
+}
+
 export async function attachRatingsUnified(
   items: TmdbMedia[],
-  opts: { blocking?: boolean; deferToAfter?: boolean; background?: boolean } = {},
+  opts: AttachRatingsOptions = {},
 ): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
-  const blocking = opts.blocking ?? false;
   const mdbOpts = { background: opts.background };
   const runDeferred = async (work: () => Promise<void>): Promise<void> => {
     if (opts.deferToAfter === false) await work();
@@ -206,149 +222,104 @@ export async function attachRatingsUnified(
     return !(mdb && hasAnyMdblistRating(mdb));
   });
 
-  if (!blocking) {
-    // Only MDBLIST state gates admission here — see the blocking path's note
-    // below: neither an OMDB _notFound NOR an OMDB value row may exclude the
-    // item from the MDBList batch.
-    const uncached = items.filter((item) =>
-      !warm.byMdblist.has(mdblistKey(item))
-      && !warm.negativeKeys.has(mdblistKey(item)));
-    if (uncached.length > 0 || staleMdblist.length > 0 || staleOmdb.length > 0) {
+  // Only MDBLIST state makes a miss: misses feed the MDBList batch — the primary
+  // source — so no OMDB row of ANY shape may exclude a title from it. Otherwise
+  // an OMDB row written while MDBList was off or quota-locked would keep the
+  // title away from MDBList forever, and it could never gain the
+  // Trakt/Letterboxd/RT-Audience/MDBList fields OMDB lacks. Re-admitting costs
+  // one extra id in a batch POST; mergeWarm keeps serving the OMDB row until
+  // the batch lands, and a genuine MDBList miss then writes a "not found"
+  // marker that gates via negativeKeys. A _notFound sentinel (negativeKeys —
+  // fresh or stale) is an authoritative "no ratings": re-fetching it every call
+  // would burn MDBList/OMDB quota on titles known to be absent. Stale value rows
+  // likewise serve from the warm maps and revalidate post-response.
+  const admit = opts.admitMiss;
+  const misses: TmdbMedia[] = [];
+  for (const item of items) {
+    if (warm.byMdblist.has(mdblistKey(item)) || warm.negativeKeys.has(mdblistKey(item))) continue;
+    if (admit && !admit()) continue;
+    misses.push(item);
+  }
+
+  if (!opts.blocking) {
+    if (misses.length > 0 || staleMdblist.length > 0 || staleOmdb.length > 0) {
       // Non-blocking path: fire background fetches after the response is sent so the user isn't
       // held waiting; the next page load will hit the warm cache. Stale-served entries
       // revalidate here too — never before the response.
       await runDeferred(async () => {
         if (!isMdblistQuotaLocked(mdbOpts)) {
           // Stale MDBList revalidations ride the same batch POSTs as the genuine
-          // misses — one request per 200 ids instead of N singles.
-          const toBatch = [...uncached, ...staleMdblist];
-          const movieBatch = toBatch.filter((m) => m.mediaType === "movie");
-          const tvBatch    = toBatch.filter((m) => m.mediaType === "tv");
-          const [movieRatings, tvRatings] = await Promise.all([
-            movieBatch.length > 0 ? fetchMdblistBatch(movieBatch, "movie", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
-            tvBatch.length    > 0 ? fetchMdblistBatch(tvBatch, "tv", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
-          ]);
-          // Mirror the blocking path (below): only count an MDBList row as a hit when it
-          // carries a rating, and key by `${mediaType}:${id}`. An indexed-but-unscored
-          // (all-null) row must NOT mark the item found — it has nothing to display, so it
-          // stays a candidate for the OMDB fallback probe. The media-type prefix stops a
-          // movie and a TV show that share a TMDB id from cross-suppressing each other.
-          const found = new Set<string>();
-          for (const [id, data] of movieRatings) if (hasAnyMdblistRating(data)) found.add(`movie:${id}`);
-          for (const [id, data] of tvRatings)    if (hasAnyMdblistRating(data)) found.add(`tv:${id}`);
-
-          // Only genuinely-uncached items feed the OMDB fallback probe. A stale item
-          // absent from a full batch response just had its _notFound sentinel refreshed
-          // by fetchMdblistBatch — chasing it through OMDB would burn quota for nothing.
-          const stillMissing = uncached.filter((m) => !found.has(fetchedKey(m)));
-          if (stillMissing.length > 0) {
+          // misses — one request per 200 ids instead of N singles. Titles another
+          // request is already batching are left to it (see fetchMdblistUnclaimed).
+          const { claimed, ratings } = await fetchMdblistUnclaimed([...misses, ...staleMdblist], mdbOpts);
+          // Only genuinely-uncached items THIS call batched feed the OMDB fallback
+          // probe. A stale item absent from a full batch response just had its
+          // _notFound sentinel refreshed by fetchMdblistBatch — chasing it through
+          // OMDB would burn quota for nothing — and a miss another request is
+          // batching gets its fallback from that request.
+          const stillMissing = misses.filter((m) => claimed.has(mdblistKey(m)) && !usableMdblist(ratings, m));
+          if (stillMissing.length > 0 && !(await mdblistProbeUsable(stillMissing[0], mdbOpts))) {
             // Fall back to OMDB whenever MDBList can't serve the item (no key, genuine miss,
             // or mid-batch quota trip), not only when the MDBList key is absent.
-            const probe = await getMdblistRatingsForTmdb(stillMissing[0].id, stillMissing[0].mediaType, stillMissing[0].releaseDate, mdbOpts).catch(() => null);
-            // `found` alone is not a usable signal — see the blocking path's note.
-            if (!probe || !probe.found || !hasAnyMdblistRating(probe.data)) {
-              await mapLimit(stillMissing.filter((item) => lacksOmdbRow(item, warm)), OMDB_FALLBACK_CONCURRENCY, (item) =>
-                getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
-            }
+            await omdbColdFallback(stillMissing, warm);
           }
-        } else if (uncached.length > 0) {
+        } else if (misses.length > 0) {
           // Quota-locked: genuine misses have nothing to show, so OMDB is worth the spend.
           // Stale MDBList entries are NOT rerouted to OMDB — their data is stale-but-present,
           // and burning OMDB quota to refresh it is a bad trade; they revalidate once the
           // MDBList lock lifts.
-          await mapLimit(uncached.filter((item) => lacksOmdbRow(item, warm)), OMDB_FALLBACK_CONCURRENCY, (item) =>
-            getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
+          await omdbColdFallback(misses, warm);
         }
-        if (staleOmdb.length > 0) {
-          // Items whose warm data came from an expired OMDB row. Awaited refresh, not the
-          // getter: see revalidateOmdbForTmdb for why the getter's limit is illusory.
-          await mapLimit(staleOmdb, OMDB_FALLBACK_CONCURRENCY, (item) =>
-            revalidateOmdbForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
-        }
+        await refreshStaleOmdb(staleOmdb);
       });
     }
     return items.map((item) => mergeWarm(item, warm));
   }
 
-  const misses: TmdbMedia[] = [];
-  // Misses past MAX_BLOCKING_OMDB_MISSES: warmed after the response instead of inline.
+  // Misses past the inline cap: warmed after the response instead of inline.
   let deferredOmdb: TmdbMedia[] = [];
   // Keyed by `${mediaType}:${id}`, NOT bare tmdbId — a movie and a TV show can
   // share a TMDB id (independent id spaces), so a bare-id map would cross-
   // contaminate their ratings within a single batch.
   const fetched = new Map<string, { source: "mdblist"; data: MdblistRatings } | { source: "omdb"; data: OmdbRatings }>();
-  for (const item of items) {
-    // A _notFound sentinel (negativeKeys — fresh or stale) is an authoritative "no ratings" —
-    // re-fetching it every call would burn MDBList/OMDB quota on titles known to be absent.
-    // Stale value rows likewise serve from the warm maps rather than re-entering the miss
-    // fan-out; they revalidate post-response below. Mirrors the non-blocking path's exclusion.
-    // Only MDBLIST state gates the miss: misses feed the MDBList batch — the primary
-    // source — so no OMDB row of ANY shape may exclude a title from it. Otherwise
-    // an OMDB row written while MDBList was off or quota-locked would keep the
-    // title away from MDBList forever, and it could never gain the
-    // Trakt/Letterboxd/RT-Audience/MDBList fields OMDB lacks. Re-admitting costs
-    // one extra id in a batch POST; mergeWarm keeps serving the OMDB row until
-    // the batch lands, and a genuine MDBList miss then writes a "not found"
-    // marker that gates via negativeKeys.
-    if (
-      !warm.byMdblist.has(mdblistKey(item)) &&
-      !warm.negativeKeys.has(mdblistKey(item))
-    ) misses.push(item);
-  }
+  const maxInline = opts.maxBlockingMisses ?? MAX_BLOCKING_OMDB_MISSES;
+  // OMDB for the misses MDBList can't serve: the first maxInline inline, the
+  // rest after the response.
+  const omdbInline = async (omdbMisses: TmdbMedia[]): Promise<void> => {
+    const candidates = omdbMisses.filter((item) => lacksOmdbRow(item, warm));
+    deferredOmdb = candidates.slice(maxInline);
+    await omdbColdFallback(candidates.slice(0, maxInline), warm, (item, data) => {
+      fetched.set(fetchedKey(item), { source: "omdb", data });
+    });
+  };
 
   if (misses.length > 0) {
     if (!isMdblistQuotaLocked(mdbOpts)) {
-      // Batch by media type — MDBList's bulk endpoint is type-specific
-      const movieMisses = misses.filter((m) => m.mediaType === "movie");
-      const tvMisses    = misses.filter((m) => m.mediaType === "tv");
-
-      const [movieRatings, tvRatings] = await Promise.all([
-        movieMisses.length > 0 ? fetchMdblistBatch(movieMisses, "movie", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
-        tvMisses.length    > 0 ? fetchMdblistBatch(tvMisses, "tv", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
-      ]);
-
+      const ratings = await fetchMdblistByType(misses, mdbOpts);
       // Only count an MDBList batch row as a hit when it carries a rating. Rows for
       // indexed-but-unscored titles (every score null) would otherwise be excluded
       // from mdbMisses below and skip the OMDB fallback, leaving a title OMDB *could*
       // rate showing none. (mergeWarm gates the warm-cache path the same way.)
-      for (const [id, data] of movieRatings) if (hasAnyMdblistRating(data)) fetched.set(`movie:${id}`, { source: "mdblist", data });
-      for (const [id, data] of tvRatings)    if (hasAnyMdblistRating(data)) fetched.set(`tv:${id}`,    { source: "mdblist", data });
+      for (const [key, data] of ratings) if (hasAnyMdblistRating(data)) fetched.set(key, { source: "mdblist", data });
 
       const mdbMisses = misses.filter((m) => !fetched.has(fetchedKey(m)));
-      if (mdbMisses.length > 0) {
-        // Probe a single item to see whether MDBList can serve these. Fall back to OMDB
-        // whenever MDBList can't supply the item — no key, a genuine miss, or a mid-batch
-        // quota trip — not only when the key is absent. A single source being unavailable
-        // must not leave the title with no ratings.
-        const probe = await getMdblistRatingsForTmdb(mdbMisses[0].id, mdbMisses[0].mediaType, mdbMisses[0].releaseDate, mdbOpts).catch(() => null);
-        // A bare `found` is not enough: fetchMdblistBatch awaits its cache flush, so an
-        // indexed-but-unscored (all-null) row it just wrote reads back here as found —
-        // one such title at the head of mdbMisses would disable the OMDB fallback for the
-        // whole page, which is exactly what the hasAnyMdblistRating gate above prevents.
-        const useFallback = !probe || !probe.found || !hasAnyMdblistRating(probe.data);
-        if (useFallback) {
-          const omdbMisses = mdbMisses.filter((item) => lacksOmdbRow(item, warm));
-          deferredOmdb = omdbMisses.slice(MAX_BLOCKING_OMDB_MISSES);
-          await mapLimit(omdbMisses.slice(0, MAX_BLOCKING_OMDB_MISSES), OMDB_FALLBACK_CONCURRENCY, async (item) => {
-            const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
-            if (omdb && omdb.found) fetched.set(fetchedKey(item), { source: "omdb", data: omdb.data });
-          });
-        }
+      // Probe a single item to see whether MDBList can serve these. Fall back to OMDB
+      // whenever MDBList can't supply the item — no key, a genuine miss, or a mid-batch
+      // quota trip — not only when the key is absent. A single source being unavailable
+      // must not leave the title with no ratings.
+      if (mdbMisses.length > 0 && !(await mdblistProbeUsable(mdbMisses[0], mdbOpts))) {
+        await omdbInline(mdbMisses);
       }
     } else {
-      const omdbMisses = misses.filter((item) => lacksOmdbRow(item, warm));
-      deferredOmdb = omdbMisses.slice(MAX_BLOCKING_OMDB_MISSES);
-      await mapLimit(omdbMisses.slice(0, MAX_BLOCKING_OMDB_MISSES), OMDB_FALLBACK_CONCURRENCY, async (item) => {
-        const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
-        if (omdb && omdb.found) fetched.set(fetchedKey(item), { source: "omdb", data: omdb.data });
-      });
+      await omdbInline(misses);
     }
   }
 
   // Stale revalidation never blocks the response — only genuine misses are fetched
-  // inline above (capped at MAX_BLOCKING_OMDB_MISSES); entries served stale, and the
-  // capped-out misses, refresh after the response, same as the non-blocking path.
+  // inline above (capped at maxInline); entries served stale, and the capped-out
+  // misses, refresh after the response, same as the non-blocking path.
   if (staleMdblist.length > 0 || staleOmdb.length > 0 || deferredOmdb.length > 0) {
+    const overflow = deferredOmdb;
     await runDeferred(async () => {
       if (staleMdblist.length > 0 && !isMdblistQuotaLocked(mdbOpts)) {
         // Same quota-efficient shape as the non-blocking path: one batch POST per media
@@ -356,25 +327,12 @@ export async function attachRatingsUnified(
         // by fetchMdblistBatch — no OMDB chase for stale entries. When quota-locked these
         // items are NOT rerouted to OMDB: their data is stale-but-present, and burning
         // OMDB quota to refresh it is a bad trade; they revalidate once the lock lifts.
-        const movieStale = staleMdblist.filter((m) => m.mediaType === "movie");
-        const tvStale    = staleMdblist.filter((m) => m.mediaType === "tv");
-        await Promise.all([
-          movieStale.length > 0 ? fetchMdblistBatch(movieStale, "movie", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
-          tvStale.length    > 0 ? fetchMdblistBatch(tvStale, "tv", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
-        ]);
+        await fetchMdblistUnclaimed(staleMdblist, mdbOpts);
       }
-      if (deferredOmdb.length > 0) {
-        // Misses the inline cap left unfetched: warm them here so they're served from
-        // the table on the next load rather than being chased in the request path.
-        await mapLimit(deferredOmdb, OMDB_FALLBACK_CONCURRENCY, (item) =>
-          getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
-      }
-      if (staleOmdb.length > 0) {
-        // Items whose warm data came from an expired OMDB row. Awaited refresh, not the
-        // getter: see revalidateOmdbForTmdb for why the getter's limit is illusory.
-        await mapLimit(staleOmdb, OMDB_FALLBACK_CONCURRENCY, (item) =>
-          revalidateOmdbForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
-      }
+      // Misses the inline cap left unfetched: warm them here so they're served from
+      // the table on the next load rather than being chased in the request path.
+      await omdbColdFallback(overflow, warm);
+      await refreshStaleOmdb(staleOmdb);
     });
   }
 
@@ -393,8 +351,97 @@ export async function attachRatingsUnified(
   });
 }
 
-function mdblistKey(item: TmdbMedia): string { return `mdblist:tmdb:${item.mediaType}:${item.id}`; }
-function omdbKey(item: TmdbMedia): string    { return `omdb:tmdb:${item.mediaType}:${item.id}`; }
+// ── shared steps ────────────────────────────────────────────────────────────
+
+// One MDBList batch per media type (the bulk endpoint is type-specific), keyed
+// `${mediaType}:${id}` (fetchedKey).
+async function fetchMdblistByType(items: TmdbMedia[], mdbOpts: MdblistCallOptions): Promise<Map<string, MdblistRatings>> {
+  const movies = items.filter((m) => m.mediaType === "movie");
+  const shows = items.filter((m) => m.mediaType === "tv");
+  const [movieRatings, tvRatings] = await Promise.all([
+    movies.length > 0 ? fetchMdblistBatch(movies, "movie", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
+    shows.length > 0 ? fetchMdblistBatch(shows, "tv", mdbOpts) : Promise.resolve(new Map<number, MdblistRatings>()),
+  ]);
+  const out = new Map<string, MdblistRatings>();
+  for (const [id, data] of movieRatings) out.set(`movie:${id}`, data);
+  for (const [id, data] of tvRatings) out.set(`tv:${id}`, data);
+  return out;
+}
+
+// The MDBList titles a deferred batch is sending right now, process-wide
+// (guardrail 27a). Concurrent renders of one page (two viewers, a prefetch and
+// the navigation) each deferred the same batch, and every one of them POSTed
+// the same ids until the first one's cache writes landed: MDBList quota spent
+// for nothing. The cold per-title path coalesces in mdblist.ts; this is the
+// batch's counterpart.
+const mdblistBatchInflight = processSingleton("omdb-availability:mdblist-batch-inflight", () => new Set<string>());
+
+// fetchMdblistByType for the titles no other deferred batch is sending. Returns
+// which mdblist keys THIS call claimed, so the caller only chases its own.
+async function fetchMdblistUnclaimed(
+  items: TmdbMedia[],
+  mdbOpts: MdblistCallOptions,
+): Promise<{ claimed: Set<string>; ratings: Map<string, MdblistRatings> }> {
+  const claimed = new Set<string>();
+  const mine: TmdbMedia[] = [];
+  for (const item of items) {
+    const key = mdblistKey(item);
+    if (claimed.has(key) || mdblistBatchInflight.has(key)) continue;
+    claimed.add(key);
+    mdblistBatchInflight.add(key);
+    mine.push(item);
+  }
+  try {
+    return { claimed, ratings: mine.length > 0 ? await fetchMdblistByType(mine, mdbOpts) : new Map() };
+  } finally {
+    for (const key of claimed) mdblistBatchInflight.delete(key);
+  }
+}
+
+// Whether a batch answer holds a rating for this title: an indexed-but-unscored
+// (all-null) row has nothing to display, so it stays a candidate for the OMDB
+// fallback.
+function usableMdblist(ratings: Map<string, MdblistRatings>, item: TmdbMedia): boolean {
+  const data = ratings.get(fetchedKey(item));
+  return data !== undefined && hasAnyMdblistRating(data);
+}
+
+// One single-title read to learn whether MDBList can serve the misses at all.
+// A bare `found` is not enough: fetchMdblistBatch awaits its cache flush, so an
+// indexed-but-unscored (all-null) row it just wrote reads back here as found —
+// one such title at the head of the misses would disable the OMDB fallback for
+// the whole page, which is exactly what the hasAnyMdblistRating gate prevents.
+async function mdblistProbeUsable(item: TmdbMedia, mdbOpts: MdblistCallOptions): Promise<boolean> {
+  const probe = await getMdblistRatingsForTmdb(item.id, item.mediaType, item.releaseDate, mdbOpts).catch(() => null);
+  return Boolean(probe && probe.found && hasAnyMdblistRating(probe.data));
+}
+
+// The OMDB fallback for titles with no OMDB row at all (lacksOmdbRow: the getter
+// stays on its cold path, whose refresh is awaited, so the limit bounds the
+// upstream calls — guardrail 31a). `onHit` sees each rating found.
+async function omdbColdFallback(
+  items: TmdbMedia[],
+  warm: WarmCache,
+  onHit?: (item: TmdbMedia, data: OmdbRatings) => void,
+): Promise<void> {
+  const cold = items.filter((item) => lacksOmdbRow(item, warm));
+  if (cold.length === 0) return;
+  await mapLimit(cold, OMDB_FALLBACK_CONCURRENCY, async (item) => {
+    const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
+    if (omdb && omdb.found) onHit?.(item, omdb.data);
+  });
+}
+
+// Items whose warm data came from an expired OMDB row. Awaited refresh, not the
+// getter: see revalidateOmdbForTmdb for why the getter's limit is illusory.
+async function refreshStaleOmdb(items: TmdbMedia[]): Promise<void> {
+  if (items.length === 0) return;
+  await mapLimit(items, OMDB_FALLBACK_CONCURRENCY, (item) =>
+    revalidateOmdbForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
+}
+
+function mdblistKey(item: TmdbMedia): string { return mdblistCacheKey(item.mediaType, item.id); }
+function omdbKey(item: TmdbMedia): string    { return omdbCacheKey(item.mediaType, item.id); }
 function fetchedKey(item: TmdbMedia): string { return `${item.mediaType}:${item.id}`; }
 
 // Whether the OMDB fallback should fetch this title at all. A title with ANY OMDB

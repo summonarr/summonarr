@@ -18,6 +18,7 @@ import { prisma } from "./prisma";
 import { lookupTmdbToTvdb, resolveArrTargets, type ArrLibraryEntry, type ArrLibraryIndex, type CrossRefMode } from "./library-cleanup-arr";
 import { loadLibraryWatchFacts, type LibraryWatchTitle, type ServerCoverage, type SharedWatchFacts, type TitleKey } from "./never-watched-data";
 import { latestDate, type NwSeasonVerdict } from "./never-watched";
+import { tmdbDetailsKey } from "./tmdb-cache";
 import {
   CLEANUP_SETTING_KEYS,
   cleanupKey,
@@ -330,12 +331,12 @@ async function fillTmdbCachedAiring(titles: CleanupTitle[]): Promise<void> {
   for (let i = 0; i < need.length; i += TMDB_STATUS_CHUNK) {
     const chunk = need.slice(i, i + TMDB_STATUS_CHUNK);
     const rows = await prisma.tmdbCache.findMany({
-      where: { key: { in: chunk.map((t) => `tv:${t.tmdbId}:details`) } },
+      where: { key: { in: chunk.map((t) => tmdbDetailsKey("tv", t.tmdbId)) } },
       select: { key: true, data: true },
     });
     const byKey = new Map(rows.map((r) => [r.key, r.data]));
     for (const t of chunk) {
-      const raw = byKey.get(`tv:${t.tmdbId}:details`);
+      const raw = byKey.get(tmdbDetailsKey("tv", t.tmdbId));
       if (!raw) continue;
       try {
         const parsed = JSON.parse(raw) as { status?: unknown; inProduction?: unknown };

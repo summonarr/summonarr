@@ -4,6 +4,8 @@
 // proxyClientMaxBodySize above it); 16MB is the default and leaves headroom
 // while keeping the chunk count bounded for typical 100MB–500MB dumps.
 
+import type { Translator } from "./i18n/translate";
+
 export const DEFAULT_CHUNK_SIZE = 16 * 1024 * 1024;
 
 export type ChunkedUploadProgress = {
@@ -12,9 +14,53 @@ export type ChunkedUploadProgress = {
   phase: "upload" | "import";
 };
 
+// An error outcome carries a CODE, never English prose: the caller translates
+// it (chunkedUploadErrorMessage). `error` is set only for text that is already
+// fit to show, the server's own (translated) refusal.
+export type ChunkedUploadErrorCode =
+  | "server"
+  | "chunkFailed"
+  | "nonJson"
+  | "noCompletion"
+  | "network"
+  | "cancelled";
+
+export type ChunkedUploadError = {
+  kind: "error";
+  status: number | null;
+  code: ChunkedUploadErrorCode;
+  error?: string;
+  chunk?: number;
+  total?: number;
+};
+
 export type ChunkedUploadOutcome =
   | { kind: "complete"; ok: boolean; data: Record<string, unknown> }
-  | { kind: "error"; status: number | null; error: string };
+  | ChunkedUploadError;
+
+// The text to show for an error outcome. The keys live in the `shared` area,
+// which every client is sent (guardrail 40b): the setup page and the admin
+// backup page both show these.
+export function chunkedUploadErrorMessage(outcome: ChunkedUploadError, t: Translator): string {
+  if (outcome.error) return outcome.error;
+  switch (outcome.code) {
+    case "chunkFailed":
+      return t("shared.upload.chunkFailed", {
+        chunk: outcome.chunk ?? 0,
+        total: outcome.total ?? 0,
+        status: outcome.status ?? 0,
+      });
+    case "nonJson":
+      return t("shared.upload.nonJson");
+    case "noCompletion":
+      return t("shared.upload.noCompletion");
+    case "cancelled":
+      return t("shared.upload.cancelled");
+    case "server":
+    case "network":
+      return t("shared.upload.network");
+  }
+}
 
 // crypto.randomUUID only exists in secure contexts, so a plain-HTTP LAN or
 // local-only deployment has none. getRandomValues is available everywhere;
@@ -105,7 +151,7 @@ export async function uploadInChunks(opts: {
   };
   const aborted = (): ChunkedUploadOutcome => {
     cancel();
-    return { kind: "error", status: null, error: "Upload cancelled." };
+    return { kind: "error", status: null, code: "cancelled" };
   };
 
   try {
@@ -179,7 +225,7 @@ export async function uploadInChunks(opts: {
       // is never retried): name it, rather than the redirect explanation below.
       if (GATEWAY_STATUSES.has(res.status) && !isJson(res)) {
         cancel();
-        return { kind: "error", status: res.status, error: `Chunk ${index + 1}/${totalChunks} failed (HTTP ${res.status})` };
+        return { kind: "error", status: res.status, code: "chunkFailed", chunk: index + 1, total: totalChunks };
       }
 
       // A redirect (auth gate, etc.) returns 200 + HTML after fetch follows
@@ -187,24 +233,16 @@ export async function uploadInChunks(opts: {
       // to completion with no `complete` flag. Catch that explicitly.
       if (res.redirected || !isJson(res)) {
         cancel();
-        return {
-          kind: "error",
-          status: res.status,
-          error:
-            "Server returned a non-JSON response — the request was likely redirected (e.g. to a login page). " +
-            `Endpoint: ${endpoint}`,
-        };
+        return { kind: "error", status: res.status, code: "nonJson" };
       }
 
       const data = parsed ?? ((await res.json().catch(() => ({}))) as Record<string, unknown>);
 
       if (!res.ok) {
         cancel();
-        return {
-          kind: "error",
-          status: res.status,
-          error: typeof data.error === "string" ? data.error : `Chunk ${index + 1}/${totalChunks} failed`,
-        };
+        return typeof data.error === "string" && data.error
+          ? { kind: "error", status: res.status, code: "server", error: data.error }
+          : { kind: "error", status: res.status, code: "chunkFailed", chunk: index + 1, total: totalChunks };
       }
 
       if (data.complete) {
@@ -214,10 +252,10 @@ export async function uploadInChunks(opts: {
       onProgress?.({ uploaded: end, total: file.size, phase: "upload" });
     }
     cancel();
-    return { kind: "error", status: null, error: "Upload finished without a server-side completion." };
-  } catch (err) {
+    return { kind: "error", status: null, code: "noCompletion" };
+  } catch {
     if (signal?.aborted) return aborted();
     cancel();
-    return { kind: "error", status: null, error: (err as Error).message };
+    return { kind: "error", status: null, code: "network" };
   }
 }

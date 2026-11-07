@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
+import { useToast } from "@/components/ui/toast";
 
 type State = "unsupported" | "loading" | "subscribed" | "unsubscribed" | "denied" | "naming";
 type TestState = "idle" | "sending" | "ok" | "error";
@@ -26,9 +27,15 @@ const PUSH_CHANGED_EVENT = "summonarr:push-changed";
 // the account, since a session hijacker may have added their own (guardrail 6g).
 // The bell reads the BROWSER's subscription, so without this the owner's own
 // browser would keep showing "on" while nothing was delivered. Re-send it once
-// per page load; the server upserts by endpoint, so a still-registered browser
-// changes nothing. Failures are ignored: push may be switched off, the site may
-// be in maintenance, or the endpoint may belong to another account here.
+// per page load, flagged `resync`; the server upserts by endpoint, so a
+// still-registered browser changes nothing.
+//
+// A resync never undoes a removal made on purpose — the profile's "Remove
+// device", or the per-user cap evicting this browser for a newer one — and never
+// evicts another device. The server answers those with 410, and this browser
+// then drops its own subscription so the bell shows "off". Other failures are
+// ignored: push may be switched off, the site may be in maintenance, or the
+// endpoint may belong to another account here.
 let resyncedThisPageLoad = false;
 function resyncSubscription(sub: PushSubscription): void {
   if (resyncedThisPageLoad) return;
@@ -37,8 +44,25 @@ function resyncSubscription(sub: PushSubscription): void {
   void fetch(withBasePath("/api/push/subscribe"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys }),
-  }).catch(() => { });
+    body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys, resync: true }),
+  })
+    .then(async (res) => {
+      if (res.status !== 410) return;
+      await sub.unsubscribe().catch(() => false);
+      window.dispatchEvent(new Event(PUSH_CHANGED_EVENT));
+    })
+    .catch(() => { });
+}
+
+// Best-effort removal of this browser's server row by endpoint. Used when a
+// subscribe failed after its POST may have been stored (a lost response): the
+// row would otherwise count toward the per-user cap until a send got a 410.
+function forgetEndpoint(endpoint: string): Promise<void> {
+  return fetch(withBasePath("/api/push/subscribe"), {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endpoint }),
+  }).then(() => undefined, () => undefined);
 }
 
 /** The server's own (translated, safe) reason the VAPID key could not be served. */
@@ -61,6 +85,7 @@ export function PushNotifications() {
   // SSR DOM (React #418 on /, /movies, /admin/library etc.).
   const mounted = useHasMounted();
   const t = useT();
+  const { toast } = useToast();
   const [state, setState] = useState<State>("loading");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -115,6 +140,14 @@ export function PushNotifications() {
   const testResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (testResetRef.current) clearTimeout(testResetRef.current); }, []);
 
+  // The bell turns red with the reason as its tooltip and accessible name, but a
+  // tooltip never shows on a touch screen and nothing announces it, so the same
+  // reason also goes out as an error toast: visible text, announced (role=alert).
+  function fail(message: string) {
+    setError(message);
+    toast({ title: message, variant: "error" });
+  }
+
   async function subscribe(label: string) {
     setBusy(true);
     setError(null);
@@ -155,7 +188,7 @@ export function PushNotifications() {
         // and the bell would wrongly show "subscribed" on every later visit.
         await sub.unsubscribe().catch(() => { });
         const data = (await subscribeRes.json().catch(() => null)) as { error?: string } | null;
-        setError(data?.error ?? t("shared.push.enableFailedStatus", { status: subscribeRes.status }));
+        fail(data?.error ?? t("shared.push.enableFailedStatus", { status: subscribeRes.status }));
         setState("unsubscribed");
         return;
       }
@@ -164,15 +197,20 @@ export function PushNotifications() {
       window.dispatchEvent(new Event(PUSH_CHANGED_EVENT));
     } catch (err) {
       // Same reasoning as above: if anything threw after the browser
-      // subscribed, undo that subscription. Unsubscribing one that is already
-      // gone is harmless.
+      // subscribed, undo that subscription — on the server too, since a POST
+      // whose response was lost may have stored it. Removing one that is
+      // already gone is harmless on both sides.
       await navigator.serviceWorker
         .getRegistration(withBasePath("/"))
         .then((r) => r?.pushManager.getSubscription())
-        .then((s) => s?.unsubscribe())
+        .then(async (s) => {
+          if (!s) return;
+          await forgetEndpoint(s.endpoint);
+          await s.unsubscribe();
+        })
         .catch(() => { });
       const denied = Notification.permission === "denied";
-      if (!denied) setError(err instanceof ServerReasonError ? err.message : t("shared.push.enableFailed"));
+      if (!denied) fail(err instanceof ServerReasonError ? err.message : t("shared.push.enableFailed"));
       setState(denied ? "denied" : "unsubscribed");
     } finally {
       setBusy(false);
@@ -222,7 +260,7 @@ export function PushNotifications() {
         // dropping the browser subscription anyway would show "off" while the
         // server disagrees. 404 means the server already forgot it.
         if (!delRes.ok && delRes.status !== 404) {
-          setError(t("shared.push.disableFailed"));
+          fail(t("shared.push.disableFailed"));
           return;
         }
         await sub.unsubscribe();
@@ -230,7 +268,7 @@ export function PushNotifications() {
       setState("unsubscribed");
       window.dispatchEvent(new Event(PUSH_CHANGED_EVENT));
     } catch {
-      setError(t("shared.push.disableFailed"));
+      fail(t("shared.push.disableFailed"));
     } finally {
       setBusy(false);
     }
@@ -306,6 +344,8 @@ export function PushNotifications() {
           size="sm"
           variant="ghost"
           className="h-8 shrink-0"
+          // An enable in flight would finish after a Cancel and subscribe anyway.
+          disabled={busy}
           onClick={() => { setState("unsubscribed"); setDeviceName(""); }}
         >
           {t("shared.common.cancel")}
@@ -348,7 +388,8 @@ export function PushNotifications() {
 
   // This control is a 32px icon with no room for error text, so a failure
   // turns the bell red and puts the reason in its tooltip and accessible name
-  // (the same way the Send-test button signals its failures).
+  // (the same way the Send-test button signals its failures); fail() also shows
+  // it as a toast.
   return (
     <button
       onClick={() => { setError(null); setState("naming"); }}

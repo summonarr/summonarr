@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 const {
   validateAgentConfig,
   validateAgentUrl,
+  parseStoredConfig,
   sanitizeEvents,
   buildWebhookPayload,
   renderTemplate,
@@ -20,6 +21,8 @@ const {
   eventLink,
   NOTIFY_EVENT_KEYS,
   RETRY_DELAYS_MS,
+  TEMPLATE_FIELDS,
+  WEBHOOK_DELIVERY_ID_HEADER,
 } = await import("../src/lib/notify-events.ts");
 
 const CTX = { siteUrl: "https://s.example", title: "T", message: "M", mediaTitle: "Dune", timestamp: "2026-01-01T00:00:00.000Z" };
@@ -178,4 +181,37 @@ test("delivery policy: 2xx ok, 408/429/5xx retry, other 4xx fail; three retries"
   for (const s of [408, 429, 500, 502, 503]) assert.equal(classifyStatus(s), "retry", String(s));
   for (const s of [301, 400, 401, 403, 404, 413]) assert.equal(classifyStatus(s), "fail", String(s));
   assert.equal(RETRY_DELAYS_MS.length, 3);
+});
+
+test("template validation renders a FULL sample too: a placeholder valid only while an issue/votes/arr field is empty is refused", () => {
+  const url = "https://h.example/x";
+  // Neither the Test sample nor the sparse one has an issue or arr detail, so
+  // these rendered `[]` in both and were saved — then every real arr event sent
+  // `[Some.Release-GRP]`, which no receiver parses.
+  assert.deepEqual(validateAgentConfig("webhook", { url, template: "{\"r\":[{{arr.release}}]}" }), { ok: false, error: "templateInvalid" });
+  assert.deepEqual(validateAgentConfig("webhook", { url, template: "{\"i\":[{{issue.id}}]}" }), { ok: false, error: "templateInvalid" });
+  assert.deepEqual(validateAgentConfig("webhook", { url, template: "{\"d\":[{{arr.downloadId}}{{issue.type}}]}" }), { ok: false, error: "templateInvalid" });
+  assert.deepEqual(validateAgentConfig("webhook", { url, template: "{\"x\":[{{id}}]}" }), { ok: false, error: "templateInvalid" });
+  // Quoted, the same placeholders stay valid.
+  assert.ok(validateAgentConfig("webhook", { url, template: "{\"r\":\"{{arr.release}}\",\"i\":\"{{issue.id}}\",\"x\":\"{{id}}\"}" }).ok);
+});
+
+test("payload: the delivery id comes from the context, is a template field, and its header name can't be taken by an auth header", () => {
+  const p = buildWebhookPayload({ event: "request.created" }, { ...CTX, id: "11111111-2222-4333-8444-555555555555" });
+  assert.equal(p.id, "11111111-2222-4333-8444-555555555555");
+  assert.equal(buildWebhookPayload({ event: "request.created" }, CTX).id, null, "no id outside a real delivery");
+  assert.ok((TEMPLATE_FIELDS as readonly string[]).includes("id"));
+  assert.equal(JSON.parse(renderTemplate("{\"d\": \"{{id}}\"}", p)).d, "11111111-2222-4333-8444-555555555555");
+  for (const headerName of [WEBHOOK_DELIVERY_ID_HEADER, WEBHOOK_DELIVERY_ID_HEADER.toLowerCase()]) {
+    assert.deepEqual(validateAgentConfig("webhook", { url: "https://h.example/x", headerName }), { ok: false, error: "headerName" }, headerName);
+  }
+});
+
+test("a stored config is read back tagged with its kind, or with the reason it no longer validates", () => {
+  const ntfy = parseStoredConfig("ntfy", { url: "https://n.example", topic: "t" });
+  assert.ok(ntfy.ok);
+  assert.equal(ntfy.value.kind, "ntfy");
+  if (ntfy.value.kind === "ntfy") assert.equal(ntfy.value.config.topic, "t");
+  assert.deepEqual(parseStoredConfig("slack", { url: "https://s.example" }), { ok: false, error: "kind" });
+  assert.deepEqual(parseStoredConfig("ntfy", { url: "https://n.example", topic: "has space" }), { ok: false, error: "topic" });
 });

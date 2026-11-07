@@ -2,7 +2,7 @@
 // link, the period FilterBar, the six KPI StatCards, then section cards
 // (attention, requests, fulfillment, month chart). The storage and grade
 // sections stream in behind their own Suspense fallbacks, so they're not here.
-import { Bar, ControlRow, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, ControlRow, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 const CARD = {
   background: "var(--ds-bg-2)",
@@ -12,7 +12,7 @@ const CARD = {
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle right />
       <div className="mb-4">
         <ControlRow w={300} />
@@ -30,6 +30,6 @@ export default function Loading() {
           <Bar w={160} h={14} />
         </div>
       ))}
-    </div>
+    </SkeletonRoot>
   );
 }

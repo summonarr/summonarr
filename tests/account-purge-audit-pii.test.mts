@@ -302,6 +302,7 @@ const purgeTx = {
   webAuthnCredential: { deleteMany: record("webAuthnCredential.deleteMany") },
   mfaRecoveryCode: { deleteMany: record("mfaRecoveryCode.deleteMany") },
   pushSubscription: { deleteMany: record("pushSubscription.deleteMany") },
+  pushSubscriptionRemoval: { deleteMany: record("pushSubscriptionRemoval.deleteMany") },
   discordLinkToken: { deleteMany: record("discordLinkToken.deleteMany") },
   discordMergeCode: { deleteMany: record("discordMergeCode.deleteMany") },
   mediaServerUser: { updateMany: record("mediaServerUser.updateMany") },

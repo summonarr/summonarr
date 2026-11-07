@@ -330,6 +330,12 @@ export interface QrCode {
 }
 
 export function encodeQr(text: string, ecl: QrEcl = "M", forceMask?: number): QrCode {
+  // The mask is three format bits: 8+ would overflow into the ECC-level bits
+  // (drawFormatBits ORs it in) while maskBit applied another pattern, so the
+  // code would not scan.
+  if (forceMask !== undefined && !(Number.isInteger(forceMask) && forceMask >= 0 && forceMask <= 7)) {
+    throw new RangeError(`QR mask must be an integer from 0 to 7, got ${forceMask}`);
+  }
   const bytes = utf8Bytes(text);
   let ver = MIN_VERSION;
   for (; ver <= MAX_VERSION; ver++) {

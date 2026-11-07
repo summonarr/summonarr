@@ -139,6 +139,12 @@ shadowPrismaModel(prisma, "blacklistItem", {
     const sorted = [...items].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     return args.take != null ? sorted.slice(0, args.take) : sorted;
   },
+  findUnique: async (args: { where: { tmdbId_mediaType: { tmdbId: number; mediaType: string } } }) => {
+    rec("blacklistItem.findUnique", args);
+    const w = args.where.tmdbId_mediaType;
+    const row = items.find((i) => i.tmdbId === w.tmdbId && i.mediaType === w.mediaType);
+    return row ? { tmdbId: row.tmdbId } : null;
+  },
   upsert: async (args: Record<string, unknown>) => {
     rec("blacklistItem.upsert", args);
     const where = (args.where as { tmdbId_mediaType: { tmdbId: number; mediaType: string } }).tmdbId_mediaType;
@@ -469,6 +475,32 @@ test("POST returns 201 with the stored item", async () => {
   assert.equal(body.item.title, "The Matrix");
 });
 
+test("POST says created: true when it adds a title that wasn't blocked", async () => {
+  const res = await add(await mintSession(), { tmdbId: 603, mediaType: "MOVIE", title: "The Matrix" });
+  assert.equal(res.status, 201);
+  const body = await res.json();
+  assert.equal(body.created, true);
+  assert.equal(body.item.tmdbId, 603, "the { item } shape is unchanged");
+});
+
+test("POST says created: false when the title was already blocked — the manager's count must not go up", async () => {
+  // The manager loads at most 1000 rows, so for an older blocked title only the
+  // server can say the POST rewrote a row rather than adding one.
+  items = [{ id: "a", tmdbId: 603, mediaType: "MOVIE", title: "Old", reason: "kept", addedBy: "x", createdAt: new Date("2020-01-01") }];
+  const res = await add(await mintSession(), { tmdbId: 603, mediaType: "MOVIE", title: "New" });
+  assert.equal(res.status, 201);
+  const body = await res.json();
+  assert.equal(body.created, false);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].title, "New");
+});
+
+test("created is per pair: the same tmdbId under the other media type is a new row", async () => {
+  items = [{ id: "a", tmdbId: 88, mediaType: "MOVIE", title: null, reason: null, addedBy: "x", createdAt: new Date() }];
+  const body = await (await add(await mintSession(), { tmdbId: 88, mediaType: "TV" })).json();
+  assert.equal(body.created, true);
+});
+
 // ── DELETE ───────────────────────────────────────────────────────────────────
 
 for (const [label, query] of [
@@ -599,6 +631,7 @@ test("a POST makes the new entry visible to the blacklist cache immediately", as
       rec("blacklistItem.findMany", args);
       return items.map((i) => ({ ...i }));
     },
+    findUnique: async () => null,
     upsert: async (args: Record<string, unknown>) => {
       rec("blacklistItem.upsert", args);
       const created = { id: "bl-1", createdAt: new Date(), ...(args.create as object) } as BlItem;

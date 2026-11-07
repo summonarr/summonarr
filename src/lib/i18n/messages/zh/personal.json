@@ -122,6 +122,7 @@
   "personal.stats.noActivityDescription": "在服务器上播放内容后，你的统计数据会显示在这里。",
   "personal.stats.totalPlays": "总播放次数",
   "personal.stats.watchTime": "观看时长",
+  "personal.stats.watchTimeValue": "{hours} 小时",
   "personal.stats.lastActive": "最近活跃",
   "personal.stats.avgSession": "平均单次时长",
   "personal.stats.calendar": "365 天活动",

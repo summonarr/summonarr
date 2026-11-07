@@ -4,7 +4,7 @@ import { prewarmSuggestionEdges } from "@/lib/recommendation-graph";
 import { prewarmTitleTranslations } from "@/lib/tmdb-localize";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, WARM_LIBRARY_LOCK_ID } from "@/lib/advisory-lock";
-import { cronSkippedResponse, getCronActor, recordCronRun } from "@/lib/cron-auth";
+import { cronSkippedResponse, getCronActor, withCronRunRecording } from "@/lib/cron-auth";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 
 // Scheduled version of the boot-time prewarm (instrumentation.ts) and the admin
@@ -19,46 +19,38 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Not configured: no run happened, so it is answered as a skip
+  // (X-Cron-Skipped) and kept out of the run history, decided before the lock.
   if (!tmdbAuth()) {
-    return NextResponse.json({ skipped: true, reason: "no TMDB credentials configured" });
+    return cronSkippedResponse("no TMDB credentials configured");
   }
 
-  return withAdvisoryLock(
+  // withCronRunRecording saves every run to the cron history (Admin ->
+  // Settings -> System) — a throw, a lock connection that fails or a lock
+  // timeout as a failed run, and a run with failures (X-Cron-Degraded below)
+  // as an error instead of a green tick — and leaves a busy-lock skip
+  // unrecorded. It is kept in the Setting table, not AuditLog, so scheduled
+  // runs don't flood the audit log.
+  return withCronRunRecording("library", () => withAdvisoryLock(
     WARM_LIBRARY_LOCK_ID,
     async (signal) => {
       const startTime = Date.now();
-      let result;
-      let edges;
-      let translations;
-      try {
-        result = await prewarmLibraryCache({ signal });
-        // Same walk, same cadence: while this cron is fetching each library
-        // title's metadata it also builds that title's suggestion edges, so the
-        // recommendation graph is warm long before the 12h recommendations run
-        // asks for it (see prewarmSuggestionEdges). Deliberately NOT wrapped in
-        // its own try/catch — a throw here belongs in the same failure bucket as
-        // a details-walk throw, and the ledger write below already covers it.
-        edges = await prewarmSuggestionEdges({ signal });
-        // Titles, overviews and posters in the languages people on this server
-        // read (guardrail 40a) — library, requests and watchlists, so list pages
-        // and the iCal feed are localized without a first-view fetch. A no-op
-        // unless someone reads a non-English language.
-        translations = await prewarmTitleTranslations({ signal });
-      } catch (err) {
-        // Record the failed run before re-throwing. Otherwise the cron history
-        // would still show the last successful run and look healthy.
-        await recordCronRun("library", Date.now() - startTime, false);
-        throw err;
-      }
+      const result = await prewarmLibraryCache({ signal });
+      // Same walk, same cadence: while this cron is fetching each library
+      // title's metadata it also builds that title's suggestion edges, so the
+      // recommendation graph is warm long before the 12h recommendations run
+      // asks for it (see prewarmSuggestionEdges). Deliberately NOT wrapped in
+      // its own try/catch — a throw here belongs in the same failure bucket as
+      // a details-walk throw, and the run recording already covers it.
+      const edges = await prewarmSuggestionEdges({ signal });
+      // Titles, overviews and posters in the languages people on this server
+      // read (guardrail 40a) — library, requests and watchlists, so list pages
+      // and the iCal feed are localized without a first-view fetch. A no-op
+      // unless someone reads a non-English language.
+      const translations = await prewarmTitleTranslations({ signal });
 
       const durationMs = Date.now() - startTime;
-
-      // Save this run to the cron history (Admin -> Settings -> System). It is
-      // kept in the Setting table, not AuditLog, so scheduled runs don't flood
-      // the audit log. `ok` comes from the real failure count, so a run that
-      // finished with failures shows as an error instead of a green tick.
       const failed = result.failed + edges.failed + translations.failed;
-      await recordCronRun("library", durationMs, failed === 0);
 
       if (authCtx.trigger !== "cron") {
         await logAudit({
@@ -70,7 +62,7 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      // The body's `ok` matches what was just recorded. The admin "Run now"
+      // The body's `ok` matches what gets recorded. The admin "Run now"
       // badge (cron-job-table.tsx) turns red on `ok: false` or an `error` field.
       // The status stays 200 on purpose: the container retries any non-2xx
       // every CRON_RETRY_INTERVAL (300s) instead of waiting for the job's normal
@@ -88,5 +80,5 @@ export async function POST(request: NextRequest) {
       }, failed > 0 ? { headers: { "X-Cron-Degraded": String(failed) } } : undefined);
     },
     () => cronSkippedResponse(),
-  );
+  ));
 }

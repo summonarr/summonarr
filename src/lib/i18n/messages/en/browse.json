@@ -119,6 +119,8 @@
   "browse.forYou.rebuild.failed": "Rebuild failed (HTTP {status})",
   "browse.forYou.rebuild.done_one": "Rebuilt {updated} of {count} shelf",
   "browse.forYou.rebuild.done_other": "Rebuilt {updated} of {count} shelves",
+  "browse.forYou.rebuild.partial_one": "Rebuilt {updated} of {count} shelf; {failed} failed",
+  "browse.forYou.rebuild.partial_other": "Rebuilt {updated} of {count} shelves; {failed} failed",
   "browse.forYou.rebuild.label": "Rebuild picks",
   "browse.forYou.rebuild.labelWait": "Rebuild picks — wait {seconds}s",
   "browse.forYou.rebuild.wait": "Wait {seconds}s",

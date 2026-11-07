@@ -15,17 +15,11 @@
 // watch-history, my-stats + wrapped, profile, person, requests, issues, votes,
 // settings and the admin subtree — has its own boundary and never falls
 // through to this one.
-import {
-  Bar,
-  MediaCardTile,
-  SKELETON_CARD,
-  SKELETON_FILL,
-  SkeletonHeader,
-} from "@/components/loading/poster-grid-skeleton";
+import { Bar, MediaCardTile, SKELETON_CARD, SKELETON_FILL, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle right />
 
       {/* Trending hero pair */}
@@ -65,6 +59,6 @@ export default function Loading() {
           </div>
         </section>
       ))}
-    </div>
+    </SkeletonRoot>
   );
 }

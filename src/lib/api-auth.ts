@@ -1,4 +1,4 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import {
@@ -74,10 +74,35 @@ function claimsToSession(claims: SessionClaims): SummonarrSession {
 // allowlist is fail-closed — an indeterminate client IP ("unknown" when
 // TRUST_PROXY is off) never matches. Absent/empty claim ⇒ no restriction.
 // Exported for unit tests.
-export function machineIpAllowed(claims: SessionClaims, headers: Headers): boolean {
+export function machineIpAllowed(claims: SessionClaims, requestHeaders: Headers): boolean {
   const allowlist = claims.machineAllowedIps;
   if (!Array.isArray(allowlist) || allowlist.length === 0) return true;
-  return isIpAllowed(getClientIp(headers), allowlist);
+  return isIpAllowed(getClientIp(requestHeaders), allowlist);
+}
+
+// The checks every session reader shares once it has a token: the DB-checked
+// verify + refresh, the machine-session IP binding, then the role. The
+// transport is where the token came from (`bearer`), and a token bound to the
+// other one is refused (guardrail 6h). Returns the verify result, or the
+// 401/403 to return verbatim.
+async function verifySessionToken(
+  token: string,
+  opts: { bearer: boolean; allowRotation: boolean; headers: Headers; role?: RequireAuthRole },
+): Promise<VerifyAndRefreshResult | NextResponse> {
+  const result = await verifyAndRefreshSession(token, {
+    transport: opts.bearer ? "bearer" : "cookie",
+    allowRotation: opts.allowRotation,
+  });
+  if (!result) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (!machineIpAllowed(result.claims, opts.headers)) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (opts.role && !hasRole(result.claims.role, opts.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  return result;
 }
 
 // Verifies the Summonarr session cookie, runs the refresh logic, and applies
@@ -94,8 +119,7 @@ export async function requireAuth(
 ): Promise<SummonarrSession | NextResponse> {
   // Prefer a bearer token (native clients) over the cookie (browsers). See
   // authenticateRequest for the full rationale.
-  const { headers: getHeaders } = await import("next/headers");
-  const h = await getHeaders();
+  const h = await headers();
   const bearer = parseBearerToken(h.get("authorization"));
   const token = bearer ?? (await cookies()).get(getSessionCookieName())?.value;
   if (!token) {
@@ -105,21 +129,14 @@ export async function requireAuth(
   // on, so a rotation would rename the AuthSession row out from under the token
   // the browser still holds and sign it out on its next request. That is exactly
   // what the SSE stream's 60s re-auth tick did after any role/permission edit.
-  // The fresh role + permissions are in the claims either way. The transport is
-  // where the token came from; one bound to the other is refused (guardrail 6h).
-  const result = await verifyAndRefreshSession(token, {
-    transport: bearer ? "bearer" : "cookie",
+  // The fresh role + permissions are in the claims either way.
+  const result = await verifySessionToken(token, {
+    bearer: !!bearer,
     allowRotation: false,
+    headers: h,
+    role: opts.role,
   });
-  if (!result) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  if (!machineIpAllowed(result.claims, h as unknown as Headers)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  if (opts.role && !hasRole(result.claims.role, opts.role)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  if (result instanceof NextResponse) return result;
   return claimsToSession(result.claims);
 }
 
@@ -150,21 +167,14 @@ async function authenticateRequest(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   // Rotate only for a cookie client — withAuth hands it the replacement as
-  // Set-Cookie. A bearer client is never given a new token (guardrail 6b). A
-  // token bound to the other transport is refused (guardrail 6h).
-  const result: VerifyAndRefreshResult | null = await verifyAndRefreshSession(token, {
-    transport: bearer ? "bearer" : "cookie",
+  // Set-Cookie. A bearer client is never given a new token (guardrail 6b).
+  const result = await verifySessionToken(token, {
+    bearer: !!bearer,
     allowRotation: !bearer,
+    headers: req.headers,
+    role: opts.role,
   });
-  if (!result) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  if (!machineIpAllowed(result.claims, req.headers)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  if (opts.role && !hasRole(result.claims.role, opts.role)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  if (result instanceof NextResponse) return result;
   return {
     session: claimsToSession(result.claims),
     refreshed: result.refreshed,

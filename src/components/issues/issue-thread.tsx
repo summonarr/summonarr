@@ -9,21 +9,24 @@ import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { Permission, effectivePermissions, hasPermission, parsePermissions } from "@/lib/permissions";
+import { failedLoadState, isNearBottom, type ThreadLoadState } from "@/lib/client/thread-view";
 
 interface IssueMessageData {
   id: string;
   createdAt: string;
   body: string;
   fromAdmin: boolean;
-  author: { name: string | null; email: string; role: string };
+  authorId: string;
+  // `email` is selected for MANAGE_ISSUES holders only (GET and POST alike).
+  author: { name: string | null; email?: string | null; role: string };
 }
 
 interface IssueThreadProps {
   issueId: string;
   variant?: "inline" | "panel";
-  // Which side of the thread the viewer sits on. Omitted, it is derived from the
-  // client session with the same MANAGE_ISSUES bit the messages route uses for
-  // `fromAdmin`, so every consumer agrees without each page threading it through.
+  // Which side of the thread the viewer sits on when there is no session to
+  // match authors against. Omitted, it is derived from the client session with
+  // the same MANAGE_ISSUES bit the messages route uses for `fromAdmin`.
   viewerIsAdmin?: boolean;
 }
 
@@ -37,22 +40,28 @@ const MESSAGE_COUNTER_AT = 1800;
 // an issuemessage:created event for this issue.
 export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewerIsAdminProp }: IssueThreadProps) {
   const [messages, setMessages] = useState<IssueMessageData[]>([]);
-  const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [loadState, setLoadState] = useState<ThreadLoadState>("idle");
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  // The message list's own scroll box. Only it is ever scrolled: scrollIntoView
+  // also scrolls every scrollable ancestor, so each message jumped the whole
+  // page to an inline thread inside an admin issue card.
+  const listRef = useRef<HTMLDivElement>(null);
+  // Follow the newest message on open, after the viewer's own send, and on a
+  // live reload only when the reader was already at the bottom.
+  const stickRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Guardrail 16: toLocaleString can differ between the server render and the
   // browser (different locale/timezone). Show nothing until mounted in the browser.
   const mounted = useHasMounted();
   const t = useT();
   const locale = useLocale();
-  // Bubbles sit on the viewer's side when the message is THEIRS, not when it is
-  // an admin's. `fromAdmin` is MANAGE_ISSUES-derived server-side, so "mine" is
-  // `msg.fromAdmin === viewerIsAdmin`. The reporter used to see their own replies
-  // on the left in grey — the inverse of the chat convention — and the admin
-  // pages only read correctly because admin and viewer coincided there.
+  // Bubbles sit on the viewer's side when the viewer WROTE the message:
+  // `msg.authorId === session.user.id`. Matching on role (`fromAdmin`) put every
+  // admin's reply on an admin viewer's own side, and all of them on the side of
+  // an admin who filed the issue. `viewerIsAdmin` is only the fallback for a
+  // render with no session.
   const { session } = useSummonarrSession();
   const viewerIsAdmin =
     viewerIsAdminProp ??
@@ -84,17 +93,20 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         })
-        .then((data: IssueMessageData[]) => {
+        .then((data: unknown) => {
           if (seq !== loadSeqRef.current) return;
-          setMessages(Array.isArray(data) ? data : []);
+          // Measured before the new list renders: was the reader at the bottom?
+          const el = listRef.current;
+          stickRef.current = silent && el ? isNearBottom(el) : true;
+          setMessages(Array.isArray(data) ? (data as IssueMessageData[]) : []);
           setLoadState("ready");
         })
         .catch((err) => {
           if (err?.name === "AbortError") return;
           if (seq !== loadSeqRef.current) return;
-          // A silent refresh failure leaves the existing thread intact rather
-          // than blanking a healthy view over a transient hiccup.
-          if (!silent) setLoadState("error");
+          // A silent refresh failure keeps a healthy thread intact; one that
+          // superseded a first load still pending shows the error and Retry.
+          setLoadState((s) => failedLoadState(s, silent));
         });
     },
     [issueId],
@@ -120,9 +132,9 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
   );
 
   useEffect(() => {
-    if (loadState === "ready") {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
+    const el = listRef.current;
+    if (loadState !== "ready" || !el || !stickRef.current) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, loadState]);
 
   async function sendMessage(e: React.FormEvent) {
@@ -142,6 +154,7 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
         setSendError(data.error ?? t("shared.thread.sendFailed"));
       } else {
         const msg: IssueMessageData = await res.json();
+        stickRef.current = true;
         // The server also sends an SSE event for this message, and the silent
         // reload it triggers can land first — skip the append if it's already here.
         setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
@@ -158,7 +171,8 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      sendMessage(e as unknown as React.FormEvent);
+      // A real submit of the textarea's own form, so onSubmit gets a real event.
+      e.currentTarget.form?.requestSubmit();
     }
   }
 
@@ -173,6 +187,7 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
       }
     >
       <div
+        ref={listRef}
         className={
           isPanel
             ? "px-4 py-3 space-y-3 flex-1 min-h-0 overflow-y-auto"
@@ -206,14 +221,14 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
           <p className="text-xs text-zinc-500 py-2">{t("shared.thread.empty")}</p>
         )}
         {messages.map((msg) => {
-          // `name` can be null, and `email` is only sent to admins (never on a
-          // POST reply), so fall back to "Unknown" — `authorName[0]` below
-          // would throw on undefined and blank the whole thread.
+          // `name` can be null, and `email` is only sent to MANAGE_ISSUES
+          // holders, so fall back to "Unknown" — `authorName[0]` below would
+          // throw on undefined and blank the whole thread.
           const authorName = msg.author.name ?? msg.author.email ?? t("shared.thread.unknownAuthor");
           const isAdmin = msg.fromAdmin;
           // Side = authorship relative to the viewer; the shield avatar and accent
           // fill still mark admin authorship whichever side it lands on.
-          const isMine = msg.fromAdmin === viewerIsAdmin;
+          const isMine = session ? msg.authorId === session.user.id : msg.fromAdmin === viewerIsAdmin;
           return (
             <div key={msg.id} className={`flex gap-2.5 ${isMine ? "flex-row-reverse" : "flex-row"}`}>
               <div className={`w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold mt-0.5 ${
@@ -237,7 +252,6 @@ export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewer
             </div>
           );
         })}
-        <div ref={bottomRef} />
       </div>
 
       <form onSubmit={sendMessage} className="flex items-end gap-2 px-4 pb-3 pt-1">

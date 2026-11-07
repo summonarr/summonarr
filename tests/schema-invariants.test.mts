@@ -133,6 +133,18 @@ test("the schema parser found a realistic model set — a broken parse must not 
   );
 });
 
+// ── activity title lookup ───────────────────────────────────────────────────
+
+test("PlayHistory is indexed on [title, mediaType] for the Activity page's title fallback", () => {
+  const ph = model("PlayHistory");
+  assert.ok(
+    ph.indexes.some((ix) => ix.cols.length === 2 && ix.cols[0] === "title" && ix.cols[1] === "mediaType"),
+    `the DISTINCT ON ("title", "mediaType") lookup has no index to use: ${JSON.stringify(ph.indexes)}`,
+  );
+  const page = readFileSync(new URL("../src/app/(app)/admin/activity/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /SELECT DISTINCT ON \("title", "mediaType"\)/, "the lookup the index serves");
+});
+
 // ── guardrail 28: play history outlives the account that made it ────────────
 
 const HISTORY_OWNING_MODELS = ["PlayHistory", "ActiveSession"] as const;

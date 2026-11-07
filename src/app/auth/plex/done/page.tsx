@@ -9,24 +9,21 @@ import { cn } from "@/lib/utils";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
+import {
+  PIN_POLL_INTERVAL_MS,
+  PIN_POLL_REQUEST_TIMEOUT_MS,
+  PIN_POLL_WINDOW_MS,
+  SETTINGS_POLL_REQUEST_TIMEOUT_MS,
+  parsePlexRedirectAuth,
+  pollDeadline,
+  plexPinPollStep,
+  requestTimeoutSignal,
+  type LoginAuth,
+} from "@/lib/client/plex-redirect-auth";
 
-interface LoginAuth {
-  flow: "login";
-  pinId: number;
-  clientId: string;
-  rememberMe: boolean;
-  callbackUrl: string;
-  siteUrl: string;
-  state?: string;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
-
-interface SettingsAuth {
-  flow: "settings";
-  pinId: number;
-  state?: string;
-}
-
-type RedirectAuth = LoginAuth | SettingsAuth;
 
 // Turn a failed POST /api/auth/sign-in/plex into a message that reflects the
 // ACTUAL failure class, instead of a blanket "you don't have access". The route
@@ -81,9 +78,13 @@ export default function PlexDonePage() {
   }
 
   async function completeLogin(auth: LoginAuth) {
-    // Poll plex.tv directly (up to 120s) until the user approves the PIN in the Plex UI
+    // Poll plex.tv directly until the user approves the PIN in the Plex UI. The
+    // window is wall-clock (each request is bounded too), so a stalled
+    // connection can't hold the spinner past it.
     let authToken: string | null = null;
-    for (let i = 0; i < 120; i++) {
+    const deadline = pollDeadline(PIN_POLL_WINDOW_MS);
+    while (deadline.remaining() > 0) {
+      let delayMs = PIN_POLL_INTERVAL_MS;
       try {
         const r = await fetch(`https://plex.tv/api/v2/pins/${auth.pinId}`, {
           headers: {
@@ -96,11 +97,23 @@ export default function PlexDonePage() {
             "X-Plex-Platform": "Web",
             Accept: "application/json",
           },
+          signal: requestTimeoutSignal(PIN_POLL_REQUEST_TIMEOUT_MS),
         });
-        const d: { authToken?: string | null } = await r.json();
-        if (d.authToken) { authToken = d.authToken; break; }
+        const step = plexPinPollStep(r.status, r.headers.get("retry-after"));
+        if (step.kind === "expired") {
+          // An unknown or expired PIN can never be approved: say so now
+          // rather than after the whole window.
+          fail(t("auth.plexDone.error.expired"));
+          return;
+        }
+        if (step.kind === "read") {
+          const d = (await r.json().catch(() => null)) as { authToken?: unknown } | null;
+          if (d && typeof d.authToken === "string" && d.authToken) { authToken = d.authToken; break; }
+        } else {
+          delayMs = step.delayMs;
+        }
       } catch { }
-      await new Promise((r) => setTimeout(r, 1000));
+      await sleep(Math.min(delayMs, deadline.remaining()));
     }
 
     if (!authToken) {
@@ -175,9 +188,15 @@ export default function PlexDonePage() {
     // forwards here after approval, so the first poll normally saves it.
     setMessage(t("auth.plexDone.saving"));
     let connected = false;
-    for (let i = 0; i < 120; i++) {
+    const deadline = pollDeadline(PIN_POLL_WINDOW_MS);
+    while (deadline.remaining() > 0) {
       try {
-        const r = await fetch(withBasePath("/api/auth/plex/pin"), { method: "PATCH" });
+        // Above the route's own 15s plex.tv timeout, so a slow plex.tv answer
+        // still arrives.
+        const r = await fetch(withBasePath("/api/auth/plex/pin"), {
+          method: "PATCH",
+          signal: requestTimeoutSignal(SETTINGS_POLL_REQUEST_TIMEOUT_MS),
+        });
         if (r.status === 400 || r.status === 401 || r.status === 403 || r.status === 422) {
           // No connect in progress for this session (expired / another admin),
           // or plex.tv refused the token it issued: retrying the poll can't help.
@@ -187,7 +206,7 @@ export default function PlexDonePage() {
         const d: { status?: string } = await r.json();
         if (d.status === "connected") { connected = true; break; }
       } catch { }
-      await new Promise((r) => setTimeout(r, 1000));
+      await sleep(Math.min(PIN_POLL_INTERVAL_MS, deadline.remaining()));
     }
 
     if (!connected) {
@@ -217,13 +236,11 @@ export default function PlexDonePage() {
     }
 
     sessionStorage.removeItem("plex-redirect-auth");
-    let auth: RedirectAuth;
-    try {
-      auth = JSON.parse(stored) as RedirectAuth;
-    } catch {
-      // Corrupted/tampered sessionStorage value would otherwise throw here and leave the user
-      // stuck on the loading spinner with no recovery path. Fall back to /login the same way the
-      // missing-key branch above does.
+    // A corrupted or tampered value (unparseable, `null`, a wrong shape) would
+    // otherwise throw below or poll with garbage. Fall back to /login the same
+    // way the missing-key branch above does.
+    const auth = parsePlexRedirectAuth(stored);
+    if (!auth) {
       window.location.replace(withBasePath("/login"));
       return;
     }

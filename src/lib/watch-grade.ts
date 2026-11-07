@@ -132,14 +132,24 @@ export function watchGradeBands(settings: BandSettings): { letter: WatchGradeLet
   ];
 }
 
+// What 0 means for a field that accepts it. A tag, not the message text: the
+// English fragment and the translated key are each looked up from it, so
+// rewording one can never silently change which the other picks.
+type ZeroMeaning = "noLimit" | "off";
+const ZERO_TEXT: Record<ZeroMeaning, string> = { noLimit: "for no limit", off: "to turn it off" };
+const ZERO_KEY: Record<ZeroMeaning, string> = {
+  noLimit: "apiAdmin.watchGrade.rangeOrZeroNoLimit",
+  off: "apiAdmin.watchGrade.rangeOrZeroOff",
+};
+
 // One table serves the write-side validator (/api/settings) and the read-side
 // parser, so a value the settings route accepts can never be clamped into
 // something else on read. `zero` names what 0 means for the fields that accept it.
-const SETTING_BOUNDS: Record<keyof WatchGradeSettings, { min: number; max: number; zero: string | null }> = {
+const SETTING_BOUNDS: Record<keyof WatchGradeSettings, { min: number; max: number; zero: ZeroMeaning | null }> = {
   graceDays: { min: 1, max: 365, zero: null },
-  windowDays: { min: 30, max: 3650, zero: "for no limit" },
+  windowDays: { min: 30, max: 3650, zero: "noLimit" },
   tvEpisodePercent: { min: 1, max: 100, zero: null },
-  otherViewers: { min: 1, max: 100, zero: "to turn it off" },
+  otherViewers: { min: 1, max: 100, zero: "off" },
   // No 0: a D cutoff of 0 would make an F impossible.
   bandA: { min: 1, max: 100, zero: null },
   bandB: { min: 1, max: 100, zero: null },
@@ -170,13 +180,8 @@ export function watchGradeSettingError(key: string, value: string, t?: Translato
   if (!field) return null;
   if (parseBounded(value, field) !== null) return null;
   const b = SETTING_BOUNDS[field];
-  if (t) {
-    const vars = { key, min: b.min, max: b.max };
-    if (b.zero === "for no limit") return t("apiAdmin.watchGrade.rangeOrZeroNoLimit", vars);
-    if (b.zero === "to turn it off") return t("apiAdmin.watchGrade.rangeOrZeroOff", vars);
-    return t("apiAdmin.watchGrade.range", vars);
-  }
-  return `"${key}" must be an integer between ${b.min} and ${b.max}${b.zero ? `, or 0 ${b.zero}` : ""}`;
+  if (t) return t(b.zero ? ZERO_KEY[b.zero] : "apiAdmin.watchGrade.range", { key, min: b.min, max: b.max });
+  return `"${key}" must be an integer between ${b.min} and ${b.max}${b.zero ? `, or 0 ${ZERO_TEXT[b.zero]}` : ""}`;
 }
 
 // The rules that span fields, checked on write against the MERGED values (stored
@@ -689,6 +694,25 @@ export function watchGradeSpread(summaries: Iterable<WatchGradeSummary>): WatchG
     else spread.notGraded++;
   }
   return spread;
+}
+
+// The breakdown's filters. Each but "all" is exactly one of the summary's
+// buckets (gradeUser's tally), so over a complete verdict list a filter's rows
+// are that bucket's count.
+export type WatchGradeFilter = "all" | "unwatched" | "partial" | "others" | "watched" | "grace" | "untracked";
+
+export function verdictMatchesFilter(v: RequestWatchVerdict, filter: WatchGradeFilter): boolean {
+  switch (filter) {
+    case "all":
+      return true;
+    case "grace":
+    case "untracked":
+      return v.scoring === filter;
+    case "others":
+      return v.scoring === "scored" && v.watchedByOthers;
+    default:
+      return v.scoring === "scored" && !v.watchedByOthers && v.watch === filter;
+  }
 }
 
 // "watched/scored" for the chip — the requests that earned full credit: the

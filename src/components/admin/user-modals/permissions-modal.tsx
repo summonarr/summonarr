@@ -136,7 +136,8 @@ function QuotaRow({
       <span className="text-[10px] text-zinc-500">{t("adminManage.perm.quota.per")}</span>
       <Input
         type="number"
-        min={1}
+        // 0 is a valid window: the route reads it as the 7-day default.
+        min={0}
         inputMode="numeric"
         placeholder={t("adminManage.perm.quota.daysPlaceholder")}
         aria-label={t("adminManage.perm.quota.daysAria", { noun })}
@@ -175,7 +176,11 @@ export function PermissionsModal({
   const [perms, setPerms] = useState<bigint>(() => parsePermissions(u.permissions));
   const [grants, setGrants] = useState<InstanceGrantMap>(u.instanceGrants);
   const [mediaGrants, setMediaGrants] = useState<MediaServerGrants>(u.mediaServerGrants);
-  const [saving, setSaving] = useState(false);
+  // PATCHes in flight. A counter, not a boolean: a quota save finishing first
+  // would otherwise re-enable the toggles while a permission PATCH is still out,
+  // and the next toggle would send an absolute mask carrying the pending bit.
+  const [pending, setPending] = useState(0);
+  const saving = pending > 0;
   const [error, setError] = useState<string | null>(null);
   const [quota, setQuota] = useState({
     movieQuotaLimit: u.movieQuotaLimit?.toString() ?? "",
@@ -192,10 +197,13 @@ export function PermissionsModal({
     tvQuotaLimit: u.tvQuotaLimit ?? null,
     tvQuotaDays: u.tvQuotaDays ?? null,
   });
-  // Saves every uncommitted quota edit. Refreshed after each render so the
-  // close handler below can stay stable for useModalA11y (which re-runs its
-  // focus-in effect whenever onClose changes) yet still see the latest text.
-  const flushQuotaRef = useRef<() => void>(() => {});
+  // Saves every uncommitted quota edit and resolves true once every quota save
+  // (these and any still in flight from a blur) succeeded. Refreshed after each
+  // render so the close handler below can stay stable for useModalA11y (which
+  // re-runs its focus-in effect whenever onClose changes) yet still see the
+  // latest text.
+  const flushQuotaRef = useRef<() => Promise<boolean>>(async () => true);
+  const quotaSavesRef = useRef(new Set<Promise<boolean>>());
   const [confirmReset, setConfirmReset] = useState(false);
   const [maxRating, setMaxRating] = useState<string>(u.maxContentRating ?? "");
   const titleId = `perm-modal-title-${u.id}`;
@@ -205,10 +213,11 @@ export function PermissionsModal({
 
   // Closing (Escape, the X, or the backdrop) unmounts the quota inputs without
   // firing their onBlur, which silently dropped a value just typed. Flush any
-  // uncommitted quota edit first; saveQuota no-ops for unchanged fields.
-  const handleClose = useCallback(() => {
-    flushQuotaRef.current();
-    onClose();
+  // uncommitted quota edit first and close only once it saved: a refused save
+  // (a limit of 0, a 429, the network) keeps the modal open with its error,
+  // instead of rolling back on an unmounted component nobody sees.
+  const handleClose = useCallback(async () => {
+    if (await flushQuotaRef.current()) onClose();
   }, [onClose]);
 
   // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
@@ -228,8 +237,9 @@ export function PermissionsModal({
   //
   // The rollback only has to restore the value it captured: the nested updates
   // below build new maps instead of editing `prev`, so no deep copy is needed.
-  async function patchUser(body: Record<string, unknown>, rollback: () => void): Promise<void> {
-    setSaving(true);
+  // Resolves true when the server accepted the change.
+  async function patchUser(body: Record<string, unknown>, rollback: () => void): Promise<boolean> {
+    setPending((n) => n + 1);
     setError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
@@ -241,17 +251,19 @@ export function PermissionsModal({
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         rollback();
         setError(rateLimitMessage(res, t) ?? data?.error ?? t("adminManage.notif.failed", { status: res.status }));
-        return;
+        return false;
       }
       router.refresh();
+      return true;
     } catch {
       // A network failure throws instead of returning a response, so the
       // !res.ok branch above never runs. Roll back here too, and swallow the
       // error: callers don't await this promise, so a throw would go unhandled.
       rollback();
       setError(t("adminManage.users.error.network"));
+      return false;
     } finally {
-      setSaving(false);
+      setPending((n) => n - 1);
     }
   }
 
@@ -294,27 +306,45 @@ export function PermissionsModal({
     await patchUser({ mediaServerGrants: next }, () => setMediaGrants(prev));
   }
 
-  async function saveQuota(field: QuotaField, raw: string) {
+  // Resolves true when there was nothing to save or the server accepted it.
+  function saveQuota(field: QuotaField, raw: string): Promise<boolean> {
     const trimmed = raw.trim();
     const value = trimmed === "" ? null : Math.max(0, Math.floor(Number(trimmed)));
-    if (value !== null && !Number.isFinite(value)) return;
+    if (value !== null && !Number.isFinite(value)) {
+      // Too large to be a number (1e400) or not one at all: nothing is saved,
+      // so say so and put back the saved value rather than leave unsaved text
+      // looking committed (and blocking every close after this one).
+      const saved = committedQuota.current[field];
+      setQuota((q) => ({ ...q, [field]: saved?.toString() ?? "" }));
+      setError(t("adminManage.perm.quota.invalid"));
+      return Promise.resolve(false);
+    }
+    // Show what is saved: "2.7" is sent as 2 and "-3" as 0.
+    setQuota((q) => ({ ...q, [field]: value?.toString() ?? "" }));
     // Nothing changed, so nothing to save. This runs on blur, so without this
     // check just tabbing through the four inputs would send four PATCHes — each
     // writing a no-op audit row and using up the 20-per-minute rate limit
     // shared with the permission checkboxes above.
     const prev = committedQuota.current[field];
-    if (value === prev) return;
+    if (value === prev) return Promise.resolve(true);
     committedQuota.current[field] = value;
     // Rollback restores the server's value, not the typed text: the server
     // refused, so what it holds is still what it held before.
-    await patchUser({ [field]: value }, () => {
+    const save = patchUser({ [field]: value }, () => {
       committedQuota.current[field] = prev;
       setQuota((q) => ({ ...q, [field]: prev?.toString() ?? "" }));
     });
+    quotaSavesRef.current.add(save);
+    void save.finally(() => quotaSavesRef.current.delete(save));
+    return save;
   }
   useEffect(() => {
-    flushQuotaRef.current = () => {
-      for (const field of QUOTA_FIELDS) void saveQuota(field, quota[field]);
+    flushQuotaRef.current = async () => {
+      // Start a save for every uncommitted field; saves already in flight from
+      // a blur are tracked in quotaSavesRef and awaited too.
+      const started = QUOTA_FIELDS.map((field) => saveQuota(field, quota[field]));
+      const results = await Promise.all([...started, ...quotaSavesRef.current]);
+      return results.every(Boolean);
     };
   });
 

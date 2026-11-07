@@ -2,7 +2,7 @@ import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlayHistoryStats, isPlayHistoryEnabled } from "@/lib/play-history";
-import { parseActivityDays } from "@/lib/activity-days";
+import { parseActivityFilters, type PageParam } from "@/lib/activity-days";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { Activity } from "@/components/icons";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
@@ -16,7 +16,8 @@ export const dynamic = "force-dynamic";
 export default async function StatsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; source?: string; mediaType?: string }>;
+  // A repeated key arrives as an array; parseActivityFilters takes its first value.
+  searchParams: Promise<{ days?: PageParam; source?: PageParam; mediaType?: PageParam }>;
 }) {
   // Same gate as the overview and history tabs: switching the Activity page off
   // used to leave this tab reachable by URL.
@@ -24,17 +25,7 @@ export default async function StatsPage({
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam } =
-    await searchParams;
-  const days = parseActivityDays(daysParam);
-  const source =
-    sourceParam && ["plex", "jellyfin"].includes(sourceParam)
-      ? sourceParam
-      : undefined;
-  const mediaType =
-    mediaTypeParam && ["MOVIE", "TV"].includes(mediaTypeParam)
-      ? mediaTypeParam
-      : undefined;
+  const { days, source, mediaType } = parseActivityFilters(await searchParams);
 
   const [t, requestStatsOn, phEnabled] = await Promise.all([
     getTranslator(),
@@ -79,6 +70,7 @@ export default async function StatsPage({
 // be serialized into this page's client payload for nothing.
 function pickStatsForPage(stats: Awaited<ReturnType<typeof getPlayHistoryStats>>): ActivityStatsData {
   return {
+    timeZone: stats.timeZone,
     totalPlays: stats.totalPlays,
     totalWatchTimeHours: stats.totalWatchTimeHours,
     uniqueViewers: stats.uniqueViewers,

@@ -67,8 +67,11 @@ function SortHeader({
   // The Link is the hit target, not the <th>: py-1 on the cell + min-h-8 on the
   // link keeps the row at its previous 40px while making the whole 32px
   // tappable.
+  // The active column says its direction to assistive tech, not only by the
+  // arrow (the other sortable admin tables do the same).
+  const ariaSort = isActive ? (currentDir === "asc" ? "ascending" : "descending") : "none";
   return (
-    <th scope="col" className={`py-1 px-4 ${alignClass}`}>
+    <th scope="col" aria-sort={ariaSort} className={`py-1 px-4 ${alignClass}`}>
       <Link
         href={`/admin/activity/users?${params.toString()}`}
         className={`inline-flex items-center min-h-8 gap-1 select-none rounded hover:text-zinc-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)] ${flexAlign}`}
@@ -131,6 +134,10 @@ export default async function UsersActivityPage({
     ? (statusParam as StatusFilter)
     : "all";
   const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
+  // One decimal, locale-separated, with the catalog's hours suffix — the plays
+  // column beside it already goes through toLocaleString (as on the overview).
+  const dec1 = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  const hoursSuffix = t("adminActivity.common.hoursSuffix");
 
   const sort: SortField = (SORT_FIELDS as readonly string[]).includes(sortParam ?? "")
     ? (sortParam as SortField)
@@ -287,7 +294,7 @@ export default async function UsersActivityPage({
                       {u.plays > 0 ? u.plays.toLocaleString(locale) : <span className="text-zinc-500">0</span>}
                     </td>
                     <td className="py-3 px-4 text-right text-zinc-400 tabular-nums">
-                      {u.hours > 0 ? `${u.hours}h` : <span className="text-zinc-500">—</span>}
+                      {u.hours > 0 ? `${dec1.format(u.hours)}${hoursSuffix}` : <span className="text-zinc-500">—</span>}
                     </td>
                     <td className="py-3 px-4 text-zinc-400 text-xs">
                       {u.lastActive ? relativeWithDateFallback(u.lastActive, locale) : t("adminActivity.users.never")}

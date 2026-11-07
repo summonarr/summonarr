@@ -295,5 +295,5 @@ test("the cron route skips without a lock when nothing is due, and is wired into
   // interval var, default, quiet, first run, and the short-cadence loop.
   assert.match(entry, /\narr-snapshots\|ARR_SNAPSHOT_URL\|\/api\/cron\/refresh-arr-snapshots\|ARR_SNAPSHOT_INTERVAL\|300\|quiet\|300\|fast\n/);
   const settings = readFileSync(new URL("../src/app/(app)/settings/page.tsx", import.meta.url), "utf8");
-  assert.match(settings, /endpoint: "\/api\/cron\/refresh-arr-snapshots", interval: formatInterval\(t, process\.env\.ARR_SNAPSHOT_INTERVAL, "300"\), \.\.\.lastRunInfo\("arr-snapshots"\)/);
+  assert.match(settings, /\{ target: "arr-snapshots", nameKey: "settings\.cron\.job\.arrSnapshots\.name", descriptionKey: "settings\.cron\.job\.arrSnapshots\.description", endpoint: "\/api\/cron\/refresh-arr-snapshots", envVar: "ARR_SNAPSHOT_INTERVAL", defaultSeconds: "300" \}/);
 });

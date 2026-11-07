@@ -4,15 +4,10 @@ import { NATIVE_CLIENT_HEADER, hasNativeClientHeader } from "@/lib/mobile-auth";
 import type { SignInResult } from "@/lib/auth";
 import type { Translator } from "@/lib/i18n/translate";
 
-// English text of apiAuth.signIn.accountDisabled (the catalog is the source;
-// this constant is kept for tests that pin the English wire text).
 // Shown when signInAndMintSession throws AccountDeactivatedError — i.e. the
 // credential was valid but the account is disabled (see account-lifecycle.ts).
 // 403, not 401: retrying with different credentials for the same account will
 // never help, and the client should stop offering "try again".
-export const DISABLED_ACCOUNT_MESSAGE =
-  "This account has been disabled. Contact an administrator.";
-
 export function disabledAccountResponse(t: Translator): NextResponse {
   return NextResponse.json({ error: t("apiAuth.signIn.accountDisabled") }, { status: 403 });
 }

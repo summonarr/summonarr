@@ -40,6 +40,8 @@ export const GET = withAuth(async (_req, _ctx, session) => {
       totalWatchTimeHours: stats.totalWatchTimeHours,
       avgSessionDuration: stats.avgSessionDuration,
       lastActiveIso: stats.recentPlays[0]?.startedAt.toISOString() ?? null,
+      // Additive: the zone the calendar, playsByDay and userHeatmap buckets are in.
+      timeZone: stats.timeZone,
       activityCalendar: stats.activityCalendar,
       playsByDay: stats.playsByDay,
       userHeatmap: stats.userHeatmap,

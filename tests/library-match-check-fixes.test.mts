@@ -92,5 +92,44 @@ test("structural: the component lists, counts and records fixes through match-ch
   assert.match(src, /setFixes\(\(prev\) => recordMatchFix\(prev, checkedAt, flag, warning\)\)/);
   assert.match(src, /onFixed\(flag, warning \?\? undefined\);/, "Fix one passes the flag itself");
   assert.match(src, /onFixed\(flag, fixMatchWarningMessage\(outcome, t\) \?\? undefined\);/, "so does Fix all");
-  assert.match(src, /setFixes\(noMatchFixes\(\)\);\s*router\.refresh\(\);/, "Check now starts clean");
+  // Check now does NOT clear the fixes before the refresh: the new report's
+  // checkedAt voids them (the "NEW check" test above), and clearing first
+  // brought every fixed row back with a live Fix button until it arrived.
+  const check = src.slice(src.indexOf("async function check("), src.indexOf("const chip = "));
+  assert.match(check, /router\.refresh\(\);/);
+  assert.doesNotMatch(check, /setFixes\(/, "no reset of this session's fixes before the refresh");
+});
+
+test("structural: Fix all can be stopped, stops on unmount, and stays mounted when the list empties", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, "../src/components/admin/library-match-check.tsx"), "utf8");
+  const fixAll = src.slice(src.indexOf("function FixAllButton("), src.indexOf("function FlagRow("));
+  assert.match(fixAll, /for \(const flag of flags\) \{\s*if \(stopRef\.current\) break;/, "the loop checks the stop flag between items");
+  assert.match(fixAll, /\}, \{ signal: ac\.signal \}\);/, "each poll can be aborted");
+  assert.match(fixAll, /return \(\) => \{ alive\.current = false; stopRef\.current = true; abortRef\.current\?\.abort\(\); \};/, "unmount stops the run");
+  assert.match(fixAll, /onClick=\{\(\) => \{ stopRef\.current = true; \}\}/, "a Stop button while running");
+  assert.match(fixAll, /if \(err instanceof DOMException && err\.name === "AbortError"\) break;/, "an abort is not a failure");
+  // A run that fixed every flag empties the list; inside `flags.length > 0`
+  // the button (and its summary) unmounted with it.
+  const listBlock = src.slice(src.indexOf("{flags.length > 0 && ("), src.indexOf("{report && flags.length === 0 && ("));
+  assert.ok(listBlock.length > 0);
+  assert.doesNotMatch(listBlock, /<FixAllButton/);
+  assert.match(src, /<FixAllButton flags=\{fixable\} onFixed=\{onFixed\} \/>/);
+});
+
+test("structural: each confirm moves focus to its Cancel and back to the button that opened it", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const read = (p: string) => readFileSync(join(here, p), "utf8");
+  const src = read("../src/components/admin/library-match-check.tsx");
+  for (const [name, body] of [
+    ["FixOneButton", src.slice(src.indexOf("function FixOneButton("), src.indexOf("function FixAllButton("))],
+    ["FixAllButton", src.slice(src.indexOf("function FixAllButton("), src.indexOf("function FlagRow("))],
+    ["MasterDbFillButton", read("../src/components/admin/master-db-fill-button.tsx")],
+  ] as const) {
+    assert.match(body, /=== "confirm"\) cancelRef\.current\?\.focus\(\);/, `${name}: Cancel takes focus`);
+    assert.match(body, /ref=\{cancelRef\}/, name);
+    assert.match(body, /ref=\{triggerRef\}/, name);
+    assert.match(body, /triggerRef\.current\?\.focus\(\);/, `${name}: focus returns to the opener`);
+    assert.match(body, /onClick=\{\(\) => \{ refocus\.current = true; set(State|Phase)\("idle"\); \}\}/, `${name}: Cancel asks for it back`);
+  }
 });

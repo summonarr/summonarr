@@ -35,7 +35,11 @@ export function formatRelativeTimeWithDateFallback(date: string | number | Date)
 // contract, so client callers still gate it behind useHasMounted (guardrail 16).
 export function formatRelativeTimeLocalized(date: string | number | Date, locale: string): string {
   if (locale === "en") return formatRelativeTime(date);
-  const minutes = Math.max(0, Math.floor((Date.now() - new Date(date).getTime()) / 60_000));
+  // An unparsable date would reach rtf.format(NaN) below, which throws a
+  // RangeError inside a client render; show nothing instead.
+  const ms = new Date(date).getTime();
+  if (!Number.isFinite(ms)) return "";
+  const minutes = Math.max(0, Math.floor((Date.now() - ms) / 60_000));
   const rtf = new Intl.RelativeTimeFormat(locale, { numeric: "auto", style: "short" });
   if (minutes < 1) return rtf.format(0, "second");
   if (minutes < 60) return rtf.format(-minutes, "minute");

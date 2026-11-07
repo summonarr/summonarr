@@ -1,4 +1,4 @@
-// Unit tests for replaceEpisodeCacheForSource (src/lib/cron-auth.ts) — the
+// Unit tests for replaceEpisodeCacheForSource (src/lib/episode-cache.ts) — the
 // whole-table TVEpisodeCache rewrite shared by the orchestrator, the two
 // per-source resync routes and /api/sync/tv-episodes.
 //
@@ -445,7 +445,7 @@ test("the digest tells null from empty, and no value can shift into the next fie
 });
 
 test("the digest covers exactly the columns the swap writes, in JS and in SQL", () => {
-  const src = readFileSync(new URL("../src/lib/cron-auth.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/lib/episode-cache.ts", import.meta.url), "utf8");
   const schema = readFileSync(new URL("../prisma/schema.prisma", import.meta.url), "utf8");
 
   const insertCols = (src.match(/INSERT INTO "TVEpisodeCache" \(([^)]*)\)/)?.[1] ?? "")

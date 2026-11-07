@@ -13,6 +13,7 @@ import type { QueueItem } from "@/lib/arr-queue";
 import type { ArrErrorKind } from "@/lib/arr-error-kind";
 import { createLoadGate, type LoadKind } from "@/lib/arr-system";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
+import { readApiError } from "@/lib/client/api-error";
 
 export type Service = "radarr" | "sonarr";
 
@@ -28,12 +29,6 @@ const POLL_MS = 20_000;
 // The page's one read. The live load and its snapshot must name the SAME url,
 // or the server's snapshot key misses.
 const queueUrl = () => withBasePath("/api/admin/queue");
-
-/** The error a queue route answered with, else `fallback`. */
-export async function readError(res: Response, fallback: string): Promise<string> {
-  const d = (await res.json().catch(() => null)) as { error?: string } | null;
-  return d?.error ?? fallback;
-}
 
 export function useQueueData({
   configured,
@@ -77,7 +72,7 @@ export function useQueueData({
     let next: { report: QueueReport } | { error: string };
     try {
       const res = await fetch(queueUrl());
-      next = res.ok ? { report: (await res.json()) as QueueReport } : { error: await readError(res, t("adminManage.queue.error.load")) };
+      next = res.ok ? { report: (await res.json()) as QueueReport } : { error: await readApiError(res, t("adminManage.queue.error.load")) };
     } catch {
       next = { error: t("adminManage.queue.error.loadNetwork") };
     }

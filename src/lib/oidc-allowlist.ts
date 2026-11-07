@@ -57,13 +57,15 @@ function normalizeDomain(raw: string): string {
 
 // Validates a whole policy (the PATCH body, or a stored value). A field that is
 // wrong refuses the WHOLE policy — nothing is repaired or dropped, so what is
-// saved is exactly what the admin typed. Lists are trimmed and de-duplicated;
-// blank entries are dropped (a trailing newline in the text box).
+// saved is exactly what the admin typed. Lists are trimmed and de-duplicated
+// (first-seen order, through a Set so a long list stays linear); blank entries
+// are dropped (a trailing newline in the text box). The entry cap is checked as
+// the list grows, so an over-long list is refused without walking all of it.
 export function validateOidcAllowlist(input: unknown): OidcAllowlistValidation {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return { ok: false, field: "groups" };
   const body = input as Record<string, unknown>;
 
-  const groups: string[] = [];
+  const groupSet = new Set<string>();
   if (body.groups !== undefined) {
     if (!Array.isArray(body.groups)) return { ok: false, field: "groups" };
     for (const g of body.groups) {
@@ -71,10 +73,11 @@ export function validateOidcAllowlist(input: unknown): OidcAllowlistValidation {
       const trimmed = g.trim();
       if (!trimmed) continue;
       if (trimmed.length > MAX_GROUP_LENGTH || CONTROL_RE.test(trimmed)) return { ok: false, field: "groups" };
-      if (!groups.includes(trimmed)) groups.push(trimmed);
+      groupSet.add(trimmed);
+      if (groupSet.size > OIDC_ALLOWLIST_MAX_ENTRIES) return { ok: false, field: "groups" };
     }
-    if (groups.length > OIDC_ALLOWLIST_MAX_ENTRIES) return { ok: false, field: "groups" };
   }
+  const groups = Array.from(groupSet);
 
   let groupsClaim = DEFAULT_OIDC_ALLOWLIST.groupsClaim;
   if (body.groupsClaim !== undefined) {
@@ -92,7 +95,7 @@ export function validateOidcAllowlist(input: unknown): OidcAllowlistValidation {
     requestGroupsScope = body.requestGroupsScope;
   }
 
-  const emailDomains: string[] = [];
+  const domainSet = new Set<string>();
   if (body.emailDomains !== undefined) {
     if (!Array.isArray(body.emailDomains)) return { ok: false, field: "emailDomains" };
     for (const d of body.emailDomains) {
@@ -100,10 +103,11 @@ export function validateOidcAllowlist(input: unknown): OidcAllowlistValidation {
       const domain = normalizeDomain(d);
       if (!domain) continue;
       if (!DOMAIN_RE.test(domain)) return { ok: false, field: "emailDomains" };
-      if (!emailDomains.includes(domain)) emailDomains.push(domain);
+      domainSet.add(domain);
+      if (domainSet.size > OIDC_ALLOWLIST_MAX_ENTRIES) return { ok: false, field: "emailDomains" };
     }
-    if (emailDomains.length > OIDC_ALLOWLIST_MAX_ENTRIES) return { ok: false, field: "emailDomains" };
   }
+  const emailDomains = Array.from(domainSet);
 
   let existingUsersOnly = false;
   if (body.existingUsersOnly !== undefined) {
@@ -154,9 +158,25 @@ export function formatAllowlistLines(list: readonly string[]): string {
 // The group names a claim carries: an array of strings (every common IdP), or a
 // single string. Anything else, or an absent claim, is null. Own properties
 // only, so a claim named "constructor" can't read the prototype.
+//
+// The literal name is tried first, so a dotted URI claim name keeps working.
+// Only when no claim has that exact name is a dotted name read as a path into
+// nested objects (Keycloak's "realm_access.roles"), own properties at every step.
 export function readGroupsClaim(claims: Record<string, unknown>, name: string): string[] | null {
-  if (!Object.hasOwn(claims, name)) return null;
-  const value = claims[name];
+  let value: unknown;
+  if (Object.hasOwn(claims, name)) {
+    value = claims[name];
+  } else if (name.includes(".")) {
+    value = claims;
+    for (const segment of name.split(".")) {
+      if (typeof value !== "object" || value === null || Array.isArray(value) || !Object.hasOwn(value, segment)) {
+        return null;
+      }
+      value = (value as Record<string, unknown>)[segment];
+    }
+  } else {
+    return null;
+  }
   if (typeof value === "string") return [value];
   if (Array.isArray(value)) return value.filter((g): g is string => typeof g === "string");
   return null;

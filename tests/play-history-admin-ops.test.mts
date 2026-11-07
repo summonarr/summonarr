@@ -120,13 +120,25 @@ const EXPORT_ROWS = [
 ];
 
 let rawCalls: string[] = [];
-shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string) => {
+// When true, every export page query answers a FULL page (the LIMIT it was sent),
+// so the CSV loop would page all the way to MAX_EXPORT_ROWS if nothing stopped it.
+let fullExportPages = false;
+shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string, ...binds: unknown[]) => {
   rawCalls.push(sql);
   // The export joins the username alias; everything else (the cached stats
   // getters) gets an empty result set.
-  if (sql.includes('LEFT JOIN "MediaServerUser" msu')) return EXPORT_ROWS;
+  if (sql.includes('LEFT JOIN "MediaServerUser" msu')) {
+    if (fullExportPages) {
+      const take = Number(binds[binds.length - 1]);
+      const base = rawCalls.length * 1_000_000;
+      return Array.from({ length: take }, (_, i) =>
+        exportRow({ id: `ph-${base + i}`, startedAt: new Date(startedAt.getTime() - (base + i) * 1000) }));
+    }
+    return EXPORT_ROWS;
+  }
   return [];
 });
+const exportPageQueries = () => rawCalls.filter((sql) => sql.includes('LEFT JOIN "MediaServerUser" msu')).length;
 
 // ── the delete target ────────────────────────────────────────────────────────
 const deletedIds: string[] = [];
@@ -174,6 +186,7 @@ const { getTranscodeOffenders, clearActivityCache } = await import("../src/lib/p
 
 beforeEach(() => {
   rawCalls = [];
+  fullExportPages = false;
   deletedIds.length = 0;
   auditRows.length = 0;
   warns.length = 0;
@@ -234,6 +247,80 @@ test("GUARDRAIL 19a: the CSV export opens with a UTF-8 BOM, titles the column \"
   assert.equal(byTitle.get("東京物語")![bitrateIdx], "20000", "Jellyfin bps → kbps in the CSV too");
   assert.equal(byTitle.get("Amélie")![bitrateIdx], "8000", "Plex kbps unchanged — and the non-ASCII title survives intact");
   assert.equal(lines.length, 1 + 3, "three data rows, no truncation notice under the cap");
+});
+
+// ═══ Export: validation, audit scope, backpressure ═══════════════════════════
+
+test("a mistyped export date is a 400 that spends no export budget and writes no audit row", async () => {
+  const token = await mintAdmin();
+  for (let i = 0; i < 5; i++) {
+    const bad = await runInScope(token, () => exportRoute(req("/api/play-history/export?startDate=notadate", token)));
+    assert.equal(bad.status, 400, `attempt ${i + 1} is refused for the date`);
+  }
+  assert.equal(auditRows.length, 0, "no PLAY_HISTORY_EXPORT row for an export that never ran");
+  const ok = await runInScope(token, () => exportRoute(req("/api/play-history/export?format=json", token)));
+  assert.equal(ok.status, 200, "the five 400s did not use up the five-per-hour budget");
+  assert.equal(auditRows.length, 1);
+});
+
+function auditFilters(): Record<string, unknown> {
+  const row = auditRows.at(-1) as { action: string; details: string };
+  assert.equal(row.action, "PLAY_HISTORY_EXPORT");
+  return (JSON.parse(row.details) as { filters: Record<string, unknown> }).filters;
+}
+
+test("the export audit records the filters the query applied — an unrecognised value is null, never the raw string", async () => {
+  const token = await mintAdmin();
+  const junk = await runInScope(token, () =>
+    exportRoute(req("/api/play-history/export?format=json&source=foo&mediaType=X&watched=maybe&tmdbId=abc&playMethod=Nope", token)));
+  assert.equal(junk.status, 200);
+  const f = auditFilters();
+  for (const key of ["source", "mediaType", "watched", "tmdbId", "playMethod"]) {
+    assert.equal(f[key], null, `${key}: an ignored value must not be logged as a narrowing`);
+  }
+
+  const real = await runInScope(token, () =>
+    exportRoute(req("/api/play-history/export?format=json&source=jellyfin&mediaType=TV&watched=false&tmdbId=603abc", token)));
+  assert.equal(real.status, 200);
+  const g = auditFilters();
+  assert.equal(g.source, "jellyfin");
+  assert.equal(g.mediaType, "TV");
+  assert.equal(g.watched, "false");
+  assert.equal(g.tmdbId, 603, "the query binds parseInt('603abc'), so the trail records 603");
+});
+
+test("the CSV export reads pages only as fast as the client downloads, and a cancelled download stops paging", async () => {
+  fullExportPages = true;
+  const token = await mintAdmin();
+  const res = await runInScope(token, () => exportRoute(req("/api/play-history/export?format=csv", token)));
+  assert.equal(res.status, 200);
+  const reader = res.body!.getReader();
+  const first = await reader.read();
+  assert.equal(first.done, false);
+  // Give an eager producer every chance to run ahead before the cancel.
+  for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+  const beforeCancel = exportPageQueries();
+  await reader.cancel();
+  for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+  assert.ok(beforeCancel <= 1, `with only the header read, at most one page is queried (got ${beforeCancel} of 10)`);
+  assert.equal(exportPageQueries(), beforeCancel, "nothing is queried after the download is cancelled");
+});
+
+// ═══ the history filter's platform list ═══════════════════════════════════════
+
+test("?distinct=platforms is served from the activity cache: one DISTINCT scan, repeated after a clear", async () => {
+  const listRoute = (await import("../src/app/api/play-history/route.ts")).GET;
+  const token = await mintAdmin();
+  const distinctScans = () => rawCalls.filter((sql) => sql.includes(`DISTINCT "platform"`)).length;
+  for (let i = 0; i < 2; i++) {
+    const res = await listRoute(req("/api/play-history?distinct=platforms", token), undefined);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), [], "the wire shape stays a string array");
+  }
+  assert.equal(distinctScans(), 1, "the table's mount-time fetch no longer rescans PlayHistory every time");
+  clearActivityCache();
+  await listRoute(req("/api/play-history?distinct=platforms", token), undefined);
+  assert.equal(distinctScans(), 2, "a finalize's clear lets a new platform show up");
 });
 
 // ═══ DELETE flushes the activity cache ═══════════════════════════════════════

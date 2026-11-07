@@ -8,6 +8,13 @@ import {
   useMemo,
   useState,
 } from "react";
+import {
+  ACCENT_STORAGE_KEY,
+  THEME_STORAGE_KEY,
+  isAccent,
+  type Accent,
+  type Theme,
+} from "@/lib/theme-constants";
 
 /* Saved appearance preferences.
    - theme  sets `[data-theme]` on <html> (the ds-* colour tokens in
@@ -17,20 +24,10 @@ import {
    src/app/layout.tsx applies them before the first paint, so the page never
    flashes the wrong colours. */
 
-export type Theme = "dark" | "light";
-export type Accent = "indigo" | "amber" | "emerald" | "cyan" | "rose" | "mono";
-
-export const ACCENTS: readonly Accent[] = [
-  "indigo",
-  "amber",
-  "emerald",
-  "cyan",
-  "rose",
-  "mono",
-];
-
-export const THEME_STORAGE_KEY = "summonarr-theme";
-export const ACCENT_STORAGE_KEY = "summonarr-accent";
+// The keys and accent list live in a plain shared module so the root
+// layout's pre-paint script and the crash page read the same values; they are
+// re-exported here for the existing importers.
+export { ACCENT_STORAGE_KEY, ACCENTS, THEME_STORAGE_KEY, type Accent, type Theme } from "@/lib/theme-constants";
 
 const DEFAULT_THEME: Theme = "dark";
 const DEFAULT_ACCENT: Accent = "indigo";
@@ -84,8 +81,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       setThemeState(t);
       applyChromeColor(t);
     }
-    if (a && (ACCENTS as readonly string[]).includes(a)) {
-      setAccentState(a as Accent);
+    if (isAccent(a)) {
+      setAccentState(a);
     }
   }, []);
 

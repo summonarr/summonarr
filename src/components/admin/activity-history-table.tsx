@@ -5,27 +5,16 @@
 // Relative-time cells ("3h ago") wait for useHasMounted so the server render
 // and the browser's first render match (guardrail 16).
 //
-// All state lives here. The filter bar, pagination footer, expanded detail
-// row, delete modal and pure helpers live under ./activity-history/ and get
-// their state and callbacks (including the `mounted` flag) through props.
+// All state lives here. The filter bar, pagination footer, table rows,
+// expanded detail row, delete modal and pure helpers live under
+// ./activity-history/ and get their state and callbacks (including the
+// `mounted` flag) through props.
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
-import { formatRelativeTimeLocalized } from "@/lib/relative-time";
-import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import {
-  ActivityCard,
-  Avatar,
-  MethodPill,
-  Poster,
-  Th,
-  ChevIcon,
-  methodLabel,
-  fmtDuration,
-  fmtTimestamp,
-} from "@/components/admin/activity-ui";
+import { useT } from "@/components/i18n/i18n-provider";
+import { ActivityCard, Th } from "@/components/admin/activity-ui";
 import type {
   HistoryRow,
   MediaServerUserOption,
@@ -35,13 +24,16 @@ import type {
 import { buildHistoryFilterParams } from "./activity-history/helpers";
 import { HistoryFilterBar } from "./activity-history/filter-bar";
 import { HistoryPagination } from "./activity-history/pagination";
-import { DetailRow } from "./activity-history/detail-row";
+import { HistoryTableRow } from "./activity-history/table-row";
 import { DeleteConfirm } from "./activity-history/delete-confirm";
+
+const COL_SPAN = 10;
 
 export function ActivityHistoryTable({
   source: globalSource,
   mediaType: globalMediaType,
   startDateIso,
+  timeZone,
   initialFromDate,
   initialToDate,
   initialWatched,
@@ -49,11 +41,14 @@ export function ActivityHistoryTable({
   source?: string;
   mediaType?: string;
   // Not read here: the parent remounts the table via `key="ht-<days>-…"`
-  // (admin/activity/page.tsx), so a period change starts from fresh state.
+  // (admin/activity/history/page.tsx), so a period change starts from fresh
+  // state.
   days: number;
   // Period lower bound, computed once on the server so client refetches don't
   // drift off a fresh client clock (guardrail 16).
   startDateIso?: string;
+  // The statistics zone the date filter's days are read in (by the API).
+  timeZone: string;
   // Seed the date filter from the URL (a calendar "View these plays" deep-link).
   // YYYY-MM-DD; the server page validates the format before passing them.
   initialFromDate?: string;
@@ -62,7 +57,6 @@ export function ActivityHistoryTable({
 }) {
   const mounted = useHasMounted();
   const t = useT();
-  const locale = useLocale();
 
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -104,22 +98,28 @@ export function ActivityHistoryTable({
 
   const abortRef = useRef<AbortController | null>(null);
 
-  // Keep the URL's seeded filters in step with the table's own. The period
-  // selector copies the current query string, so a from/to/watched the user has
-  // since cleared would otherwise ride along and re-seed the remounted table.
+  // Keep from/to/watched in the URL in step with the table's own. The period
+  // selector copies the current query string, so a date picked here survives a
+  // period change or a reload, and one the user has since cleared doesn't ride
+  // along and re-seed the remounted table. The state argument is null on
+  // purpose: Next's patched replaceState skips its router sync for a state
+  // carrying its own marker (which `window.history.state` does), so the router
+  // kept the old query; with null, Next copies its own history state itself.
   useEffect(() => {
     const url = new URL(window.location.href);
     let changed = false;
     for (const [key, value] of [["from", fromDate], ["to", toDate], ["watched", watched]] as const) {
-      if (value === "" && url.searchParams.has(key)) {
-        url.searchParams.delete(key);
-        changed = true;
-      } else if (value !== "" && url.searchParams.has(key) && url.searchParams.get(key) !== value) {
+      if (value === "") {
+        if (url.searchParams.has(key)) {
+          url.searchParams.delete(key);
+          changed = true;
+        }
+      } else if (url.searchParams.get(key) !== value) {
         url.searchParams.set(key, value);
         changed = true;
       }
     }
-    if (changed) window.history.replaceState(window.history.state, "", url);
+    if (changed) window.history.replaceState(null, "", url);
   }, [fromDate, toDate, watched]);
 
   useEffect(() => {
@@ -328,7 +328,33 @@ export function ActivityHistoryTable({
     !!fromDate ||
     !!toDate;
 
-  const colSpan = 10;
+  // Stable callbacks, so the memoized rows below skip a re-render whenever
+  // their own props are unchanged.
+  const toggleExpanded = useCallback(
+    (id: string) => setExpandedId((cur) => (cur === id ? null : id)),
+    [],
+  );
+
+  // The row list is memoized so a keystroke in the search box (which
+  // re-renders this component before the debounce fires) doesn't rebuild up to
+  // 200 rows; each row is also memo()'d, so expanding one re-renders only the
+  // rows whose `isExpanded` changed.
+  const rowNodes = useMemo(
+    () =>
+      rows.map((r, i) => (
+        <HistoryTableRow
+          key={r.id}
+          row={r}
+          index={i}
+          isExpanded={expandedId === r.id}
+          mounted={mounted}
+          colSpan={COL_SPAN}
+          onToggle={toggleExpanded}
+          onDelete={setDeleteRow}
+        />
+      )),
+    [rows, expandedId, mounted, toggleExpanded],
+  );
 
   return (
     <div>
@@ -357,6 +383,7 @@ export function ActivityHistoryTable({
           hasFilter={hasFilter}
           clearFilters={clearFilters}
           exportAs={exportAs}
+          timeZone={timeZone}
         />
 
         <div
@@ -428,7 +455,7 @@ export function ActivityHistoryTable({
               {loading && rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={colSpan}
+                    colSpan={COL_SPAN}
                     style={{
                       padding: "60px 20px",
                       textAlign: "center",
@@ -441,7 +468,7 @@ export function ActivityHistoryTable({
               ) : error ? (
                 <tr>
                   <td
-                    colSpan={colSpan}
+                    colSpan={COL_SPAN}
                     style={{
                       padding: "60px 20px",
                       textAlign: "center",
@@ -470,7 +497,7 @@ export function ActivityHistoryTable({
               ) : rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={colSpan}
+                    colSpan={COL_SPAN}
                     style={{
                       padding: "60px 20px",
                       textAlign: "center",
@@ -482,371 +509,7 @@ export function ActivityHistoryTable({
                   </td>
                 </tr>
               ) : (
-                rows.map((r, i) => {
-                  const isExpanded = expandedId === r.id;
-                  // Use the chain total when present (grouped mode). In
-                  // ungrouped mode the API fills it with the row's own value,
-                  // so this works either way.
-                  const effectivePlay = r.totalPlayDuration ?? r.playDuration;
-                  const pct =
-                    r.duration > 0
-                      ? Math.min(
-                          100,
-                          Math.round((effectivePlay / r.duration) * 100),
-                        )
-                      : 0;
-                  const ml = methodLabel(
-                    t,
-                    r.playMethod,
-                    r.videoDecision,
-                    r.audioDecision,
-                  );
-                  return (
-                    <Fragment key={r.id}>
-                      <tr
-                        className="history-row"
-                        tabIndex={0}
-                        aria-expanded={isExpanded}
-                        onClick={() =>
-                          setExpandedId((id) => (id === r.id ? null : r.id))
-                        }
-                        onKeyDown={(e) => {
-                          // Only react to keys pressed on the row itself. A key
-                          // pressed on the user link or the delete button also
-                          // bubbles up here, and preventDefault() would stop
-                          // that link/button from working from the keyboard.
-                          if (e.target !== e.currentTarget) return;
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            setExpandedId((id) => (id === r.id ? null : r.id));
-                          }
-                        }}
-                        style={{
-                          background: isExpanded
-                            ? "var(--ds-bg-3)"
-                            : i % 2 === 1
-                              ? "color-mix(in oklab, var(--ds-fg) 1.2%, transparent)"
-                              : "transparent",
-                          borderBottom: "1px solid var(--ds-border)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        <td style={{ padding: "10px 0 10px 12px" }}>
-                          <ChevIcon open={isExpanded} />
-                        </td>
-                        <td
-                          style={{
-                            padding: "10px 11px",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          <Link
-                            href={`/admin/activity/user/${r.mediaServerUserId}`}
-                            onClick={(e) => e.stopPropagation()}
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: 8,
-                              textDecoration: "none",
-                              color: "inherit",
-                            }}
-                          >
-                            <Avatar
-                              letter={(
-                                r.mediaServerUser.username[0] ?? "?"
-                              ).toUpperCase()}
-                              size={20}
-                            />
-                            <span style={{ color: "var(--ds-fg)" }}>
-                              {r.mediaServerUser.username}
-                            </span>
-                            <span
-                              style={{
-                                width: 4,
-                                height: 4,
-                                borderRadius: 999,
-                                background:
-                                  r.source === "plex"
-                                    ? "var(--ds-plex)"
-                                    : "var(--ds-jellyfin)",
-                              }}
-                            />
-                            {/* Instance slug for a named server, so two plays
-                                on different servers of the same provider are
-                                distinguishable. Rendered only when non-empty:
-                                "" means the default server AND every row
-                                written before multi-server support, which must
-                                stay unlabelled. Colour is keyed off `source`
-                                (matching the dot), never off the slug. */}
-                            {r.serverInstance && (
-                              <span
-                                className="ds-mono"
-                                title={t("adminActivity.common.playedOnServer", { instance: r.serverInstance, source: r.source })}
-                                style={{
-                                  fontSize: 9.5,
-                                  padding: "1px 5px",
-                                  borderRadius: 999,
-                                  background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
-                                  color:
-                                    r.source === "plex"
-                                      ? "var(--ds-plex-text)"
-                                      : "var(--ds-jellyfin-text)",
-                                  letterSpacing: "0.04em",
-                                  flexShrink: 0,
-                                }}
-                              >
-                                {r.serverInstance}
-                              </span>
-                            )}
-                          </Link>
-                        </td>
-                        <td style={{ padding: "10px 11px", minWidth: 240 }}>
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 10,
-                            }}
-                          >
-                            <Poster
-                              src={r.posterUrl}
-                              letter={(r.title[0] ?? "?").toUpperCase()}
-                              w={28}
-                              h={40}
-                              radius={3}
-                            />
-                            <div
-                              style={{
-                                minWidth: 0,
-                                lineHeight: 1.25,
-                                flex: 1,
-                              }}
-                            >
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  minWidth: 0,
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    color: "var(--ds-fg)",
-                                    whiteSpace: "nowrap",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                  }}
-                                >
-                                  {r.title}
-                                </div>
-                                {(r.segmentCount ?? 1) > 1 && (
-                                  <span
-                                    className="ds-mono"
-                                    title={t("adminActivity.history.continuedTitle")}
-                                    style={{
-                                      fontSize: 9.5,
-                                      padding: "2px 6px",
-                                      borderRadius: 999,
-                                      background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
-                                      color: "var(--ds-fg-subtle)",
-                                      letterSpacing: "0.04em",
-                                      whiteSpace: "nowrap",
-                                      flexShrink: 0,
-                                    }}
-                                  >
-                                    {r.segmentCount}×
-                                  </span>
-                                )}
-                              </div>
-                              <div
-                                className="ds-mono"
-                                style={{
-                                  fontSize: 10.5,
-                                  color: "var(--ds-fg-subtle)",
-                                  whiteSpace: "nowrap",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                }}
-                              >
-                                {r.mediaType === "TV" &&
-                                r.seasonNumber != null
-                                  ? `S${String(r.seasonNumber).padStart(2, "0")} · E${String(r.episodeNumber ?? 0).padStart(2, "0")}${r.episodeTitle ? ` · ${r.episodeTitle}` : ""}`
-                                  : (r.mediaType ?? "")}
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                        <td
-                          className="ds-mono"
-                          style={{
-                            padding: "10px 11px",
-                            color: "var(--ds-fg-muted)",
-                            fontVariantNumeric: "tabular-nums",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {fmtTimestamp(r.startedAt, mounted, locale)}
-                          <div
-                            className="ds-mono"
-                            style={{
-                              fontSize: 10,
-                              color: "var(--ds-fg-disabled)",
-                            }}
-                          >
-                            {mounted ? formatRelativeTimeLocalized(r.startedAt, locale) : ""}
-                          </div>
-                        </td>
-                        <td
-                          className="ds-mono"
-                          style={{
-                            padding: "10px 11px",
-                            color: "var(--ds-fg-muted)",
-                            textAlign: "right",
-                            fontVariantNumeric: "tabular-nums",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {fmtDuration(r.duration, locale)}
-                        </td>
-                        <td
-                          style={{
-                            padding: "10px 11px",
-                            whiteSpace: "nowrap",
-                            minWidth: 130,
-                          }}
-                        >
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                            }}
-                          >
-                            <div
-                              style={{
-                                flex: 1,
-                                height: 3,
-                                background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
-                                borderRadius: 999,
-                                overflow: "hidden",
-                              }}
-                            >
-                              <div
-                                style={{
-                                  width: `${pct}%`,
-                                  height: "100%",
-                                  background: r.watched
-                                    ? "var(--ds-success)"
-                                    : "var(--ds-accent)",
-                                  borderRadius: 999,
-                                }}
-                              />
-                            </div>
-                            <span
-                              className="ds-mono"
-                              style={{
-                                fontSize: 10.5,
-                                color: r.watched
-                                  ? "var(--ds-success)"
-                                  : "var(--ds-fg-subtle)",
-                                fontVariantNumeric: "tabular-nums",
-                                width: 32,
-                                textAlign: "right",
-                              }}
-                            >
-                              {pct}%
-                            </span>
-                          </div>
-                        </td>
-                        <td
-                          style={{
-                            padding: "10px 11px",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          <MethodPill
-                            method={ml.label}
-                            methodClass={ml.cls}
-                          />
-                        </td>
-                        <td
-                          className="ds-mono"
-                          style={{
-                            padding: "10px 11px",
-                            color: "var(--ds-fg-muted)",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {r.resolution ?? "—"}
-                          {r.videoCodec && (
-                            <span
-                              style={{ color: "var(--ds-fg-disabled)" }}
-                            >
-                              {" "}
-                              · {r.videoCodec}
-                            </span>
-                          )}
-                        </td>
-                        <td
-                          style={{
-                            padding: "10px 11px",
-                            color: "var(--ds-fg-muted)",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {r.platform ?? "—"}
-                        </td>
-                        <td
-                          style={{
-                            padding: "10px 11px",
-                            textAlign: "right",
-                            whiteSpace: "nowrap",
-                          }}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <button
-                            onClick={() => setDeleteRow(r)}
-                            className="history-delete"
-                            aria-label={t("adminActivity.history.deleteAria")}
-                            // Muted, not disabled: the only destructive control
-                            // in the table must read as live. Hover/focus turn
-                            // it danger via the .history-delete rule in
-                            // globals.css (guardrail 42 — no inline cursor).
-                            style={{
-                              background: "transparent",
-                              border: "1px solid transparent",
-                              color: "var(--ds-fg-muted)",
-                              borderRadius: 4,
-                              padding: "4px 6px",
-                              lineHeight: 0,
-                            }}
-                          >
-                            <svg
-                              width="13"
-                              height="13"
-                              viewBox="0 0 14 14"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="1.3"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            >
-                              <path d="M2.5 3.5h9M5 3.5V2.5a1 1 0 011-1h2a1 1 0 011 1v1M5 6v5M9 6v5M3.5 3.5l.5 8a1 1 0 001 1h4a1 1 0 001-1l.5-8" />
-                            </svg>
-                          </button>
-                        </td>
-                      </tr>
-                      {isExpanded && (
-                        <DetailRow
-                          play={r}
-                          colSpan={colSpan}
-                          mounted={mounted}
-                        />
-                      )}
-                    </Fragment>
-                  );
-                })
+                rowNodes
               )}
             </tbody>
           </table>

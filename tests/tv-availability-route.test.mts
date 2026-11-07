@@ -175,9 +175,11 @@ shadowPrismaModel(prisma, "jellyfinLibraryItem", libraryStub("jellyfinLibraryIte
 
 type EpisodeRow = { tmdbId: number; source: string; seasonNumber: number; episodeNumber: number };
 let episodes: EpisodeRow[] = [];
+let episodeSelects: unknown[] = [];
 shadowPrismaModel(prisma, "tVEpisodeCache", {
-  findMany: async (args: { where: { tmdbId: number; source: { in: string[] } } }) => {
+  findMany: async (args: { where: { tmdbId: number; source: { in: string[] } }; select?: unknown }) => {
     rec("tVEpisodeCache.findMany", args.where);
+    episodeSelects.push(args.select);
     return episodes
       .filter((e) => e.tmdbId === args.where.tmdbId && args.where.source.in.includes(e.source))
       .sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
@@ -581,4 +583,15 @@ test("the rate limit runs before input validation, so a flood of bad ids still c
   const token = await mintSession();
   for (let i = 0; i < 30; i++) assert.equal((await get(token, "?tmdbId=bad")).status, 400);
   assert.equal((await get(token, "?tmdbId=bad")).status, 429);
+});
+
+test("the episode read selects only the three columns the response is built from", async () => {
+  // Without a select every row of a long show carried its overview, still path
+  // and name for nothing.
+  episodeSelects = [];
+  plexHolders = [{ tmdbId: 1399, serverInstance: "" }];
+  episodes = [{ tmdbId: 1399, source: "plex", seasonNumber: 1, episodeNumber: 1 }];
+  const res = await get(await mintSession(), "?tmdbId=1399");
+  assert.equal(res.status, 200);
+  assert.deepEqual(episodeSelects, [{ seasonNumber: true, episodeNumber: true, source: true }]);
 });

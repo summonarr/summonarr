@@ -62,7 +62,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
   return (
     <div className="space-y-2">
       <p className="text-xs text-zinc-500 mb-3">{t("profile.push.registered", { count: devices.length, label: capLabel })}</p>
-      {error && <p className="text-xs text-red-400 mb-2">{t("profile.push.error.remove")}</p>}
+      {error && <p role="alert" className="text-xs text-red-400 mb-2">{t("profile.push.error.remove")}</p>}
       {devices.map((device, i) => {
         const deviceLabel = device.label || t("profile.push.deviceN", { n: i + 1 });
         return (
@@ -86,7 +86,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                 variant="ghost"
                 aria-label={t("profile.push.removeNamed", { name: deviceLabel })}
                 title={t("profile.push.removeDevice")}
-                className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-10 w-10 p-0"
+                className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-10 w-10 px-0"
                 disabled={removing === device.id}
                 onClick={() => setConfirmingRemove(device.id)}
               >
@@ -114,7 +114,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                   size="sm"
                   variant="ghost"
                   aria-label={t("profile.common.cancelRemove")}
-                  className="h-10 w-10 p-0 text-zinc-400 hover:text-zinc-200"
+                  className="h-10 w-10 px-0 text-zinc-400 hover:text-zinc-200"
                   onClick={() => setConfirmingRemove(null)}
                 >
                   <X className="w-3.5 h-3.5" />

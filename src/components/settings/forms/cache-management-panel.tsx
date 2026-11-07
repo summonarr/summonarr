@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -66,16 +66,26 @@ function summarizeClear(t: Translator, d: ClearResult): string {
 }
 
 function summarizeWarm(t: Translator, d: WarmResult): string {
-  if (d.error) return d.error;
   const parts: string[] = [t("settings.form.cache.warm.fetched", { count: d.fetched ?? 0 }), t("settings.form.cache.warm.skipped", { count: d.skipped ?? 0 })];
   if ((d.purged ?? 0) > 0) parts.push(t("settings.form.cache.warm.purged", { count: d.purged ?? 0 }));
   if ((d.failed ?? 0) > 0) parts.push(t("settings.form.cache.warm.failed", { count: d.failed ?? 0 }));
   return parts.join(", ");
 }
 
-function CacheSourceRow({ source }: { source: CacheSourceDef }) {
+// `locked` is true while "Clear & Refetch All" runs, and the row reports its own
+// busy state up, so the two can't overlap: the server would answer the loser
+// with a 409/429, and a per-source Clear could wipe what run-all just refetched.
+function CacheSourceRow({ source, locked, onBusyChange }: {
+  source: CacheSourceDef;
+  locked: boolean;
+  onBusyChange: (id: CacheSourceId, busy: boolean) => void;
+}) {
   const t = useT();
-  const [busy, setBusy] = useState<null | "clear" | "refetch">(null);
+  const [busy, setBusyState] = useState<null | "clear" | "refetch">(null);
+  const setBusy = (next: null | "clear" | "refetch") => {
+    setBusyState(next);
+    onBusyChange(source.id, next !== null);
+  };
   const [confirmClear, setConfirmClear] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   // Kept in a ref so a new action cancels the previous action's timer (which
@@ -130,7 +140,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
       {confirmClear ? (
         <div className="flex items-center gap-2">
           <span className="text-xs text-zinc-300">{t("settings.form.cache.confirmClear", { source: source.label })}</span>
-          <Button type="button" size="sm" onClick={doClear} className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] h-8 px-3 text-xs">{t("settings.form.cache.clear")}</Button>
+          <Button type="button" size="sm" onClick={doClear} disabled={locked} className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] h-8 px-3 text-xs">{t("settings.form.cache.clear")}</Button>
           <Button type="button" size="sm" variant="outline" onClick={() => setConfirmClear(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
         </div>
       ) : (
@@ -140,7 +150,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
             size="sm"
             variant="outline"
             onClick={() => setConfirmClear(true)}
-            disabled={busy !== null}
+            disabled={busy !== null || locked}
             className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1.5 h-8 px-3 text-xs"
           >
             {busy === "clear" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
@@ -151,7 +161,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
             size="sm"
             variant="outline"
             onClick={doRefetch}
-            disabled={busy !== null}
+            disabled={busy !== null || locked}
             className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-1.5 h-8 px-3 text-xs"
           >
             {busy === "refetch" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
@@ -179,8 +189,22 @@ export function CacheManagementPanel() {
   const [lines, setLines] = useState<{ text: string; ok: boolean }[]>([]);
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+  // Rows with a clear or refetch in flight; run-all waits for them.
+  const [busyRows, setBusyRows] = useState<ReadonlySet<CacheSourceId>>(() => new Set());
+  const onRowBusy = useCallback((id: CacheSourceId, rowBusy: boolean) => {
+    setBusyRows((prev) => {
+      if (prev.has(id) === rowBusy) return prev;
+      const next = new Set(prev);
+      if (rowBusy) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  const rowBusy = busyRows.size > 0;
+  const running = status === "running";
 
   async function runAll() {
+    if (rowBusy || running) return;
     if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("running");
     setConfirmAll(false);
@@ -235,7 +259,7 @@ export function CacheManagementPanel() {
 
       <div className="space-y-2">
         {CACHE_SOURCES.map((s) => (
-          <CacheSourceRow key={s.id} source={s} />
+          <CacheSourceRow key={s.id} source={s} locked={running} onBusyChange={onRowBusy} />
         ))}
       </div>
 
@@ -244,7 +268,7 @@ export function CacheManagementPanel() {
           <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-2.5 w-fit">
             <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" aria-hidden />
             <p className="text-sm text-zinc-200">{t("settings.form.cache.confirmAll")}</p>
-            <Button type="button" size="sm" onClick={runAll} className="bg-amber-600 text-black hover:bg-amber-600/90 h-8 px-3 text-xs">{t("settings.form.cache.run")}</Button>
+            <Button type="button" size="sm" onClick={runAll} disabled={rowBusy} className="bg-amber-600 text-black hover:bg-amber-600/90 h-8 px-3 text-xs">{t("settings.form.cache.run")}</Button>
             <Button type="button" size="sm" variant="outline" onClick={() => setConfirmAll(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
           </div>
         ) : (
@@ -252,11 +276,11 @@ export function CacheManagementPanel() {
             type="button"
             variant="outline"
             onClick={() => setConfirmAll(true)}
-            disabled={status === "running"}
+            disabled={running || rowBusy}
             className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
           >
-            {status === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
-            {status === "running" ? t("settings.form.cache.running") : t("settings.form.cache.all")}
+            {running ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
+            {running ? t("settings.form.cache.running") : t("settings.form.cache.all")}
           </Button>
         )}
 

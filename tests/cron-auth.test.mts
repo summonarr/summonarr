@@ -457,7 +457,7 @@ test("isCronAuthorized: webhook-style ?token= query param is NOT accepted here",
 // isCronAuthorized — admin-session path, per transport (guardrail 6b)
 // ---------------------------------------------------------------------------
 
-// With neither env set, buildSessionTrustedOrigins falls back to the request's
+// With neither env set, the trusted-origin check falls back to the request's
 // own origin (http://localhost:3000) — deterministic for these tests.
 delete process.env.AUTH_URL;
 delete process.env.AUTH_TRUSTED_ORIGIN;

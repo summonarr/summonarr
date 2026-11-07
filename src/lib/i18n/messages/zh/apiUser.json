@@ -116,6 +116,7 @@
   "apiUser.push.fieldsTooLong": "推送订阅字段超出最大长度",
   "apiUser.push.idOrEndpointRequired": "需要 id 或 endpoint",
   "apiUser.push.noSubscription": "你的账户没有推送订阅——请先注册应用或在浏览器中订阅。",
+  "apiUser.push.subscriptionRemoved": "此设备的推送注册已被移除。请重新开启通知以继续使用。",
   "apiUser.push.vapidMissing": "未配置 VAPID 密钥",
   "apiUser.push.webPushNotConfigured": "此服务器未配置 Web 推送",
   "apiUser.quota.window.day": "天",

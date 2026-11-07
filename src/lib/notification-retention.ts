@@ -9,12 +9,15 @@ import { prisma } from "@/lib/prisma";
 export const NOTIFICATION_READ_RETENTION_DEFAULT_DAYS = 90;
 export const NOTIFICATION_MAX_RETENTION_DEFAULT_DAYS = 365;
 export const NOTIFICATION_RETENTION_MIN_DAYS = 7;
+// A ceiling, too: a value meant as "for ever" (999999999) puts the cutoff
+// outside the Date range, and the Invalid Date made every purge run throw.
+export const NOTIFICATION_RETENTION_MAX_DAYS = 36_500;
 export const NOTIFICATION_DELETE_BATCH = 2_000;
 
 function envDays(raw: string | undefined, fallback: number): number {
   if (!raw || !/^\d+$/.test(raw.trim())) return fallback;
   const n = parseInt(raw, 10);
-  return Math.max(NOTIFICATION_RETENTION_MIN_DAYS, n);
+  return Math.min(NOTIFICATION_RETENTION_MAX_DAYS, Math.max(NOTIFICATION_RETENTION_MIN_DAYS, n));
 }
 
 export function notificationRetentionDays(env: NodeJS.ProcessEnv = process.env): { readDays: number; maxDays: number } {

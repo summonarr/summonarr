@@ -170,6 +170,11 @@ shadowPrismaModel(prisma, "user", {
     const u = usersById.get(args.where.id);
     return u ? { ...u } : null;
   },
+  // The admin notify fan-out's push channel reads the active users first and
+  // keeps the permission holders (push.ts), then reads their devices — none
+  // here, so it still stops before any network call.
+  findMany: async () =>
+    [...usersById].filter(([, u]) => u.deactivatedAt === null).map(([id, u]) => ({ id, ...u })),
   update: async () => ({}),
 });
 

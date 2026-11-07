@@ -1,12 +1,23 @@
 import Image from "next/image";
 import Link from "next/link";
-import type { TmdbMedia } from "@/lib/tmdb-types";
+import { logoUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 import { safeExternalHref } from "@/lib/safe-url";
 import { getTranslator, getLocale } from "@/lib/i18n/server";
 import { formatReleaseDate } from "@/lib/format-release-date";
 
-const PROVIDER_LOGO_BASE = "https://image.tmdb.org/t/p/w92";
+// One extras group: a small sub-label over its content. h3, not h2: these sit
+// below the page's real section headings (Cast, Seasons, More Like This).
+function ExtrasGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
+        {title}
+      </h3>
+      {children}
+    </section>
+  );
+}
 
 // i18n keys (detail.json), translated at render.
 const PROVIDER_GROUP_LABEL: Record<NonNullable<TmdbMedia["watchProviders"]>[number]["type"], string> = {
@@ -62,10 +73,7 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
       style={{ gap: 20 }}
     >
       {releases.length > 0 && (
-        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
-            {t("detail.releaseDates")}
-          </h3>
+        <ExtrasGroup title={t("detail.releaseDates")}>
           <dl className="flex flex-wrap items-start" style={{ gap: 18, margin: 0 }}>
             {releases.map((r) => (
               <div key={r.label} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -74,52 +82,47 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
               </div>
             ))}
           </dl>
-        </section>
+        </ExtrasGroup>
       )}
 
       {hasProviders && (
-        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {/* h3, not h2: these are small sub-labels, below the page's real
-              section headings (Cast, Seasons, More Like This). */}
-          <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
-            {t("detail.whereToWatch")}
-          </h3>
+        <ExtrasGroup title={t("detail.whereToWatch")}>
           <div className="flex flex-wrap items-start" style={{ gap: 18 }}>
             {grouped.map((g) => (
               <div key={g.type} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>{t(PROVIDER_GROUP_LABEL[g.type])}</span>
                 <div className="flex flex-wrap items-center" style={{ gap: 8 }}>
-                  {g.items.map((p) => (
-                    <div
-                      key={`${g.type}-${p.name}`}
-                      title={p.name}
-                      className="relative overflow-hidden shrink-0"
-                      style={{ width: 36, height: 36, borderRadius: 8, border: "1px solid var(--ds-border)", background: "var(--ds-bg-3)" }}
-                    >
-                      {p.logoPath ? (
-                        <Image src={`${PROVIDER_LOGO_BASE}${p.logoPath}`} alt="" fill className="object-cover" sizes="36px" />
-                      ) : (
-                        <span aria-hidden="true" className="flex items-center justify-center h-full w-full" style={{ fontSize: 9, color: "var(--ds-fg-muted)" }}>
-                          {p.name.slice(0, 3)}
-                        </span>
-                      )}
-                      {/* The name travels with the tile (`title` is hover-only);
-                          the logo/abbreviation are decorative beside it. */}
-                      <span className="sr-only">{p.name}</span>
-                    </div>
-                  ))}
+                  {g.items.map((p) => {
+                    const logo = logoUrl(p.logoPath);
+                    return (
+                      <div
+                        key={`${g.type}-${p.name}`}
+                        title={p.name}
+                        className="relative overflow-hidden shrink-0"
+                        style={{ width: 36, height: 36, borderRadius: 8, border: "1px solid var(--ds-border)", background: "var(--ds-bg-3)" }}
+                      >
+                        {logo ? (
+                          <Image src={logo} alt="" fill className="object-cover" sizes="36px" />
+                        ) : (
+                          <span aria-hidden="true" className="flex items-center justify-center h-full w-full" style={{ fontSize: 9, color: "var(--ds-fg-muted)" }}>
+                            {p.name.slice(0, 3)}
+                          </span>
+                        )}
+                        {/* The name travels with the tile (`title` is hover-only);
+                            the logo/abbreviation are decorative beside it. */}
+                        <span className="sr-only">{p.name}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ))}
           </div>
-        </section>
+        </ExtrasGroup>
       )}
 
       {hasStudios && (
-        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
-            {t("detail.studios")}
-          </h3>
+        <ExtrasGroup title={t("detail.studios")}>
           <div className="flex flex-wrap" style={{ gap: 6 }}>
             {studioList.map((s) => {
               // A network is TV-only; a company browses either type.
@@ -137,14 +140,11 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
               );
             })}
           </div>
-        </section>
+        </ExtrasGroup>
       )}
 
       {hasKeywords && (
-        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
-            {t("detail.keywords")}
-          </h3>
+        <ExtrasGroup title={t("detail.keywords")}>
           <div className="flex flex-wrap" style={{ gap: 6 }}>
             {keywords.map((k) => (
               <Link
@@ -156,7 +156,7 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
               </Link>
             ))}
           </div>
-        </section>
+        </ExtrasGroup>
       )}
 
       {homepage && (

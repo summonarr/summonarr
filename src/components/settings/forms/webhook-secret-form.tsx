@@ -1,14 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 
 function generateSecret(): string {
@@ -33,45 +32,21 @@ function WebhookSecretField({
   const t = useT();
   const router = useRouter();
   const [secret, setSecret] = useState(initialSecret);
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  // The route's own reason (a 429 cooldown, too long) — shown in place of the
-  // bare "Failed to save".
-  const [message, setMessage] = useState("");
-  // An earlier save's idle timer must not fire into a later save (it would
-  // re-enable Save mid-flight or hide the new result early).
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-  }, []);
+  // `message` is the route's own reason (a 429 cooldown, too long), shown in
+  // place of the bare "Failed to save".
+  const { status, message, save, edited } = useSettingsSave();
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    setStatus("saving");
-    setMessage("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [payloadKey]: secret }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setStatus("ok");
-        // The webhook URL list below is server-rendered from "does a secret
-        // exist" flags; re-render it so the ?token= mask, the 4K copy row and
-        // the "no secret" warning follow the save instead of waiting for a
-        // reload (the secret input is type=password, so a reload was the only
-        // way to get at the URL).
-        router.refresh();
-      } else {
-        setMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-      }
-    } catch {
-      setStatus("error");
+    const result = await save({ [payloadKey]: secret });
+    if (result.ok) {
+      // The webhook URL list below is server-rendered from "does a secret
+      // exist" flags; re-render it so the ?token= mask, the 4K copy row and
+      // the "no secret" warning follow the save instead of waiting for a
+      // reload (the secret input is type=password, so a reload was the only
+      // way to get at the URL).
+      router.refresh();
     }
-    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
@@ -86,7 +61,7 @@ function WebhookSecretField({
             data-1p-ignore
             data-lpignore="true"
             value={secret}
-            onChange={(e) => { setSecret(e.target.value); setStatus("idle"); }}
+            onChange={(e) => { setSecret(e.target.value); edited(); }}
             placeholder={t("settings.form.webhookSecret.placeholder")}
             className="bg-zinc-800 border-zinc-700 font-mono"
           />
@@ -94,7 +69,7 @@ function WebhookSecretField({
             type="button"
             variant="outline"
             className="shrink-0 border-zinc-700 text-zinc-300 hover:text-zinc-100"
-            onClick={() => { setSecret(generateSecret()); setStatus("idle"); }}
+            onClick={() => { setSecret(generateSecret()); edited(); }}
           >
             {t("settings.form.webhookSecret.generate")}
           </Button>

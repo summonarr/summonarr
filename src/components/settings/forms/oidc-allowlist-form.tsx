@@ -5,12 +5,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
-import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
+import { XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { formatAllowlistLines, parseDomainLines, parseGroupLines, type OidcAllowlist } from "@/lib/oidc-allowlist";
 import type { SaveStatus } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 import { rich } from "./rich";
+import { SaveStatusMessage } from "./save-status";
 
 // Admin → Settings → Authentication: who may sign in through OIDC (guardrail
 // 34e, src/lib/oidc-allowlist.ts). Saved whole through PATCH
@@ -59,6 +60,10 @@ export function OidcAllowlistForm({
   };
   // An unreadable stored value is always worth re-saving, edited or not.
   const dirty = unreadable || JSON.stringify(draft) !== JSON.stringify(saved);
+  // The controls lock while a save is in flight: its answer replaces every
+  // field with what the server stored, which would silently drop anything
+  // typed meanwhile.
+  const saving = status === "saving";
 
   function edited() {
     setStatus("idle");
@@ -126,6 +131,7 @@ export function OidcAllowlistForm({
             id={groupsId}
             value={groups}
             onChange={(e) => { setGroups(e.target.value); edited(); }}
+            disabled={saving}
             rows={3}
             spellCheck={false}
             className="font-mono"
@@ -141,6 +147,7 @@ export function OidcAllowlistForm({
             id={claimId}
             value={groupsClaim}
             onChange={(e) => { setGroupsClaim(e.target.value); edited(); }}
+            disabled={saving}
             placeholder="groups"
             spellCheck={false}
             autoComplete="off"
@@ -160,6 +167,7 @@ export function OidcAllowlistForm({
           <Switch
             checked={requestGroupsScope}
             onCheckedChange={(v) => { setRequestGroupsScope(v); edited(); }}
+            disabled={saving}
             aria-labelledby={scopeId}
             className="shrink-0"
           />
@@ -178,6 +186,7 @@ export function OidcAllowlistForm({
             id={domainsId}
             value={emailDomains}
             onChange={(e) => { setEmailDomains(e.target.value); edited(); }}
+            disabled={saving}
             rows={2}
             spellCheck={false}
             className="font-mono"
@@ -192,17 +201,19 @@ export function OidcAllowlistForm({
           <Switch
             checked={existingUsersOnly}
             onCheckedChange={(v) => { setExistingUsersOnly(v); edited(); }}
+            disabled={saving}
             aria-labelledby={existingId}
             className="shrink-0"
           />
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" size="xs" onClick={save} disabled={!dirty || status === "saving"}>
+          <Button type="button" size="xs" onClick={save} disabled={!dirty || saving}>
             {t("settings.form.oidcAllowlist.save")}
           </Button>
-          {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
-          {status === "ok" && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
+          {saving && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
+          {/* The live region: a screen reader hears the save land. */}
+          {status === "ok" && <SaveStatusMessage status="ok" />}
           {status === "error" && (
             <span role="alert" className="basis-full flex items-center gap-1 text-xs text-red-400">
               <XCircle className="w-3.5 h-3.5 shrink-0" aria-hidden />

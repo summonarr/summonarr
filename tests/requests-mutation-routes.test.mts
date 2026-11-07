@@ -46,6 +46,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { AsyncLocalStorage } from "node:async_hooks";
 import dns from "node:dns/promises";
+import { ADMIN_NOTE_MAX } from "../src/lib/request-limits.ts";
 
 (globalThis as { AsyncLocalStorage?: unknown }).AsyncLocalStorage = AsyncLocalStorage;
 
@@ -142,6 +143,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return json({ id: 1, tvdbId: 4242 });
   }
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) return json({ id: 603, title: "The Matrix", results: [] });
+  // Discord's DM-channel open (only a test that configures the bot gets here).
+  if (url.hostname === "discord.com" && url.pathname.endsWith("/users/@me/channels")) return json({ id: "333333333333333333" });
   return json({});
 }) as unknown as typeof fetch;
 
@@ -271,9 +274,13 @@ shadowPrismaModel(prisma, "mediaRequest", {
     const r = reqRows.find((x) => matchReq(x, args.where));
     return r ? { ...r } : null;
   },
-  findMany: async (args: { where?: Record<string, unknown> } = {}) => {
+  // Projects through `select` like Prisma does, so a column a route forgets to
+  // select is missing here too.
+  findMany: async (args: { where?: Record<string, unknown>; select?: Record<string, boolean> } = {}) => {
     rec("mediaRequest.findMany", args.where);
-    return reqRows.filter((r) => matchReq(r, args.where)).map((r) => ({ ...r }));
+    return reqRows
+      .filter((r) => matchReq(r, args.where))
+      .map((r) => (args.select ? Object.fromEntries(Object.entries(r).filter(([k]) => args.select![k] === true)) : { ...r }));
   },
   updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
     rec("mediaRequest.updateMany", args);
@@ -777,6 +784,66 @@ test("batch decline: a DEACTIVATED owner's request produces NO outbound request.
   );
 });
 
+// The batch decline is the single decline's fan-out for many rows: the same
+// inbox row and the same admin note on every channel — each row's note as the
+// decline left it, so a batch that sends no note still carries a note already
+// stored on the row, exactly as the single decline does.
+test("single and batch declines of equivalent rows tell the requester the same thing — inbox type and body, and the row's stored note by email, Discord and the outbound channels", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  // A linked Discord account (a DM carries the note; the shared channel doesn't)
+  // and the Resend backend, so both channels reach the scripted wire.
+  appUsers.find((u) => u.id === owner.userId)!.discordId = "111111111111111111";
+  settings.set("discordBotToken", "bot-token");
+  settings.set("emailBackend", "resend");
+  settings.set("resendApiKey", "rk_test");
+  settings.set("smtpFrom", "noreply@summonarr.test");
+  settings.set("enableUserEmails", "true");
+  agentRows.push(agentRow("request.declined"));
+  reqRows = [
+    reqRow({ id: "single", requestedBy: owner.userId, tmdbId: 701, adminNote: "stored note" }),
+    reqRow({ id: "batch", requestedBy: owner.userId, tmdbId: 702, adminNote: "stored note" }),
+  ];
+
+  // Neither decision sends a note.
+  assert.equal((await doPatch(token, "single", { status: "DECLINED" })).status, 200);
+  assert.equal((await doBatch(token, { ids: ["batch"], status: "DECLINED" })).status, 200);
+  await drainAfter();
+  await settleAgentPosts(2);
+
+  const texts = Object.fromEntries(agentPosts().map((p) => [p.request?.id, p.text]));
+  assert.deepEqual(texts, { single: "stored note", batch: "stored note" }, "both carry the row's stored note");
+
+  // One inbox writer for both: the same type and body.
+  assert.equal(opsOf("notification.create").length, 0, "no single-row inbox write");
+  const inbox = opsOf("notification.createMany").map((o) => (o.args as { data: Array<{ userId: string; type: string; body: string }> }).data);
+  assert.deepEqual(
+    inbox.map((rows) => rows.map((r) => ({ userId: r.userId, type: r.type, body: r.body }))),
+    [0, 1].map(() => [{ userId: owner.userId, type: "REQUEST_DECLINED", body: "Your movie request was declined." }]),
+    "one identical inbox row per decision",
+  );
+
+  // Email and the Discord DM: one each per decision, identical, and both carry
+  // the stored note. The DM queue spaces DMs out, so wait for the second.
+  const emails = () => fetchCalls.filter((c) => c.url.href === "https://api.resend.com/emails");
+  const dms = () => fetchCalls.filter((c) => c.url.hostname === "discord.com" && /\/channels\/\d+\/messages$/.test(c.url.pathname));
+  for (let i = 0; i < 500 && (emails().length < 2 || dms().length < 2); i++) await new Promise((r) => setTimeout(r, 10));
+  const mails = emails().map((c) => JSON.parse(c.body!) as { to: string; subject: string; html: string });
+  assert.equal(mails.length, 2, "one decline email per decision");
+  for (const m of mails) {
+    assert.equal(m.to, `${owner.userId}@example.com`);
+    assert.ok(m.html.includes("stored note"), "the email carries the row's stored note");
+  }
+  assert.equal(mails[0].subject, mails[1].subject);
+  const embeds = dms().map((c) => (JSON.parse(c.body!) as { embeds: Array<{ title: string; description: string }> }).embeds[0]);
+  assert.equal(embeds.length, 2, "one Discord DM per decision");
+  for (const e of embeds) assert.ok(e.description.includes("stored note"), `the DM carries the row's stored note: ${e.description}`);
+  assert.deepEqual(
+    { title: embeds[0].title, description: embeds[0].description },
+    { title: embeds[1].title, description: embeds[1].description },
+  );
+});
+
 // ── 2: the adminNote raw-field guard ─────────────────────────────────────────
 
 test("batch: OMITTING adminNote leaves the stored note intact", async () => {
@@ -996,6 +1063,23 @@ test("batch rejects an over-long adminNote", async () => {
   const { token } = await manager();
   const res = await doBatch(token, { ids: ["r1"], status: "DECLINED", adminNote: "x".repeat(1001) });
   assert.equal(res.status, 400);
+});
+
+// The queue's note inputs cap at ADMIN_NOTE_MAX (maxLength), so the routes must
+// accept exactly that many characters and refuse one more — or a reason the
+// form let through would still fail after submit.
+test("both routes accept an adminNote of exactly ADMIN_NOTE_MAX and refuse one character more", async () => {
+  assert.equal(ADMIN_NOTE_MAX, 1000, "the cap the API has always documented");
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId }), reqRow({ id: "r2", requestedBy: owner.userId })];
+  assert.equal((await doPatch(token, "r1", { status: "DECLINED", adminNote: "x".repeat(ADMIN_NOTE_MAX + 1) })).status, 400);
+  assert.equal((await doBatch(token, { ids: ["r2"], status: "DECLINED", adminNote: "y".repeat(ADMIN_NOTE_MAX + 1) })).status, 400);
+  assert.equal(reqRows[0].status, "PENDING", "a refused note writes nothing");
+  assert.equal((await doPatch(token, "r1", { status: "DECLINED", adminNote: "x".repeat(ADMIN_NOTE_MAX) })).status, 200);
+  assert.equal(reqRows[0].adminNote?.length, ADMIN_NOTE_MAX);
+  assert.equal((await doBatch(token, { ids: ["r2"], status: "DECLINED", adminNote: "y".repeat(ADMIN_NOTE_MAX) })).status, 200);
+  assert.equal(reqRows[1].adminNote?.length, ADMIN_NOTE_MAX);
 });
 
 test("batch is rate-limited per acting admin", async () => {
@@ -1532,7 +1616,8 @@ test("a single approve whose push gets no definite answer (gateway 504) stays AP
   assert.ok(reqRows[0].pendingNotifyAt instanceof Date, "the backstop stays armed");
   assert.equal(queued, 1, "the download check consumes the armed backstop");
   for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
-  assert.equal(opsOf("notification.create").length, 1, "the approval stands, so the requester is told");
+  const told = opsOf("notification.createMany").flatMap((o) => (o.args as { data: Array<{ type: string }> }).data);
+  assert.deepEqual(told.map((r) => r.type), ["REQUEST_APPROVED"], "the approval stands, so the requester is told");
 });
 
 test("search/retry flags must be the boolean true: a truthy string never reaches Radarr/Sonarr", async () => {

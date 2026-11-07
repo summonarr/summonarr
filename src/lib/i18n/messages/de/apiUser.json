@@ -116,6 +116,7 @@
   "apiUser.push.fieldsTooLong": "Felder des Push-Abonnements überschreiten die maximale Länge",
   "apiUser.push.idOrEndpointRequired": "id oder endpoint ist erforderlich",
   "apiUser.push.noSubscription": "Für Ihr Konto wurde kein Push-Abonnement gefunden – registrieren Sie zuerst die App oder abonnieren Sie in einem Browser.",
+  "apiUser.push.subscriptionRemoved": "Die Push-Registrierung dieses Geräts wurde entfernt. Aktiviere die Benachrichtigungen erneut, um sie zu nutzen.",
   "apiUser.push.vapidMissing": "VAPID-Schlüssel nicht konfiguriert",
   "apiUser.push.webPushNotConfigured": "Web-Push ist auf diesem Server nicht konfiguriert",
   "apiUser.quota.window.day": "Tag",

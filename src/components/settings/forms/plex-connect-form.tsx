@@ -6,8 +6,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Unlink, Download } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus, LoadStatus } from "./shared";
+import { BASE_PATH, withBasePath } from "@/lib/base-path";
+import { parseLibrarySelection, reconcileLibrarySelection } from "@/lib/client/library-selection";
+import { plexApprovalUrl, plexForwardUrl, plexReturnBase } from "@/lib/client/plex-approval-url";
+import { settingsPatchSucceeded, useSettingsSave, type LoadStatus } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
 import { rich } from "./rich";
 
@@ -17,30 +19,41 @@ interface PlexSection {
   type: "movie" | "show";
 }
 
+// One server on the admin's plex.tv account (GET /api/admin/plex/servers).
+interface PlexAccountServer {
+  machineId: string;
+  name: string;
+  connections: { uri: string; local: boolean; relay: boolean }[];
+}
+
+type LibrariesLoad = { ok: boolean; count: number; error?: string; superseded?: boolean };
+
 interface PlexLibraryPickerProps {
   initialSelected: string;
   sections: PlexSection[];
   loadStatus: LoadStatus;
   errorMessage: string;
+  // The value a successful save stored, so a remount starts from it rather
+  // than the page-load prop.
+  onSaved: (value: string) => void;
 }
 
-function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage }: PlexLibraryPickerProps) {
+function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage, onSaved }: PlexLibraryPickerProps) {
   const t = useT();
-  const [selected, setSelected] = useState<Set<string>>(
-    () => new Set(initialSelected.split(",").map((k) => k.trim()).filter(Boolean))
-  );
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
-  // The route's own reason (a 429 cooldown) — shown in place of the bare
-  // "Failed to save".
-  const [saveMessage, setSaveMessage] = useState("");
-  // An earlier save's idle timer must not fire into a later save (it would
-  // re-enable Save mid-flight or hide the new result early).
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-  }, []);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(parseLibrarySelection(initialSelected)));
+  // The ticked keys this server still lists. A key from a deleted library or an
+  // earlier server has no checkbox, so it is neither shown nor saved (an
+  // all-stale list would otherwise filter the sync down to nothing). Only read
+  // once the list loaded: Save and the hint render only then.
+  const effective = reconcileLibrarySelection(selected, sections.map((s) => s.key));
+  // `saveMessage` is the route's own reason (a 429 cooldown), shown in place of
+  // the bare "Failed to save". A box ticked while a save is in flight keeps
+  // Save locked (the save sent the boxes as they were) and the answer doesn't
+  // call it saved.
+  const { status: saveStatus, message: saveMessage, save, edited } = useSettingsSave();
 
   function toggle(key: string) {
+    edited();
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
@@ -50,26 +63,15 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
   }
 
   async function handleSave() {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    setSaveStatus("saving");
-    setSaveMessage("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plexLibraries: Array.from(selected).join(",") }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setSaveStatus("ok");
-      } else {
-        setSaveMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setSaveStatus("error");
-      }
-    } catch {
-      setSaveStatus("error");
+    // "" (nothing ticked, or only stale keys) is sent too: it means every library.
+    const value = effective.join(",");
+    const listed = sections.map((s) => s.key);
+    const result = await save({ plexLibraries: value });
+    if (result.ok) {
+      // Forget the stale keys (keeping any box ticked since the click).
+      setSelected((prev) => new Set(reconcileLibrarySelection(prev, listed)));
+      onSaved(value);
     }
-    idleTimer.current = setTimeout(() => setSaveStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
@@ -110,7 +112,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
               ))}
             </div>
           )}
-          {selected.size === 0 && sections.length > 0 && (
+          {effective.length === 0 && sections.length > 0 && (
             <p className="text-xs text-zinc-500">{t("settings.form.library.noneSelected")}</p>
           )}
           <div className="flex items-center gap-3 pt-1">
@@ -155,7 +157,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   const [librariesCount, setLibrariesCount] = useState<number | null>(null);
   // Account server picker: the list comes from plex.tv, and a pick is resolved to an
   // address that answers from this server (the browser names the machine id only).
-  const [accountServers, setAccountServers] = useState<{ machineId: string; name: string; connections: { uri: string; local: boolean; relay: boolean }[] }[] | null>(null);
+  const [accountServers, setAccountServers] = useState<PlexAccountServer[] | null>(null);
   const [serversStatus, setServersStatus] = useState<"idle" | "loading" | "error">("idle");
   const [serversError, setServersError] = useState("");
   const [allowFallback, setAllowFallback] = useState(true);
@@ -163,34 +165,61 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   const [relayPicked, setRelayPicked] = useState(false);
   const [importStatus, setImportStatus] = useState<"idle" | "running" | "done" | "busy" | "error">("idle");
   const [importResult, setImportResult] = useState<{ marked: number; scanned: { movies: number; tv: number } } | null>(null);
+  // The sync route's own reason (not configured, unreachable, forbidden), shown
+  // in place of the generic "check the server URL".
+  const [importError, setImportError] = useState("");
+  // The "Connected" line's fade. Ref'd so an earlier Save & Test's timer can't
+  // hide a later result early; cleared on unmount.
+  const serverIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (serverIdleTimer.current) clearTimeout(serverIdleTimer.current);
+  }, []);
 
   const [sections, setSections] = useState<PlexSection[]>([]);
   const [librariesStatus, setLibrariesStatus] = useState<LoadStatus>(
     initialEmail && initialServerUrl ? "loading" : "idle",
   );
   const [librariesError, setLibrariesError] = useState<string>("");
+  // The last library selection saved this session; a remounted picker starts
+  // from it, not from the page-load value.
+  const [savedLibraries, setSavedLibraries] = useState(initialPlexLibraries);
 
-  const loadLibraries = useCallback(async (): Promise<{ ok: boolean; count: number; error?: string }> => {
-    setLibrariesStatus("loading");
-    setLibrariesError("");
-    try {
-      const res = await fetch(withBasePath("/api/settings/plex/libraries"));
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as { error?: string };
-        const message = body?.error;
-        setLibrariesError(message ?? "");
-        setLibrariesStatus("error");
-        return { ok: false, count: 0, error: message };
-      }
-      const data = (await res.json()) as PlexSection[];
-      setSections(data);
-      setLibrariesStatus("loaded");
-      return { ok: true, count: data.length };
-    } catch {
+  // Only the newest load writes state. The mount load can outlive a Save &
+  // Test (a stored server that doesn't answer runs to its timeout) and would
+  // otherwise land last with the old server's libraries or error.
+  // latestLoad is that newest load, for a caller whose own load was overtaken.
+  const loadSeq = useRef(0);
+  const latestLoad = useRef<Promise<LibrariesLoad> | null>(null);
+  const loadLibraries = useCallback((): Promise<LibrariesLoad> => {
+    const seq = ++loadSeq.current;
+    const superseded = () => seq !== loadSeq.current;
+    const load = (async (): Promise<LibrariesLoad> => {
+      setLibrariesStatus("loading");
       setLibrariesError("");
-      setLibrariesStatus("error");
-      return { ok: false, count: 0 };
-    }
+      try {
+        const res = await fetch(withBasePath("/api/settings/plex/libraries"));
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          if (superseded()) return { ok: false, count: 0, superseded: true };
+          const message = body?.error;
+          setLibrariesError(message ?? "");
+          setLibrariesStatus("error");
+          return { ok: false, count: 0, error: message };
+        }
+        const data = (await res.json()) as PlexSection[];
+        if (superseded()) return { ok: false, count: 0, superseded: true };
+        setSections(data);
+        setLibrariesStatus("loaded");
+        return { ok: true, count: data.length };
+      } catch {
+        if (superseded()) return { ok: false, count: 0, superseded: true };
+        setLibrariesError("");
+        setLibrariesStatus("error");
+        return { ok: false, count: 0 };
+      }
+    })();
+    latestLoad.current = load;
+    return load;
   }, []);
 
   useEffect(() => {
@@ -224,14 +253,15 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
     }
 
     const state = crypto.randomUUID();
-    const base = (siteUrl || window.location.origin).replace(/\/$/, "");
-    const forwardUrl = encodeURIComponent(`${base}/auth/plex/done?state=${state}`);
-    const plexUrl =
-      `https://app.plex.tv/auth#?` +
-      `clientID=${encodeURIComponent(pinClientId)}` +
-      `&code=${pinCode}` +
-      `&context[device][product]=Summonarr` +
-      `&forwardUrl=${forwardUrl}`;
+    // siteUrl is the admin site URL, else AUTH_URL (a bare origin); the return
+    // address needs the base path either way.
+    const forwardUrl = plexForwardUrl(plexReturnBase(siteUrl, window.location.origin, BASE_PATH), state);
+    const plexUrl = plexApprovalUrl({
+      clientId: pinClientId,
+      code: pinCode,
+      forwardUrl,
+      device: { product: "Summonarr" },
+    });
 
     // Save the PIN details in sessionStorage: this page is about to navigate away,
     // and /auth/plex/done reads them when Plex sends the browser back.
@@ -270,7 +300,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
     setServersError("");
     try {
       const res = await fetch(withBasePath("/api/admin/plex/servers"));
-      const body = (await res.json().catch(() => ({}))) as { servers?: { machineId: string; name: string; connections: { uri: string; local: boolean; relay: boolean }[] }[]; error?: string };
+      const body = (await res.json().catch(() => ({}))) as { servers?: PlexAccountServer[]; error?: string };
       if (!res.ok || !body.servers) {
         setServersError(body.error ?? t("settings.form.plex.serversFailed"));
         setServersStatus("error");
@@ -310,6 +340,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
 
   async function handleSaveServerUrl(e: React.FormEvent) {
     e.preventDefault();
+    if (serverIdleTimer.current) clearTimeout(serverIdleTimer.current);
     setServerStatus("saving");
     setServerErrorMessage("");
     setLibrariesCount(null);
@@ -322,7 +353,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         body: JSON.stringify({ plexServerUrl: serverUrl }),
       });
       const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      saveOk = res.ok && body.ok !== false;
+      saveOk = settingsPatchSucceeded(res, body);
       if (!saveOk) {
         setServerErrorMessage(body.error ?? t("settings.form.plex.saveUrlFailed"));
       }
@@ -335,12 +366,15 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
     }
 
     setServerStatus("testing");
-    const result = await loadLibraries();
+    let result = await loadLibraries();
+    // Another load started meanwhile (a later Save & Test, or the mount load
+    // re-run): report the newest one, which is what the picker now shows.
+    while (result.superseded && latestLoad.current) result = await latestLoad.current;
     if (result.ok) {
       setLibrariesCount(result.count);
       setServerStatus("ok");
       // Only clear an "ok" — a later Save & Test may already be in flight.
-      setTimeout(() => setServerStatus((s) => (s === "ok" ? "idle" : s)), 4000);
+      serverIdleTimer.current = setTimeout(() => setServerStatus((s) => (s === "ok" ? "idle" : s)), 4000);
     } else {
       setServerErrorMessage(result.error ?? t("settings.form.library.connectFailed", { server: "Plex" }));
       setServerStatus("error");
@@ -350,13 +384,20 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   async function handleImport() {
     setImportStatus("running");
     setImportResult(null);
+    setImportError("");
     try {
       const res = await fetch(withBasePath("/api/sync/plex"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ full: true }),
       });
-      if (!res.ok) throw new Error(await res.text());
+      if (!res.ok) {
+        // A proxy's 502/504 page is not JSON; the generic message covers it.
+        const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+        setImportError(typeof body.error === "string" ? body.error : "");
+        setImportStatus("error");
+        return;
+      }
       const data = (await res.json()) as { marked: number; scanned: { movies: number; tv: number } } | { skipped: true };
       // 200 { skipped: true }: a sync of this server is already running; it
       // carries no counts.
@@ -599,15 +640,16 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                 )}
                 {importStatus === "error" && (
                   <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
-                    <XCircle className="w-4 h-4" />{t("settings.form.plex.importFailed")}
+                    <XCircle className="w-4 h-4" />{importError || t("settings.form.plex.importFailed")}
                   </span>
                 )}
               </div>
               <PlexLibraryPicker
-                initialSelected={initialPlexLibraries}
+                initialSelected={savedLibraries}
                 sections={sections}
                 loadStatus={librariesStatus}
                 errorMessage={librariesError}
+                onSaved={setSavedLibraries}
               />
             </>
           )}

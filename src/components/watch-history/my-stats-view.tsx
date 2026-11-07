@@ -23,6 +23,7 @@ import {
   MiniKpi,
 } from "@/components/admin/activity-ui";
 import { formatDurationHM } from "@/lib/format-duration";
+import { mediaHref } from "@/lib/media-href";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
 import { BarChart3 } from "@/components/icons";
 import { EmptyState } from "@/components/ui/design";
@@ -33,7 +34,9 @@ export interface MyStatsData {
   avgSessionDuration: number;
   lastActiveIso: string | null;
   activityCalendar: { day: string; count: number }[];
+  // The statistics zone every day and hour bucket here is in, and its today.
   todayIso: string;
+  timeZone: string;
   playsByDay: { day: string; count: number; hours: number }[];
   userHeatmap: { dow: number; hour: number; count: number }[];
   platformBreakdown: { platform: string; count: number }[];
@@ -105,7 +108,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
         }}
       >
         <MiniKpi label={t("personal.stats.totalPlays")} value={s.totalPlays.toLocaleString(locale)} big />
-        <MiniKpi label={t("personal.stats.watchTime")} value={`${s.totalWatchTimeHours.toLocaleString(locale)}h`} big />
+        <MiniKpi label={t("personal.stats.watchTime")} value={t("personal.stats.watchTimeValue", { hours: s.totalWatchTimeHours.toLocaleString(locale) })} big />
         <MiniKpi label={t("personal.stats.lastActive")} value={when(s.lastActiveIso)} />
         <MiniKpi label={t("personal.stats.avgSession")} value={formatDurationHM(s.avgSessionDuration, locale)} />
       </div>
@@ -116,7 +119,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
             label={t("personal.stats.calendar")}
             sub={t("personal.stats.activeDays", { count: s.activityCalendar.filter((v) => v.count > 0).length })}
           />
-          <ActivityCalendar data={s.activityCalendar} today={s.todayIso} />
+          <ActivityCalendar data={s.activityCalendar} today={s.todayIso} timeZone={s.timeZone} />
         </ActivityCard>
       )}
 
@@ -135,7 +138,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
         </ActivityCard>
         <ActivityCard>
           <SectionHeader label={t("personal.stats.heatmap")} sub={t("personal.stats.heatmapSub")} />
-          <HourHeatmap matrix={heatmapMatrix} />
+          <HourHeatmap matrix={heatmapMatrix} timeZone={s.timeZone} />
         </ActivityCard>
       </div>
 
@@ -170,8 +173,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {s.topMedia.map((m, i) => {
-              const href =
-                m.tmdbId != null ? (m.mediaType === "TV" ? `/tv/${m.tmdbId}` : `/movie/${m.tmdbId}`) : null;
+              const href = mediaHref(m.tmdbId, m.mediaType);
               return (
                 <div key={`${m.title}-${i}`} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <span

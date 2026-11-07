@@ -122,6 +122,7 @@
   "personal.stats.noActivityDescription": "Once you play something on the server, your stats will appear here.",
   "personal.stats.totalPlays": "Total plays",
   "personal.stats.watchTime": "Watch time",
+  "personal.stats.watchTimeValue": "{hours}h",
   "personal.stats.lastActive": "Last active",
   "personal.stats.avgSession": "Avg session",
   "personal.stats.calendar": "365-day activity",

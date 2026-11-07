@@ -1,4 +1,5 @@
-// Structural pins for POST /api/requests/bulk (src/app/api/requests/bulk/route.ts).
+// Structural pins for POST /api/requests/bulk (src/app/api/requests/bulk/route.ts
+// and its item pipeline, src/lib/request-bulk.ts).
 //
 // The route has no in-memory harness yet (it fans out over user, Setting,
 // mediaRequest, both library tables, both *arr-available tables, the blacklist,
@@ -25,7 +26,10 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
-const SRC = readFileSync(join(ROOT, "src/app/api/requests/bulk/route.ts"), "utf8");
+// The route (HTTP half) then its item pipeline (src/lib/request-bulk.ts), in
+// run order, so the order pins below read across both.
+const SRC = readFileSync(join(ROOT, "src/app/api/requests/bulk/route.ts"), "utf8") +
+  "\n" + readFileSync(join(ROOT, "src/lib/request-bulk.ts"), "utf8");
 // Code only: comments explain the rules and would otherwise satisfy the scans.
 const CODE = SRC.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
 
@@ -48,10 +52,10 @@ test("bulk: a peer stamped cleanedUpAt is a removal, never a greenlight to mirro
 });
 
 test("every 'already greenlit' mirror lookup in src/ excludes stamped (cleanedUpAt) rows", () => {
-  // request-create.ts (web + watchlist auto-request), the Discord /request
-  // path and bulk each copy a greenlit peer's status. One copy without the
+  // request-create.ts (web, watchlist auto-request and the Discord /request
+  // pick) and bulk each copy a greenlit peer's status. One copy without the
   // term re-opens the re-download path for a removed title.
-  const files = ["src/lib/request-create.ts", "src/lib/discord-interactions/components/pick.ts", "src/app/api/requests/bulk/route.ts"];
+  const files = ["src/lib/request-create.ts", "src/lib/request-bulk.ts"];
   for (const f of files) {
     const code = readFileSync(join(ROOT, f), "utf8").split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
     const lookups = code.split("\n").filter((l) =>

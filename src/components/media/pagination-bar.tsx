@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ChevronLeft, ChevronRight } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
+import { pagerWindow } from "@/lib/pager-window";
 
 interface PaginationBarProps {
   currentPage: number;
@@ -22,13 +23,9 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
 
   if (totalPages <= 1) return null;
 
-  const hasPrev = currentPage > 1;
-  const hasNext = currentPage < totalPages;
-
-  const pages: number[] = [];
-  const start = Math.max(1, currentPage - 2);
-  const end = Math.min(totalPages, currentPage + 2);
-  for (let i = start; i <= end; i++) pages.push(i);
+  // Past the last page the window sits on the last page and no number is
+  // marked current — see pager-window.ts.
+  const { anchor, start, end, pages, prev, next, active } = pagerWindow(currentPage, totalPages);
 
   // Below `sm` the full ±2 window (plus first/last jumps and two ellipses)
   // is ~358px — wider than a 375px phone's content box. Narrow it to ±1 there
@@ -36,7 +33,7 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
   // to page 1 / the last page stays, or the row would skip a number with no
   // ellipsis to say so.
   const hideOnMobile = (p: number) =>
-    Math.abs(p - currentPage) === 2 &&
+    Math.abs(p - anchor) === 2 &&
     p > 2 &&
     p < totalPages - 1;
 
@@ -48,7 +45,7 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
       className="flex flex-wrap items-center justify-center mt-8"
       style={{ gap: 4 }}
     >
-      <PagerButton href={hasPrev ? buildHref(currentPage - 1) : undefined} ariaLabel={t("media.pager.previous")}>
+      <PagerButton href={prev !== null ? buildHref(prev) : undefined} ariaLabel={t("media.pager.previous")}>
         <ChevronLeft style={{ width: 14, height: 14 }} />
       </PagerButton>
 
@@ -71,7 +68,7 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
       )}
 
       {pages.map((p) =>
-        p === currentPage ? (
+        p === active ? (
           <PagerButton key={p} active>
             {p}
           </PagerButton>
@@ -104,7 +101,7 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
         </>
       )}
 
-      <PagerButton href={hasNext ? buildHref(currentPage + 1) : undefined} ariaLabel={t("media.pager.next")}>
+      <PagerButton href={next !== null ? buildHref(next) : undefined} ariaLabel={t("media.pager.next")}>
         <ChevronRight style={{ width: 14, height: 14 }} />
       </PagerButton>
     </nav>

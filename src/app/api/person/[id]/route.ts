@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { getEnrichedPerson } from "@/lib/person";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isTmdbIdInRange, parseTmdbIdParam } from "@/lib/tmdb-id";
 
 // The enrichment lives in getEnrichedPerson (shared with the /person/[id] server
 // page) so the two can't drift. This handler is just auth + rate-limit + the
@@ -18,10 +19,10 @@ export const GET = withAuth(async (
   }
 
   const { id } = await params;
-  const personId = Number(id);
-  // TMDB person ids are whole numbers, so "1.5" or "1e3" is rejected up front
-  // instead of being sent to TMDB.
-  if (!Number.isInteger(personId) || personId <= 0) {
+  // Canonical digits only, so "1.5", "1e3" or " 12 " is rejected up front
+  // instead of being sent to TMDB (Number.isInteger let "1e3" through as 1000).
+  const personId = parseTmdbIdParam(id);
+  if (personId === null || !isTmdbIdInRange(personId)) {
     return NextResponse.json({ error: t("apiUser.person.invalidId") }, { status: 400 });
   }
 

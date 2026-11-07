@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
+import { TTL, getCache, setCache, tmdbDetailsKey } from "@/lib/tmdb-cache";
 import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
 import {
   folderOf,
@@ -301,7 +301,7 @@ async function posterPathMap(
   const misses = pairs.filter((p) => !out.has(`${p.tmdbId}:${p.mediaType}`));
   if (misses.length === 0) return out;
 
-  const cacheKeys = misses.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
+  const cacheKeys = misses.map((i) => tmdbDetailsKey(i.mediaType, i.tmdbId));
   const rows = await prisma.tmdbCache.findMany({
     where: { key: { in: cacheKeys } },
     select: { key: true, data: true },

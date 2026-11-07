@@ -1,5 +1,5 @@
 import nodePath from "node:path";
-import { getCache } from "./tmdb-cache";
+import { getCache, tmdbDetailsKey } from "./tmdb-cache";
 import { processSingleton } from "./process-singleton";
 
 // Helpers the fix-match routes share (the POST, candidates, file-info): one
@@ -45,7 +45,7 @@ export function rowWithPathFor<T extends { serverInstance: string; filePath: str
 }
 
 export function tmdbDetailsCacheKey(mediaType: "MOVIE" | "TV", tmdbId: number): string {
-  return `${mediaType === "MOVIE" ? "movie" : "tv"}:${tmdbId}:details`;
+  return tmdbDetailsKey(mediaType, tmdbId);
 }
 
 /** The cached TMDB title for an id — an expired row is a miss (getCache). */

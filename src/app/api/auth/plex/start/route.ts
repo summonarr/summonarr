@@ -4,10 +4,11 @@ import {
   buildPlexFlowSetCookie,
   signPlexFlowCookie,
 } from "@/lib/plex-flow-state";
-import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
+import { readOptionalJsonCapped } from "@/lib/body-size";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isSecureCookieContext } from "@/lib/session-cookie";
 
 // Server-side PIN creation for the Plex sign-in flow. Returns the PIN id +
 // code AND sets a short-lived signed cookie binding the pinId to this
@@ -19,13 +20,6 @@ const MAX_START_BODY_BYTES = 4 * 1024;
 
 const PLEX_TV_HOSTS = ["plex.tv"];
 
-function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? "";
-  if (url.startsWith("https://")) return true;
-  if (url.startsWith("http://")) return false;
-  return process.env.NODE_ENV === "production";
-}
-
 export async function POST(req: NextRequest) {
   const t = translatorForRequest(req);
   const ipKey = getClientIpKey(req.headers);
@@ -33,27 +27,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.common.tooManyRequests") }, { status: 429 });
   }
 
-  const headerCheck = checkBodySize(req, MAX_START_BODY_BYTES);
-  if (headerCheck) return headerCheck;
-  const raw = new Uint8Array(await req.arrayBuffer());
-  const sizeCheck = assertBodyBytesUnderCap(raw, MAX_START_BODY_BYTES);
-  if (sizeCheck) return sizeCheck;
-
-  let body: Record<string, unknown> = {};
-  if (raw.byteLength > 0) {
-    let decoded: unknown;
-    try {
-      decoded = JSON.parse(new TextDecoder().decode(raw));
-    } catch {
-      return NextResponse.json({ error: t("apiAuth.common.invalidJson") }, { status: 400 });
-    }
-    // A valid-JSON non-object (`null`, a bare number) would otherwise throw on
-    // the property reads below and 500 this unauthenticated route.
-    if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
-      return NextResponse.json({ error: t("apiAuth.common.invalidJson") }, { status: 400 });
-    }
-    body = decoded as Record<string, unknown>;
-  }
+  // An empty body reads as {} and is refused below for its missing clientId;
+  // malformed JSON or a non-object (`null`, a bare number, an array) is a 400
+  // and an oversized body a 413, never a property read that 500s.
+  const parsed = await readOptionalJsonCapped<Record<string, unknown>>(req, MAX_START_BODY_BYTES, {});
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const clientId =
     typeof body.clientId === "string" && /^[a-f0-9-]{8,64}$/i.test(body.clientId)
@@ -101,8 +80,16 @@ export async function POST(req: NextRequest) {
     console.error("[auth/plex/start] plex.tv returned", res.status);
     return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailed") }, { status: 502 });
   }
-  const data = (await res.json()) as { id?: number; code?: string };
-  if (typeof data.id !== "number" || typeof data.code !== "string") {
+  // A 2xx proxy page, an empty body or a JSON `null` is malformed, not a 500.
+  const data = (await res.json().catch(() => null)) as { id?: unknown; code?: unknown } | null;
+  if (
+    data === null ||
+    typeof data !== "object" ||
+    typeof data.id !== "number" ||
+    !Number.isInteger(data.id) ||
+    data.id <= 0 ||
+    typeof data.code !== "string"
+  ) {
     return NextResponse.json({ error: t("apiAuth.plex.pinMalformed") }, { status: 502 });
   }
 

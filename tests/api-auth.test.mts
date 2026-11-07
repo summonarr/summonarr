@@ -674,3 +674,20 @@ test("requireAuth() refuses a token on the wrong transport too (guardrail 6h) �
   assert.ok(!((await inRequestScope(asCookie(browser.token), () => requireAuth())) instanceof NextResponse));
   assert.ok(!((await inRequestScope(asBearer(native.token), () => requireAuth())) instanceof NextResponse));
 });
+
+test("requireAuth() enforces a machine session's mint-time IP allowlist too — wrong caller IP → 401", async () => {
+  // The SSE stream and the other dual-auth readers go through requireAuth, not
+  // withAuth; a replayed machine token must be refused on that path as well.
+  const machine = await mintSession({ machineAllowedIps: ["203.0.113.7"] });
+  const wrongIp = await inRequestScope(
+    { ...asBearer(machine.token), "x-forwarded-for": "198.51.100.9" },
+    () => requireAuth(),
+  );
+  assert.ok(wrongIp instanceof NextResponse);
+  assert.equal(wrongIp.status, 401, "a replayed machine token from an unlisted IP must 401");
+  const allowedIp = await inRequestScope(
+    { ...asBearer(machine.token), "x-forwarded-for": "203.0.113.7" },
+    () => requireAuth(),
+  );
+  assert.ok(!(allowedIp instanceof NextResponse), "the allowlisted address passes");
+});

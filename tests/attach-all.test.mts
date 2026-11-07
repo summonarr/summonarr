@@ -14,7 +14,8 @@
 //     shares its TMDB id, and each source lights only its own flag;
 //   - blacklisted titles stay VISIBLE (marked `blacklisted: true`, absent key
 //     otherwise — the request POST is the authoritative block), whereas the
-//     caller's hidden titles are REMOVED after enrichment; anonymous callers
+//     caller's hidden titles are REMOVED before enrichment (no library, request,
+//     ratings or translation lookup is spent on them); anonymous callers
 //     and includeHidden callers are never filtered, and neither even issues
 //     the hidden query;
 //   - without a userId the per-user request query is skipped entirely;
@@ -362,7 +363,7 @@ test("blacklisted titles stay visible with blacklisted:true; non-matches get NO 
   assert.equal("blacklisted" in out[2], false); // MOVIE row must not mark the tv sibling
 });
 
-test("the caller's hidden titles are removed AFTER enrichment; survivors keep flags and order", async () => {
+test("the caller's hidden titles are removed BEFORE enrichment; survivors keep flags and order", async () => {
   hidden.rows = [{ tmdbId: 604, mediaType: "MOVIE" }]; // stored enum-cased, matched lowercased
   plexLib.state.movie = [603, 605];
   const out = await attachAllAvailability(
@@ -379,6 +380,39 @@ test("the caller's hidden titles are removed AFTER enrichment; survivors keep fl
   );
   assert.equal(hidden.calls.length, 1);
   assert.equal(hidden.calls[0].where.userId, "u_1");
+  // No lookup carries the hidden title: its results would be thrown away.
+  assert.ok(plexLib.state.args.length > 0 && requests.calls.length > 0, "the lookups ran");
+  for (const args of [...plexLib.state.args, ...jellyfinLib.state.args]) {
+    assert.ok(!args.where.tmdbId.in.includes(604), "a hidden title reached a library lookup");
+  }
+  for (const call of requests.calls) {
+    assert.ok(!JSON.stringify(call.where).includes("604"), "a hidden title reached the request lookup");
+  }
+});
+
+test("when every title is hidden, nothing is enriched at all", async () => {
+  hidden.rows = [{ tmdbId: 603, mediaType: "MOVIE" }];
+  const out = await attachAllAvailability([media(603, "movie")], "u_1");
+  assert.deepEqual(out, []);
+  assert.equal(plexLib.state.calls + jellyfinLib.state.calls, 0);
+  assert.equal(requests.calls.length, 0);
+  assert.equal(ratingsCache.calls.length, 0, "no ratings read (or MDBList/OMDb miss) for a hidden title");
+});
+
+test("a caller's own fields survive enrichment (the result is typed as the input)", async () => {
+  // /popular carries rank and play counts through here; they used to survive
+  // only because the ratings pass happened to spread its input.
+  ratingsCache.rows = [
+    { key: "mdblist:tmdb:movie:603", data: JSON.stringify(MDBLIST_603), cachedAt: new Date(), expiresAt: FRESH() },
+  ];
+  const ranked = [{ ...fullMedia(603, "movie"), rank: 7, plays: 12 }];
+  for (const options of [SKIP, {}]) {
+    const out = await attachAllAvailability(ranked, "u_1", options);
+    assert.equal(out[0].rank, 7);
+    assert.equal(out[0].plays, 12);
+  }
+  const rated = await attachAllAvailability(ranked, "u_1");
+  assert.equal(rated[0].imdbRating, "8.7", "the ratings fields still win over the input's");
 });
 
 test("includeHidden keeps the title AND skips the hidden query entirely", async () => {

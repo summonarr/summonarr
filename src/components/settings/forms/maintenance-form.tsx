@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
-import { withBasePath } from "@/lib/base-path";
-import type { SaveStatus } from "./shared";
+import { useSettingsSave } from "./shared";
 import { Switch } from "@/components/ui/switch";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -20,45 +19,19 @@ export function MaintenanceForm({ initialEnabled, initialMessage }: MaintenanceF
   const t = useT();
   const [enabled, setEnabled] = useState(initialEnabled);
   const [message, setMessage] = useState(initialMessage);
-  const [status, setStatus] = useState<SaveStatus>("idle");
-  // The route's own reason (too long, a 429 cooldown) — shown in place of the
-  // bare "Failed to save".
-  const [errorMessage, setErrorMessage] = useState("");
+  // `errorMessage` is the route's own reason (too long, a 429 cooldown), shown
+  // in place of the bare "Failed to save". An edit during a save keeps Save
+  // locked and isn't reported as saved (useSettingsSave).
+  const { status, message: errorMessage, save, edited } = useSettingsSave();
   const titleId = useId();
   const descId = useId();
-  // An earlier save's idle timer must not fire into a later save (it would
-  // re-enable Save mid-flight or hide the new result early).
-  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => {
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-  }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    if (idleTimer.current) clearTimeout(idleTimer.current);
-    setStatus("saving");
-    setErrorMessage("");
-    try {
-      const res = await fetch(withBasePath("/api/settings"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          maintenanceEnabled: enabled ? "true" : "false",
-          maintenanceMessage: message,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (res.ok && data.ok !== false) {
-        setStatus("ok");
-      } else {
-        setErrorMessage(data.error ?? t("settings.form.common.saveFailed"));
-        setStatus("error");
-      }
-    } catch {
-      setStatus("error");
-    }
-    // Only an "ok" fades; an error stays until the next edit or save.
-    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
+    await save({
+      maintenanceEnabled: enabled ? "true" : "false",
+      maintenanceMessage: message,
+    });
   }
 
   return (
@@ -74,7 +47,7 @@ export function MaintenanceForm({ initialEnabled, initialMessage }: MaintenanceF
         <Switch
           variant="warning"
           checked={enabled}
-          onCheckedChange={() => { setEnabled(!enabled); setStatus("idle"); }}
+          onCheckedChange={() => { setEnabled(!enabled); edited(); }}
           aria-labelledby={titleId}
           aria-describedby={descId}
           className="shrink-0"
@@ -85,7 +58,7 @@ export function MaintenanceForm({ initialEnabled, initialMessage }: MaintenanceF
         <Textarea
           id="maintenance-message"
           value={message}
-          onChange={(e) => { setMessage(e.target.value); setStatus("idle"); }}
+          onChange={(e) => { setMessage(e.target.value); edited(); }}
           placeholder={t("settings.form.maintenance.messagePlaceholder")}
           rows={3}
           className="resize-none"

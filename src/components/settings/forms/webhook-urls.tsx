@@ -1,56 +1,72 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { Copy, Check, Loader2 } from "@/components/icons";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { Copy, Check, Loader2, X } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
+
+// What a copy click resolved to: the URL, no secret saved for that row (nothing
+// to copy until one is set — retrying can't help), or a failed token fetch.
+type CopyResolution = { kind: "url"; url: string } | { kind: "none" } | { kind: "error" };
 
 function CopyRow({
   label,
   displayUrl,
-  copyUrl,
   resolveCopyUrl,
 }: {
   label: string;
   displayUrl: string;
-  // Static value to copy. Optional when resolveCopyUrl is provided.
-  copyUrl?: string;
-  // Async resolver, called on click — used when the value (e.g. a secret token)
-  // must be fetched on demand rather than baked into props.
-  resolveCopyUrl?: () => Promise<string | null>;
+  // Called on every click: the value carries a secret token, fetched on demand
+  // rather than baked into props.
+  resolveCopyUrl: () => Promise<CopyResolution>;
 }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
   const [revealed, setRevealed] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [problem, setProblem] = useState<"none" | "error" | null>(null);
   // True while the token fetch is in flight: shows a spinner and blocks repeat
   // clicks, each of which would otherwise fire another token fetch.
   const [pending, setPending] = useState(false);
+  // The "copied" tick's and the error line's fades. Ref'd so a new click
+  // cancels the previous click's timers (which would otherwise clear the new
+  // result early); cleared on unmount.
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const problemTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    if (problemTimer.current) clearTimeout(problemTimer.current);
+  }, []);
 
   async function copy() {
     if (pending) return;
-    setFailed(false);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    if (problemTimer.current) clearTimeout(problemTimer.current);
+    setCopied(false);
+    setProblem(null);
+    setRevealed(null);
     setPending(true);
-    let url: string | null;
+    let result: CopyResolution;
     try {
-      url = resolveCopyUrl ? await resolveCopyUrl() : (copyUrl ?? null);
+      result = await resolveCopyUrl();
     } finally {
       setPending(false);
     }
-    if (!url) {
-      setFailed(true);
-      setTimeout(() => setFailed(false), 2500);
+    if (result.kind !== "url") {
+      setProblem(result.kind);
+      // A missing secret stays explained until the next click; a failed fetch
+      // is worth a retry, so its line fades.
+      if (result.kind === "error") problemTimer.current = setTimeout(() => setProblem(null), 2500);
       return;
     }
     try {
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(result.url);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      copiedTimer.current = setTimeout(() => setCopied(false), 2000);
     } catch {
       // Clipboard blocked (e.g. write-after-await loses the user gesture on some
-      // browsers) — reveal the URL so it can be selected and copied manually.
-      setRevealed(url);
-      setTimeout(() => setRevealed(null), 10000);
+      // browsers) — show the URL in a selectable field, whole (a truncated span
+      // hid the token behind the ellipsis), until dismissed or the next click.
+      setRevealed(result.url);
     }
   }
 
@@ -58,7 +74,29 @@ function CopyRow({
     <div className="space-y-1">
       <p className="text-xs font-medium text-zinc-400">{label}</p>
       <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
-        <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{revealed ?? displayUrl}</span>
+        {revealed === null ? (
+          <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{displayUrl}</span>
+        ) : (
+          <input
+            readOnly
+            autoFocus
+            value={revealed}
+            onFocus={(e) => e.currentTarget.select()}
+            aria-label={label}
+            spellCheck={false}
+            className="flex-1 min-w-0 bg-transparent font-mono text-xs text-zinc-100 outline-none"
+          />
+        )}
+        {revealed !== null && (
+          <button
+            type="button"
+            onClick={() => setRevealed(null)}
+            className="shrink-0 p-3 -m-3 text-zinc-500 hover:text-zinc-100 transition-colors"
+            aria-label={t("shared.common.dismiss")}
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
         <button
           type="button"
           onClick={copy}
@@ -72,25 +110,28 @@ function CopyRow({
             : copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
         </button>
       </div>
-      {failed && <p className="text-xs text-amber-500">{t("settings.form.webhookUrls.loadFailed")}</p>}
+      {revealed !== null && <p className="text-xs text-zinc-500">{t("settings.form.webhookUrls.copyManually")}</p>}
+      {problem === "error" && <p className="text-xs text-amber-500">{t("settings.form.webhookUrls.loadFailed")}</p>}
+      {problem === "none" && <p className="text-xs text-amber-500">{t("settings.form.webhookUrls.noSecret")}</p>}
     </div>
   );
 }
 
-// Placeholder row for a 4K instance that is configured but has no webhook secret yet.
+// Placeholder row for a URL with no webhook secret yet: an HD row whose service
+// has neither its own nor the legacy secret, or a configured 4K instance
+// without its own. There is nothing to copy until one is saved.
 //
 // About the URLs below: the token rides in a ?token= query param because the Radarr/Sonarr
 // webhook screens have no field for custom headers (guardrail 2). The default rows use the
 // per-service secret and fall back to the legacy shared one, the same way the webhook handler
 // does. The 4K rows point at the SAME endpoint with the 4K instance's own secret; the handler
 // works out which instance fired by which secret matched (guardrail 32).
-function SecretNeededRow({ label }: { label: string }) {
-  const t = useT();
+function SecretNeededRow({ label, message }: { label: string; message: string }) {
   return (
     <div className="space-y-1">
       <p className="text-xs font-medium text-zinc-400">{label}</p>
       <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
-        <span className="flex-1 text-xs text-amber-500">{t("settings.form.webhookUrls.secretNeeded")}</span>
+        <span className="flex-1 text-xs text-amber-500">{message}</span>
       </div>
     </div>
   );
@@ -138,35 +179,41 @@ export function WebhookUrls({
     return (await res.json()) as Record<string, string | null>;
   }, []);
   const resolver = useCallback(
-    (key: string, base: string) => async (): Promise<string | null> => {
+    (key: string, base: string) => async (): Promise<CopyResolution> => {
       try {
         const tok = (await loadTokens())[key];
-        return tok ? `${base}?token=${encodeURIComponent(tok)}` : null;
+        // null: no secret saved for this row (removed since the page rendered).
+        return tok ? { kind: "url", url: `${base}?token=${encodeURIComponent(tok)}` } : { kind: "none" };
       } catch {
-        return null;
+        return { kind: "error" };
       }
     },
     [loadTokens],
   );
 
-  const maskSuffix = (has?: boolean) => (has ? "?token=••••••••" : "");
+  const masked = (base: string) => `${base}?token=••••••••`;
   const radarrTokenSet = radarrHasSecret || legacyHasSecret;
   const sonarrTokenSet = sonarrHasSecret || legacyHasSecret;
   const noHdSecret = !radarrTokenSet && !sonarrTokenSet;
+  const label = (service: string) => t("settings.form.webhookUrls.label", { service });
 
   return (
     <div className="space-y-4">
-      <CopyRow label={t("settings.form.webhookUrls.label", { service: "Radarr" })} displayUrl={`${radarrBase}${maskSuffix(radarrTokenSet)}`} resolveCopyUrl={resolver("radarr", radarrBase)} />
-      <CopyRow label={t("settings.form.webhookUrls.label", { service: "Sonarr" })} displayUrl={`${sonarrBase}${maskSuffix(sonarrTokenSet)}`} resolveCopyUrl={resolver("sonarr", sonarrBase)} />
+      {radarrTokenSet
+        ? <CopyRow label={label("Radarr")} displayUrl={masked(radarrBase)} resolveCopyUrl={resolver("radarr", radarrBase)} />
+        : <SecretNeededRow label={label("Radarr")} message={t("settings.form.webhookUrls.secretNeededFor", { service: "Radarr" })} />}
+      {sonarrTokenSet
+        ? <CopyRow label={label("Sonarr")} displayUrl={masked(sonarrBase)} resolveCopyUrl={resolver("sonarr", sonarrBase)} />
+        : <SecretNeededRow label={label("Sonarr")} message={t("settings.form.webhookUrls.secretNeededFor", { service: "Sonarr" })} />}
       {radarr4kConfigured && (
         radarr4kHasSecret
-          ? <CopyRow label={t("settings.form.webhookUrls.label", { service: "Radarr 4K" })} displayUrl={`${radarrBase}?token=••••••••`} resolveCopyUrl={resolver("radarr4k", radarrBase)} />
-          : <SecretNeededRow label={t("settings.form.webhookUrls.label", { service: "Radarr 4K" })} />
+          ? <CopyRow label={label("Radarr 4K")} displayUrl={masked(radarrBase)} resolveCopyUrl={resolver("radarr4k", radarrBase)} />
+          : <SecretNeededRow label={label("Radarr 4K")} message={t("settings.form.webhookUrls.secretNeeded")} />
       )}
       {sonarr4kConfigured && (
         sonarr4kHasSecret
-          ? <CopyRow label={t("settings.form.webhookUrls.label", { service: "Sonarr 4K" })} displayUrl={`${sonarrBase}?token=••••••••`} resolveCopyUrl={resolver("sonarr4k", sonarrBase)} />
-          : <SecretNeededRow label={t("settings.form.webhookUrls.label", { service: "Sonarr 4K" })} />
+          ? <CopyRow label={label("Sonarr 4K")} displayUrl={masked(sonarrBase)} resolveCopyUrl={resolver("sonarr4k", sonarrBase)} />
+          : <SecretNeededRow label={label("Sonarr 4K")} message={t("settings.form.webhookUrls.secretNeeded")} />
       )}
       {noHdSecret && (
         <p className="text-xs text-amber-500">

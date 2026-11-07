@@ -3,7 +3,7 @@ import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage, arrWriteOutcomeUn
 import { localizedTitleFor } from "@/lib/tmdb-localize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { scheduleDownloadCheck } from "@/lib/download-check";
+import { DOWNLOAD_CHECK_DELAY_MS, scheduleDownloadCheck } from "@/lib/download-check";
 import { logAudit } from "@/lib/audit";
 import { effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -51,9 +51,11 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
     return;
   }
 
+  // adminNote: a decline here writes none, so the requester is told the note the
+  // row already holds — what the web and batch declines send too.
   const request = await prisma.mediaRequest.findUnique({
     where: { id: requestId },
-    select: { id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true, qualityProfileId: true, arrInstance: true },
+    select: { id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true, qualityProfileId: true, arrInstance: true, adminNote: true },
   });
 
   // The shared admin-channel embed is written in the instance default language,
@@ -86,7 +88,7 @@ export async function handleAdminDecision(ctx: ComponentContext): Promise<void> 
     // orchestrator sweep is the backstop for when this job is dropped or fails.
     const claimed = await prisma.mediaRequest.updateMany({
       where: { id: requestId, status: "PENDING" },
-      data: { status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) },
+      data: { status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + DOWNLOAD_CHECK_DELAY_MS) },
     });
     if (claimed.count === 0) {
       await editOriginal(appId, token, { content: "", embeds: [handledEmbed(channelT, localizedTitle)], components: [] });

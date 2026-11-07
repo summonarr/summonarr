@@ -4,13 +4,14 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
-import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw, Users } from "@/components/icons";
+import { Download, Ban, ShieldCheck, LinkIcon, Loader2, RefreshCw, Users } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { Switch } from "@/components/ui/switch";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { EmptyState } from "@/components/ui/design";
 import { useT } from "@/components/i18n/i18n-provider";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import type { Translator } from "@/lib/i18n/translate";
 
 interface ServerUser {
@@ -63,10 +64,42 @@ const NONE = "__none__";
 // are ADMIN-gated (and the link picker is shown to admins only), while the Users
 // page admits MANAGE_USERS delegates, so a 403 is "you need an administrator",
 // translated — never the route's raw English `{ error: "Forbidden" }` echoed
-// into a French or Spanish UI.
+// into a French or Spanish UI. A 401 reads the same: the auth wrappers answer it
+// for a missing session, and the cron routes (getCronActor) for any non-ADMIN.
 function failureMessage(status: number, serverError: string | undefined, t: Translator): string {
-  if (status === 403) return t("adminManage.serverUsers.requiresAdmin");
+  if (status === 401 || status === 403) return t("adminManage.serverUsers.requiresAdmin");
   return serverError ?? t("adminManage.notif.failed", { status });
+}
+
+type WriteResult<T> = { ok: true; data: T | null } | { ok: false; error: string };
+
+// The one write path for every control on this table: the body is read
+// leniently (a proxy's error page is not JSON), a non-2xx answer goes through
+// failureMessage — or `genericError` for a route whose own errors are untranslated
+// English — and a network failure is translated. A 2xx body is the route's own
+// answer for the caller to read; the caller owns refresh and any rollback.
+async function sendWrite<T>(
+  url: string,
+  init: { method: "PATCH" | "POST"; body?: unknown },
+  t: Translator,
+  genericError?: string,
+): Promise<WriteResult<T>> {
+  try {
+    const res = await fetch(withBasePath(url), {
+      method: init.method,
+      ...(init.body === undefined
+        ? {}
+        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(init.body) }),
+    });
+    const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null;
+    if (!res.ok) {
+      const authFailure = res.status === 401 || res.status === 403;
+      return { ok: false, error: genericError && !authFailure ? genericError : failureMessage(res.status, data?.error, t) };
+    }
+    return { ok: true, data };
+  } catch {
+    return { ok: false, error: t("adminManage.serverUsers.networkError") };
+  }
 }
 
 // DS brand chip recipes (solid brand fill, black text) — the same classes the
@@ -110,21 +143,15 @@ function LinkPicker({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(withBasePath(`/api/admin/server-users/${row.id}`), {
+      const result = await sendWrite(`/api/admin/server-users/${row.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          next === AUTO ? { autoLink: true } : { userId: next === NONE ? null : next },
-        ),
-      });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
-      if (!res.ok || data?.error) {
-        setError(failureMessage(res.status, data?.error, t));
+        body: next === AUTO ? { autoLink: true } : { userId: next === NONE ? null : next },
+      }, t);
+      if (!result.ok) {
+        setError(result.error);
         return;
       }
       router.refresh();
-    } catch {
-      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -136,7 +163,7 @@ function LinkPicker({
         {loading ? (
           <Loader2 className="w-3 h-3 animate-spin text-zinc-500 shrink-0" />
         ) : (
-          <Link className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
+          <LinkIcon className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
         )}
         {/* The house select (compact = Input's 32px) — text-base below md so
             iOS Safari doesn't zoom on focus; 12px on desktop keeps the row dense. */}
@@ -191,7 +218,7 @@ function LinkedAccountLabel({ row }: { row: ServerUser }) {
   return (
     <div className="flex flex-col gap-1" title={t("adminManage.serverUsers.requiresAdmin")}>
       <div className="flex items-center gap-1.5 min-w-0">
-        <Link className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
+        <LinkIcon className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
         <span className="max-w-[170px] truncate text-xs text-zinc-300">{label}</span>
       </div>
       {row.manualUserLink && (
@@ -240,27 +267,21 @@ function DownloadToggle({
     setError(null);
     setWarning(null);
     try {
-      const res = await fetch(withBasePath(`/api/admin/server-users/${userId}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ downloadsEnabled: next }),
-      });
-      const data = (await res.json().catch(() => null)) as
-        | { error?: string; pushed?: boolean; warning?: string }
-        | null;
-      if (!res.ok || data?.error) {
+      const result = await sendWrite<{ pushed?: boolean; warning?: string }>(
+        `/api/admin/server-users/${userId}`,
+        { method: "PATCH", body: { downloadsEnabled: next } },
+        t,
+      );
+      if (!result.ok) {
+        // Refused or never reached the server — roll back the optimistic state.
         setOptimistic(optimistic);
-        setError(failureMessage(res.status, data?.error, t));
+        setError(result.error);
         return;
       }
-      if (data?.pushed === false) {
-        setWarning(data.warning ?? t("adminManage.serverUsers.savedNotPushed"));
+      if (result.data?.pushed === false) {
+        setWarning(result.data.warning ?? t("adminManage.serverUsers.savedNotPushed"));
       }
       router.refresh();
-    } catch {
-      // Network failure — roll back the optimistic state too.
-      setOptimistic(optimistic);
-      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -309,19 +330,34 @@ function SyncUsersButton() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A 200 that is not a clean run: the advisory lock was held (`skipped`), or
+  // some policies failed (`ok: false` — the route keeps 200 on a partial
+  // failure and marks the run degraded). Its English `error` is never shown.
+  const [notice, setNotice] = useState<string | null>(null);
 
   async function sync() {
     setLoading(true);
     setError(null);
+    setNotice(null);
     try {
-      const res = await fetch(withBasePath("/api/cron/sync-download-policies"), { method: "POST" });
-      if (!res.ok) {
-        setError(res.status === 403 ? t("adminManage.serverUsers.requiresAdmin") : t("adminManage.serverUsers.syncFailed"));
+      const result = await sendWrite<{ ok?: boolean; skipped?: boolean; errors?: number }>(
+        "/api/cron/sync-download-policies",
+        { method: "POST" },
+        t,
+        t("adminManage.serverUsers.syncFailed"),
+      );
+      if (!result.ok) {
+        setError(result.error);
         return;
       }
+      if (result.data?.skipped === true) {
+        setNotice(t("adminManage.serverUsers.syncSkipped"));
+        return;
+      }
+      if (result.data?.ok === false) {
+        setNotice(t("adminManage.serverUsers.syncErrors", { count: result.data.errors ?? 0 }));
+      }
       router.refresh();
-    } catch {
-      setError(t("adminManage.serverUsers.syncFailed"));
     } finally {
       setLoading(false);
     }
@@ -338,6 +374,7 @@ function SyncUsersButton() {
         {loading ? t("adminManage.serverUsers.syncing") : t("adminManage.serverUsers.sync")}
       </button>
       {error && <span role="alert" className="text-xs text-red-400">{error}</span>}
+      {!error && notice && <span role="status" className="text-xs text-amber-400">{notice}</span>}
     </div>
   );
 }
@@ -353,6 +390,10 @@ function BulkBar({
   const router = useRouter();
   const [loading, setLoading] = useState<"disable" | "enable" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The route saves every row and answers 200 even when some users' policy
+  // could not be pushed to Jellyfin (`errors`). A failed enable-push never
+  // self-heals (the hourly reconcile re-pushes disables only), so say so.
+  const [warning, setWarning] = useState<string | null>(null);
   // A bulk write overwrites every per-user setting and can't be undone (the
   // opposite button restores a uniform state, not the previous mix), so each
   // one asks first — the same inline confirm as the library Resync button.
@@ -362,19 +403,20 @@ function BulkBar({
     setConfirming(null);
     setLoading(downloadsEnabled ? "enable" : "disable");
     setError(null);
+    setWarning(null);
     try {
-      const res = await fetch(withBasePath("/api/admin/server-users/bulk"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source, downloadsEnabled }),
-      });
-      if (!res.ok) {
-        setError(res.status === 403 ? t("adminManage.serverUsers.requiresAdmin") : t("adminManage.serverUsers.failed"));
+      const result = await sendWrite<{ pushed?: number; errors?: number }>(
+        "/api/admin/server-users/bulk",
+        { method: "POST", body: { source, downloadsEnabled } },
+        t,
+      );
+      if (!result.ok) {
+        setError(result.error);
         return;
       }
+      const notPushed = result.data?.errors ?? 0;
+      if (notPushed > 0) setWarning(t("adminManage.serverUsers.bulk.notPushed", { count: notPushed }));
       router.refresh();
-    } catch {
-      setError(t("adminManage.serverUsers.failed"));
     } finally {
       setLoading(null);
     }
@@ -427,6 +469,7 @@ function BulkBar({
         {t("adminManage.serverUsers.bulk.enableAll")}
       </button>
       {error && <span role="alert" className="text-xs text-red-400">{error}</span>}
+      {!error && warning && <span role="status" className="text-xs text-amber-400">{warning}</span>}
     </div>
   );
 }
@@ -444,22 +487,14 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(withBasePath("/api/admin/server-users"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ autoDisableNew: next }),
-      });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
-      if (!res.ok || data?.error) {
+      const result = await sendWrite("/api/admin/server-users", { method: "PATCH", body: { autoDisableNew: next } }, t);
+      if (!result.ok) {
+        // Refused or never reached the server — roll back the optimistic state.
         setOn(on);
-        setError(failureMessage(res.status, data?.error, t));
+        setError(result.error);
         return;
       }
       router.refresh();
-    } catch {
-      // Network failure — roll back the optimistic state too.
-      setOn(on);
-      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -488,6 +523,11 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
 export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, canLink }: ServerUserTableProps) {
   const t = useT();
   const [search, setSearch] = useState("");
+  // The account control renders in ONE place per row: the mobile stack below
+  // md, the Linked-account column from md up. Mounting it in both kept two
+  // copies of every account <option> per row and split their error state.
+  // null (SSR and hydration) renders the desktop column, like the server did.
+  const mdUp = useMediaQuery("(min-width: 48rem)");
 
   const query = search.trim().toLowerCase();
   const filtered = query
@@ -508,6 +548,8 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, 
     if (group.length === 0) return null;
     return group.map((u) => {
       const initials = u.username.slice(0, 2).toUpperCase();
+      // Guardrail 34d: the picker for an admin, the binding read-only otherwise.
+      const linkControl = canLink ? <LinkPicker row={u} accounts={accounts} /> : <LinkedAccountLabel row={u} />;
 
       return (
         <tr key={u.id} className="border-b border-zinc-800/50 last:border-0 hover:bg-zinc-800/20 transition-colors">
@@ -551,7 +593,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, 
                   <Badge className={`sm:hidden text-[10px] ${sourceStyles[source] ?? ""}`}>
                     {mediaInstanceLabel(source, u.serverInstance)}
                   </Badge>
-                  {canLink ? <LinkPicker row={u} accounts={accounts} /> : <LinkedAccountLabel row={u} />}
+                  {mdUp === false && linkControl}
                 </div>
               </div>
             </div>
@@ -569,7 +611,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts, 
 
           {/* Linked Summonarr account — whose watch history this identity feeds */}
           <td className="py-2.5 px-3 hidden md:table-cell">
-            {canLink ? <LinkPicker row={u} accounts={accounts} /> : <LinkedAccountLabel row={u} />}
+            {mdUp !== false && linkControl}
           </td>
 
           {/* Downloads toggle (Jellyfin only — Plex sharing API does not support

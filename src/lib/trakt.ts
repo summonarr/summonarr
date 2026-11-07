@@ -3,13 +3,16 @@ import { prisma } from "./prisma";
 import { getCache, setCache, TTL } from "./tmdb-cache";
 import { safeFetchTrusted } from "./safe-fetch";
 import { coalesce } from "./concurrency";
+import { processSingleton } from "./process-singleton";
 import type { TmdbMedia } from "./tmdb-types";
 
 const TRAKT_BASE = "https://api.trakt.tv";
 const TRAKT_TIMEOUT_MS = 15_000;
 
-// In-process lockout prevents hammering Trakt after a 429.
-let quotaLockoutUntil = 0;
+// In-process lockout prevents hammering Trakt after a 429. Process-wide
+// (guardrail 27a): a per-chunk `let` let a lockout tripped by the warm cron go
+// unseen by the page renders.
+const lockout = processSingleton("trakt:lockout", () => ({ until: 0 }));
 // Ceiling for the lockout, and the fallback when Trakt sends no Retry-After.
 // Deliberately different from the OMDB/MDBList 60-min constants: those guard a
 // DAILY quota, whereas Trakt's limits are short rolling windows (its
@@ -19,7 +22,7 @@ const QUOTA_LOCKOUT_MS = 60 * 60 * 1000;
 const QUOTA_LOCKOUT_MIN_MS = 30 * 1000;
 
 function isTraktQuotaLocked(): boolean {
-  return Date.now() < quotaLockoutUntil;
+  return Date.now() < lockout.until;
 }
 
 // Pure clamp (exported for tests): a Retry-After (ms) is honored within
@@ -30,7 +33,7 @@ export function clampTraktLockoutMs(retryAfterMs?: number): number {
 
 function tripQuotaLockout(reason: string, retryAfterMs?: number) {
   const ms = clampTraktLockoutMs(retryAfterMs);
-  quotaLockoutUntil = Date.now() + ms;
+  lockout.until = Date.now() + ms;
   console.warn(`[trakt] Quota lockout tripped (${reason}) — suspending calls for ${(ms / 60000).toFixed(1)} min`);
 }
 
@@ -47,16 +50,19 @@ interface TraktIds {
   tvdb?: number;
 }
 
-interface TraktMovie {
+// A popular-list row: /movies/popular and /shows/popular answer the same shape.
+interface TraktTitle {
   title: string;
   year: number | null;
   ids: TraktIds;
 }
 
-interface TraktShow {
-  title: string;
-  year: number | null;
-  ids: TraktIds;
+function traktHeaders(apiKey: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    "trakt-api-version": "2",
+    "trakt-api-key": apiKey,
+  };
 }
 
 async function traktFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
@@ -71,11 +77,7 @@ async function traktFetch<T>(path: string, params?: Record<string, string>): Pro
 
   const res = await safeFetchTrusted(url.toString(), {
     allowedHosts: ["api.trakt.tv"],
-    headers: {
-      "Content-Type": "application/json",
-      "trakt-api-version": "2",
-      "trakt-api-key": apiKey,
-    },
+    headers: traktHeaders(apiKey),
     timeoutMs: TRAKT_TIMEOUT_MS,
   });
 
@@ -92,32 +94,17 @@ async function traktFetch<T>(path: string, params?: Record<string, string>): Pro
 }
 
 // Trakt items without a tmdb id are silently dropped — we have no way to look them up in the TMDB cache
-function normalizeMovie(m: TraktMovie): TmdbMedia | null {
+function normalize(m: TraktTitle, mediaType: "movie" | "tv"): TmdbMedia | null {
   if (!m.ids.tmdb) return null;
   return {
     id: m.ids.tmdb,
-    mediaType: "movie",
+    mediaType,
     title: m.title ?? "",
     overview: "",
     posterPath: null,
     backdropPath: null,
     releaseDate: null,
     releaseYear: m.year ? String(m.year) : null,
-    voteAverage: 0,
-  };
-}
-
-function normalizeShow(s: TraktShow): TmdbMedia | null {
-  if (!s.ids.tmdb) return null;
-  return {
-    id: s.ids.tmdb,
-    mediaType: "tv",
-    title: s.title ?? "",
-    overview: "",
-    posterPath: null,
-    backdropPath: null,
-    releaseDate: null,
-    releaseYear: s.year ? String(s.year) : null,
     voteAverage: 0,
   };
 }
@@ -140,12 +127,28 @@ async function fetchPages<T>(path: string, pages: number, limit: number): Promis
   };
 }
 
-// Each helper wraps its whole cache-check-then-fan-out body in coalesce()
-// keyed on its cache key, so simultaneous cold-cache callers (the /top page
-// and /api/top-rated both call the popular pair per request) share ONE 3-5
-// page fan-out instead of multiplying it — guardrail 31's list-helper shape.
-export async function getTraktPopularMovies(pages = 5): Promise<TmdbMedia[]> {
-  const key = "trakt:popular:movies";
+// Pages of 100 each list reads.
+const DEFAULT_POPULAR_PAGES = 5;
+
+const POPULAR = {
+  movie: { key: "trakt:popular:movies", path: "/movies/popular", label: "popular movies" },
+  tv: { key: "trakt:popular:tv", path: "/shows/popular", label: "popular TV" },
+} as const;
+
+// The cache (and coalesce) key. The page count changes the list, so a caller
+// asking for another count gets its own entry; every production caller uses
+// the default, whose key is unchanged.
+function traktPopularKey(mediaType: "movie" | "tv", pages: number = DEFAULT_POPULAR_PAGES): string {
+  const base = POPULAR[mediaType].key;
+  return pages === DEFAULT_POPULAR_PAGES ? base : `${base}:pages=${pages}`;
+}
+
+// The whole cache-check-then-fan-out body is wrapped in coalesce() keyed on the
+// cache key, so simultaneous cold-cache callers (the /top page and
+// /api/top-rated both call the popular pair per request) share ONE page fan-out
+// instead of multiplying it — guardrail 31's list-helper shape.
+async function getTraktPopular(mediaType: "movie" | "tv", pages: number): Promise<TmdbMedia[]> {
+  const key = traktPopularKey(mediaType, pages);
   return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
@@ -154,42 +157,26 @@ export async function getTraktPopularMovies(pages = 5): Promise<TmdbMedia[]> {
   if (!apiKey) return [];
 
   try {
-    const { items, complete } = await fetchPages<TraktMovie>("/movies/popular", pages, 100);
+    const { items, complete } = await fetchPages<TraktTitle>(POPULAR[mediaType].path, pages, 100);
     const seen = new Set<number>();
     const result = items
-      .map(normalizeMovie)
+      .map((m) => normalize(m, mediaType))
       .filter((m): m is TmdbMedia => m !== null && !seen.has(m.id) && (seen.add(m.id), true));
     if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
     return result;
   } catch (err) {
-    console.error("[trakt] Failed to fetch popular movies:", err);
+    console.error(`[trakt] Failed to fetch ${POPULAR[mediaType].label}:`, err);
     return [];
   }
   });
 }
 
-export async function getTraktPopularTV(pages = 5): Promise<TmdbMedia[]> {
-  const key = "trakt:popular:tv";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
+export function getTraktPopularMovies(pages: number = DEFAULT_POPULAR_PAGES): Promise<TmdbMedia[]> {
+  return getTraktPopular("movie", pages);
+}
 
-  const apiKey = await getApiKey();
-  if (!apiKey) return [];
-
-  try {
-    const { items, complete } = await fetchPages<TraktShow>("/shows/popular", pages, 100);
-    const seen = new Set<number>();
-    const result = items
-      .map(normalizeShow)
-      .filter((m): m is TmdbMedia => m !== null && !seen.has(m.id) && (seen.add(m.id), true));
-    if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-    return result;
-  } catch (err) {
-    console.error("[trakt] Failed to fetch popular TV:", err);
-    return [];
-  }
-  });
+export function getTraktPopularTV(pages: number = DEFAULT_POPULAR_PAGES): Promise<TmdbMedia[]> {
+  return getTraktPopular("tv", pages);
 }
 
 // Admin connection test. Intentionally bypasses the quota lockout (inline
@@ -204,16 +191,12 @@ export async function testTraktConnection(): Promise<string> {
   url.searchParams.set("limit", "1");
   const res = await safeFetchTrusted(url.toString(), {
     allowedHosts: ["api.trakt.tv"],
-    headers: {
-      "Content-Type": "application/json",
-      "trakt-api-version": "2",
-      "trakt-api-key": apiKey,
-    },
+    headers: traktHeaders(apiKey),
     timeoutMs: TRAKT_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(`Trakt ${res.status}: ${res.statusText}`);
 
-  const movies = await res.json() as TraktMovie[];
+  const movies = await res.json() as TraktTitle[];
   if (!Array.isArray(movies) || !movies.length) throw new Error("Empty response from Trakt");
   return movies[0].title;
 }

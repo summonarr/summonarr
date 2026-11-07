@@ -2,6 +2,7 @@
   "shared.bell.empty": "Ancora nessuna notifica.",
   "shared.bell.viewAll": "Vedi tutte",
   "shared.common.dismiss": "Ignora",
+  "shared.common.loading": "Caricamento…",
   "shared.common.cancel": "Annulla",
   "shared.maintenance.active": "La modalità manutenzione è attiva.",
   "shared.maintenance.blocked": "Gli utenti non amministratori sono bloccati.",
@@ -56,5 +57,10 @@
   "shared.common.clearSearch": "Cancella ricerca",
   "shared.thread.placeholderShortcut": "Scrivi un messaggio… ({shortcut} per inviare)",
   "shared.rateLimited.generic": "Troppe richieste. Riprova tra poco.",
-  "shared.rateLimited.seconds": "Troppe richieste. Riprova tra {seconds} s."
+  "shared.rateLimited.seconds": "Troppe richieste. Riprova tra {seconds} s.",
+  "shared.upload.chunkFailed": "Caricamento della parte {chunk} di {total} non riuscito (HTTP {status}).",
+  "shared.upload.nonJson": "Il server ha inviato una risposta inattesa. Probabilmente la richiesta è stata reindirizzata, ad esempio alla pagina di accesso.",
+  "shared.upload.noCompletion": "Il caricamento è terminato, ma il server non ha mai confermato il ripristino.",
+  "shared.upload.network": "Caricamento non riuscito. Controlla la connessione e riprova.",
+  "shared.upload.cancelled": "Caricamento annullato."
 }

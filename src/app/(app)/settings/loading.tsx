@@ -6,7 +6,7 @@
 // the lg-only 192px (w-48) SettingsNav (group label + 32px links) beside the
 // max-w-3xl column of section cards (padding 22, radius 10, gap 16), each
 // opening with a 15px heading + 12px description (mb-5).
-import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 // Site / Media / Notifications / Integrations / Features / System at 12px with
 // 14px side padding.
@@ -14,7 +14,7 @@ const TAB_WIDTHS = [54, 64, 108, 104, 82, 74];
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle />
 
       <div className="flex flex-wrap gap-1 max-w-full" style={{ ...SKELETON_CARD, padding: 2, borderRadius: 8 }}>
@@ -58,6 +58,6 @@ export default function Loading() {
           ))}
         </div>
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

@@ -14,6 +14,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { logAudit, auditContext } from "@/lib/audit";
 import { isPrismaErrorCode } from "@/lib/prisma-errors";
 import { lockSetupInTx } from "@/lib/setup-lock";
+import { configuredTrustedOrigins } from "@/lib/trusted-origin";
 
 // A fixed, DB-free per-IP bound taken before the first Setting read: this is an
 // unauthenticated surface, so the limiter must bound anonymous DB load too (the
@@ -37,16 +38,12 @@ export async function POST(req: NextRequest) {
     hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
   if (!isNativeClient) {
     const origin = req.headers.get("origin") ?? "";
-    // Mirror proxy.ts's trusted-origin set: AUTH_URL plus any comma-separated
-    // AUTH_TRUSTED_ORIGIN entries, normalized to bare origins. Reading only
-    // AUTH_URL here would 403 a legitimately-configured additional origin that
-    // the proxy already trusts.
-    const allowed = new Set<string>();
-    for (const raw of [process.env.AUTH_URL, ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(",")]) {
-      const trimmed = raw?.trim();
-      if (!trimmed) continue;
-      try { allowed.add(new URL(trimmed).origin); } catch { }
-    }
+    // The proxy's trusted-origin set: AUTH_URL plus any comma-separated
+    // AUTH_TRUSTED_ORIGIN entries, read by the shared parser (trusted-origin.ts),
+    // so a bare `host:port` entry is skipped rather than trusting the opaque
+    // "null" origin. Stricter than the proxy on purpose: an Origin header is
+    // required (no Referer fallback) and an empty allowlist trusts nothing.
+    const allowed = configuredTrustedOrigins();
     let originOk = false;
     if (origin) {
       try { originOk = allowed.has(new URL(origin).origin); } catch { }

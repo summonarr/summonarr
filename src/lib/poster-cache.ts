@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
+import { tmdbDetailsKey } from "@/lib/tmdb-cache";
 
 // Resolve TMDB posters for activity views — `resolvePosterMap` returns a
 // `posterPathKey`→url map, `resolvePosterPathMap` the same lookup as raw TMDB
@@ -33,6 +34,18 @@ export interface PosterLookupItem {
 // below deliberately files such a row under BOTH keys so either spelling hits.
 export function posterPathKey(tmdbId: number, mediaType?: string | null): string {
   return mediaType === "TV" ? `tv:${tmdbId}` : `movie:${tmdbId}`;
+}
+
+// The poster for one activity row: the live lookup's (authoritative, current)
+// when resolvePosterMap found one, else the PlayHistory snapshot at w342, else
+// null (the letter tile). One rule for every page that shows these rows.
+export function posterSrcFor(
+  posters: Record<string, string>,
+  tmdbId: number | null,
+  mediaType: string | null | undefined,
+  snapshotPath: string | null | undefined,
+): string | null {
+  return (tmdbId != null ? posters[posterPathKey(tmdbId, mediaType)] : undefined) ?? (snapshotPath ? posterUrl(snapshotPath, "w342") : null);
 }
 
 function namespacesFor(mediaType?: string | null): ("movie" | "tv")[] {
@@ -113,7 +126,9 @@ export async function resolvePosterPathMap(
     }
   }
 
-  const missing: string[] = [];
+  // details key → the `<ns>:<id>` key the map is filled under.
+  const missing = new Map<string, string>();
+  const want = (ns: "movie" | "tv", id: number) => missing.set(tmdbDetailsKey(ns, id), `${ns}:${id}`);
   for (const [id, namespaces] of wanted) {
     const named = explicit.get(id);
     for (const ns of namespaces) {
@@ -121,28 +136,25 @@ export async function resolvePosterPathMap(
       // A namespace the caller NAMED is always resolved on its own — the other
       // medium's hit is not an answer for it.
       if (named?.has(ns)) {
-        missing.push(`${ns}:${id}`);
+        want(ns, id);
         continue;
       }
       // Unknown mediaType ⇒ both namespaces were requested, but either one
       // answers the question (finalize mirrors it), so one hit ends the search.
       if (map[`movie:${id}`] || map[`tv:${id}`]) continue;
-      missing.push(`${ns}:${id}`);
+      want(ns, id);
     }
   }
-  if (missing.length === 0) return finalize(map, wanted, explicit);
+  if (missing.size === 0) return finalize(map, wanted, explicit);
 
   const rows = await prisma.tmdbCache.findMany({
-    where: { key: { in: missing.map((k) => `${k}:details`) } },
+    where: { key: { in: [...missing.keys()] } },
     select: { key: true, data: true },
   });
 
   for (const row of rows) {
-    const [ns, rawId] = row.key.split(":");
-    const id = parseInt(rawId ?? "", 10);
-    if (!Number.isFinite(id) || (ns !== "movie" && ns !== "tv")) continue;
-    const key = `${ns}:${id}`;
-    if (map[key]) continue;
+    const key = missing.get(row.key);
+    if (!key || map[key]) continue;
     try {
       const parsed = JSON.parse(row.data) as { posterPath?: string | null };
       if (parsed.posterPath && posterUrl(parsed.posterPath, "w342")) {

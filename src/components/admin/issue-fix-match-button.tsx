@@ -9,11 +9,14 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 import type { FileInfoInstance, FileInfoResponse } from "@/app/api/admin/fix-match/file-info/route";
 import { withBasePath } from "@/lib/base-path";
+import { postMediaRequest } from "@/lib/client/media-request";
 import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib/client/fix-match";
 import { rich } from "@/components/settings/forms/rich";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 import { useT } from "@/components/i18n/i18n-provider";
-import { requestPageRefresh } from "@/lib/client/refresh-hold";
+import { holdLiveRefresh, requestPageRefresh } from "@/lib/client/refresh-hold";
+
+type Side = "plex" | "jellyfin";
 
 type ServerStatus = "idle" | "fetching" | "selecting" | "applying" | "done" | "error";
 
@@ -37,12 +40,6 @@ interface Props {
   title:        string;
   onPlex:       boolean;
   onJellyfin:   boolean;
-
-  isAdmin:      boolean;
-
-  userProvider?: string;
-
-  requestToken?: string;
 
   // Preferred server for the fix. This dialog starts from a tmdbId with no
   // library row in hand, so it's only a HINT: the real instance is resolved from
@@ -80,11 +77,14 @@ const LEVEL_STYLES: Record<string, { border: string; bg: string; badge: string }
   unknown:  { border: "border-l-2 border-transparent",     bg: "hover:bg-zinc-800",                        badge: "bg-zinc-800 text-zinc-500 border-zinc-700" },
 };
 
+// A row only PICKS its candidate; the footer's Apply sends it, so a misclick
+// while scrolling the list never rematches the item.
 function PlexCandidateRow({
-  candidate, onSelect, disabled, serverInstance,
+  candidate, onPick, picked, disabled, serverInstance,
 }: {
   candidate:      PlexCandidate;
-  onSelect:       (guid: string) => void;
+  onPick:         (guid: string) => void;
+  picked:         boolean;
   disabled:       boolean;
   serverInstance: string;
 }) {
@@ -102,10 +102,12 @@ function PlexCandidateRow({
 
   return (
     <button
-      onClick={() => onSelect(candidate.guid)}
+      onClick={() => onPick(candidate.guid)}
       disabled={disabled}
+      aria-pressed={picked}
       className={`w-full text-left px-5 py-3.5 flex items-start gap-4 transition-colors
         disabled:opacity-50 disabled:cursor-not-allowed ${style.border} ${style.bg}`}
+      style={picked ? { boxShadow: "inset 0 0 0 2px var(--ds-accent-ring)" } : undefined}
     >
       <div className="flex-shrink-0 w-14 h-[84px] rounded overflow-hidden bg-zinc-800 flex items-center justify-center mt-0.5">
         {thumbSrc
@@ -129,10 +131,13 @@ function PlexCandidateRow({
         <div className="flex items-center gap-3 mt-1 flex-wrap">
           {candidate.tmdbId && <span className="text-xs font-mono text-zinc-500">tmdb:{candidate.tmdbId}</span>}
           {candidate.imdbId && <span className="text-xs font-mono text-zinc-500">{candidate.imdbId}</span>}
-          {candidate.tmdbRuntime && <span className="text-xs text-zinc-500">{t("adminQueue.fixMatch.minutes", { minutes: candidate.tmdbRuntime })}</span>}
+          {/* TMDB answers runtime 0 for many unreleased titles: never a bare `0 &&`. */}
+          {candidate.tmdbRuntime != null && candidate.tmdbRuntime > 0 && <span className="text-xs text-zinc-500">{t("adminQueue.fixMatch.minutes", { minutes: candidate.tmdbRuntime })}</span>}
         </div>
       </div>
-      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">{t("adminQueue.fixMatch.apply")}</div>
+      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">
+        {picked ? <Check aria-hidden className="w-4 h-4 text-[var(--ds-accent-text)]" /> : t("adminQueue.fixMatch.select")}
+      </div>
     </button>
   );
 }
@@ -172,13 +177,75 @@ function InstancePicker({
   );
 }
 
+// One brand colour per service: a fill/border tint and its per-theme text token
+// (guardrail 42). Literal class names so Tailwind generates them.
+const BRAND: Record<Side, { name: string; tint: string; text: string; textClass: string }> = {
+  plex:     { name: "Plex",     tint: "var(--ds-plex)",     text: "var(--ds-plex-text)",     textClass: "text-[var(--ds-plex-text)]" },
+  jellyfin: { name: "Jellyfin", tint: "var(--ds-jellyfin)", text: "var(--ds-jellyfin-text)", textClass: "text-[var(--ds-jellyfin-text)]" },
+};
+
+// A service's card on the confirm step: its state, the server picker and the
+// one action that starts its fix (Plex: search candidates; Jellyfin: apply).
+function ServerFixPanel({
+  side, instanceLabel, state, rows, instance, onInstance, pickerDisabled, actionLabel, onAction,
+}: {
+  side:           Side;
+  instanceLabel:  string;
+  state:          ServerState;
+  rows:           FileInfoInstance[];
+  instance:       string | null;
+  onInstance:     (slug: string) => void;
+  pickerDisabled: boolean;
+  actionLabel:    string;
+  onAction:       () => void;
+}) {
+  const t = useT();
+  const brand = BRAND[side];
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-2.5">
+      <div className="flex items-center justify-between">
+        <span className={`text-sm font-semibold ${brand.textClass}`}>
+          {brand.name}{instanceLabel && <span className="ml-1.5 text-xs font-normal text-zinc-400">{instanceLabel}</span>}
+        </span>
+        {state.status === "done" && (
+          <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> {t("adminQueue.fixMatch.fixed")}</span>
+        )}
+        {state.status === "error" && (
+          <span className="text-xs text-red-400">{state.error}</span>
+        )}
+      </div>
+      {state.status === "done" && state.warning && (
+        <p className="text-xs text-amber-400 leading-snug">{state.warning}</p>
+      )}
+      <InstancePicker service={side} rows={rows} value={instance} onChange={onInstance} disabled={pickerDisabled} />
+      {state.status === "idle" || state.status === "error" ? (
+        // Brand tint fill + brand text token; .ds-hover-tint supplies the
+        // hover since the background is inline.
+        <button
+          onClick={onAction}
+          className="ds-hover-tint w-full text-xs px-3 py-2 rounded border font-medium transition-colors"
+          style={{
+            background: `color-mix(in oklab, ${brand.tint} 12%, transparent)`,
+            borderColor: `color-mix(in oklab, ${brand.tint} 35%, var(--ds-border))`,
+            color: brand.text,
+          }}
+        >
+          {actionLabel}
+        </button>
+      ) : state.status === "fetching" ? (
+        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.loadingPlex")}</p>
+      ) : state.status === "applying" ? (
+        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.applying")}</p>
+      ) : null}
+    </div>
+  );
+}
+
 // Multi-phase dialog (search → confirm → Plex candidates) for re-matching a mismatched library item to the correct TMDB ID and resolving the issue.
 export function IssueFixMatchButton({
-  issueId, tmdbId, mediaType, title, onPlex, onJellyfin, isAdmin, userProvider, requestToken,
+  issueId, tmdbId, mediaType, title, onPlex, onJellyfin,
   serverInstance = DEFAULT_MEDIA_INSTANCE,
 }: Props) {
-  const showPlex     = onPlex     && (isAdmin || userProvider === "plex");
-  const showJellyfin = onJellyfin && (isAdmin || userProvider === "jellyfin" || userProvider === "jellyfin-quickconnect");
   const router = useRouter();
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -193,6 +260,8 @@ export function IssueFixMatchButton({
   const [plexState, setPlexState]         = useState<ServerState>({ status: "idle" });
   const [jellyfinState, setJellyfinState] = useState<ServerState>({ status: "idle" });
   const [plexCandidates, setPlexCandidates] = useState<CandidatesResponse | null>(null);
+  // The Plex candidate picked in the list; the footer's Apply sends it.
+  const [plexPick, setPlexPick] = useState<string | null>(null);
   const [fileInfo, setFileInfo]           = useState<FileInfoResponse | null>(null);
   const [fileInfoError, setFileInfoError] = useState(false);
   // Which configured server each side's fix targets. Resolved from the file-info
@@ -204,6 +273,12 @@ export function IssueFixMatchButton({
 
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The query whose results are on screen: Back from the confirm step keeps
+  // them, so the same query isn't asked again (the search route is rate limited).
+  const lastSearched = useRef<string | null>(null);
+  // Bumped by reset(): an add-as-request still in flight when the dialog was
+  // closed must not write its outcome into the next session of the dialog.
+  const addGen = useRef(0);
   // Stops the runFixMatch status polling on unmount (the server-side job keeps
   // running by design). One controller PER SIDE: Plex and Jellyfin can be
   // applied at the same time, and a single shared ref would lose the first
@@ -221,10 +296,13 @@ export function IssueFixMatchButton({
     setSearching(false);
     setSearchResults([]);
     setSearchError("");
+    lastSearched.current = null;
     setSelected(null);
     setPlexState({ status: "idle" });
     setJellyfinState({ status: "idle" });
     setPlexCandidates(null);
+    setPlexPick(null);
+    addGen.current++;
     setAddWrongState("idle");
     setFileInfoError(false);
     setPlexInstance(null);
@@ -235,6 +313,16 @@ export function IssueFixMatchButton({
     setOpen(false);
     reset();
   }, [reset]);
+
+  // While the dialog is open, the page's live refresh waits: resolving the
+  // issue refreshes the page, and on the OPEN tab that drops the issue's card
+  // — and this dialog with it — before its result or the add-as-request step
+  // was seen. Released on close, hide and unmount; never held while hidden,
+  // where a remap can run for hours.
+  useEffect(() => {
+    if (!open) return;
+    return holdLiveRefresh();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -273,7 +361,10 @@ export function IssueFixMatchButton({
   useEffect(() => {
     if (!open || phase !== "search") return;
     if (searchTimer.current) clearTimeout(searchTimer.current);
-    if (!query.trim()) { setSearchResults([]); setSearchError(""); return; }
+    const q = query.trim();
+    if (!q) { setSearchResults([]); setSearchError(""); lastSearched.current = null; return; }
+    // Back from the confirm step: these results are still on screen.
+    if (q === lastSearched.current) return;
     // AbortController in addition to the debounce timer: cancels the in-flight
     // fetch when the query changes mid-request OR the dialog closes, so stale
     // results from a previous keystroke can't overwrite the current ones.
@@ -283,9 +374,10 @@ export function IssueFixMatchButton({
       setSearchError("");
       try {
         const type = mediaType === "MOVIE" ? "movie" : "tv";
-        const res = await fetch(withBasePath(`/api/search?q=${encodeURIComponent(query.trim())}&type=${type}`), { signal: ac.signal });
+        const res = await fetch(withBasePath(`/api/search?q=${encodeURIComponent(q)}&type=${type}`), { signal: ac.signal });
         const json = await res.json().catch(() => null) as TmdbMedia[] | { error: string } | null;
         if (!res.ok || !json || "error" in json) throw new Error(json && "error" in json ? json.error : t("adminQueue.common.requestFailed", { status: res.status }));
+        lastSearched.current = q;
         setSearchResults(json as TmdbMedia[]);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -311,6 +403,7 @@ export function IssueFixMatchButton({
   async function fetchPlexCandidates() {
     if (!selected) return;
     setPlexState({ status: "fetching" });
+    setPlexPick(null);
     try {
       const params = new URLSearchParams({
         server: "plex",
@@ -333,8 +426,10 @@ export function IssueFixMatchButton({
     }
   }
 
-  // true when the issue was closed. A failure used to be swallowed, so a fix that
-  // landed left the issue open with nothing on screen to say so.
+  // The fallback close, for a fix that joined a remap already running (whose
+  // job closes this issue separately and can't say whether it did). A resolved
+  // issue stays resolved, so it is harmless when the job got there first. true
+  // when the issue is closed.
   async function resolveIssue(correctedTitle: string): Promise<boolean> {
     const res = await fetch(withBasePath(`/api/issues/${issueId}`), {
       method:  "PATCH",
@@ -346,78 +441,60 @@ export function IssueFixMatchButton({
     return res?.ok === true;
   }
 
-  async function applyPlex(canonicalGuid: string) {
+  // One apply for both services. Plex sends the candidate picked from its list;
+  // Jellyfin's target is exact. Each side keeps its own AbortController (both
+  // can run at once). The job closes the issue itself when the remap succeeds
+  // (issueId), so the issue no longer stays open when this dialog goes away
+  // mid-fix; its answer says whether it did.
+  async function applyFix(side: Side, canonicalGuid?: string) {
     if (!selected) return;
-    setPlexState({ status: "applying" });
-    setPhase("confirm");
+    const setState = side === "plex" ? setPlexState : setJellyfinState;
+    const abort = side === "plex" ? plexAbort : jellyfinAbort;
+    const instance = side === "plex" ? plexInstance : jellyfinInstance;
+    setState({ status: "applying" });
+    if (side === "plex") setPhase("confirm");
     const ac = new AbortController();
-    plexAbort.current = ac;
+    abort.current = ac;
     try {
       // Background job + status poll (guardrail 37a).
       const outcome = await runFixMatch({
-        server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, canonicalGuid,
-        ...(plexInstance ? { serverInstance: plexInstance } : {}),
+        server: side, tmdbId, mediaType, correctTmdbId: selected.id,
+        ...(canonicalGuid ? { canonicalGuid } : {}),
+        ...(instance ? { serverInstance: instance } : {}),
+        issueId, issueTitle: selected.title,
       }, { signal: ac.signal });
-      const resolved = await resolveIssue(selected.title);
-      setPlexState({ status: "done", warning: [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")].filter(Boolean).join(" ") || undefined });
+      const resolved = outcome.issueResolved ?? await resolveIssue(selected.title);
+      setState({ status: "done", warning: [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")].filter(Boolean).join(" ") || undefined });
       // Resolving is announced over SSE too; the shared refresh makes the two one.
       requestPageRefresh(() => router.refresh());
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
       // Codes → translated lines; the server's own message passes through.
-      setPlexState({ status: "error", error: fixMatchErrorMessage(err, t) });
-    }
-  }
-
-  async function applyJellyfin() {
-    if (!selected) return;
-    setJellyfinState({ status: "applying" });
-    const ac = new AbortController();
-    jellyfinAbort.current = ac;
-    try {
-      // Background job + status poll (guardrail 37a).
-      const outcome = await runFixMatch({
-        server: "jellyfin", tmdbId, mediaType, correctTmdbId: selected.id,
-        ...(jellyfinInstance ? { serverInstance: jellyfinInstance } : {}),
-      }, { signal: ac.signal });
-      const resolved = await resolveIssue(selected.title);
-      setJellyfinState({ status: "done", warning: [fixMatchWarningMessage(outcome, t), resolved ? null : t("adminQueue.fixMatch.issueNotResolved")].filter(Boolean).join(" ") || undefined });
-      // Resolving is announced over SSE too; the shared refresh makes the two one.
-      requestPageRefresh(() => router.refresh());
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
-      setJellyfinState({ status: "error", error: fixMatchErrorMessage(err, t) });
+      setState({ status: "error", error: fixMatchErrorMessage(err, t) });
     }
   }
 
   const anyFixDone = plexState.status === "done" || jellyfinState.status === "done";
 
   async function addWrongItemAsRequest() {
+    const gen = ++addGen.current;
     setAddWrongState("adding");
+    let next: "done" | "conflict" | "error";
     try {
-
-      let token = requestToken;
-      if (!token) {
-        const tokenRes = await fetch(withBasePath(`/api/requests/token?tmdbId=${tmdbId}&mediaType=${mediaType}`));
-        if (tokenRes.ok) token = (await tokenRes.json()).token;
-      }
-      const res = await fetch(withBasePath("/api/requests"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tmdbId,
-          mediaType,
-          // Stored on the MediaRequest and rendered in the queue — translated.
-          note: t("adminQueue.fixMatch.autoRequestNote"),
-          _token: token,
-        }),
+      // A failed token fetch is returned as its own non-ok answer (nothing is
+      // posted).
+      const res = await postMediaRequest({
+        tmdbId,
+        mediaType,
+        // Stored on the MediaRequest and rendered in the queue — translated.
+        note: t("adminQueue.fixMatch.autoRequestNote"),
       });
-      if (res.status === 409) { setAddWrongState("conflict"); return; }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setAddWrongState("done");
+      next = res.status === 409 ? "conflict" : res.ok ? "done" : "error";
     } catch {
-      setAddWrongState("error");
+      next = "error";
     }
+    // The dialog was closed (reset) meanwhile: this answer belongs to that session.
+    if (gen === addGen.current) setAddWrongState(next);
   }
 
   const busy = plexState.status === "fetching" || plexState.status === "applying" || jellyfinState.status === "applying";
@@ -447,9 +524,9 @@ export function IssueFixMatchButton({
       </button>
 
       {/* While an apply is in flight the dialog HIDES rather than resetting
-          (matches the sibling FixMatchModal's onHide): the component stays
-          mounted so runFixMatch's poll still resolves the issue and refreshes,
-          and reopening shows the settled state. Only a not-busy close resets. */}
+          (matches the sibling FixMatchModal's onHide): reopening shows the
+          settled state. The job closes the issue itself, mounted or not. Only
+          a not-busy close resets. */}
       <Dialog open={open} onOpenChange={(o) => { if (!o) { if (busy) setOpen(false); else close(); } }}>
         <DialogPortal>
           <DialogBackdrop />
@@ -460,7 +537,7 @@ export function IssueFixMatchButton({
                 {phase !== "search" && (
                   <button
                     onClick={() => {
-                      if (phase === "plex-candidates") { setPhase("confirm"); setPlexState({ status: "idle" }); setPlexCandidates(null); }
+                      if (phase === "plex-candidates") { setPhase("confirm"); setPlexState({ status: "idle" }); setPlexCandidates(null); setPlexPick(null); }
                       else { setPhase("search"); setSelected(null); }
                     }}
                     disabled={busy}
@@ -528,13 +605,15 @@ export function IssueFixMatchButton({
                     {fileInfo.arrTitle && (
                       <span className="text-xs text-orange-400 truncate">{fileInfo.arrTitle}</span>
                     )}
+                    {/* Disabled while a fix runs: picking now would re-offer
+                        the fix buttons for a new title over the one in flight. */}
                     <button
                       onClick={() => {
-                        if (!fileInfo.arrTmdbId || !fileInfo.arrTitle) return;
+                        if (!fileInfo.arrTmdbId) return;
                         pickResult({
                           id: fileInfo.arrTmdbId,
                           mediaType: mediaType === "MOVIE" ? "movie" : "tv",
-                          title: fileInfo.arrTitle,
+                          title: fileInfo.arrTitle ?? `TMDB #${fileInfo.arrTmdbId}`,
                           overview: "",
                           posterPath: null,
                           backdropPath: null,
@@ -543,8 +622,9 @@ export function IssueFixMatchButton({
                           voteAverage: 0,
                         });
                       }}
+                      disabled={busy}
                       className="text-xs px-2 py-0.5 rounded border border-orange-500/30 bg-orange-500/10
-                        text-orange-400 hover:bg-orange-500/20 transition-colors shrink-0 font-medium"
+                        text-orange-400 hover:bg-orange-500/20 transition-colors shrink-0 font-medium disabled:opacity-40"
                     >
                       {t("adminQueue.fixMatch.useThis")}
                     </button>
@@ -569,6 +649,8 @@ export function IssueFixMatchButton({
                     <input
                       ref={inputRef}
                       type="text"
+                      // The search route refuses a longer query.
+                      maxLength={200}
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                       placeholder={mediaType === "MOVIE" ? t("adminQueue.fixMatch.searchMovies") : t("adminQueue.fixMatch.searchTv")}
@@ -656,94 +738,35 @@ export function IssueFixMatchButton({
                 </div>
 
                 <div className="px-6 py-4 space-y-3 flex-1">
-                  {showPlex && (
-                    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-2.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-[var(--ds-plex-text)]">
-                          Plex{plexInstanceLabel && <span className="ml-1.5 text-xs font-normal text-zinc-400">{plexInstanceLabel}</span>}
-                        </span>
-                        {plexState.status === "done" && (
-                          <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> {t("adminQueue.fixMatch.fixed")}</span>
-                        )}
-                        {plexState.status === "error" && (
-                          <span className="text-xs text-red-400">{plexState.error}</span>
-                        )}
-                      </div>
-                      {plexState.status === "done" && plexState.warning && (
-                        <p className="text-xs text-amber-400 leading-snug">{plexState.warning}</p>
-                      )}
-                      <InstancePicker
-                        service="plex"
-                        rows={fileInfo?.plexInstances ?? []}
-                        value={plexInstance}
-                        onChange={setPlexInstance}
-                        disabled={busy || plexState.status === "done"}
-                      />
-                      {plexState.status === "idle" || plexState.status === "error" ? (
-                        // Brand tint fill + brand text token (one colour per
-                        // brand, guardrail 42); .ds-hover-tint supplies the
-                        // hover since the background is inline.
-                        <button
-                          onClick={fetchPlexCandidates}
-                          className="ds-hover-tint w-full text-xs px-3 py-2 rounded border font-medium transition-colors"
-                          style={{
-                            background: "color-mix(in oklab, var(--ds-plex) 12%, transparent)",
-                            borderColor: "color-mix(in oklab, var(--ds-plex) 35%, var(--ds-border))",
-                            color: "var(--ds-plex-text)",
-                          }}
-                        >
-                          {t("adminQueue.fixMatch.searchPlex", { id: selected.id })}
-                        </button>
-                      ) : plexState.status === "fetching" ? (
-                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.loadingPlex")}</p>
-                      ) : plexState.status === "applying" ? (
-                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.applying")}</p>
-                      ) : null}
-                    </div>
+                  {onPlex && (
+                    <ServerFixPanel
+                      side="plex"
+                      instanceLabel={plexInstanceLabel}
+                      state={plexState}
+                      rows={fileInfo?.plexInstances ?? []}
+                      instance={plexInstance}
+                      onInstance={setPlexInstance}
+                      pickerDisabled={busy || plexState.status === "done"}
+                      actionLabel={t("adminQueue.fixMatch.searchPlex", { id: selected.id })}
+                      onAction={fetchPlexCandidates}
+                    />
                   )}
 
-                  {showJellyfin && (
-                    <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-2.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-[var(--ds-jellyfin-text)]">
-                          Jellyfin{jellyfinInstanceLabel && <span className="ml-1.5 text-xs font-normal text-zinc-400">{jellyfinInstanceLabel}</span>}
-                        </span>
-                        {jellyfinState.status === "done" && (
-                          <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> {t("adminQueue.fixMatch.fixed")}</span>
-                        )}
-                        {jellyfinState.status === "error" && (
-                          <span className="text-xs text-red-400">{jellyfinState.error}</span>
-                        )}
-                      </div>
-                      {jellyfinState.status === "done" && jellyfinState.warning && (
-                        <p className="text-xs text-amber-400 leading-snug">{jellyfinState.warning}</p>
-                      )}
-                      <InstancePicker
-                        service="jellyfin"
-                        rows={fileInfo?.jellyfinInstances ?? []}
-                        value={jellyfinInstance}
-                        onChange={setJellyfinInstance}
-                        disabled={busy || jellyfinState.status === "done"}
-                      />
-                      {jellyfinState.status === "idle" || jellyfinState.status === "error" ? (
-                        <button
-                          onClick={applyJellyfin}
-                          className="ds-hover-tint w-full text-xs px-3 py-2 rounded border font-medium transition-colors"
-                          style={{
-                            background: "color-mix(in oklab, var(--ds-jellyfin) 12%, transparent)",
-                            borderColor: "color-mix(in oklab, var(--ds-jellyfin) 35%, var(--ds-border))",
-                            color: "var(--ds-jellyfin-text)",
-                          }}
-                        >
-                          {t("adminQueue.fixMatch.fixJellyfin", { id: selected.id })}
-                        </button>
-                      ) : jellyfinState.status === "applying" ? (
-                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.applying")}</p>
-                      ) : null}
-                    </div>
+                  {onJellyfin && (
+                    <ServerFixPanel
+                      side="jellyfin"
+                      instanceLabel={jellyfinInstanceLabel}
+                      state={jellyfinState}
+                      rows={fileInfo?.jellyfinInstances ?? []}
+                      instance={jellyfinInstance}
+                      onInstance={setJellyfinInstance}
+                      pickerDisabled={busy || jellyfinState.status === "done"}
+                      actionLabel={t("adminQueue.fixMatch.fixJellyfin", { id: selected.id })}
+                      onAction={() => void applyFix("jellyfin")}
+                    />
                   )}
 
-                  {!showPlex && !showJellyfin && (
+                  {!onPlex && !onJellyfin && (
                     <p className="text-sm text-zinc-500 text-center py-6">
                       {t("adminQueue.fixMatch.notInLibrary")}
                     </p>
@@ -814,7 +837,8 @@ export function IssueFixMatchButton({
                       <PlexCandidateRow
                         key={c.guid}
                         candidate={c}
-                        onSelect={applyPlex}
+                        onPick={setPlexPick}
+                        picked={c.guid === plexPick}
                         disabled={plexState.status === "applying"}
                         serverInstance={plexCandidates.serverInstance}
                       />
@@ -824,7 +848,7 @@ export function IssueFixMatchButton({
               </>
             )}
 
-            <div className="px-6 py-4 border-t border-zinc-700 flex justify-end flex-shrink-0">
+            <div className="px-6 py-4 border-t border-zinc-700 flex justify-end gap-2 flex-shrink-0">
               {/* Mirrors the header X: never disabled — while an apply runs it
                   HIDES the dialog (onOpenChange) and says so, instead of the
                   same dialog answering "can I close?" two different ways. */}
@@ -835,6 +859,20 @@ export function IssueFixMatchButton({
               >
                 {busy ? t("adminQueue.fixMatch.hide") : t("adminQueue.common.close")}
               </DialogClose>
+              {phase === "plex-candidates" && plexCandidates && (
+                <button
+                  onClick={() => { if (plexPick) void applyFix("plex", plexPick); }}
+                  disabled={plexPick === null || plexState.status === "applying"}
+                  className="ds-hover-tint text-sm px-4 py-2 rounded border font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  style={{
+                    background: `color-mix(in oklab, ${BRAND.plex.tint} 12%, transparent)`,
+                    borderColor: `color-mix(in oklab, ${BRAND.plex.tint} 35%, var(--ds-border))`,
+                    color: BRAND.plex.text,
+                  }}
+                >
+                  {t("adminQueue.fixMatch.applyMatch")}
+                </button>
+              )}
             </div>
           </DialogPopup>
         </DialogPortal>

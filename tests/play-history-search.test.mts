@@ -428,7 +428,7 @@ shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string, ...binds
   if (sql.includes("COUNT(DISTINCT") || sql.includes("COUNT(*)::int")) {
     return [{ total: rows.length }];
   }
-  if (sql.includes("WITH base AS")) {
+  if (/\bbase AS \(/.test(sql)) {
     return paginate(rows, sql, binds).map(groupedShape);
   }
   if (sql.includes("SELECT h.*")) {
@@ -461,6 +461,8 @@ shadowPrismaModel(prisma, "playHistory", {
 // Poster resolution: no cached art, so the response's poster fields stay null.
 shadowPrismaModel(prisma, "tmdbMediaCore", { findMany: async () => [] });
 shadowPrismaModel(prisma, "tmdbCache", { findMany: async () => [] });
+// The statistics time zone the fromDay/toDay filters are read in.
+shadowPrismaModel(prisma, "setting", { findUnique: async () => ({ value: "UTC" }), findMany: async () => [] });
 
 const auditRows: { action: string; details: string | null }[] = [];
 shadowPrismaModel(prisma, "auditLog", {
@@ -847,4 +849,61 @@ test("grouped: the window aliases map through as totalPausedDuration / firstStar
   for (const alias of ["rn", "chain_id", "segment_count", "total_play_duration", "total_paused_duration", "first_started_at", "last_stopped_at", "chain_watched", "chain_completed", "msu_username", "msu_source", "msu_thumb_url"]) {
     assert.equal(alias in it, false, `raw alias ${alias} must not reach the client`);
   }
+});
+
+// The grouped list's filters pick CHAINS; the window aggregates then run over
+// every segment of a picked chain. When the filters were applied inside the
+// windowed CTE, a date range cut a chain at its edge (segmentCount and the
+// totals under-counted) and `watched=false` reported a chain finished in another
+// segment as unwatched. The aggregate arithmetic itself is Postgres's (proven
+// against a real database when this changed); these pin the query's structure.
+function groupedDataSql(): string {
+  const q = rawCalls.find((c) => /\bbase AS \(/.test(c.sql) && c.sql.includes("ROW_NUMBER()"));
+  assert.ok(q, "the grouped data query ran");
+  return q!.sql.replace(/\s+/g, " ");
+}
+function groupedCountSql(): string {
+  const q = rawCalls.find((c) => c.sql.includes("COUNT(DISTINCT") || c.sql.includes("COUNT(*)::int"));
+  assert.ok(q, "the grouped count query ran");
+  return q!.sql.replace(/\s+/g, " ");
+}
+
+test("grouped: segment filters apply only where chains are CHOSEN, never inside the windowed CTE", async () => {
+  rawCalls.length = 0;
+  await fetchList({ source: "plex", startDate: "2026-01-01", search: "anything" });
+  const sql = groupedDataSql();
+  const matched = sql.slice(sql.indexOf("matched AS ("), sql.indexOf("base AS ("));
+  const base = sql.slice(sql.indexOf("base AS ("), sql.indexOf("SELECT b.*"));
+  assert.match(matched, /h\."source" = \$1/, "the chain choice carries the filters");
+  assert.match(matched, /h\."startedAt" >= \$2/);
+  assert.doesNotMatch(base, /\$\d/, "the windows see every segment of a chosen chain, unfiltered");
+  assert.match(
+    base,
+    /WHERE \(h\.id IN \(SELECT chain_id FROM matched\) OR h\."referenceId" IN \(SELECT chain_id FROM matched\)\) AND COALESCE\(h\."referenceId", h\.id\) IN \(SELECT chain_id FROM matched\)/,
+    "every segment of each chosen chain, by id or referenceId, re-checked exactly",
+  );
+});
+
+test("grouped: watched is decided per CHAIN — in the data and in the total", async () => {
+  rawCalls.length = 0;
+  await fetchList({ watched: "false", source: "plex" });
+  const sql = groupedDataSql();
+  assert.doesNotMatch(sql, /h\."watched" = (TRUE|FALSE)/, "no per-segment watched filter");
+  assert.match(sql, /WHERE b\.rn = 1 AND b\.chain_watched = FALSE/);
+  const count = groupedCountSql();
+  assert.match(count, /bool_or\(h\."watched"\) AS chain_watched/);
+  assert.match(count, /GROUP BY COALESCE\(h\."referenceId", h\.id\)/);
+  assert.match(count, /b\.chain_watched = FALSE/);
+
+  rawCalls.length = 0;
+  await fetchList({ watched: "true" });
+  assert.match(groupedDataSql(), /WHERE b\.rn = 1 AND b\.chain_watched = TRUE/);
+  assert.doesNotMatch(groupedDataSql(), /matched AS/, "no segment filter: every chain is chosen in full, no chain-selection pass");
+});
+
+test("ungrouped: watched still filters segments (each row is its own chain there)", async () => {
+  rawCalls.length = 0;
+  await fetchList({ ungrouped: "true", watched: "false" });
+  const q = rawCalls.find((c) => c.sql.includes("SELECT h.*"));
+  assert.match(q!.sql, /h\."watched" = FALSE/);
 });

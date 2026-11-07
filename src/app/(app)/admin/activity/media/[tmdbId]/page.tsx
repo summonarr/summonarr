@@ -19,34 +19,6 @@ const COMPLETION_BUCKETS = [
   "95-100%",
 ];
 
-// getMediaPlayStats' 90-day window (`ninetyDaysAgo` in play-history.ts).
-const PLAYS_BY_DAY_WINDOW_DAYS = 90;
-
-// Postgres GROUP BY day omits zero-play days, and getMediaPlayStats hands its
-// daily series over unpadded — unlike its two siblings, which run it through
-// play-history.ts's private padDailySeries. AreaChart positions points evenly
-// by index with no date awareness and renders NOTHING for fewer than two
-// points, so an unpadded feed collapses the "90d" x-axis onto the non-zero
-// days (a Jun 1 → Aug 30 gap looks like Jun 1 → Jun 2) and a title watched on
-// one day in the window shows a blank box. Pad here, mirroring that helper
-// (UTC day keys, oldest → newest, `daysBack` entries), so the chart reads the
-// same way as the user-detail page's identical card.
-function padPlaysByDay(
-  rows: { day: string; count: number }[],
-  daysBack: number,
-): { day: string; count: number }[] {
-  const byDay = new Map(rows.map((r) => [r.day, r]));
-  const out: { day: string; count: number }[] = [];
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  for (let i = daysBack - 1; i >= 0; i--) {
-    const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
-    const key = d.toISOString().slice(0, 10);
-    out.push(byDay.get(key) ?? { day: key, count: 0 });
-  }
-  return out;
-}
-
 export default async function MediaActivityPage({
   params,
   searchParams,
@@ -128,10 +100,10 @@ export default async function MediaActivityPage({
     resolutionBreakdown: stats.resolutionBreakdown,
     platforms,
     completionHist,
-    // getMediaPlayStats' cutoff is a rolling `now - 90d`, which spans 91 UTC
-    // calendar days (both edges partial) — pad one extra so the oldest edge's
-    // rows aren't fetched and then dropped from the chart.
-    playsByDay: padPlaysByDay(stats.playsByDay, PLAYS_BY_DAY_WINDOW_DAYS + 1),
+    // Already one entry per day of the 90-day window, in the statistics zone
+    // (getMediaPlayStats pads it like its siblings): AreaChart positions points
+    // by index and draws nothing for fewer than two, so gaps must be zeros.
+    playsByDay: stats.playsByDay,
     recentPlays: stats.recentPlays.slice(0, 14).map((p) => ({
       id: p.id,
       username: p.mediaServerUser.username,

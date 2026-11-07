@@ -19,9 +19,15 @@ import { createPortal } from "react-dom";
 import Image from "next/image";
 import Link from "next/link";
 import { foldBarItems } from "@/lib/activity-bars";
+import {
+  streamMixSegments,
+  type StreamMix,
+  type StreamSegmentKey,
+} from "@/lib/activity-stream-mix";
 import { bitrateToKbps } from "@/lib/bitrate";
 import { formatDurationHM } from "@/lib/format-duration";
-import { Chip, SectionHeader as DsSectionHeader } from "@/components/ui/design";
+import { zoneShortLabel } from "@/lib/stats-time-zone";
+import { Chip, EmptyState, SectionHeader as DsSectionHeader } from "@/components/ui/design";
 import {
   HeatmapCellPopover,
   type HeatmapCellAnchor,
@@ -44,6 +50,38 @@ export const WEEKDAY_KEYS = [
 
 export function sourceDotColor(source: string): string {
   return source === "plex" ? "var(--ds-plex)" : "var(--ds-jellyfin)";
+}
+
+// The small Plex/Jellyfin dot beside a name. Colour alone can't tell a screen
+// reader or a colour-blind viewer which server it is, so the dot carries the
+// name as an image label (and a hover title). Brand colours stay fills
+// (guardrail 42); brand names are not translated.
+export function SourceDot({
+  source,
+  size = 5,
+  style,
+}: {
+  source: string;
+  size?: number;
+  style?: CSSProperties;
+}) {
+  const name = source === "plex" ? "Plex" : "Jellyfin";
+  return (
+    <span
+      role="img"
+      aria-label={name}
+      title={name}
+      style={{
+        display: "inline-block",
+        width: size,
+        height: size,
+        borderRadius: 999,
+        flexShrink: 0,
+        background: sourceDotColor(source),
+        ...style,
+      }}
+    />
+  );
 }
 
 // `instance` is a media-server instance slug (see media-instances.ts). When it
@@ -85,6 +123,31 @@ export function methodLabel(
   }
   if (playMethod) return { label: playMethod, cls: "muted" };
   return { label: "—", cls: "muted" };
+}
+
+// The stream-type bars' label (a catalog key, translated at render) and colour
+// per segment, shared by the Stats tab and the title and user detail views.
+// Keyed by the segment union, so a missing entry fails to compile instead of
+// throwing at render. Status tokens, never literals (guardrail 42).
+export const STREAM_META: Record<StreamSegmentKey, { labelKey: string; color: string }> = {
+  DirectPlay: { labelKey: "adminActivity.method.directPlay", color: "var(--ds-success)" },
+  DirectStream: { labelKey: "adminActivity.method.remux", color: "var(--ds-info)" },
+  Transcode: { labelKey: "adminActivity.method.transcode", color: "var(--ds-warning)" },
+  Other: { labelKey: "adminActivity.method.other", color: "var(--ds-fg-disabled)" },
+};
+
+// StreamTypeBars data for a folded method mix: the named methods in order, then
+// one "Other" segment for anything else the server recorded (streamMixSegments),
+// so the bars and every share divide by one total.
+export function streamTypeSegments(
+  t: Translator,
+  mix: StreamMix,
+): { label: string; count: number; color: string }[] {
+  return streamMixSegments(mix).map((s) => ({
+    label: t(STREAM_META[s.key].labelKey),
+    count: s.count,
+    color: STREAM_META[s.key].color,
+  }));
 }
 
 export function MethodPill({
@@ -750,19 +813,27 @@ export function AreaChart({
   );
 }
 
-// `matrix` is 7 rows (Mon..Sun) × 24 cols (hour 0..23) of raw counts.
+// The hour of the last label on the heatmap's hour axis (0, 6, 12, 18); the
+// columns after it carry the time zone marker instead.
+const LAST_HOUR_LABEL = 18;
+
+// `matrix` is 7 rows (Mon..Sun) × 24 cols (hour 0..23) of raw counts, bucketed
+// in `timeZone`, the statistics zone the server named with the data.
 export function HourHeatmap({
   matrix,
   detailBase,
+  timeZone,
 }: {
   matrix: number[][];
   // When provided, cells with plays become clickable and open the drill-down
   // popover. `days` scopes the admin grid; per-user grids pass `userId` instead
   // (all-history) — matches getHeatmapCellDetail's scoping. Omit for static.
   detailBase?: { userId?: string; source?: string; mediaType?: string; days?: number };
+  timeZone: string;
 }) {
   const t = useT();
   const DAYS = WEEKDAY_KEYS.map((k) => t(k));
+  const zone = zoneShortLabel(timeZone);
   const cell = 12;
   const gap = 2;
   const max = Math.max(1, ...matrix.flat());
@@ -811,14 +882,8 @@ export function HourHeatmap({
         justifyContent: "start",
       }}
     >
-      <div
-        className="ds-mono"
-        title={t("adminActivity.heatmap.utcTitle")}
-        style={{ fontSize: 7.5, color: "var(--ds-fg-subtle)", alignSelf: "end", lineHeight: 1 }}
-      >
-        UTC
-      </div>
-      {Array.from({ length: 24 }).map((_, hr) => (
+      <div />
+      {Array.from({ length: LAST_HOUR_LABEL + 1 }).map((_, hr) => (
         <div
           key={hr}
           className="ds-mono"
@@ -832,6 +897,25 @@ export function HourHeatmap({
           {hr % 6 === 0 ? `${hr}` : ""}
         </div>
       ))}
+      {/* The hours are the statistics zone's wall clock: its short name sits at
+          the end of the hour axis, the full name in the title. */}
+      <div
+        className="ds-mono"
+        title={t("adminActivity.heatmap.zoneTitle", { zone: timeZone })}
+        style={{
+          gridColumn: `span ${23 - LAST_HOUR_LABEL}`,
+          fontSize: 7.5,
+          color: "var(--ds-fg-subtle)",
+          textAlign: "right",
+          lineHeight: 1,
+          alignSelf: "end",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {zone}
+      </div>
       {matrix.map((row, r) => (
         <Fragment key={r}>
           <div
@@ -852,7 +936,7 @@ export function HourHeatmap({
               <div
                 key={c}
                 title={t("adminActivity.heatmap.cellTitle", { day: DAYS[r], hour: `${c}:00`, count: v })}
-                aria-label={clickable ? t("adminActivity.heatmap.cellAria", { day: DAYS[r], hour: `${c}:00`, count: v }) : undefined}
+                aria-label={clickable ? t("adminActivity.heatmap.cellAria", { day: DAYS[r], hour: `${c}:00`, zone, count: v }) : undefined}
                 role={clickable ? "button" : undefined}
                 tabIndex={clickable ? 0 : undefined}
                 onClick={clickable ? (e) => openCell(e.currentTarget, r, c, v) : undefined}
@@ -1226,12 +1310,14 @@ export function fmtTimestamp(iso: string | null, mounted: boolean, locale: strin
   });
 }
 
-/* ── UTC marker ───────────────────────────────────────────────── */
+/* ── Time zone marker ─────────────────────────────────────────── */
 
-// The activity aggregates bucket by UTC hour and UTC day. Every chart drawn from
-// them says so — the heatmap and calendar always did; without it a viewer west
-// of Greenwich reads their evening peak as "2:00" with nothing to say why.
-export function UtcTag({ title }: { title: string }) {
+// The activity aggregates bucket hours and days in the statistics time zone
+// (an admin setting, the server's own zone by default). Every chart drawn from
+// them says which: without it a viewer in another zone reads the evening peak
+// as "2:00" with nothing to say why. `zone` comes from the server with the
+// data; the tag shows its short name, `title` the full one.
+export function ZoneTag({ zone, title }: { zone: string; title: string }) {
   return (
     <span
       className="ds-mono"
@@ -1247,8 +1333,148 @@ export function UtcTag({ title }: { title: string }) {
         whiteSpace: "nowrap",
       }}
     >
-      UTC
+      {zoneShortLabel(zone)}
     </span>
+  );
+}
+
+/* ── Empty card body ──────────────────────────────────────────── */
+
+// The shared DS empty block, iconless — the one "nothing here" recipe every
+// Activity card uses (guardrail 42), so the cards of one row read alike.
+// Defaults to "No data yet"; a card that knows WHY it is empty says so.
+export function Empty({ description }: { description?: ReactNode }) {
+  const t = useT();
+  return <EmptyState description={description ?? t("adminActivity.common.noDataYet")} />;
+}
+
+/* ── Leaderboard row ──────────────────────────────────────────── */
+
+// One ranked row of an Activity leaderboard (top viewers, top titles, most
+// rewatched): rank, avatar/poster, name, figures and a bar scaled to the
+// leader. The whole row is the link. `pct` is clamped, so a caller whose list
+// isn't sorted by the bar's figure can't draw past the track.
+export function LeaderboardRow({
+  href,
+  rank,
+  avatar,
+  title,
+  source,
+  tag,
+  primary,
+  secondary,
+  pct,
+}: {
+  href: string;
+  rank: number;
+  avatar?: ReactNode;
+  title: string;
+  // Plex/Jellyfin dot after the name.
+  source?: string;
+  // A small trailing label after the name (the media type).
+  tag?: ReactNode;
+  primary: ReactNode;
+  secondary?: ReactNode;
+  pct: number;
+}) {
+  return (
+    <Link
+      href={href}
+      className="lb-row"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "4px 6px",
+        margin: "0 -6px",
+        borderRadius: 5,
+        textDecoration: "none",
+      }}
+    >
+      <span
+        className="ds-mono"
+        style={{
+          width: 16,
+          textAlign: "right",
+          fontSize: 10.5,
+          color: "var(--ds-fg-subtle)",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {rank.toString().padStart(2, "0")}
+      </span>
+      {avatar}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+            marginBottom: 3,
+            gap: 8,
+            minWidth: 0,
+          }}
+        >
+          <span
+            style={{
+              fontSize: 12.5,
+              color: "var(--ds-fg)",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              minWidth: 0,
+            }}
+          >
+            {/* title: the name is ellipsized, so hover shows the whole of it. */}
+            <span
+              title={title}
+              style={{ overflow: "hidden", textOverflow: "ellipsis" }}
+            >
+              {title}
+            </span>
+            {source && <SourceDot source={source} />}
+            {tag}
+          </span>
+          <span
+            className="ds-mono"
+            style={{
+              fontSize: 11,
+              color: "var(--ds-fg-muted)",
+              fontVariantNumeric: "tabular-nums",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {primary}
+            {secondary && (
+              <span style={{ color: "var(--ds-fg-subtle)" }}>
+                {" "}
+                · {secondary}
+              </span>
+            )}
+          </span>
+        </div>
+        <div
+          style={{
+            height: 4,
+            background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
+            borderRadius: 999,
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              width: `${Math.max(0, Math.min(100, pct))}%`,
+              height: "100%",
+              background: "var(--ds-accent)",
+              borderRadius: 999,
+            }}
+          />
+        </div>
+      </div>
+    </Link>
   );
 }
 
@@ -1263,26 +1489,13 @@ export function HorizontalBars({
   color?: string;
   labelWidth?: number;
 }) {
-  const t = useT();
   const locale = useLocale();
   // Two stored values can share a display label ('Unknown' and an upstream
   // literal 'unknown' both read "Unknown"); the label is the row key, so they
   // are merged here, once, for every caller.
   const items = foldBarItems(rawItems);
   const max = Math.max(...items.map((i) => i.count), 1);
-  if (items.length === 0)
-    return (
-      <div
-        style={{
-          fontSize: 12,
-          color: "var(--ds-fg-subtle)",
-          padding: "20px 0",
-          textAlign: "center",
-        }}
-      >
-        {t("adminActivity.common.noDataYet")}
-      </div>
-    );
+  if (items.length === 0) return <Empty />;
   // `contain: inline-size` is load-bearing, as on HourHeatmap: every caller
   // sits in a `1fr` grid column (minmax(auto, 1fr)), and while the column is
   // sized a percentage max-width has nothing to resolve against, so a wide
@@ -1447,7 +1660,7 @@ export function BarColumn({
   data: number[];
   h?: number;
   color?: string;
-  // Per-bar hover text ("21:00 UTC · 5 plays"). Without it a bar shows its bare count.
+  // Per-bar hover text ("21:00 New York · 5 plays"). Without it a bar shows its bare count.
   titles?: string[];
 }) {
   const max = Math.max(...data, 1);
@@ -1733,5 +1946,39 @@ export function Th({
         label
       )}
     </th>
+  );
+}
+
+// A body cell of the Activity tables: the shared padding and no-wrap, plus the
+// few things that vary per column. Colours are tokens (guardrail 42).
+export function Td({
+  children,
+  mono = false,
+  color,
+  align,
+  tabular = false,
+  fontSize,
+}: {
+  children?: ReactNode;
+  mono?: boolean;
+  color?: string;
+  align?: "right";
+  tabular?: boolean;
+  fontSize?: number;
+}) {
+  return (
+    <td
+      className={mono ? "ds-mono" : undefined}
+      style={{
+        padding: "10px 14px",
+        color,
+        fontSize,
+        textAlign: align,
+        fontVariantNumeric: tabular ? "tabular-nums" : undefined,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </td>
   );
 }

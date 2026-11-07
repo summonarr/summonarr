@@ -8,6 +8,7 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
+import { manualRunOutcome } from "@/lib/cron-run-outcome";
 
 export interface CronJobInfo {
   name: string;
@@ -44,6 +45,9 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
   // Why the last MANUAL run of each job failed. Kept client-side only: the
   // server-rendered rows carry no reason, so scheduled failures show none.
   const [runErrors, setRunErrors] = useState<Record<string, string>>({});
+  // Why the last manual Run was skipped (busy lock, unconfigured job). A skip
+  // is not a run: the row's last run, status and runs/h stay as they were.
+  const [skipNotes, setSkipNotes] = useState<Record<string, string>>({});
   const mounted = useHasMounted();
   const t = useT();
   const locale = useLocale();
@@ -57,16 +61,31 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
         else delete next[name];
         return next;
       });
+    const setSkipNote = (message: string | null) =>
+      setSkipNotes((prev) => {
+        const next = { ...prev };
+        if (message) next[name] = message;
+        else delete next[name];
+        return next;
+      });
     try {
       const res = await fetch(withBasePath(endpoint), { method: "POST" });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; skipped?: unknown; durationMs?: number; error?: string };
-      // Success = a 2xx status and no `error` field. Don't look at `ok` or
-      // `skipped`: most of these endpoints don't return `ok` at all (/api/sync
-      // answers {checked, marked, …}), and /api/sync/ratings' `skipped` is a
-      // COUNT, so `skipped: 0` — the best possible run — would look like a
-      // failure. Real failures come back as a non-2xx status (e.g. upcoming's
-      // 502) or as an `error` field on a 200 (a partly failed sync).
-      const succeeded = res.ok && !data.error;
+      const data = (await res.json().catch(() => ({}))) as { durationMs?: number; error?: string; reason?: unknown };
+      // Real failures come back as a non-2xx status (e.g. upcoming's 502) or
+      // as an `error` field on a 200 (a partly failed sync); a skip carries
+      // X-Cron-Skipped (see manualRunOutcome).
+      const outcome = manualRunOutcome(res.status, res.headers, data);
+      if (outcome === "skipped") {
+        // The server recorded nothing, so neither does the table.
+        setSkipNote(
+          typeof data.reason === "string" && data.reason
+            ? t("settings.cron.skipped", { reason: data.reason })
+            : t("settings.cron.skippedNoReason"),
+        );
+        return;
+      }
+      setSkipNote(null);
+      const succeeded = outcome === "ok";
       setRunError(succeeded ? null : typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
 
       setJobs((prev) =>
@@ -85,6 +104,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
         ),
       );
     } catch {
+      setSkipNote(null);
       setRunError(t("settings.common.networkError"));
       setJobs((prev) =>
         prev.map((j) =>
@@ -123,10 +143,12 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
             const isRunning = running.has(job.name);
             return (
               <tr key={job.name} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                <td className="py-3 pr-4">
+                {/* The row's header cell, so a screen reader announces the job
+                    with every cell in its row. */}
+                <th scope="row" className="py-3 pr-4 text-left font-normal">
                   <div className="text-zinc-100 font-medium text-xs">{job.name}</div>
                   <div className="text-zinc-500 text-[11px] mt-0.5">{job.description}</div>
-                </td>
+                </th>
                 <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">{job.interval}</td>
                 <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">
                   {job.lastRun ? (
@@ -178,12 +200,18 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                       <Clock className="w-3.5 h-3.5" /> —
                     </span>
                   )}
+                  {skipNotes[job.name] && (
+                    <div role="status" className="text-[11px] text-zinc-500 mt-0.5 max-w-48 break-words">{skipNotes[job.name]}</div>
+                  )}
                 </td>
                 <td className="py-3">
                   <Button
                     size="sm"
                     variant="outline"
                     disabled={isRunning}
+                    // Every row's visible label is the same word, so the
+                    // accessible name carries the job.
+                    aria-label={isRunning ? t("settings.cron.runningNamed", { name: job.name }) : t("settings.cron.runNamed", { name: job.name })}
                     onClick={() => triggerJob(job.endpoint, job.name)}
                     className="h-9 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1.5"
                   >

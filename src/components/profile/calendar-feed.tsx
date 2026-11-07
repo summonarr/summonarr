@@ -5,6 +5,7 @@ import { Calendar, Check, Copy, Loader2, RefreshCw } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useCopyFeedback } from "@/hooks/use-copy-feedback";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
@@ -113,7 +114,7 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
         </p>
       )}
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
 
       {confirming ? (
         <div className="flex flex-wrap items-center gap-2">
@@ -171,16 +172,9 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
 
 function FeedUrl({ label, url }: { label: string; url: string }) {
   const t = useT();
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setCopied(false);
-    }
-  }
+  // The URL is in the field beside the button for manual selection when the
+  // clipboard is blocked.
+  const { copied, copy } = useCopyFeedback();
   return (
     <div className="space-y-1">
       <p className="text-xs font-medium text-zinc-400">{label}</p>
@@ -195,10 +189,10 @@ function FeedUrl({ label, url }: { label: string; url: string }) {
         <Button
           type="button"
           variant="ghost"
-          onClick={copy}
+          onClick={() => void copy(url)}
           aria-label={t("profile.calendar.copyFeedUrl", { label })}
           title={t("profile.calendar.copyLink")}
-          className="h-10 w-10 shrink-0 p-0 text-zinc-400 hover:text-zinc-100"
+          className="h-10 w-10 shrink-0 px-0 text-zinc-400 hover:text-zinc-100"
         >
           {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
         </Button>

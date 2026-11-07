@@ -8,13 +8,17 @@ import { useLiveEvents } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { COMMENT_MAX_CHARS } from "@/lib/request-comments";
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
+import { failedLoadState, isNearBottom, type ThreadLoadState } from "@/lib/client/thread-view";
 
 interface CommentData {
   id: string;
   createdAt: string;
   body: string;
   fromAdmin: boolean;
-  author: { name: string | null; email?: string; role: string };
+  authorId: string;
+  // `email` is selected for request managers only.
+  author: { name: string | null; email?: string | null; role: string };
 }
 
 interface RequestThreadProps {
@@ -35,7 +39,7 @@ const COUNTER_AT = 1800;
 
 // A collapsible comment thread under a request row. Loads on first open, then
 // reloads on the live stream's request:comment event for this request. Bubbles
-// follow the chat convention: the viewer's own side is on the right.
+// follow the chat convention: the viewer's own comments are on the right.
 export function RequestThread({
   requestId,
   viewerIsManager,
@@ -48,11 +52,17 @@ export function RequestThread({
   const [open, setOpen] = useState(defaultOpen);
   const [comments, setComments] = useState<CommentData[]>([]);
   const [count, setCount] = useState(initialCount);
-  const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [loadState, setLoadState] = useState<ThreadLoadState>("idle");
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  // The thread's own scroll box — the only thing ever scrolled, so a reload
+  // never moves the page (scrollIntoView scrolls every scrollable ancestor).
+  const listRef = useRef<HTMLDivElement>(null);
+  // Follow the newest comment on open and after the viewer's own send; a live
+  // reload follows only a reader who was already at the bottom.
+  const stickRef = useRef(true);
+  const { session } = useSummonarrSession();
   // Guardrail 16: dates differ between server and browser locale/timezone.
   const mounted = useHasMounted();
   const t = useT();
@@ -68,9 +78,11 @@ export function RequestThread({
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
           return r.json();
         })
-        .then((data: CommentData[]) => {
+        .then((data: unknown) => {
           if (seq !== loadSeqRef.current) return;
-          const list = Array.isArray(data) ? data : [];
+          const el = listRef.current;
+          stickRef.current = silent && el ? isNearBottom(el) : true;
+          const list = Array.isArray(data) ? (data as CommentData[]) : [];
           setComments(list);
           setCount(list.length);
           setLoadState("ready");
@@ -78,7 +90,7 @@ export function RequestThread({
         .catch((err) => {
           if (err?.name === "AbortError") return;
           if (seq !== loadSeqRef.current) return;
-          if (!silent) setLoadState("error");
+          setLoadState((s) => failedLoadState(s, silent));
         });
     },
     [requestId],
@@ -103,7 +115,9 @@ export function RequestThread({
   );
 
   useEffect(() => {
-    if (open && loadState === "ready") bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const el = listRef.current;
+    if (!open || loadState !== "ready" || !el || !stickRef.current) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [comments, loadState, open]);
 
   async function send(e: React.FormEvent) {
@@ -123,6 +137,7 @@ export function RequestThread({
         setSendError(data.error ?? t("shared.thread.sendFailed"));
       } else {
         const created: CommentData = await res.json();
+        stickRef.current = true;
         // The live event for this comment can reload the thread first.
         setComments((prev) => (prev.some((c) => c.id === created.id) ? prev : [...prev, created]));
         setCount((c) => Math.max(c, comments.length + 1));
@@ -138,7 +153,8 @@ export function RequestThread({
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      void send(e as unknown as React.FormEvent);
+      // A real submit of the textarea's own form, so onSubmit gets a real event.
+      e.currentTarget.form?.requestSubmit();
     }
   }
 
@@ -173,7 +189,7 @@ export function RequestThread({
             background: "var(--ds-bg-1)",
           }}
         >
-          <div className="space-y-3 overflow-y-auto" style={{ padding: "12px 14px", maxHeight: 288 }}>
+          <div ref={listRef} className="space-y-3 overflow-y-auto" style={{ padding: "12px 14px", maxHeight: 288 }}>
             {requestNote && (
               <p className="whitespace-pre-wrap break-words" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)" }}>
                 <span style={{ color: "var(--ds-fg-subtle)" }}>{t("requests.thread.requestNote")}: </span>
@@ -207,7 +223,9 @@ export function RequestThread({
 
             {comments.map((c) => {
               const authorName = c.author.name ?? c.author.email ?? t("shared.thread.unknownAuthor");
-              const isMine = c.fromAdmin === viewerIsManager;
+              // Mine = I wrote it. By role, another manager's reply sat on a
+              // manager's own side; `viewerIsManager` is the no-session fallback.
+              const isMine = session ? c.authorId === session.user.id : c.fromAdmin === viewerIsManager;
               return (
                 <div key={c.id} className={`flex gap-2.5 ${isMine ? "flex-row-reverse" : "flex-row"}`}>
                   <div
@@ -239,7 +257,6 @@ export function RequestThread({
                 </div>
               );
             })}
-            <div ref={bottomRef} />
           </div>
 
           {closed ? (

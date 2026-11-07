@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Chip, type ChipTone } from "@/components/ui/design";
-import { AlertTriangle, CheckCircle2, ExternalLink, Link, Loader2, RefreshCw, XCircle } from "@/components/icons";
+import { AlertTriangle, CheckCircle2, ExternalLink, LinkIcon, Loader2, RefreshCw, XCircle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { ArrHealthCheck, WebhookState } from "@/lib/arr-health";
@@ -205,7 +205,7 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
                 )}
                 <div className="flex-1" />
                 <Chip tone={WEBHOOK_TONE[wh]} title={t("adminManage.arrHealth.webhookHint")}>
-                  <Link style={{ width: 11, height: 11 }} aria-hidden /> {t(`adminManage.arrHealth.webhook.${wh}`)}
+                  <LinkIcon style={{ width: 11, height: 11 }} aria-hidden /> {t(`adminManage.arrHealth.webhook.${wh}`)}
                 </Chip>
                 {needsSetup && openSetup !== k && (
                   <Button size="xs" variant="outline" onClick={() => setOpenSetup(k)}>
@@ -272,7 +272,7 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
                   <p className="m-0 text-xs text-zinc-500">{t("adminManage.arrHealth.baseHelp", { service: SERVICE_LABEL[inst.service] })}</p>
                   <div className="flex items-center gap-2">
                     <Button type="submit" size="sm" disabled={st?.busy || !base.trim()}>
-                      {st?.busy ? <Loader2 className="animate-spin" /> : <Link />}
+                      {st?.busy ? <Loader2 className="animate-spin" /> : <LinkIcon />}
                       {wh === "missing" ? t("adminManage.arrHealth.setupSubmit") : t("adminManage.arrHealth.repairSubmit")}
                     </Button>
                     <Button type="button" size="sm" variant="ghost" onClick={() => setOpenSetup(null)} disabled={st?.busy}>

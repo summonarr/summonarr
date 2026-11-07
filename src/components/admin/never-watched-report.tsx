@@ -26,13 +26,13 @@ import { ArrowDown, ArrowUp, ArrowUpDown, EyeOff, Loader2, RefreshCw, Shield, Sh
 import {
   CleanupPlanPanel,
   CleanupResultPanel,
-  arrInstanceLabel,
+  arrSlugLabel,
   cleanupKeyOf,
   dayFormatter,
   formatBytesIn,
-  readApiError,
   useCleanupDelete,
 } from "@/components/admin/cleanup-delete";
+import { readApiError } from "@/lib/client/api-error";
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
 import { arrFailureText, upstreamFailureText } from "@/lib/cleanup-error-text";
 import {
@@ -491,7 +491,7 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
       {data.arrErrors.length > 0 && (
         <div role="status" className={`${bannerClass("warn")} flex flex-wrap items-center gap-2`} style={{ padding: "8px 12px", fontSize: 13 }}>
           <span className="flex-1">
-            {t("adminManage.cleanup.arrErrorsList", { list: data.arrErrors.map((e) => arrFailureText(t, arrInstanceLabel(e.service, e.instance), e)).join("; ") })}
+            {t("adminManage.cleanup.arrErrorsList", { list: data.arrErrors.map((e) => arrFailureText(t, arrSlugLabel(e.service, e.instance), e)).join("; ") })}
           </span>
           {/* Re-lists Radarr/Sonarr now instead of waiting out the shared cache. */}
           <Button size="xs" variant="outline" onClick={() => void reload(true)} disabled={loading}>
@@ -798,7 +798,7 @@ function TitleRow({
       <td style={{ ...td, fontSize: 11, color: "var(--ds-fg-muted)" }}>
         <div>{r.servers.join(", ")}</div>
         <div style={{ color: "var(--ds-fg-subtle)" }}>
-          {r.arr.length > 0 ? r.arr.map((a) => arrInstanceLabel(a.service, a.instance)).join(", ") : t("adminManage.cleanup.notInArr")}
+          {r.arr.length > 0 ? r.arr.map((a) => arrSlugLabel(a.service, a.instance)).join(", ") : t("adminManage.cleanup.notInArr")}
         </div>
       </td>
       <td className="ds-mono" style={tdMono}>{day(r.shelfStart ?? r.addedAt)}</td>

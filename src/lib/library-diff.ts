@@ -111,6 +111,23 @@ export function makeBadMatchComparator(collator: Intl.Collator) {
   };
 }
 
+type BadMatchKeys = { plexRatingKey: string | null; jellyfinItemId: string | null };
+
+/** The item key a bad match's side is fixed by; null when the row has none yet (its card says "re-sync to fix"). */
+export function badMatchSideKey(m: BadMatchKeys, side: "plex" | "jellyfin"): string | null {
+  return (side === "plex" ? m.plexRatingKey : m.jellyfinItemId) || null;
+}
+
+/**
+ * A bad match the bulk "Fix all" may send: Radarr/Sonarr named the wrong side
+ * and the id it belongs to, and that side has its item key — the rule the card
+ * applies before it offers a Fix. Without the key fix-match can only answer
+ * "re-sync first", so sending it is a predictable failure.
+ */
+export function fixAllEligible(m: BadMatchKeys & { arrVerdict: "plex" | "jellyfin" | null; arrTmdbId: number | null }): boolean {
+  return m.arrVerdict !== null && m.arrTmdbId !== null && badMatchSideKey(m, m.arrVerdict) !== null;
+}
+
 export function diffCollator(locale: string): Intl.Collator {
   try {
     return new Intl.Collator(locale, { numeric: true, sensitivity: "base" });

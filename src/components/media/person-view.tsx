@@ -6,12 +6,12 @@
 // so SSR and hydration agree — no Date.now()/locale drift (guardrail 16). Cards
 // self-navigate to /movie|/tv detail via MediaCard's router push.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Image from "next/image";
 import { User } from "@/components/icons";
 import { MediaCard } from "@/components/media/media-card";
 import { EmptyState } from "@/components/ui/design";
-import type { PersonDetails, PersonCredit, TmdbMedia } from "@/lib/tmdb-types";
+import { profileUrl, type PersonDetails, type PersonCredit, type TmdbMedia } from "@/lib/tmdb-types";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 // "YYYY-MM-DD" → "June 9, 1963", pinned to UTC + the active UI locale (the
@@ -93,8 +93,20 @@ export function PersonView({
   const [filter, setFilter] = useState<"all" | "movie" | "tv">("all");
   const [bioExpanded, setBioExpanded] = useState(false);
 
-  const movieCount = person.credits.filter((c) => c.mediaType === "movie").length;
-  const tvCount = person.credits.filter((c) => c.mediaType === "tv").length;
+  // One media object per credit for as long as `person.credits` is the same
+  // list: a fresh object per render defeated memo(MediaCard), so the bio toggle
+  // or a filter switch re-rendered every card.
+  const { mediaByCredit, movieCount, tvCount } = useMemo(() => {
+    const map = new Map<PersonCredit, TmdbMedia>();
+    let movies = 0;
+    let tv = 0;
+    for (const c of person.credits) {
+      map.set(c, toMedia(c));
+      if (c.mediaType === "movie") movies++;
+      else if (c.mediaType === "tv") tv++;
+    }
+    return { mediaByCredit: map, movieCount: movies, tvCount: tv };
+  }, [person.credits]);
   const shown = filter === "all" ? person.credits : person.credits.filter((c) => c.mediaType === filter);
 
   const born = fmtDate(person.birthday, locale);
@@ -105,6 +117,7 @@ export function PersonView({
   const bio = person.biography?.trim() ?? "";
   const bioIsLong = bio.length > BIO_CLAMP;
   const bioText = bioExpanded || !bioIsLong ? bio : `${bio.slice(0, BIO_CLAMP).trimEnd()}…`;
+  const photo = profileUrl(person.profilePath, "w342");
 
   return (
     <div className="ds-page-enter">
@@ -115,9 +128,9 @@ export function PersonView({
           className="relative shrink-0 overflow-hidden"
           style={{ width: 120, height: 180, borderRadius: 8, background: "var(--ds-bg-3)" }}
         >
-          {person.profilePath ? (
+          {photo ? (
             <Image
-              src={`https://image.tmdb.org/t/p/w342${person.profilePath}`}
+              src={photo}
               alt={person.name}
               fill
               sizes="120px"
@@ -220,7 +233,7 @@ export function PersonView({
                 // just-made request's local state; getPersonDetails dedupes
                 // credits per (mediaType, id) so this can't collide.
                 key={`${c.mediaType}-${c.id}`}
-                media={toMedia(c)}
+                media={mediaByCredit.get(c) ?? toMedia(c)}
                 size="md"
                 requestToken={c.requestToken}
                 showPlex={showPlex}

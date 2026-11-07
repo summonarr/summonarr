@@ -22,7 +22,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
-import { readError, type Mode, type ReportKey, type Reports, type Service } from "@/components/admin/use-missing-reports";
+import type { Mode, ReportKey, Reports, Service } from "@/components/admin/use-missing-reports";
+import { readApiError } from "@/lib/client/api-error";
 import {
   BULK_SEARCH_CONFIRM_OVER,
   BULK_SEARCH_MAX,
@@ -116,7 +117,7 @@ export function useBulkSearch() {
         const d = (await res.json().catch(() => null)) as { partial?: unknown } | null;
         return d?.partial === true ? { ...attempt, message: t("adminManage.missing.searchPartial") } : attempt;
       }
-      const message = await readError(res, t("adminManage.missing.searchError"));
+      const message = await readApiError(res, t("adminManage.missing.searchError"));
       return searchAttemptFromResponse(res.status, message, res.headers.get("Retry-After"));
     } catch {
       return { outcome: "failed", message: t("adminManage.missing.searchError") };

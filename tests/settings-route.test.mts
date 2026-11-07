@@ -169,7 +169,13 @@ const fakePrisma = {
     if (typeof arg === "function") return (arg as (t: ReturnType<typeof makeTx>) => Promise<unknown>)(makeTx());
     return Promise.all(arg as Promise<unknown>[]);
   },
+  // The statistics time zone's database check (databaseKnowsTimeZone): Postgres
+  // knows every zone except the ones a test lists here.
+  $queryRaw: async (_strings: TemplateStringsArray, ...values: unknown[]) => [
+    { known: !zonesUnknownToDb.has(String(values[0]).toLowerCase()) },
+  ],
 };
+const zonesUnknownToDb = new Set<string>();
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
 // ── dynamic imports (env + globalThis stubs must precede the module graph) ───
@@ -1428,4 +1434,48 @@ test("PATCH: the email test runs against the SUBMITTED settings, not the stored 
   assert.match(((await res.json()) as { smtpError: string }).smtpError, /169\.254\.169\.254/, "the submitted host was tested");
   assert.equal(settings.get("smtpHost"), "169.254.1.1", "the stored host is untouched");
   assert.equal(upsertCalls.length, 0);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — the statistics time zone (stats-time-zone.ts)
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: statsTimeZone stores only a named zone Intl AND Postgres know, canonicalized; anything else is a 400", async () => {
+  const admin = await mintSession("ADMIN");
+  const refused = { error: "\"statsTimeZone\" must be a time zone name such as America/New_York or UTC" };
+  // Not a zone; a bare offset (Postgres would read "+05:00" with the sign
+  // flipped); a zone this Postgres doesn't carry.
+  zonesUnknownToDb.add("antarctica/troll");
+  try {
+    for (const value of ["Mars/Olympus_Mons", "+05:00", "-0500", "Antarctica/Troll"]) {
+      const res = await patchLater({ statsTimeZone: value }, admin.header);
+      assert.equal(res.status, 400, value);
+      assert.deepEqual(await res.json(), refused, value);
+    }
+  } finally {
+    zonesUnknownToDb.clear();
+  }
+  assert.equal(upsertFor("statsTimeZone").length, 0, "a refused zone is never stored");
+  assert.equal(auditAttempts.length, 0);
+
+  const ok = await patchLater({ statsTimeZone: "america/new_york" }, admin.header);
+  assert.equal(ok.status, 200);
+  assert.equal(upsertFor("statsTimeZone").at(-1)?.create.value, "America/New_York", "stored in Intl's canonical spelling");
+});
+
+test("PATCH: a blank statsTimeZone clears it, and a save applies to the statistics at once", async () => {
+  const { getStatsTimeZone, invalidateStatsTimeZone } = await import("../src/lib/stats-time-zone-data.ts");
+  const { processTimeZone } = await import("../src/lib/stats-time-zone.ts");
+  invalidateStatsTimeZone();
+  const admin = await mintSession("ADMIN");
+  assert.equal(await getStatsTimeZone(), processTimeZone(), "unset: the server process's own zone");
+
+  const set = await patchLater({ statsTimeZone: "Asia/Tokyo" }, admin.header);
+  assert.equal(set.status, 200);
+  assert.equal(await getStatsTimeZone(), "Asia/Tokyo", "the route drops the 15s zone memo on a change");
+
+  const cleared = await patchLater({ statsTimeZone: "" }, admin.header);
+  assert.equal(cleared.status, 200);
+  assert.equal(upsertFor("statsTimeZone").at(-1)?.create.value, "", "blank is WRITTEN, not skipped");
+  assert.equal(await getStatsTimeZone(), processTimeZone(), "and the statistics fall back to the process zone");
 });

@@ -160,21 +160,20 @@ export async function register() {
     if (defaultLocaleWarning) console.warn(defaultLocaleWarning);
 
     // AUTH_TRUSTED_ORIGIN is a comma-separated allowlist of extra browser origins
-    // (proxy.ts / cron-auth.ts). Those readers silently drop unparseable entries,
-    // so a typo'd origin fails open as "not trusted" with no signal — warn here so
-    // a misconfigured CSRF allowlist surfaces at boot instead of as mystery 403s.
+    // (proxy.ts, cron-auth.ts, the register route). Those readers silently drop
+    // unparseable entries, so a typo'd origin fails open as "not trusted" with no
+    // signal — warn here so a misconfigured CSRF allowlist surfaces at boot
+    // instead of as mystery 403s.
     if (process.env.AUTH_TRUSTED_ORIGIN) {
-      const { parseTrustedOriginEntry } = await import("@/lib/cron-auth");
+      const { parseTrustedOriginEntry } = await import("@/lib/trusted-origin");
       for (const raw of process.env.AUTH_TRUSTED_ORIGIN.split(",")) {
         const trimmed = raw.trim();
         if (!trimmed) continue;
-        // Mirror the readers EXACTLY (parseTrustedOriginEntry in cron-auth.ts, the
-        // inline twin in proxy.ts): they accept only an http(s) URL whose origin is
-        // not "null". A bare `host:port` does NOT throw out of `new URL` — it
-        // parses as scheme `host:` with path `port` and origin "null" — so the old
-        // try/catch here never fired for the one mistake the docker README's
-        // "internal hostname, LAN IP" wording invites, while the readers silently
-        // trusted the literal "null" origin instead of the intended host.
+        // The readers' own parser (trusted-origin.ts): only an http(s) URL whose
+        // origin is not "null". A bare `host:port` does NOT throw out of `new URL`
+        // — it parses as scheme `host:` with path `port` and origin "null" — the
+        // one mistake the docker README's "internal hostname, LAN IP" wording
+        // invites.
         if (parseTrustedOriginEntry(trimmed) === null) {
           console.warn(
             `[startup] AUTH_TRUSTED_ORIGIN entry "${trimmed}" has no http(s) scheme or is not a valid absolute URL and will be ignored. ` +

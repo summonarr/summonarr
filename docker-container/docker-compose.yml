@@ -60,6 +60,10 @@ services:
       - "3001:3000"
     environment:
       PORT: "3000"
+      # The server's local time zone; unset means UTC. The global request quota's
+      # day / week / month windows reset at midnight in this zone. To change it,
+      # uncomment this (or put TZ=… in .env):
+      # TZ: "America/New_York"
       # AUTH_URL (set in .env) pins the app's public base URL so auth flows and
       # redirects don't rely on the incoming Host/X-Forwarded-Host header, eliminating
       # the host-header injection risk behind a reverse proxy.

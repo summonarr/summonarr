@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isCronAuthorized, withCronRunRecording, cronSkippedResponse } from "@/lib/cron-auth";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, DOWNLOAD_POLICIES_LOCK_ID } from "@/lib/advisory-lock";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 
 export async function POST(request: NextRequest) {
@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
   }
 
   return withCronRunRecording("download-policies", () => withAdvisoryLock(
-    2009,
+    DOWNLOAD_POLICIES_LOCK_ID,
     async () => {
       const startTime = Date.now();
       const results = await syncDownloadPolicies();

@@ -27,6 +27,10 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   const t = useT();
   const [state, setState] = useState<"idle" | "reason" | "loading" | "voted">(alreadyVoted ? "voted" : "idle");
   const [reason, setReason] = useState("");
+  // Set by a user-initiated change of control (submit, cancel): the focused
+  // input or button unmounts, so the root button that replaces it takes focus
+  // (autoFocus acts on mount only) instead of focus falling to <body>.
+  const [refocus, setRefocus] = useState(false);
   // Client nav reuses this instance across titles. `alreadyVoted` is live so a
   // refresh after voting (this button already router.refresh()es) matches.
   const [seenTmdbId, setSeenTmdbId] = useState(tmdbId);
@@ -37,14 +41,22 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
     setSeenVoted(alreadyVoted);
     setState(alreadyVoted ? "voted" : "idle");
     setReason("");
+    setRefocus(false);
   } else if (alreadyVoted !== seenVoted && state !== "loading" && state !== "reason") {
     setSeenVoted(alreadyVoted);
     setState(alreadyVoted ? "voted" : "idle");
   }
   const displayState = titleChanged ? (alreadyVoted ? "voted" : "idle") : state;
 
+  function closeReason() {
+    setState("idle");
+    setReason("");
+    setRefocus(true);
+  }
+
   async function handleVote() {
     setState("loading");
+    setRefocus(true);
     try {
       const res = await fetch(withBasePath("/api/votes"), {
         method: "POST",
@@ -53,6 +65,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
       });
       if (res.ok || res.status === 409) {
         setState("voted");
+        setReason("");
         router.refresh();
       } else {
         setState("idle");
@@ -74,7 +87,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
         router.refresh();
       } else {
         setState("voted");
-        toast({ title: t("request.vote.removeFailed"), variant: "error" });
+        toast({ title: rateLimitMessage(res, t) ?? t("request.vote.removeFailed"), variant: "error" });
       }
     } catch {
       setState("voted");
@@ -89,6 +102,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
         onClick={handleUnvote}
         title={t("request.vote.removeTitle")}
         aria-label={t("request.vote.votedLabel")}
+        autoFocus={refocus}
       >
         <Check style={{ width: 14, height: 14 }} />
         {t("request.vote.voted")}
@@ -105,9 +119,11 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
           onChange={(e) => setReason(e.target.value.slice(0, REASON_MAX))}
           placeholder={t("request.vote.reasonPlaceholder")}
           aria-label={t("request.vote.reason")}
-          className="h-[34px] w-48 rounded-md border border-zinc-700 bg-zinc-800 px-3 text-[13px] text-zinc-100 focus:outline-none focus:ring-2 focus:ring-red-500"
+          // 16px below md: iOS Safari zooms the page when a control under 16px
+          // takes focus (same rule as Input and StyledSelect).
+          className="h-[34px] w-48 rounded-md border border-zinc-700 bg-zinc-800 px-3 text-base md:text-[13px] text-zinc-100 focus:outline-none focus:ring-2 focus:ring-red-500"
           autoFocus
-          onKeyDown={(e) => { if (e.key === "Enter") handleVote(); if (e.key === "Escape") setState("idle"); }}
+          onKeyDown={(e) => { if (e.key === "Enter") handleVote(); if (e.key === "Escape") closeReason(); }}
         />
         {reason.length > REASON_COUNTER_AT && (
           <span className="ds-mono text-[10px] tabular-nums text-zinc-500" aria-live="polite">
@@ -117,7 +133,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
         <DetailActionButton variant="danger" onClick={handleVote}>
           {t("request.vote.vote")}
         </DetailActionButton>
-        <DetailActionButton variant="ghost" onClick={() => setState("idle")}>
+        <DetailActionButton variant="ghost" onClick={closeReason}>
           {t("request.cancel")}
         </DetailActionButton>
       </div>
@@ -125,15 +141,25 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   }
 
   if (displayState === "loading") {
+    // aria-disabled, not disabled: the same <button> carries the idle, loading
+    // and voted states, and disabling it would drop its focus to <body>. It has
+    // no onClick, so a click while loading does nothing.
     return (
-      <DetailActionButton variant="secondary" disabled busy aria-label={t("request.vote.updating")}>
+      <DetailActionButton
+        variant="secondary"
+        aria-disabled
+        busy
+        aria-label={t("request.vote.updating")}
+        autoFocus={refocus}
+        style={{ opacity: 0.7 }}
+      >
         <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
       </DetailActionButton>
     );
   }
 
   return (
-    <DetailActionButton variant="secondary" onClick={() => setState("reason")}>
+    <DetailActionButton variant="secondary" onClick={() => setState("reason")} autoFocus={refocus}>
       <Trash2 style={{ width: 14, height: 14 }} />
       {t("request.vote.voteToDelete")}
     </DetailActionButton>

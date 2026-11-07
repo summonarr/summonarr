@@ -116,6 +116,7 @@
   "apiUser.push.fieldsTooLong": "Push subscription fields exceed maximum length",
   "apiUser.push.idOrEndpointRequired": "id or endpoint is required",
   "apiUser.push.noSubscription": "No push subscription found for your account — register the app or subscribe in a browser first.",
+  "apiUser.push.subscriptionRemoved": "This device's push registration was removed. Turn notifications on again to use it.",
   "apiUser.push.vapidMissing": "VAPID keys not configured",
   "apiUser.push.webPushNotConfigured": "Web push is not configured on this server",
   "apiUser.quota.window.day": "day",

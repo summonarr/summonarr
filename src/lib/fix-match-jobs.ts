@@ -15,7 +15,9 @@ import type { Translator } from "./i18n/translate";
 // status route answers 404 for a job it no longer knows.
 
 export type FixMatchJobStatus = "queued" | "running" | "done" | "failed";
-export type FixMatchJobResult = { ok: true; warning?: string };
+// `issueResolved`: only on a background job started for an issue (the issue
+// dialog) — whether that issue is closed now. Never on the synchronous answer.
+export type FixMatchJobResult = { ok: true; warning?: string; issueResolved?: boolean };
 
 // Live progress a runner reports while it works, so the UI can tell "waiting
 // on the media server's refresh" apart from "stuck". `remoteApplied` flips the

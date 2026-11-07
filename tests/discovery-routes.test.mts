@@ -803,3 +803,38 @@ test("no discovery route source contains a console.log call (guardrail 7)", asyn
 });
 
 
+
+// ── browse: a page past the end ──────────────────────────────────────────────
+// TMDB clamps its page number at 500, so a page past the end used to come back
+// filled with the LAST real page's titles under the requested page number — a
+// client paging on saw the same titles again. Past the end the items are
+// empty (and nothing is enriched); the shape and the echoed page are unchanged.
+for (const extra of ["", "&hideAvailable=1"]) {
+  test(`browse: a page past the end answers 200 with no items${extra ? " (hideAvailable window)" : ""}`, async () => {
+    const { token } = await mintSession();
+    const res = await ROUTES[0].call(token, `?type=movie&page=99999999${extra}`);
+    assert.equal(res.status, 200);
+    const body = await res.json() as { items: unknown[]; totalPages: number; page: number };
+    assert.deepEqual(body.items, []);
+    assert.ok(body.totalPages <= 500, `totalPages ${body.totalPages}`);
+    assert.equal(body.page, 10_000, "the clamped requested page is still echoed");
+    assert.deepEqual(enrichedForUserIds, [], "nothing past the end is enriched");
+  });
+}
+
+// ── popular: the TmdbMediaCore lookup ────────────────────────────────────────
+// One `tmdbId IN` list per media type, as the page does — not one OR branch per
+// item (each with its own `new Date()`).
+test("popular: the TmdbMediaCore lookup is one tmdbId IN list per media type", async () => {
+  const { token } = await mintSession();
+  assert.equal((await ROUTES[2].call(token)).status, 200);
+  const reads = ops.filter((o) => o.op === "tmdbMediaCore.findMany");
+  assert.ok(reads.length > 0, "the route never read TmdbMediaCore");
+  for (const r of reads) {
+    const where = (r.args as { where: Record<string, unknown> }).where;
+    assert.equal(where.OR, undefined, "an OR branch per item is back");
+    assert.deepEqual(where.tmdbId, { in: [POPULAR_ROW.tmdbId] });
+    assert.ok(where.mediaType === "MOVIE" || where.mediaType === "TV");
+    assert.ok((where.expiresAt as { gt?: unknown })?.gt instanceof Date);
+  }
+});

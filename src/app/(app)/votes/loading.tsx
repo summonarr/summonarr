@@ -3,11 +3,11 @@
 // nomination hint wraps), the mine/sort FilterPills + 32px SearchBox row
 // (mb-5), then rows — 44px poster thumb inside 14px padding, 8px apart, with
 // title, vote count and a reason line.
-import { Bar, ControlRow, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import { Bar, ControlRow, SKELETON_CARD, SkeletonHeader, SkeletonRoot } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
-    <div className="animate-pulse">
+    <SkeletonRoot>
       <SkeletonHeader subtitle subtitleLines={2} />
       <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <ControlRow w={220} />
@@ -28,6 +28,6 @@ export default function Loading() {
           </div>
         ))}
       </div>
-    </div>
+    </SkeletonRoot>
   );
 }

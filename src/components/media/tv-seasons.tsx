@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useRef, useState } from "react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import Image from "next/image";
 import { ChevronDown, CheckCircle, Circle, Loader2, Tv2, Calendar } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { posterUrl, stillUrl, type TmdbSeason, type TmdbEpisode } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
+import { formatReleaseDate } from "@/lib/format-release-date";
 import { DetailActionButton } from "./detail-action-button";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
@@ -20,34 +21,28 @@ interface TVSeasonsProps {
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 
+// UI state only, created lazily the first time a season is touched. Ownership
+// from the server props is NOT copied in here: a copy taken at mount went stale
+// after a router.refresh, and a season first listed by that refresh had no
+// entry at all, so it could not be expanded.
 interface SeasonState {
   expanded: boolean;
   loadState: LoadState;
   episodes: TmdbEpisode[];
-
-  owned: Set<number>;
+  // The season fetch's owned episodes; null until it lands, and the collapsed
+  // count reads the ownedBySeason prop meanwhile.
+  owned: Set<number> | null;
 }
 
-// Formats in the active UI locale. The call site below still waits for
-// `mounted` (guardrail 16) — the date path stays client-only as before.
-//
-// TMDB's `air_date` is a bare date ("2024-03-05"), which `new Date` reads as
-// midnight UTC. Showing that in the viewer's time zone gave the PREVIOUS day to
-// everyone west of UTC, so a bare date is formatted in UTC (the same fix as
-// format-release-date.ts). Only the language/locale comes from the browser.
-function formatAirDate(iso: string | null, locale: string): string | null {
-  if (!iso) return null;
-  try {
-    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(iso);
-    return new Date(iso).toLocaleDateString(locale, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      ...(dateOnly ? { timeZone: "UTC" } : {}),
-    });
-  } catch {
-    return iso;
-  }
+const NEW_SEASON: SeasonState = { expanded: false, loadState: "idle", episodes: [], owned: null };
+
+// The year of a season's TMDB `air_date` ("YYYY-MM-DD"), read off the string.
+// A bare date parses as UTC midnight everywhere, so server and client agree
+// (guardrail 16); a malformed value ("0000-00-00", "2024-13-01") renders
+// nothing instead of NaN.
+function airYear(airDate: string | null): string | null {
+  const m = airDate ? /^(\d{4})-\d{2}-\d{2}/.exec(airDate) : null;
+  return m && !Number.isNaN(Date.parse(m[0])) ? m[1] : null;
 }
 
 function formatRuntime(min: number | null, t: Translator): string | null {
@@ -77,63 +72,59 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   const mounted = useHasMounted();
   const t = useT();
   const locale = useLocale();
-  const [state, setState] = useState<Record<number, SeasonState>>(() => {
-    const init: Record<number, SeasonState> = {};
-    for (const s of seasons) {
-      init[s.seasonNumber] = {
-        expanded: false,
-        loadState: "idle",
-        episodes: [],
-        owned: new Set(ownedBySeason[s.seasonNumber] ?? []),
-      };
+  // Keyed `${tmdbId}:${seasonNumber}`: a client navigation to another show can
+  // reuse this instance, and its seasons share numbers with the last one's — a
+  // late answer for the old show lands under a key nothing reads.
+  const [state, setState] = useState<Record<string, SeasonState>>({});
+  const keyOf = (seasonNumber: number) => `${tmdbId}:${seasonNumber}`;
+  // The latest fetch per key; an older answer is dropped on arrival.
+  const reqSeq = useRef(0);
+  const latestReq = useRef<Record<string, number>>({});
+
+  const patch = (key: string, next: Partial<SeasonState>) =>
+    setState((prev) => ({ ...prev, [key]: { ...(prev[key] ?? NEW_SEASON), ...next } }));
+
+  // A plain function, not a useCallback: it reads this render's `state`, which
+  // is current at click time (a callback keyed on [state] was rebuilt on every
+  // change anyway).
+  async function toggleSeason(seasonNumber: number, forceReload = false) {
+    const key = keyOf(seasonNumber);
+    const current = state[key] ?? NEW_SEASON;
+
+    // forceReload is used by the Retry button. It skips the early returns
+    // below (collapse, "already loaded", "already loading") and always
+    // re-fetches. Without it, clicking Retry inside the open error panel would
+    // just close the panel.
+    if (current.expanded && !forceReload) {
+      patch(key, { expanded: false });
+      return;
     }
-    return init;
-  });
 
-  const toggleSeason = useCallback(
-    async (seasonNumber: number, forceReload = false) => {
-      const current = state[seasonNumber];
-      if (!current) return;
+    // Loaded, or still loading from an earlier expand (expand → collapse →
+    // expand): just show it. Only Retry starts a second fetch.
+    if ((current.loadState === "ready" || current.loadState === "loading") && !forceReload) {
+      patch(key, { expanded: true });
+      return;
+    }
 
-      // forceReload is used by the Retry button. It skips the two early returns
-      // below (collapse, and "already loaded") and always re-fetches. Without it,
-      // clicking Retry inside the open error panel would just close the panel.
-      if (current.expanded && !forceReload) {
-        setState((prev) => ({ ...prev, [seasonNumber]: { ...prev[seasonNumber], expanded: false } }));
-        return;
-      }
-
-      if (current.loadState === "ready" && !forceReload) {
-        setState((prev) => ({ ...prev, [seasonNumber]: { ...prev[seasonNumber], expanded: true } }));
-        return;
-      }
-
-      setState((prev) => ({
-        ...prev,
-        [seasonNumber]: { ...prev[seasonNumber], expanded: true, loadState: "loading" },
-      }));
-      try {
-        const res = await fetch(withBasePath(`/api/tv/${tmdbId}/season/${seasonNumber}`));
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as { episodes: TmdbEpisode[]; owned: number[] };
-        setState((prev) => ({
-          ...prev,
-          [seasonNumber]: {
-            ...prev[seasonNumber],
-            loadState: "ready",
-            episodes: data.episodes ?? [],
-            owned: new Set(data.owned ?? []),
-          },
-        }));
-      } catch {
-        setState((prev) => ({
-          ...prev,
-          [seasonNumber]: { ...prev[seasonNumber], loadState: "error" },
-        }));
-      }
-    },
-    [state, tmdbId],
-  );
+    const myReq = ++reqSeq.current;
+    latestReq.current[key] = myReq;
+    patch(key, { expanded: true, loadState: "loading" });
+    try {
+      const res = await fetch(withBasePath(`/api/tv/${tmdbId}/season/${seasonNumber}`));
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { episodes: TmdbEpisode[]; owned: number[] };
+      if (latestReq.current[key] !== myReq) return;
+      patch(key, {
+        loadState: "ready",
+        episodes: data.episodes ?? [],
+        owned: new Set(data.owned ?? []),
+      });
+    } catch {
+      if (latestReq.current[key] !== myReq) return;
+      patch(key, { loadState: "error" });
+    }
+  }
 
   if (seasons.length === 0) return null;
 
@@ -152,8 +143,12 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
       </h2>
       <div className="flex flex-col" style={{ gap: 8 }}>
         {seasons.map((season) => {
-          const s = state[season.seasonNumber];
-          const ownedCount = s?.owned.size ?? 0;
+          const s = state[keyOf(season.seasonNumber)];
+          // The season fetch's answer once it has one, else the server's props
+          // (live across a router.refresh).
+          const ownedCount = s?.owned ? s.owned.size : (ownedBySeason[season.seasonNumber]?.length ?? 0);
+          const year = airYear(season.airDate);
+          const panelId = `season-${season.seasonNumber}-panel`;
           const ownershipLabel =
             ownedCount === 0
               ? null
@@ -181,7 +176,9 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                 onClick={() => toggleSeason(season.seasonNumber)}
                 className="ds-hover-tint w-full flex items-center text-left"
                 aria-expanded={s?.expanded ?? false}
-                aria-controls={`season-${season.seasonNumber}-panel`}
+                // The panel is only in the DOM while expanded; pointing at a
+                // missing id is an invalid reference.
+                aria-controls={s?.expanded ? panelId : undefined}
                 style={{
                   gap: 14,
                   padding: 12,
@@ -238,7 +235,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                     >
                       {t("detail.seasons.episodeCount", { count: season.episodeCount })}
                     </span>
-                    {season.airDate && (
+                    {year && (
                       <span
                         className="ds-mono flex items-center"
                         style={{
@@ -248,11 +245,9 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         }}
                       >
                         <Calendar style={{ width: 10, height: 10 }} />
-                        {/* Not gated on `mounted`: a bare YYYY-MM-DD parses as UTC
-                            midnight everywhere, so getUTCFullYear() is identical on
-                            server and client (guardrail 16 is about values that
-                            differ between the two). */}
-                        {new Date(season.airDate).getUTCFullYear()}
+                        {/* Not gated on `mounted`: airYear reads the string, so
+                            server and client agree (guardrail 16). */}
+                        {year}
                       </span>
                     )}
                   </div>
@@ -284,7 +279,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
 
               {s?.expanded && (
                 <div
-                  id={`season-${season.seasonNumber}-panel`}
+                  id={panelId}
                   style={{
                     borderTop: "1px solid var(--ds-border)",
                     padding: 12,
@@ -346,10 +341,15 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                   {s.loadState === "ready" && s.episodes.length > 0 && (
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                       {s.episodes.map((ep) => {
-                        const owned = s.owned.has(ep.episodeNumber);
+                        const owned = s.owned?.has(ep.episodeNumber) ?? false;
                         const still = stillUrl(ep.stillPath, "w300");
                         const runtime = formatRuntime(ep.runtime, t);
-                        const aired = mounted ? formatAirDate(ep.airDate, locale) : null;
+                        // Still gated on `mounted` (guardrail 16): the locale's
+                        // formatting can differ between server and browser. A
+                        // bare TMDB date is formatted in UTC, so nobody west of
+                        // UTC sees the previous day, and an unparseable one is
+                        // dropped rather than shown as "Invalid Date".
+                        const aired = mounted ? formatReleaseDate(ep.airDate, locale) : null;
                         return (
                           <div
                             key={ep.episodeNumber}

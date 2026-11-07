@@ -7,6 +7,8 @@
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { episodeLabel } from "@/lib/episode-label";
+import { foldStreamMethods } from "@/lib/activity-stream-mix";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +27,7 @@ import {
   MiniKpi,
   Th,
   fmtDuration,
+  streamTypeSegments,
 } from "@/components/admin/activity-ui";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
 
@@ -46,7 +49,10 @@ export interface UserDetailData {
   directPct: number | null;
   lastActiveIso: string | null;
   activityCalendar: { day: string; count: number }[];
+  // The statistics zone's today (zonedTodayIso) and the zone itself: the
+  // calendar, the daily series and the heatmap are bucketed in it.
   todayIso: string;
+  timeZone: string;
   playsByDay: { day: string; count: number; hours: number }[];
   userHeatmap: { dow: number; hour: number; count: number }[];
   platformBreakdown: { platform: string; count: number }[];
@@ -60,7 +66,10 @@ export interface UserDetailData {
     count: number;
     posterSrc: string | null;
   }[];
+  // The most recently seen addresses (capped by the page); knownIpTotal counts
+  // every distinct one, so the "N unique" label stays true past the cap.
   knownIps: { ip: string; plays: number; lastSeenIso: string | null }[];
+  knownIpTotal?: number;
   recentPlays: {
     id: string;
     title: string;
@@ -73,13 +82,6 @@ export interface UserDetailData {
     startedAtIso: string;
   }[];
 }
-
-// `labelKey` is a catalog key, translated at render.
-const STREAM_META: Record<string, { labelKey: string; color: string }> = {
-  DirectPlay: { labelKey: "adminActivity.method.directPlay", color: "var(--ds-success)" },
-  DirectStream: { labelKey: "adminActivity.method.remux", color: "var(--ds-info)" },
-  Transcode: { labelKey: "adminActivity.method.transcode", color: "var(--ds-warning)" },
-};
 
 function absTime(iso: string, locale: string): string {
   // Pin to UTC so the server (container time zone) and the browser (user time
@@ -110,11 +112,10 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
     }
   }
 
-  const streamTypes = ["DirectPlay", "DirectStream", "Transcode"].map((m) => ({
-    label: t(STREAM_META[m].labelKey),
-    count: s.transcodeRatio.find((r) => r.method === m)?.count ?? 0,
-    color: STREAM_META[m].color,
-  }));
+  // Any other method the server recorded is one "Other" segment, as on the
+  // Stats tab, so the shares divide by every session.
+  const streamMix = foldStreamMethods(s.transcodeRatio);
+  const streamTypes = streamTypeSegments(t, streamMix);
 
   const playsByDay = s.playsByDay.map((d) => d.count);
   // Floor at 1 so a zero count can't divide by zero (NaN bar widths).
@@ -199,6 +200,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
             <ActivityCalendar
               data={s.activityCalendar}
               today={s.todayIso}
+              timeZone={s.timeZone}
               detailBase={{ userId: s.userId }}
             />
           </ActivityCard>
@@ -228,7 +230,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         </ActivityCard>
         <ActivityCard>
           <SectionHeader label={t("adminActivity.user.viewingHeatmap")} sub={t("adminActivity.user.dayHour")} />
-          <HourHeatmap matrix={heatmapMatrix} detailBase={{ userId: s.userId }} />
+          <HourHeatmap matrix={heatmapMatrix} detailBase={{ userId: s.userId }} timeZone={s.timeZone} />
         </ActivityCard>
       </div>
 
@@ -263,7 +265,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
               label: r.resolution,
               count: r.count,
             }))}
-            color="oklch(0.68 0.16 158)"
+            color="var(--ds-chart-2)"
             labelWidth={70}
           />
         </ActivityCard>
@@ -276,7 +278,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
             items={s.deviceList
               .slice(0, 6)
               .map((d) => ({ label: d.device, count: d.count }))}
-            color="oklch(0.62 0.14 295)"
+            color="var(--ds-chart-3)"
             labelWidth={100}
           />
         </ActivityCard>
@@ -429,7 +431,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         <ActivityCard>
           <SectionHeader
             label={t("adminActivity.user.knownIps")}
-            sub={t("adminActivity.user.uniqueIps", { count: s.knownIps.length })}
+            sub={t("adminActivity.user.uniqueIps", { count: s.knownIpTotal ?? s.knownIps.length })}
           />
           {s.knownIps.length === 0 ? (
             <div
@@ -574,8 +576,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                             color: "var(--ds-fg-subtle)",
                           }}
                         >
-                          S{String(p.seasonNumber).padStart(2, "0")} · E
-                          {String(p.episodeNumber ?? 0).padStart(2, "0")}
+                          {episodeLabel(p.seasonNumber, p.episodeNumber)}
                         </span>
                       )}
                     </td>

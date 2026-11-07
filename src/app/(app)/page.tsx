@@ -27,6 +27,8 @@ import { PageHeader, EmptyState } from "@/components/ui/design";
 import { AlertTriangle } from "@/components/icons";
 import { getTranslator } from "@/lib/i18n/server";
 import { canRequest } from "@/lib/permissions";
+import { settleSources } from "@/lib/settle-sources";
+import { first, type PageSearchParams } from "@/lib/search-params";
 
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
@@ -86,7 +88,7 @@ function project(
 // True when Hide Available is what emptied a rail: at least one of its titles
 // survived the hidden-title filter and every such title was dropped as
 // available. A rail that is empty for any OTHER reason — a failed TMDB call
-// (settled() → []), a new user with no For You shelf, titles the user hid —
+// (settleSources → []), a new user with no For You shelf, titles the user hid —
 // must not claim "everything here is already on your server".
 function emptiedByHideAvailable(
   raw: TmdbMedia[],
@@ -105,10 +107,6 @@ function emptiedByHideAvailable(
   return seen;
 }
 
-function settled<T>(r: PromiseSettledResult<T[]>): T[] {
-  return r.status === "fulfilled" ? r.value : [];
-}
-
 // Tab / bookmark / history title — the page title, in the viewer's language.
 export async function generateMetadata(): Promise<Metadata> {
   const t = await getTranslator();
@@ -118,10 +116,10 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function DiscoverPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
   const [sp, session, flags, t] = await Promise.all([searchParams, requireAppSession(), getFeatureFlags(), getTranslator()]);
-  const hideAvailable = sp.hideAvailable === "1";
+  const hideAvailable = first(sp.hideAvailable) === "1";
   // Integration flags passed explicitly: they default to TRUE when omitted, which
   // left a disabled integration's leftover library rows driving these rails while
   // the /movies and /tv pages they link to (browse-query.ts) ignored them.
@@ -146,51 +144,43 @@ export default async function DiscoverPage({
   const show4kPromise = getShow4kVisibility(session);
   show4kPromise.catch(() => {});
 
-  const [
-    trendingRes,
-    popMoviesRes,
-    popTVRes,
-    upMoviesRes,
-    upTVRes,
-    topMoviesRes,
-    topTVRes,
-    forYouRes,
-    recentRes,
-  ] = await Promise.allSettled([
-    getTrending(),
-    getPopularMovies(),
-    getPopularTV(),
-    getUpcomingMovies(),
-    getOnTheAirTV(),
-    getTopRatedMovies(),
-    getTopRatedTV(),
+  // A rail whose source rejected degrades to an empty rail; settleSources logs
+  // each rejection by name, as src/app/api/home/route.ts does.
+  const lists = await settleSources("home", {
+    trending: getTrending(),
+    "popular-movies": getPopularMovies(),
+    "popular-tv": getPopularTV(),
+    "upcoming-movies": getUpcomingMovies(),
+    "on-the-air-tv": getOnTheAirTV(),
+    "top-rated-movies": getTopRatedMovies(),
+    "top-rated-tv": getTopRatedTV(),
     // The For You rail is gated at emit time below, so don't pay the
     // recommendation read plus the enrichment of its 20 extra titles for a
     // rail the default (flag-off) configuration then discards. Mirrors
     // src/app/api/home/route.ts — keep the two in sync.
-    forYouEnabled
+    "for-you": forYouEnabled
       ? getUserRecommendations(session.user.id)
       : Promise.resolve([] as TmdbMedia[]),
     // Library reads scoped to the servers this viewer may see (guardrail 35),
     // cached per visible-server set — never a TMDB call. Mirrors
     // src/app/api/home/route.ts — keep the two in sync.
-    recentEnabled
+    "recently-added": recentEnabled
       ? getRecentlyAddedForViewer(session, {
           plex: flags["feature.integration.plex"],
           jellyfin: flags["feature.integration.jellyfin"],
         })
       : Promise.resolve([] as TmdbMedia[]),
-  ]);
+  });
 
-  const trending  = settled(trendingRes);
-  const popMovies = settled(popMoviesRes).slice(0, RAIL_OVERFETCH);
-  const popTV     = settled(popTVRes).slice(0, RAIL_OVERFETCH);
-  const upMovies  = settled(upMoviesRes).slice(0, RAIL_OVERFETCH);
-  const upTV      = settled(upTVRes).slice(0, RAIL_OVERFETCH);
-  const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
-  const topTV     = settled(topTVRes).slice(0, RAIL_OVERFETCH);
-  const forYou    = settled(forYouRes).slice(0, RAIL_OVERFETCH);
-  const recent    = settled(recentRes);
+  const trending  = lists.trending;
+  const popMovies = lists["popular-movies"].slice(0, RAIL_OVERFETCH);
+  const popTV     = lists["popular-tv"].slice(0, RAIL_OVERFETCH);
+  const upMovies  = lists["upcoming-movies"].slice(0, RAIL_OVERFETCH);
+  const upTV      = lists["on-the-air-tv"].slice(0, RAIL_OVERFETCH);
+  const topMovies = lists["top-rated-movies"].slice(0, RAIL_OVERFETCH);
+  const topTV     = lists["top-rated-tv"].slice(0, RAIL_OVERFETCH);
+  const forYou    = lists["for-you"].slice(0, RAIL_OVERFETCH);
+  const recent    = lists["recently-added"];
 
   // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
   // available/hidden items then backfills toward RAIL_SIZE from the tail, so the

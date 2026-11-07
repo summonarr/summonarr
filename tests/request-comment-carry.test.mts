@@ -255,8 +255,8 @@ const ROOT = resolve(fileURLToPath(import.meta.url), "../..");
 const code = (rel: string) =>
   readFileSync(join(ROOT, rel), "utf8").split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
 
-test("request-create.ts and the Discord pick: the stale row is dropped through the helper and EVERY create restores its thread", () => {
-  for (const f of ["src/lib/request-create.ts", "src/lib/discord-interactions/components/pick.ts"]) {
+test("request-create.ts (and the Discord pick, which files through it): the stale row is dropped through the helper and EVERY create restores its thread", () => {
+  for (const f of ["src/lib/request-create.ts"]) {
     const src = code(f);
     assert.doesNotMatch(src, /mediaRequest\.deleteMany\(\{ where: \{ id: staleDeclinedId/, `${f}: a bare stale-row delete cascades the thread`);
     const drops = src.match(/const carried = await dropStaleDeclined\(tx, staleDeclinedId\);/g) ?? [];
@@ -266,7 +266,8 @@ test("request-create.ts and the Discord pick: the stale row is dropped through t
     assert.equal(creates.length, allCreates.length, `${f}: a create without restoreThread right after it`);
     for (const m of creates) assert.equal(m[1], m[2], `${f}: restores onto the row it created`);
   }
-  // One drop per create transaction: request-create has one tx, the pick two.
+  // One drop per create transaction: request-create has one tx. The pick has no
+  // create of its own to drop a row for.
   assert.equal((code("src/lib/request-create.ts").match(/dropStaleDeclined\(/g) ?? []).length, 1);
-  assert.equal((code("src/lib/discord-interactions/components/pick.ts").match(/dropStaleDeclined\(/g) ?? []).length, 2);
+  assert.equal((code("src/lib/discord-interactions/components/pick.ts").match(/dropStaleDeclined\(|tx\.mediaRequest/g) ?? []).length, 0);
 });

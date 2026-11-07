@@ -21,10 +21,54 @@ test("f27: the cron last-run audit fallback is one LIMIT-1 findFirst per target,
   assert.doesNotMatch(src, /prisma\.auditLog\.findMany\(/);
   assert.match(
     src,
-    /cronTargets\.map\(\s*\(target\)\s*=>\s*prisma\.auditLog\.findFirst\(\{\s*where:\s*\{\s*target\s*\}/,
+    /unrecorded\.map\(\s*\(target\)\s*=>\s*prisma\.auditLog\.findFirst\(\{\s*where:\s*\{\s*target\s*\}/,
   );
   // findFirst can return null per target — the fallback loop must skip those.
   assert.match(src, /for \(const r of lastRuns\) \{\s*if \(!r\) continue;/);
+});
+
+test("the audit-log fallback is read only for jobs with no usable ledger row, after the ledger", () => {
+  // Every job records to the cron:lastRun ledger now, so the per-target audit
+  // read is a fallback for a job that has never run since — not 19 reads a
+  // render whose answers the ledger then overwrites.
+  assert.match(src, /const unrecorded = cronTargets\.filter\(\(target\) => !lastRunMap\.has\(target\)\);/);
+  const ledger = src.indexOf("for (const s of lastRunSettings)");
+  const fallback = src.indexOf("const unrecorded = ");
+  assert.ok(ledger > 0 && fallback > ledger, "the ledger rows must be read into lastRunMap before the fallback is chosen");
+  assert.doesNotMatch(src, /cronTargets\.map\(\s*\(target\)\s*=>\s*prisma\.auditLog/, "the audit log is read for every target again");
+});
+
+test("each cron job's target, endpoint and interval are declared once, in CRON_JOBS", () => {
+  assert.match(src, /const cronTargets = CRON_JOBS\.map\(\(job\) => job\.target\);/);
+  assert.match(src, /return CRON_JOBS\.map\(\(job\) => \(\{[\s\S]*?\.\.\.lastRunInfo\(job\.target\),/);
+  // No second, hand-written list of targets or rows.
+  assert.doesNotMatch(src, /lastRunInfo\("/);
+  assert.doesNotMatch(src, /const cronTargets = \[/);
+});
+
+test("ALL_KEYS no longer loads the unused legacy path-strip prefixes", () => {
+  const keys = src.slice(src.indexOf("const ALL_KEYS = ["), src.indexOf("] as const;"));
+  assert.ok(keys.length > 0);
+  assert.doesNotMatch(keys, /"plexPathStripPrefix"|"jellyfinPathStripPrefix"/);
+  assert.match(keys, /"plexMoviePathStripPrefix"/);
+});
+
+test("the webhook URL base falls through a cleared Site URL and carries BASE_PATH", () => {
+  // `cfg.siteUrl?.replace(...) ?? AUTH_URL` kept "" (a cleared Site URL) and
+  // built relative URLs; AUTH_URL alone dropped BASE_PATH (tests/site-base-url).
+  assert.doesNotMatch(src, /cfg\.siteUrl\?\.replace\([^)]*\)\s*\?\?/);
+  assert.match(src, /const baseUrl = siteBaseUrl\(cfg\.siteUrl, process\.env\.AUTH_URL, process\.env\.BASE_PATH\);/);
+  assert.match(src, /siteUrl=\{cfg\.siteUrl \|\| process\.env\.AUTH_URL \|\| ""\}/);
+});
+
+test("the database counts are ONE named-column statement, and the share count streams behind Suspense", () => {
+  // readDbCounts (tests/settings-db-counts.test.mts); no per-model count
+  // fan-out left on this page.
+  assert.match(src, /readDbCounts\(new Date\(\)\)/);
+  assert.doesNotMatch(src, /prisma\.\w+\.count\(/);
+  // The live Plex/Jellyfin share count is not awaited by the page itself.
+  assert.doesNotMatch(src, /await Promise\.allSettled\(\[\s*\/\/ This server's members/);
+  assert.match(src, /<Suspense fallback="…">\s*<CurrentSharesValue count=\{metrics\.currentShares\} locale=\{locale\} \/>\s*<\/Suspense>/);
 });
 
 test("f28: no second setting.findUnique read for values ALL_KEYS already loaded into cfg", () => {

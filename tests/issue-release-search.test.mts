@@ -479,11 +479,29 @@ test("structural (C024): the Fix file window's release list searches through the
 test("structural (C112): the release list is offered only for a searchable TV scope", () => {
   const src = read("src/components/admin/issue-actions.tsx");
   assert.match(src, /const canPickRelease = mediaType === "MOVIE"\s*\|\| \(seriesReleaseScopeSearchable\(scope, seasonNumber, episodeNumber\)/);
-  assert.match(src, /c === "pick" \? canPickRelease/, "the window drops the choice without it");
+  assert.match(src, /<FixFileOptions[^>]*\bcanPickRelease=\{canPickRelease\}/, "the window hands it to the options view");
+  const options = read("src/components/admin/issue-fix-options.tsx");
+  assert.match(options, /c === "pick" \? canPickRelease/, "the options view drops the choice without it");
 });
 
 test("structural (C024): ReleaseSearchDialog runs the same shared loop", () => {
   const src = read("src/components/admin/release-search-dialog.tsx");
   assert.match(src, /runReleaseSearchJob\(fetch, withBasePath\(url\), \{\s*isAlive: \(\) => id === seq\.current,/);
   assert.doesNotMatch(src, /while \(res\.status === 202\)/, "no private copy of the poll loop");
+});
+
+test("structural: in the Fix file window the filter and the rejected toggle never move the selection; Grab waits for it to be visible", () => {
+  // The window used to re-point a filtered-out selection at the first visible
+  // release, so Grab sent Radarr/Sonarr a release the admin never picked.
+  const src = read("src/components/admin/issue-actions.tsx");
+  const picker = stripComments(functionBody(src, "function ReleasePicker("));
+  assert.doesNotMatch(src, /setSelectedGuid\(visibleReleases\[0\]/, "no effect re-points the selection");
+  assert.equal(picker.match(/setSelectedGuid\(/g)?.length, 1, "the selection changes only on the admin's click");
+  assert.match(picker, /onClick=\{\(\) => setSelectedGuid\(rel\.guid\)\}/);
+  assert.match(picker, /const selectedVisible = visibleReleases\.find\(\(r\) => r\.guid === selectedGuid\) \?\? null;/);
+  assert.match(picker, /disabled=\{!selectedGuid \|\| !selectedVisible \|\| working\}/);
+  assert.match(picker, /onGrab\(selectedVisible\)/, "Grab sends the visible selection, nothing else");
+  // The handle goes back as the server issued it (guardrail 5e).
+  const grab = functionBody(src, "async function grabRelease(");
+  assert.match(grab, /body: JSON\.stringify\(\{ guid: rel\.guid, indexerId: rel\.indexerId, instance \}\)/);
 });

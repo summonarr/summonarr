@@ -9,6 +9,7 @@
 // code.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   addTitleResolutions,
   collectUnmappedPairs,
@@ -151,4 +152,45 @@ test("calendar 'View these plays' link carries watched=true and the page seeds i
   assert.match(page, /initialWatched=\{initialWatched\}/);
   const table = readFileSync(new URL("../src/components/admin/activity-history-table.tsx", import.meta.url), "utf8");
   assert.match(table, /useState<"" \| "true" \| "false">\(initialWatched \?\? ""\)/);
+});
+
+// ── what the Activity overview may persist onto a live session ──────────────
+
+const { sessionBackfill } = await import("@/lib/activity-title-resolve.ts");
+
+test("sessionBackfill persists an item-level match, keeping the session's own type", () => {
+  assert.deepEqual(sessionBackfill("TV", { tmdbId: 1399, mediaType: "TV", via: "item" }), { tmdbId: 1399, mediaType: "TV" });
+  assert.deepEqual(
+    sessionBackfill(null, { tmdbId: 603, mediaType: "MOVIE", via: "item" }),
+    { tmdbId: 603, mediaType: "MOVIE" },
+    "a type-less session takes the matched item's own type",
+  );
+});
+
+test("sessionBackfill never persists a title-only guess", () => {
+  assert.equal(sessionBackfill("MOVIE", { tmdbId: 275, mediaType: "MOVIE", via: "title" }), null);
+  assert.equal(
+    sessionBackfill(null, { tmdbId: 275, mediaType: "MOVIE", via: "title" }),
+    null,
+    "a music track titled like a film must not become that film's play",
+  );
+});
+
+test("sessionBackfill invents no media type and writes nothing when the types disagree", () => {
+  assert.equal(
+    sessionBackfill(null, { tmdbId: 42, mediaType: null, via: "item" }),
+    null,
+    "a history row with no type used to be written as TV",
+  );
+  assert.equal(sessionBackfill("MOVIE", { tmdbId: 42, mediaType: "TV", via: "item" }), null);
+  assert.equal(sessionBackfill("TV", undefined), null);
+});
+
+test("the Activity overview backfills through sessionBackfill and no longer defaults a missing type to TV", () => {
+  const src = readFileSync(new URL("../src/app/(app)/admin/activity/page.tsx", import.meta.url), "utf8");
+  assert.match(src, /sessionBackfill\(s\.mediaType, \{ \.\.\.byItem, via: "item" \}\)/);
+  assert.doesNotMatch(src, /mediaType: h\.mediaType \?\? "TV"/);
+  const backfill = src.slice(src.indexOf("INTENTIONAL fire-and-forget"));
+  assert.match(backfill, /void Promise\.all\(/, "still fire-and-forget (guardrail 17)");
+  assert.match(backfill, /data: \{ tmdbId: s\.backfill\.tmdbId, mediaType: s\.backfill\.mediaType \}/);
 });

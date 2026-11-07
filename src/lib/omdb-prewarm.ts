@@ -1,16 +1,16 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { fetchAndCacheOmdbForTmdb, isOmdbQuotaLocked } from "./omdb";
+import { fetchAndCacheOmdbForTmdb, isOmdbQuotaLocked, omdbCacheKey } from "./omdb";
 import { collectAllLibraryItems, LIBRARY_PAGE_SIZE } from "./library-iterator";
+import { tmdbDetailsKey } from "./tmdb-cache";
+import { readDetailsReleaseDates } from "./details-release-dates";
 
 const CONCURRENCY = 5;
 const BATCH_DELAY_MS = 250;
 
 const MAX_PREWARM_ITEMS = 200_000;
 
-interface DetailsCacheData {
-  releaseDate?: string | null;
-}
+const typeOf = (i: { mediaType: "MOVIE" | "TV" }): "movie" | "tv" => (i.mediaType === "MOVIE" ? "movie" : "tv");
 
 export interface OmdbPrewarmResult {
   total: number;
@@ -19,8 +19,9 @@ export interface OmdbPrewarmResult {
   // these were negative-cached. A transient failure NEVER lands here — see `failed`.
   notFound: number;
   skipped: number;
-  // Rejected chains PLUS fulfilled `{ found: false, transient: true }` results
-  // and `tmdbUnconfigured` misses (no TMDB token — nothing fetched or cached).
+  // Rejected chains PLUS fulfilled `{ found: false, transient: true }` results,
+  // `tmdbUnconfigured` misses (no TMDB token — nothing fetched or cached) and
+  // `keyConfigured: false` misses (the OMDb key removed mid-run).
   // fetchAndCacheOmdbForTmdb turns every network/5xx/401/quota failure into a
   // transient miss instead of throwing, so this counter is the only way the cron
   // history (`recordCronRun(..., failed === 0)`) shows a bad key or an outage.
@@ -39,7 +40,9 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
   }
 
   const apiKey = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
-  if (!apiKey?.value) {
+  // Trimmed, as omdb.ts's getApiKey and the cron route read it: a blank key is
+  // no key, not thousands of "not found" titles.
+  if (!apiKey?.value.trim()) {
     return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0 };
   }
 
@@ -56,7 +59,7 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
   // TMDB→IMDb id never really changes, so reusing it skips one TMDB call per
   // item. `data` comes along in the same freshness read (OMDB rows are tiny).
   const imdbIdByKey = new Map<string, string>();
-  const omdbKeys = items.map((i) => `omdb:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`);
+  const omdbKeys = items.map((i) => omdbCacheKey(typeOf(i), i.tmdbId));
   for (let i = 0; i < omdbKeys.length; i += LIBRARY_PAGE_SIZE) {
     const slice = omdbKeys.slice(i, i + LIBRARY_PAGE_SIZE);
     const existingRows = await prisma.tmdbCache.findMany({
@@ -79,30 +82,11 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
     }
   }
 
-  const toFetch = items.filter((i) => {
-    const key = `omdb:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`;
-    return !freshKeys.has(key);
-  });
+  const toFetch = items.filter((i) => !freshKeys.has(omdbCacheKey(typeOf(i), i.tmdbId)));
 
   const skipped = items.length - toFetch.length;
 
-  const releaseDateByKey = new Map<string, string | null>();
-  const detailKeys = toFetch.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
-  for (let i = 0; i < detailKeys.length; i += LIBRARY_PAGE_SIZE) {
-    const slice = detailKeys.slice(i, i + LIBRARY_PAGE_SIZE);
-    const detailRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: slice } },
-      select: { key: true, data: true },
-    });
-    for (const row of detailRows) {
-      try {
-        const parsed = JSON.parse(row.data) as DetailsCacheData;
-        releaseDateByKey.set(row.key, parsed.releaseDate ?? null);
-      } catch {
-        releaseDateByKey.set(row.key, null);
-      }
-    }
-  }
+  const releaseDateByKey = await readDetailsReleaseDates(toFetch.map((i) => tmdbDetailsKey(i.mediaType, i.tmdbId)));
 
   let fetched = 0;
   let notFound = 0;
@@ -134,16 +118,15 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
     const batch = toFetch.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(
       batch.map((item) => {
-        const type = item.mediaType === "MOVIE" ? "movie" : "tv";
-        const key = `omdb:tmdb:${type}:${item.tmdbId}`;
-        const releaseDate = releaseDateByKey.get(`${type}:${item.tmdbId}:details`) ?? null;
+        const type = typeOf(item);
+        const releaseDate = releaseDateByKey.get(tmdbDetailsKey(type, item.tmdbId)) ?? null;
         // Force-fetch rather than getOmdbRatingsForTmdb: that getter is cache-first and
         // serves any UNEXPIRED row warm, so every row in the 0-25%-remaining band this
         // pass exists to renew would be "refreshed" with no upstream call at all (and
         // still counted as fetched below). Mirrors mdblist-prewarm/tmdb-prewarm, which
         // both call their fetch-and-store entry point directly. The stored imdbId (when
         // the prior row had one) skips the TMDB external_ids resolve per item.
-        return fetchAndCacheOmdbForTmdb(item.tmdbId, type, key, releaseDate, imdbIdByKey.get(key) ?? null);
+        return fetchAndCacheOmdbForTmdb(item.tmdbId, type, releaseDate, imdbIdByKey.get(omdbCacheKey(type, item.tmdbId)) ?? null);
       })
     );
     for (const r of results) {
@@ -159,6 +142,8 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
         // No TMDB token: nothing was fetched or negative-cached, so it is not an
         // authoritative miss — count it failed so the misconfiguration shows up.
         else if (r.value.tmdbUnconfigured) failed++;
+        // No OMDb key (removed mid-run): nothing was asked, nothing cached.
+        else if (!r.value.keyConfigured) failed++;
         else notFound++;
       } else { failed++; console.warn("[omdb-prewarm] item failed:", r.reason); }
     }

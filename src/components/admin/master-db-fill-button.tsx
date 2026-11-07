@@ -40,6 +40,20 @@ export function MasterDbFillButton({
     return () => { alive.current = false; };
   }, []);
 
+  // The confirm replaces the focused button: focus moves to its Cancel (the
+  // safe choice beside a full fill) and back to the button when the confirm
+  // closes — at once on Cancel, once the fill has answered on Run.
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const refocus = useRef(false);
+  useEffect(() => {
+    if (phase === "confirm") cancelRef.current?.focus();
+    else if (refocus.current && phase !== "phase1" && phase !== "phase2") {
+      refocus.current = false;
+      triggerRef.current?.focus();
+    }
+  }, [phase]);
+
   function scheduleReset(ms: number) {
     clearTimeout(resetTimer.current);
     resetTimer.current = setTimeout(() => { setPhase("idle"); setSummary(null); }, ms);
@@ -47,6 +61,7 @@ export function MasterDbFillButton({
 
   async function handleFill() {
     clearTimeout(resetTimer.current);
+    refocus.current = true;
     setPhase("phase1");
     setSummary(null);
 
@@ -172,9 +187,10 @@ export function MasterDbFillButton({
             {t("adminManage.library.fill.run")}
           </Button>
           <Button
+            ref={cancelRef}
             size="sm"
             variant="outline"
-            onClick={() => setPhase("idle")}
+            onClick={() => { refocus.current = true; setPhase("idle"); }}
             className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
           >
             {t("adminManage.common.cancel")}
@@ -194,6 +210,7 @@ export function MasterDbFillButton({
     <div className="space-y-1.5">
       <div className="flex items-center gap-3 flex-wrap">
         <Button
+          ref={triggerRef}
           variant="outline"
           size="sm"
           onClick={() => { clearTimeout(resetTimer.current); setPhase("confirm"); }}

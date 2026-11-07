@@ -97,7 +97,7 @@ test("running out on body-less proxy 5xx polls is 'no answer' (status 0), never 
 test("structural: every caller reads status 0 as 'may still be running' BEFORE its non-2xx failure branch", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   for (const [file, stillRunning] of [
-    ["src/components/admin/issue-actions.tsx", "adminQueue.issueActions.replaceFileNoAnswer"],
+    ["src/components/admin/issue-fix-options.tsx", "adminQueue.issueActions.replaceFileNoAnswer"],
     ["src/components/admin/never-watched-report.tsx", "adminManage.neverWatched.checkStillRunning"],
     ["src/components/admin/watch-sync-panel.tsx", "adminManage.watchSync.runStillRunning"],
     ["src/components/admin/library-match-check.tsx", "adminManage.library.match.stillRunning"],
@@ -133,9 +133,10 @@ test("the dialog unmounting stops the loop", async () => {
 
 test("structural: the Fix file window runs the delete through the job, and stops polling on unmount", () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const src = readFileSync(join(here, "../src/components/admin/issue-actions.tsx"), "utf8");
-  assert.ok(src.includes("function FixFileDialog("));
-  const dialog = src.slice(src.indexOf("function FixFileDialog("));
+  // The delete is the options view's (one instance's view inside the window).
+  const src = readFileSync(join(here, "../src/components/admin/issue-fix-options.tsx"), "utf8");
+  assert.ok(src.includes("export function FixFileOptions("));
+  const dialog = functionBody(src, "export function FixFileOptions(");
   // The WHOLE function, cut at its closing brace — a fixed window stopped short
   // of the !res.ok branch, the catch and the reload tail, so a synchronous
   // POST added there passed the doesNotMatch below unseen.

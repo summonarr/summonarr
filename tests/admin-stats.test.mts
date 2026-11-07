@@ -227,17 +227,38 @@ test("the pending queue excludes a PENDING row that carries an approval (a rolle
 });
 
 test("stuck requests match the *arr caches on the request's OWN instance (guardrail 32) and only look at approved rows", async () => {
-  rawResponder = (sql) =>
-    /GROUP BY reason/.test(sql)
-      ? [{ reason: "push-failed", count: 2n }, { reason: "slow-download", count: 1n }]
-      : [];
-  const s = await data.getStuckRequests();
+  const row = (id: string, reason: string, reasonCount: bigint, rn: bigint) => ({
+    id, tmdbId: 1, mediaType: "MOVIE", title: id, arrInstance: "", reason,
+    approvedAt: new Date("2026-09-01T00:00:00Z"), lastArrPushAt: null, reason_count: reasonCount, rn,
+  });
+  // limit 1: the oldest row, plus the first row of every other reason (past
+  // the cut, there only to carry its reason's full count).
+  rawResponder = () => [row("a", "slow-download", 1n, 1n), row("b", "push-failed", 2n, 2n)];
+  const s = await data.getStuckRequests(1);
+  assert.equal(rawCalls.length, 1, "the classification runs ONCE for the counts and the list");
   const sql = norm(rawCalls[0].sql);
   assert.match(sql, /"RadarrWantedItem" w WHERE w\."tmdbId" = r\."tmdbId" AND w\."arrInstance" = r\."arrInstance"/);
   assert.match(sql, /"SonarrWantedItem" w WHERE w\."tmdbId" = r\."tmdbId" AND w\."arrInstance" = r\."arrInstance"/);
   assert.match(sql, /WHERE r\."approvedAt" IS NOT NULL AND r\.status IN \('PENDING', 'APPROVED'\)/);
   assert.match(sql, /WHEN r\.status = 'PENDING' THEN 'push-failed'/);
+  assert.match(sql, /WHERE t\.rn <= (\?|\$\d+)::int OR t\.rn_reason = 1/);
   assert.deepEqual(s.counts, { "push-failed": 2, "not-in-arr": 0, "slow-download": 1 });
+  assert.deepEqual(s.oldest.map((r) => r.id), ["a"], "a row past the limit counts but is not listed");
+});
+
+// ── sources ─────────────────────────────────────────────────────────────────
+
+test("request sources: each ledger source has its own bucket — a Trakt auto-request is not an in-app watchlist one", async () => {
+  rawResponder = () => [
+    { source: "watchlist", count: 3n },
+    { source: "plex-watchlist", count: 2n },
+    { source: "trakt-watchlist", count: 4n },
+    { source: "something-new", count: 9n },
+  ];
+  const auto = await data.getAutoRequestSources(null);
+  assert.deepEqual(auto, { watchlist: 3, plexWatchlist: 2, traktWatchlist: 4 }, "an unknown source is credited to none");
+  assert.deepEqual(data.requestSources(auto, 20), { watchlist: 3, plexWatchlist: 2, traktWatchlist: 4, other: 11 });
+  assert.equal(data.requestSources(auto, 5).other, 0, "never negative");
 });
 
 // ── users ───────────────────────────────────────────────────────────────────
@@ -245,6 +266,16 @@ test("stuck requests match the *arr caches on the request's OWN instance (guardr
 test("active users exclude disabled (and therefore purged) accounts", async () => {
   await data.countActiveUsers();
   assert.deepEqual(ops.find((o) => o.op === "user.count")?.args, { where: { deactivatedAt: null } });
+});
+
+test("the watch-grade spread reads the active requesters as a GROUP BY, not a distinct findMany of every request", async () => {
+  // Prisma applies `distinct` in memory, so that shape read every request row.
+  assert.equal(await data.getWatchGradeSpreadForStats(), null, "no requesters, no spread");
+  assert.deepEqual(ops.find((o) => o.op === "mediaRequest.groupBy")?.args, {
+    by: ["requestedBy"],
+    where: { user: { deactivatedAt: null } },
+  });
+  assert.equal(ops.filter((o) => o.op === "mediaRequest.findMany").length, 0);
 });
 
 test("top requesters group by account id with a stable tiebreak", async () => {

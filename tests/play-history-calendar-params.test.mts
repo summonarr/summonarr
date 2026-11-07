@@ -15,6 +15,7 @@
 // recording $queryRawUnsafe that returns []. No DB, no network.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 (globalThis as { AsyncLocalStorage?: unknown }).AsyncLocalStorage = AsyncLocalStorage;
@@ -52,6 +53,12 @@ shadowPrismaModel(prisma, "user", {
     return u ? { ...u } : null;
   },
   update: async () => ({}),
+});
+
+// The statistics time zone: pinned so the bound zone is the same on every host.
+shadowPrismaModel(prisma, "setting", {
+  findUnique: async () => ({ value: "UTC" }),
+  findMany: async () => [],
 });
 
 // ── query capture ─────────────────────────────────────────────────────────────
@@ -97,7 +104,7 @@ test("calendar route: junk ?source/?mediaType are dropped BEFORE the lib — the
   await getActivityCalendar();
   assert.equal(captured.length, 1, "reference unfiltered call issues exactly one query");
   const reference = captured[0];
-  assert.deepEqual(reference.params, [], "unfiltered calendar binds no params");
+  assert.deepEqual(reference.params, ["UTC"], "unfiltered calendar binds only the statistics zone");
 
   // (a) A junk source must produce the SAME query (no bound source param) —
   //     and, because the whitelist collapses it onto the bare `calendar` key,
@@ -123,7 +130,46 @@ test("calendar route: recognised filters still reach the lib as bound params", a
   const res = await calendar(req("/api/play-history/calendar?source=jellyfin&mediaType=TV", token), undefined);
   assert.equal(res.status, 200);
   assert.equal(captured.length, 1, "a legitimate filter set is a fresh key → one query");
-  assert.deepEqual(captured[0].params, ["jellyfin", "TV"], "recognised values are bound, in filter order");
-  assert.match(captured[0].sql, /"source" = \$1/);
-  assert.match(captured[0].sql, /"mediaType"::text = \$2/);
+  assert.deepEqual(captured[0].params, ["UTC", "jellyfin", "TV"], "the zone, then the recognised values, in filter order");
+  assert.match(captured[0].sql, /"source" = \$2/);
+  assert.match(captured[0].sql, /"mediaType"::text = \$3/);
+});
+
+// ═══ the shared source/mediaType parser ═════════════════════════════════════
+// One helper for the stats, calendar and transcode-offenders routes (and the
+// Activity pages): the three used to carry their own copy of this whitelist.
+
+const { parseActivitySourceMediaType, parseActivityFilters, firstParam } = await import("../src/lib/activity-days.ts");
+
+test("parseActivitySourceMediaType passes the recognised values through and drops everything else", () => {
+  const parse = (qs: string) => parseActivitySourceMediaType(new URLSearchParams(qs));
+  assert.deepEqual(parse("source=plex&mediaType=MOVIE"), { source: "plex", mediaType: "MOVIE" });
+  assert.deepEqual(parse("source=jellyfin&mediaType=TV"), { source: "jellyfin", mediaType: "TV" });
+  for (const qs of ["", "source=&mediaType=", "source=Plex&mediaType=movie", "source=JELLYFIN&mediaType=tv", "source=junk&mediaType=SHOW", "source=MOVIE&mediaType=plex"]) {
+    assert.deepEqual(parse(qs), { source: undefined, mediaType: undefined }, `?${qs} narrows nothing`);
+  }
+});
+
+test("parseActivityFilters reads the FIRST value of a repeated page param and clamps days as before", () => {
+  assert.deepEqual(
+    parseActivityFilters({ days: ["7", "90"], source: ["jellyfin", "plex"], mediaType: ["TV", "MOVIE"] }),
+    { days: 7, source: "jellyfin", mediaType: "TV" },
+  );
+  assert.deepEqual(parseActivityFilters({}), { days: 30, source: undefined, mediaType: undefined });
+  assert.deepEqual(parseActivityFilters({ days: "99999", source: "Plex", mediaType: ["junk", "TV"] }), {
+    days: 3650,
+    source: undefined,
+    mediaType: undefined,
+  });
+  assert.deepEqual(parseActivityFilters({ days: "0" }).days, 30, "?days=0 renders the default, as parseActivityDays does");
+  assert.equal(firstParam([]), undefined);
+  assert.equal(firstParam("x"), "x");
+});
+
+test("the stats, calendar and transcode-offenders routes all parse source/mediaType through the shared helper", () => {
+  for (const route of ["stats", "calendar", "transcode-offenders"]) {
+    const src = readFileSync(new URL(`../src/app/api/play-history/${route}/route.ts`, import.meta.url), "utf8");
+    assert.match(src, /parseActivitySourceMediaType\(/, `${route} uses the shared parser`);
+    assert.doesNotMatch(src, /rawSource === "plex"/, `${route} still carries a private copy of the whitelist`);
+  }
 });

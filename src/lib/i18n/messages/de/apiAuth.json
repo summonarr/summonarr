@@ -3,7 +3,6 @@
   "apiAuth.common.forbidden": "Zugriff verweigert",
   "apiAuth.common.invalidCredentials": "Ungültige Anmeldedaten",
   "apiAuth.common.invalidEmail": "Ungültige E-Mail-Adresse",
-  "apiAuth.common.invalidJson": "Ungültiges JSON",
   "apiAuth.common.invalidPassword": "Ungültiges Passwort",
   "apiAuth.common.invalidServer": "Ungültiger Server",
   "apiAuth.common.reservedEmail": "Diese E-Mail-Adresse ist reserviert und kann nicht für ein Konto verwendet werden.",

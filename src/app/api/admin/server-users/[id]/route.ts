@@ -67,6 +67,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   if ((wantsLink || wantsAutoLink) && !hasPermission(session.user.permissions, Permission.ADMIN)) {
     return NextResponse.json({ error: t("apiAdmin.serverUsers.onlyAdminLink") }, { status: 403 });
   }
+  // The two halves are separate actions with separate rules (a departed row can
+  // be linked but has no policy to push), so a body naming both is refused
+  // whole rather than applying the link and silently dropping the policy.
+  if ((wantsLink || wantsAutoLink) && wantsPolicy) {
+    return NextResponse.json({ error: t("apiAdmin.serverUsers.linkOrPolicy") }, { status: 400 });
+  }
 
   const record = await prisma.mediaServerUser.findUnique({
     where: { id },

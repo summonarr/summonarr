@@ -105,6 +105,7 @@ const baseTx = {
   account: { deleteMany: record("account", "deleteMany") },
   authSession: { deleteMany: record("authSession", "deleteMany") },
   pushSubscription: { deleteMany: record("pushSubscription", "deleteMany") },
+  pushSubscriptionRemoval: { deleteMany: record("pushSubscriptionRemoval", "deleteMany") },
   discordLinkToken: { deleteMany: record("discordLinkToken", "deleteMany") },
   discordMergeCode: { deleteMany: record("discordMergeCode", "deleteMany") },
   watchlistItem: { deleteMany: record("watchlistItem", "deleteMany") },
@@ -210,6 +211,7 @@ const PURGE_OPS = [
   "webAuthnCredential.deleteMany",
   "mfaRecoveryCode.deleteMany",
   "pushSubscription.deleteMany",
+  "pushSubscriptionRemoval.deleteMany",
   "discordLinkToken.deleteMany",
   "discordMergeCode.deleteMany",
   "mediaServerUser.updateMany",
@@ -376,7 +378,7 @@ test("purge is idempotent — an already-purged row is a no-op, not a second scr
 test("purge of a disabled account issues the full scrub set, in order", async () => {
   await purgeUserDataInTx(purgeTx, ID, NOW);
   assert.deepEqual(opNames(), PURGE_OPS);
-  for (const op of PURGE_OPS.slice(1, 9)) {
+  for (const op of PURGE_OPS.slice(1, 10)) {
     assert.deepEqual(opArgs(op), { where: { userId: ID } }, op);
   }
   // Scoped to THIS account: the ledger rows of everyone else stay.

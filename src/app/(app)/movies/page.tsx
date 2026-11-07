@@ -1,14 +1,17 @@
 export const dynamic = "force-dynamic";
 
 import type { Metadata } from "next";
-import { getMovieGenres, getWatchProviders, type DiscoverFilters, type TmdbMedia } from "@/lib/tmdb";
+import { getMovieGenres, getWatchProviders, tmdbLanguageFor, type TmdbMedia } from "@/lib/tmdb";
 import { requireAppSession } from "@/lib/require-app-session";
 import { runBrowseQuery } from "@/lib/browse-query";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
-import { getTranslator } from "@/lib/i18n/server";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { discoverFiltersOf, hasActiveFilters, parseBrowseFilters } from "@/lib/browse-filters";
+import { parsePageNumber } from "@/lib/pagination";
+import { searchParamGetter, type PageSearchParams } from "@/lib/search-params";
 import { canRequest } from "@/lib/permissions";
 
 // Tab / bookmark / history title — the nav label, in the viewer's language.
@@ -20,26 +23,16 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function MoviesPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<PageSearchParams>;
 }) {
-  const [sp, session, t] = await Promise.all([searchParams, requireAppSession(), getTranslator()]);
-  const genreId        = sp.genreId        || undefined;
-  const keywordId      = sp.keywordId      || undefined;
-  const companyId      = sp.companyId      || undefined;
-  const networkId      = sp.networkId      || undefined;
-  const certification  = sp.certification  || undefined;
-  const minRating      = sp.minRating      || undefined;
-  const ratingFilter   = sp.ratingFilter   || undefined;
-  const minVoteCount   = sp.minVoteCount   || undefined;
-  const fromYear       = sp.fromYear       || undefined;
-  const toYear         = sp.toYear         || undefined;
-  const sortBy         = sp.sortBy         || undefined;
-  const watchProvider  = sp.watchProvider  || undefined;
-  const watchRegion    = sp.watchRegion    || undefined;
-  const hideAvailable  = sp.hideAvailable === "1";
-  const requestedPage  = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+  const [sp, session, t, locale] = await Promise.all([searchParams, requireAppSession(), getTranslator(), getLocale()]);
+  // One parser for every surface (browse-filters.ts); a repeated key counts
+  // its first value, as /api/browse's URLSearchParams.get does.
+  const browseFilters = parseBrowseFilters(searchParamGetter(sp));
+  const { ratingFilter, watchRegion, hideAvailable } = browseFilters;
+  const requestedPage  = parsePageNumber(sp.page);
 
-  const filters: DiscoverFilters = { genreId, keywordId, companyId, networkId, certification, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
+  const filters = discoverFiltersOf(browseFilters);
 
   // Shared with /api/browse — see src/lib/browse-query.ts. The helper THROWS on
   // a first-page failure; a server component has no prior state to preserve, so
@@ -51,10 +44,23 @@ export default async function MoviesPage({
   const query = (p: number) =>
     runBrowseQuery({ mediaType: "movie", page: p, filters, hideAvailable, ratingFilter, session })
       .then((r) => ({ ...r, failed: false }))
-      .catch(() => ({ items: [] as TmdbMedia[], totalPages: 1, showPlex: false, showJellyfin: false, failed: true }));
+      .catch((err: unknown) => {
+        console.error("[browse] movies page query failed:", err instanceof Error ? err.message : err);
+        return { items: [] as TmdbMedia[], totalPages: 1, showPlex: false, showJellyfin: false, failed: true };
+      });
+  // A failed list degrades to an empty control rather than failing the page,
+  // but says why in the log. Genre names follow the viewer's language: the
+  // localized list is cached under its own key, the English one is untouched
+  // (guardrail 40a).
   const [genres, providers, firstBrowse] = await Promise.all([
-    getMovieGenres().catch(() => []),
-    getWatchProviders("movie", watchRegion).catch(() => []),
+    getMovieGenres(tmdbLanguageFor(locale)).catch((err: unknown) => {
+      console.warn("[browse] movie genre list failed:", err instanceof Error ? err.message : err);
+      return [];
+    }),
+    getWatchProviders("movie", watchRegion).catch((err: unknown) => {
+      console.warn("[browse] movie watch-provider list failed:", err instanceof Error ? err.message : err);
+      return [];
+    }),
     query(requestedPage),
   ]);
   // Clamp the page ONCE and hand every surface the same number, the way
@@ -71,11 +77,11 @@ export default async function MoviesPage({
   const page = Math.max(1, Math.min(requestedPage, browse.totalPages));
   const { items, totalPages, showPlex, showJellyfin, failed } = browse;
 
-  // Header subtitle. Same predicate as BrowseGrid's own `hasFilters` (which
-  // deliberately leaves watchRegion out — a region alone narrows nothing the
-  // user asked for); the grid used to render this line itself and pull it up
-  // under the header with a negative margin.
-  const hasFilters = !!(genreId || keywordId || companyId || networkId || certification || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
+  // Header subtitle. Same predicate as BrowseGrid's own `hasFilters`
+  // (hasActiveFilters — watchRegion alone narrows nothing the user asked for);
+  // the grid used to render this line itself and pull it up under the header
+  // with a negative margin.
+  const hasFilters = hasActiveFilters(browseFilters);
   // `items` is ONE TMDB page (~20), not the result set, so a bare count would
   // read "20 results" above a pager offering hundreds of pages. Page-scoped when
   // there is more than one page; a count only when this page is everything.

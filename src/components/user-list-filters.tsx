@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search, X } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
+import { buildParamHref, sameListHref, searchEcho, shouldResyncSearch } from "@/lib/list-filter-url";
 
 export function FilterPills({
   param,
@@ -22,17 +23,13 @@ export function FilterPills({
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
+  // A pill change is a real history step (push), but re-clicking the pill
+  // that is already active would only add a duplicate entry.
   const onSelect = useCallback(
     (value: string) => {
-      const params = new URLSearchParams();
-      if (preserve) {
-        for (const key of preserve) {
-          const current = searchParams.get(key);
-          if (current) params.set(key, current);
-        }
-      }
-      if (value) params.set(param, value);
-      router.push(`${pathname}?${params.toString()}`);
+      const href = buildParamHref(pathname, searchParams, param, value, preserve);
+      if (sameListHref(href, `${pathname}?${searchParams.toString()}`)) return;
+      router.push(href);
     },
     [router, pathname, searchParams, param, preserve],
   );
@@ -72,7 +69,15 @@ export function FilterPills({
               borderRadius: 6,
               border: 0,
               fontSize: 12,
-              background: isActive ? "var(--ds-bg-3)" : "transparent",
+              // FilterBar's raised segment (design/filter-bar.tsx): a bg-3 fill
+              // alone was ~1.07:1 against the bg-1 track in light mode, so the
+              // active pill also gets a border-strong edge and a small shadow.
+              // Inactive pills leave boxShadow unset so .ds-hover-tint's inset
+              // tint (a box-shadow) still shows on hover.
+              background: isActive ? "var(--ds-bg-2)" : "transparent",
+              boxShadow: isActive
+                ? "var(--ds-shadow-sm), inset 0 0 0 1px var(--ds-border-strong)"
+                : undefined,
               color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
             }}
           >
@@ -105,12 +110,14 @@ export function FilterPills({
 export function SearchBox({
   param,
   initial,
-  placeholder = "Search…",
+  placeholder,
   preserve,
 }: {
   param: string;
   initial: string;
-  placeholder?: string;
+  // Required: it is also the input's accessible name, and only the caller can
+  // translate it (an English default here was a localisation trap).
+  placeholder: string;
   preserve?: string[];
 }) {
   const router = useRouter();
@@ -119,16 +126,20 @@ export function SearchBox({
   const t = useT();
   const [value, setValue] = useState(initial);
 
-  // The last value this box pushed to the URL. When our own debounced push
-  // lands late (a slow RSC round-trip), `initial` becomes that value while the
-  // user may already have typed more; resyncing then would drop those
-  // keystrokes. So resync only when the URL changed from OUTSIDE (back/forward,
-  // a pill click, a link) — i.e. to something other than what we pushed.
+  // What the server will echo back for the last value this box sent to the
+  // URL. When our own debounced search lands late (a slow RSC round-trip),
+  // `initial` becomes that echo while the user may already have typed more;
+  // resyncing then would drop those keystrokes. So resync only when the URL
+  // changed from OUTSIDE (back/forward, a pill click, a link). The echo is the
+  // page's normalised form (trimmed, LIKE wildcards stripped): comparing the
+  // raw text made "star " come back as "star", wipe the input and glue the
+  // next word on. A search still waiting to be sent never resyncs either.
   const [lastPushed, setLastPushed] = useState(initial);
+  const [pending, setPending] = useState(false);
   const [prevInitial, setPrevInitial] = useState(initial);
   if (initial !== prevInitial) {
     setPrevInitial(initial);
-    if (initial !== lastPushed) {
+    if (shouldResyncSearch(initial, lastPushed, pending)) {
       setLastPushed(initial);
       setValue(initial);
     }
@@ -144,47 +155,47 @@ export function SearchBox({
     [],
   );
 
-  const push = useCallback(
+  // REPLACE, not push: every typing pause sends a search, and pushing each
+  // one made Back step through "st", "star", "star w"… instead of leaving.
+  const navigate = useCallback(
     (next: string) => {
-      const params = new URLSearchParams();
-      if (preserve) {
-        for (const key of preserve) {
-          const current = searchParams.get(key);
-          if (current) params.set(key, current);
-        }
-      }
-      if (next) params.set(param, next);
-      router.push(`${pathname}?${params.toString()}`);
+      router.replace(buildParamHref(pathname, searchParams, param, next, preserve));
     },
     [router, pathname, searchParams, param, preserve],
   );
 
   // The debounce timer (typing waits 350ms before searching) must call the
-  // LATEST `push`, because `push` captures the current URL params. Example:
+  // LATEST `navigate`, because it captures the current URL params. Example:
   // type "abc" while on ?status=PENDING, then click the APPROVED pill before
-  // the timer fires. An old `push` would bring back ?status=PENDING and undo
-  // the click; the latest one gives ?status=APPROVED&q=abc. The ref is updated
-  // in an effect because React's lint rules forbid writing refs during render.
-  const pushRef = useRef(push);
+  // the timer fires. An old `navigate` would bring back ?status=PENDING and
+  // undo the click; the latest one gives ?status=APPROVED&q=abc. The ref is
+  // updated in an effect because React's lint rules forbid writing refs during
+  // render.
+  const navigateRef = useRef(navigate);
   useEffect(() => {
-    pushRef.current = push;
-  }, [push]);
+    navigateRef.current = navigate;
+  }, [navigate]);
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const next = e.target.value;
     setValue(next);
+    setPending(true);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      setLastPushed(next);
-      pushRef.current(next);
+      debounceRef.current = null;
+      setLastPushed(searchEcho(next));
+      setPending(false);
+      navigateRef.current(next);
     }, 350);
   }
 
   function handleClear() {
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = null;
     setValue("");
     setLastPushed("");
-    push("");
+    setPending(false);
+    navigate("");
   }
 
   // Full width only on small screens, where the parent row stacks into a
@@ -212,8 +223,10 @@ export function SearchBox({
           onChange={handleChange}
           placeholder={placeholder}
           aria-label={placeholder}
-          className="flex-1 min-w-0 bg-transparent border-0 outline-none"
-          style={{ fontSize: 13, color: "var(--ds-fg)" }}
+          // 16px below md: iOS Safari zooms the page when a control under 16px
+          // takes focus (same rule as Input and StyledSelect).
+          className="flex-1 min-w-0 bg-transparent border-0 outline-none text-base md:text-[13px]"
+          style={{ color: "var(--ds-fg)" }}
         />
         {value && (
           <button

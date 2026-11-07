@@ -57,6 +57,12 @@ export class SmtpError extends Error {
 }
 
 const READ_TIMEOUT_MS = 30_000;
+// A write's callback waits until the bytes leave the local socket buffer. A peer
+// that stops READING (during DATA, once the message outgrows its receive window
+// plus our send buffer) never drains it, emits no error, and would leave
+// sendMail — and the socket, fd and the closure holding the password — pending
+// forever, wedging the settleLimit(…, 3) email queue (see upgradeToTls).
+const WRITE_TIMEOUT_MS = 30_000;
 // READ_TIMEOUT_MS only arms once we are already connected, so a relay that
 // black-holes SYNs (firewall change, host down with no ICMP) leaves the connect
 // promise — and its socket, fd and retained closures — pending for the kernel's
@@ -126,10 +132,15 @@ const MAX_ENCODED_WORD_BYTES = 45;
 // 998-octet line limit relays enforce.
 function encodeSubject(subject: string): string {
   if (ASCII_PRINTABLE.test(subject)) return subject;
+  return encodeWords(subject);
+}
+
+// Non-ASCII text as one or more UTF-8 B encoded-words (see encodeSubject).
+function encodeWords(text: string): string {
   const words: string[] = [];
   let chunk = "";
   let chunkBytes = 0;
-  for (const ch of subject) {
+  for (const ch of text) {
     const bytes = Buffer.byteLength(ch, "utf8");
     if (chunkBytes + bytes > MAX_ENCODED_WORD_BYTES) {
       words.push(chunk);
@@ -143,6 +154,26 @@ function encodeSubject(subject: string): string {
   return words
     .map((w) => `=?UTF-8?B?${Buffer.from(w, "utf8").toString("base64")}?=`)
     .join("\r\n ");
+}
+
+// From/To header value. A non-ASCII display name (an admin's smtpFrom such as
+// "Médiathèque <noreply@host>") goes out as RFC 2047 encoded-words: raw 8-bit
+// header bytes need SMTPUTF8, which this client never negotiates, and strict
+// MTAs reject them. Quotes around the name are dropped (an encoded-word may not
+// sit inside a quoted string). The address itself is never encoded — an
+// encoded-word is not allowed in an addr-spec — and an all-ASCII value is
+// returned unchanged, byte for byte.
+function encodeAddressHeader(value: string): string {
+  if (ASCII_PRINTABLE.test(value)) return value;
+  const m = /^([^<]*)<([^<>]*)>\s*$/.exec(value);
+  if (!m) return value;
+  const rawName = m[1].trim();
+  const addr = `<${m[2].trim()}>`;
+  if (!rawName) return addr;
+  if (ASCII_PRINTABLE.test(rawName)) return `${rawName} ${addr}`;
+  const quoted = rawName.length >= 2 && rawName.startsWith('"') && rawName.endsWith('"');
+  const name = quoted ? rawName.slice(1, -1).replace(/\\(.)/g, "$1") : rawName;
+  return `${encodeWords(name)} ${addr}`;
 }
 
 // RFC 5322 date. `toUTCString()` returns "Tue, 01 Jan 2024 00:00:00 GMT"; SMTP
@@ -380,7 +411,20 @@ class SmtpConnection {
   async send(line: string): Promise<void> {
     if (this.closed) throw new SmtpError("SMTP connection is closed");
     await new Promise<void>((resolve, reject) => {
-      this.socket.write(line, "utf8", (err) => (err ? reject(err) : resolve()));
+      // Armed before the write: the callback may run synchronously.
+      const timer = setTimeout(() => {
+        try {
+          this.socket.destroy(new Error("SMTP write timeout"));
+        } catch {
+          // socket may already be destroyed
+        }
+        reject(new SmtpError(`SMTP write timed out after ${WRITE_TIMEOUT_MS}ms`));
+      }, WRITE_TIMEOUT_MS);
+      this.socket.write(line, "utf8", (err) => {
+        clearTimeout(timer);
+        if (err) reject(err);
+        else resolve();
+      });
     });
   }
 
@@ -666,8 +710,8 @@ function buildMessage(msg: SmtpMessage): string {
   const date = rfc5322Date();
 
   const headers = [
-    `From: ${msg.from}`,
-    `To: ${msg.to}`,
+    `From: ${encodeAddressHeader(msg.from)}`,
+    `To: ${encodeAddressHeader(msg.to)}`,
     `Subject: ${subject}`,
     `Date: ${date}`,
     `Message-ID: ${messageId}`,

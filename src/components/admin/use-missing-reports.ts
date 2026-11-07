@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
+import { readApiError } from "@/lib/client/api-error";
 import type { CutoffMovie, CutoffSeries, MissingMovie, MissingSeries } from "@/lib/arr-missing";
 import type { ArrErrorKind } from "@/lib/arr-error-kind";
 
@@ -45,11 +46,6 @@ export type Reports = {
 // A list's live read. ONE builder for the live load and the snapshot read, so
 // the server keys the snapshot on exactly the read the live load makes.
 const missingListUrl = (svc: Service, m: Mode) => withBasePath(`/api/admin/missing?service=${svc}&mode=${m}`);
-
-export async function readError(res: Response, fallback: string): Promise<string> {
-  const d = (await res.json().catch(() => null)) as { error?: string } | null;
-  return d?.error ?? fallback;
-}
 
 export function useMissingReports({
   service,
@@ -97,7 +93,7 @@ export function useMissingReports({
     try {
       const res = await fetch(missingListUrl(svc, m));
       if (!res.ok) {
-        const message = await readError(res, t("adminManage.missing.error.load"));
+        const message = await readApiError(res, t("adminManage.missing.error.load"));
         if (superseded()) return;
         setErrors((e) => ({ ...e, [k]: message }));
         return;

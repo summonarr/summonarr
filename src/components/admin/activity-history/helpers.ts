@@ -34,15 +34,15 @@ export interface HistoryFilterInput {
   grouped: boolean;
 }
 
-// A YYYY-MM-DD day filter means a whole UTC calendar day. `PlayHistory.startedAt`
-// is stored in UTC (with no time zone attached), and every per-day count built
-// from it groups by the UTC date — including the activity heatmap, whose cells
-// link here as ?from=&to=. Using the admin's LOCAL midnight instead would shift
-// the window by their time-zone offset, so it would not match the day the cell
-// counted. Returns null for a malformed or impossible date (2026-13-01, or
-// 2026-02-30, which Date silently rolls forward to Mar 2) so the caller drops
-// the filter instead of passing an Invalid Date to toISOString(), which throws.
-function utcDayBounds(day: string): { start: string; end: string } | null {
+// A YYYY-MM-DD day filter means a whole calendar day in the statistics time zone,
+// the zone every per-day count is bucketed in — including the activity heatmap,
+// whose cells link here as ?from=&to=. The day is sent as is (fromDay/toDay) and
+// the SERVER turns it into that zone's midnights: the browser can't know the
+// zone's offset on that date, and the admin's own midnight would not match the
+// day the cell counted. A malformed or impossible date (2026-13-01, or
+// 2026-02-30, which Date silently rolls forward to Mar 2) is dropped here rather
+// than sent, since the API answers it with a 400.
+function validDay(day: string): string | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
   if (!m) return null;
   const year = Number(m[1]);
@@ -57,10 +57,7 @@ function utcDayBounds(day: string): { start: string; end: string } | null {
   ) {
     return null;
   }
-  return {
-    start: start.toISOString(),
-    end: new Date(start.getTime() + 86_400_000 - 1).toISOString(),
-  };
+  return day;
 }
 
 export function buildHistoryFilterParams({
@@ -81,14 +78,14 @@ export function buildHistoryFilterParams({
   const params = new URLSearchParams();
   if (globalSource) params.set("source", globalSource);
   if (globalMediaType) params.set("mediaType", globalMediaType);
-  const from = fromDate ? utcDayBounds(fromDate) : null;
-  const to = toDate ? utcDayBounds(toDate) : null;
+  const from = fromDate ? validDay(fromDate) : null;
+  const to = toDate ? validDay(toDate) : null;
   if (from) {
-    params.set("startDate", from.start);
+    params.set("fromDay", from);
   } else if (startDateIso) {
     params.set("startDate", startDateIso);
   }
-  if (to) params.set("endDate", to.end);
+  if (to) params.set("toDay", to);
   if (debouncedSearch) params.set("search", debouncedSearch);
   if (watched) params.set("watched", watched);
   if (method) params.set("playMethod", method);

@@ -133,6 +133,7 @@ const rec = (op: string, args?: unknown) => { ops.push({ op, args }); };
 const opsOf = (name: string) => ops.filter((o) => o.op === name);
 
 const auditRows: Array<Record<string, unknown>> = [];
+const issueRows = new Map<string, Record<string, unknown>>();
 
 // Filters an in-memory library table by a prisma-style where clause. An ABSENT
 // serverInstance key means "any instance" — which is precisely the pre-fix
@@ -276,6 +277,21 @@ const fakePrisma = {
   auditLog: {
     create: async (args: { data: Record<string, unknown> }) => { auditRows.push(args.data); return args.data; },
   },
+  // The issue a background fix answers (the issue dialog's `issueId`).
+  issue: {
+    findUnique: async (args: { where: { id: string } }) => {
+      rec("issue.findUnique", args);
+      const row = issueRows.get(args.where.id);
+      return row ? { ...row } : null;
+    },
+    updateMany: async (args: { where: { id: string; status: { in: string[] } }; data: Record<string, unknown> }) => {
+      rec("issue.updateMany", args);
+      const row = issueRows.get(args.where.id);
+      if (!row || !args.where.status.in.includes(row.status as string)) return { count: 0 };
+      Object.assign(row, args.data);
+      return { count: 1 };
+    },
+  },
   $transaction: async (arg: unknown) => {
     if (txThrows) throw new Error("tx boom (test knob)");
     if (typeof arg === "function") return (arg as (t: unknown) => Promise<unknown>)(makeTx());
@@ -383,6 +399,7 @@ beforeEach(() => {
   fetchCalls.length = 0;
   settingReads.length = 0;
   auditRows.length = 0;
+  issueRows.clear();
   warns.length = 0;
   errors.length = 0;
   settings.clear();
@@ -2213,6 +2230,7 @@ test("jobs feed: lists recent jobs with a title and outcome, coarse only — no 
   assert.equal(job?.status, "done");
   assert.equal(job?.title, "Dune (2021)");
   assert.equal(job?.server, "plex");
+  assert.equal((job as { serverInstance?: string } | undefined)?.serverInstance, "", "the default server's slug");
   for (const secret of ["1001", "/secret/path", "plex://movie/xyz", PLEX_DEFAULT, TOKEN_DEFAULT]) {
     assert.ok(!text.includes(secret), `the feed must not leak ${secret}`);
   }
@@ -2659,4 +2677,182 @@ test("file-info: a Radarr that fails is logged and flagged — a null arrTmdbId 
   const logged = warns.filter((w) => w.includes("[fix-match/file-info]"));
   assert.equal(logged.length, 1, warns.join(" | "));
   assert.ok(!logged[0].includes("uhd-key"), "never the api key");
+});
+
+// ── the issue dialog's fix closes its issue from the job (not the browser) ───
+
+const { sseEmitter } = await import("../src/lib/sse-emitter.ts");
+const sseEvents: Array<Record<string, unknown>> = [];
+sseEmitter.on("event", (e: Record<string, unknown>) => { sseEvents.push(e); });
+
+function seedIssue(id: string, over: Record<string, unknown> = {}) {
+  issueRows.set(id, {
+    id, status: "OPEN", reportedBy: "reporter-gone", title: "Wrong Film", mediaType: "MOVIE", tmdbId: 111,
+    posterPath: null, issueType: "WRONG_MATCH", resolution: null, resolvedAt: null, ...over,
+  });
+}
+
+async function settle(jobId: string, header: Record<string, string>): Promise<{ status: string; result?: Record<string, unknown>; error?: string }> {
+  let st: { status: string; result?: Record<string, unknown>; error?: string } = { status: "running" };
+  for (let i = 0; i < 400 && (st.status === "running" || st.status === "queued"); i++) {
+    await flush();
+    st = await (await fixMatchStatus(req(statusUrl(jobId), { headers: header }), undefined)).json() as typeof st;
+  }
+  return st;
+}
+
+test("an async fix sent with issueId closes that issue from the job on success — CAS, issue:updated, audit — and says so in the result", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+  respond = jellyfinRemapResponder(JF_DEFAULT, "aaaaaaaa", 222);
+  seedIssue("issue-ok");
+  sseEvents.length = 0;
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true, issueId: "issue-ok", issueTitle: "Right Film" }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const { jobId } = await res.json() as { jobId: string };
+  const st = await settle(jobId, a.header);
+  assert.equal(st.status, "done");
+  assert.deepEqual(st.result, { ok: true, issueResolved: true });
+
+  const row = issueRows.get("issue-ok") as Record<string, unknown>;
+  assert.equal(row.status, "RESOLVED");
+  assert.ok(row.resolvedAt instanceof Date);
+  assert.equal(row.resolution, "Match corrected to “Right Film”");
+  const cas = opsOf("issue.updateMany")[0].args as { where: { status: { in: string[] } } };
+  assert.deepEqual(cas.where.status.in, ["OPEN", "IN_PROGRESS"], "a compare-and-swap, never a blind write");
+  assert.deepEqual(sseEvents.filter((e) => e.type === "issue:updated"), [{ type: "issue:updated", issueId: "issue-ok", status: "RESOLVED", userId: "reporter-gone" }]);
+  const audit = auditRows.find((r) => r.action === "ISSUE_STATUS_CHANGE");
+  assert.equal(audit?.target, "issue:issue-ok");
+  assert.equal(audit?.userId, a.userId);
+  assert.match(String(audit?.details), /"trigger":"fix-match"/);
+});
+
+test("a failed fix leaves its issue OPEN; an issue about another title, or a synchronous call, is never closed", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+  seedIssue("issue-failed");
+  seedIssue("issue-other", { tmdbId: 999 });
+  seedIssue("issue-sync");
+  sseEvents.length = 0;
+
+  // Never confirms → the job fails.
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "111" } });
+    if (p === "/Library/VirtualFolders") return okJson([]);
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+  let res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true, issueId: "issue-failed" }, a.header), undefined);
+  assert.equal(res.status, 202);
+  assert.equal((await settle((await res.json() as { jobId: string }).jobId, a.header)).status, "failed");
+  assert.equal(issueRows.get("issue-failed")?.status, "OPEN");
+
+  // Succeeds, but the issue names another title → left alone.
+  respond = jellyfinRemapResponder(JF_DEFAULT, "aaaaaaaa", 222);
+  res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true, issueId: "issue-other" }, a.header), undefined);
+  const other = await settle((await res.json() as { jobId: string }).jobId, a.header);
+  assert.deepEqual([other.status, other.result], ["done", { ok: true, issueResolved: false }]);
+  assert.equal(issueRows.get("issue-other")?.status, "OPEN");
+
+  // The synchronous contract ignores issueId: same body as ever, issue untouched.
+  res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, issueId: "issue-sync" }, a.header), undefined);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal(issueRows.get("issue-sync")?.status, "OPEN");
+  assert.equal(opsOf("issue.updateMany").length, 0);
+  assert.equal(sseEvents.filter((e) => e.type === "issue:updated").length, 0);
+});
+
+test("a fix that JOINS a running remap still closes its issue once that remap succeeds", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+  seedIssue("issue-joined");
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const base = jellyfinRemapResponder(JF_DEFAULT, "aaaaaaaa", 222);
+  respond = (url) => url.pathname === "/Items/aaaaaaaa" ? gate.then(() => base(url)) : base(url);
+
+  const first = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true }, a.header), undefined);
+  const { jobId } = await first.json() as { jobId: string };
+  const joined = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true, issueId: "issue-joined" }, a.header), undefined);
+  assert.deepEqual(await joined.json(), { ok: true, jobId, status: "running", joined: true });
+  assert.equal(issueRows.get("issue-joined")?.status, "OPEN", "nothing closes before the remap lands");
+
+  release();
+  assert.equal((await settle(jobId, a.header)).status, "done");
+  await until(() => issueRows.get("issue-joined")?.status === "RESOLVED", "the joined caller's issue to close");
+});
+
+test("issueId is refused when malformed, before anything is started", async () => {
+  const a = await admin();
+  configureServers();
+  for (const extra of [{ issueId: 42 }, { issueId: "has spaces" }, { issueId: "ok", issueTitle: 7 }]) {
+    const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true, ...extra }, a.header), undefined);
+    assert.equal(res.status, 400, JSON.stringify(extra));
+  }
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(opsOf("jellyfinLibraryItem.findFirst").length, 0);
+});
+
+test("jobs feed: a named server's job carries its instance slug, so two servers' jobs for one title read apart", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/secret/remote/a.mkv", plexRatingKey: "2002" });
+  respond = plexRemapResponder(PLEX_REMOTE, "2002", 222);
+  const res = await fixMatch(postBody({ server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz", serverInstance: "remote", async: true }, a.header), undefined);
+  const { jobId } = await res.json() as { jobId: string };
+  await settle(jobId, a.header);
+  const text = await (await fixMatchJobs(req("http://localhost:3000/api/admin/fix-match/jobs", { headers: a.header }), undefined)).text();
+  const job = (JSON.parse(text) as { jobs: Array<{ id: string; server: string; serverInstance: string }> }).jobs.find((j) => j.id === jobId);
+  assert.deepEqual([job?.server, job?.serverInstance], ["plex", "remote"]);
+  for (const secret of ["2002", "/secret/remote", PLEX_REMOTE, TOKEN_REMOTE]) {
+    assert.ok(!text.includes(secret), `the feed must not leak ${secret}`);
+  }
+});
+
+test("during maintenance an issue admin's fix still runs but does not close the issue (the PATCH would refuse it too)", async () => {
+  const a = await issueAdmin();
+  configureServers();
+  settings.set("maintenanceEnabled", "true");
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+  respond = jellyfinRemapResponder(JF_DEFAULT, "aaaaaaaa", 222);
+  seedIssue("issue-maint");
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true, issueId: "issue-maint" }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const st = await settle((await res.json() as { jobId: string }).jobId, a.header);
+  assert.deepEqual([st.status, st.result], ["done", { ok: true, issueResolved: false }]);
+  assert.equal(issueRows.get("issue-maint")?.status, "OPEN");
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 1, "the fix itself landed");
+});
+
+test("a synchronous call that joins a background fix started for an issue answers the plain body — never the issue flag", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+  seedIssue("issue-sync-join");
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  const base = jellyfinRemapResponder(JF_DEFAULT, "aaaaaaaa", 222);
+  respond = (url) => url.pathname === "/Items/aaaaaaaa" ? gate.then(() => base(url)) : base(url);
+  const body = { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 };
+  const started = await fixMatch(postBody({ ...body, async: true, issueId: "issue-sync-join" }, a.header), undefined);
+  assert.equal(started.status, 202);
+  const sync = fixMatch(postBody(body, a.header), undefined);
+  const titleReads = () =>
+    opsOf("jellyfinLibraryItem.findFirst").filter((o) => (o.args as { select?: { title?: boolean } }).select?.title === true).length;
+  for (let i = 0; i < 200 && titleReads() < 2; i++) await flush();
+  assert.equal(titleReads(), 2, "fixture sanity: both POSTs reached the join");
+  await flush();
+  release();
+  const res = await sync;
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal(issueRows.get("issue-sync-join")?.status, "RESOLVED");
 });

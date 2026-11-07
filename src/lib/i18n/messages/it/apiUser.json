@@ -116,6 +116,7 @@
   "apiUser.push.fieldsTooLong": "I campi della sottoscrizione push superano la lunghezza massima",
   "apiUser.push.idOrEndpointRequired": "id o endpoint è obbligatorio",
   "apiUser.push.noSubscription": "Nessuna sottoscrizione push trovata per il tuo account — registra prima l'app o iscriviti da un browser.",
+  "apiUser.push.subscriptionRemoved": "La registrazione push di questo dispositivo è stata rimossa. Riattiva le notifiche per usarla.",
   "apiUser.push.vapidMissing": "Chiavi VAPID non configurate",
   "apiUser.push.webPushNotConfigured": "Le notifiche web push non sono configurate su questo server",
   "apiUser.quota.window.day": "giorno",

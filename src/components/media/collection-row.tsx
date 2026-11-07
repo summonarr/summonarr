@@ -6,6 +6,9 @@ import { SectionHeader } from "@/components/ui/design";
 interface CollectionRowProps {
   collectionName: string;
   items: TmdbMedia[];
+  // `${mediaType}:${id}` of titles the viewer can never re-request (see
+  // permanentlyDeclinedKeys); "Request all" leaves them out.
+  declinedKeys?: string[];
   currentId: number;
   showPlex?: boolean;
   showJellyfin?: boolean;
@@ -15,6 +18,7 @@ interface CollectionRowProps {
 export function CollectionRow({
   collectionName,
   items,
+  declinedKeys,
   currentId,
   showPlex,
   showJellyfin,
@@ -28,7 +32,7 @@ export function CollectionRow({
           its styles — the copies drift the first time SectionHeader changes. */}
       <SectionHeader
         title={collectionName}
-        right={<CollectionRequestAllButton items={others} canRequest={canRequest} />}
+        right={<CollectionRequestAllButton items={others} declinedKeys={declinedKeys} canRequest={canRequest} />}
       />
       <div className="ds-media-grid">
         {others.map((media) => (

@@ -2,10 +2,11 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { prisma } from "@/lib/prisma";
-import { getMdblistUsageSnapshot, isMdblistQuotaLocked } from "@/lib/mdblist";
-import { isOmdbQuotaLocked } from "@/lib/omdb";
+import { getMdblistUsageSnapshot, isMdblistQuotaLocked, mdblistCacheKey } from "@/lib/mdblist";
+import { isOmdbQuotaLocked, omdbCacheKey } from "@/lib/omdb";
 import { fetchUnifiedRatings, type UnifiedRatingsResult } from "@/lib/omdb-availability";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { tmdbDetailsKey } from "@/lib/tmdb-cache";
 
 // Ratings-pipeline counterpart to /api/admin/debug/arr-state: dumps provider
 // configuration, in-process quota lockouts, the raw ratings cache rows
@@ -68,9 +69,9 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const liveRequested = sp.get("live") === "1";
 
   const now = new Date();
-  const mdblistCacheKey = `mdblist:tmdb:${type}:${tmdbId}`;
-  const omdbCacheKey = `omdb:tmdb:${type}:${tmdbId}`;
-  const detailsCacheKey = `${type}:${tmdbId}:details`;
+  const mdblistKey = mdblistCacheKey(type, tmdbId);
+  const omdbKey = omdbCacheKey(type, tmdbId);
+  const detailsCacheKey = tmdbDetailsKey(type, tmdbId);
 
   const [mdblistKeyRow, omdbKeyRow, traktIdRow, mdblistCacheRow, omdbCacheRow, detailsCacheRow] = await Promise.all([
     // The Prisma extension decrypts Setting.value on read; only truthiness is
@@ -78,8 +79,8 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     prisma.setting.findUnique({ where: { key: "mdblistApiKey" } }),
     prisma.setting.findUnique({ where: { key: "omdbApiKey" } }),
     prisma.setting.findUnique({ where: { key: "traktClientId" } }),
-    prisma.tmdbCache.findUnique({ where: { key: mdblistCacheKey } }),
-    prisma.tmdbCache.findUnique({ where: { key: omdbCacheKey } }),
+    prisma.tmdbCache.findUnique({ where: { key: mdblistKey } }),
+    prisma.tmdbCache.findUnique({ where: { key: omdbKey } }),
     prisma.tmdbCache.findUnique({ where: { key: detailsCacheKey } }),
   ]);
 
@@ -159,8 +160,8 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     // what is left today, and whether background jobs have stopped.
     mdblistUsage: await getMdblistUsageSnapshot(),
     cache: {
-      mdblist: describeRatingsRow(mdblistCacheKey, mdblistCacheRow, now),
-      omdb: describeRatingsRow(omdbCacheKey, omdbCacheRow, now),
+      mdblist: describeRatingsRow(mdblistKey, mdblistCacheRow, now),
+      omdb: describeRatingsRow(omdbKey, omdbCacheRow, now),
     },
     details: {
       key: detailsCacheKey,

@@ -117,6 +117,8 @@ const { encryptToken, decryptToken } = await import("../src/lib/token-crypto.ts"
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { Prisma } = await import("@/generated/prisma");
 const { apnsEndpointFor, legacyApnsToken, migrateLegacyApnsEndpoints } = await import("../src/lib/apns-endpoint.ts");
+const { clearSessionFootholdsInTx } = await import("../src/lib/session-footholds.ts");
+const { tombstoneRemovedPushRowsInTx, MAX_PUSH_REMOVALS_PER_USER, pushEndpointHash } = await import("../src/lib/push-registration.ts");
 
 // ── Setting stub (feature flags, VAPID keys, relay config, maintenance, cap) ──
 const settings = new Map<string, string>();
@@ -221,6 +223,51 @@ const pushModel = {
 };
 shadowPrismaModel(prisma, "pushSubscription", pushModel);
 
+// PushSubscriptionRemoval stub — the removal tombstones (push-registration.ts).
+type RemovalRow = { id: string; userId: string; endpointHash: string; removedAt: Date };
+let removalRows: RemovalRow[] = [];
+let removalSeq = 0;
+type RemovalWhere = { userId?: string; endpointHash?: string; id?: { in?: string[] } };
+function removalMatches(row: RemovalRow, where: RemovalWhere | undefined): boolean {
+  if (!where) return true;
+  if (where.userId !== undefined && row.userId !== where.userId) return false;
+  if (where.endpointHash !== undefined && row.endpointHash !== where.endpointHash) return false;
+  if (where.id?.in && !where.id.in.includes(row.id)) return false;
+  return true;
+}
+const removalModel = {
+  findUnique: async (args: { where: { userId_endpointHash: { userId: string; endpointHash: string } } }) => {
+    const k = args.where.userId_endpointHash;
+    return removalRows.find((r) => r.userId === k.userId && r.endpointHash === k.endpointHash) ?? null;
+  },
+  findMany: async (args: { where?: RemovalWhere; orderBy?: { removedAt: "desc" }; skip?: number }) => {
+    const rows = removalRows.filter((r) => removalMatches(r, args?.where));
+    rows.sort((a, b) => b.removedAt.getTime() - a.removedAt.getTime());
+    return rows.slice(args?.skip ?? 0).map((r) => ({ ...r }));
+  },
+  upsert: async (args: {
+    where: { userId_endpointHash: { userId: string; endpointHash: string } };
+    create: { userId: string; endpointHash: string };
+    update: { removedAt: Date };
+  }) => {
+    const k = args.where.userId_endpointHash;
+    const hit = removalRows.find((r) => r.userId === k.userId && r.endpointHash === k.endpointHash);
+    if (hit) {
+      hit.removedAt = args.update.removedAt;
+      return { ...hit };
+    }
+    const row = { id: `removal-${++removalSeq}`, removedAt: new Date(), ...args.create };
+    removalRows.push(row);
+    return { ...row };
+  },
+  deleteMany: async (args: { where: RemovalWhere }) => {
+    const before = removalRows.length;
+    removalRows = removalRows.filter((r) => !removalMatches(r, args.where));
+    return { count: before - removalRows.length };
+  },
+};
+shadowPrismaModel(prisma, "pushSubscriptionRemoval", removalModel);
+
 // ── auth fixture (tests/api-auth.test.mts idiom): real signed JWT over an
 // in-memory authSession + user row so the withAuth slow path is DB-checked.
 type DbUser = {
@@ -253,9 +300,22 @@ shadowPrismaModel(prisma, "user", {
 // $transaction: interactive form only. The tx object exposes every delegate a
 // push-route (or a would-be session rotation) callback might touch, all sharing
 // the in-memory stores above so committed writes are observable afterwards.
+// Every statement a push-registration transaction issues, in order: the
+// advisory lock (its SQL) and the cap count — so the lock-first pin can read it.
+const txOps: string[] = [];
 const txObj = {
-  $executeRaw: async () => 0, // pg_advisory_xact_lock no-op (getOrCreateVapidPublicKey)
-  pushSubscription: pushModel,
+  $executeRaw: async (strings: TemplateStringsArray | string, ...values: unknown[]) => {
+    txOps.push(`sql:${Array.isArray(strings) ? strings.join("?") : String(strings)}|${values.map(String).join(",")}`);
+    return 0;
+  },
+  pushSubscription: {
+    ...pushModel,
+    count: async (args: { where?: SubWhere }) => {
+      txOps.push("count");
+      return pushModel.count(args);
+    },
+  },
+  pushSubscriptionRemoval: removalModel,
   setting: settingModel,
   authSession: {
     findUnique: async (args: { where: { sessionId: string } }) =>
@@ -391,6 +451,8 @@ const FCM = "https://fcm.googleapis.com/fcm/send"; // a recognized Web Push serv
 
 beforeEach(() => {
   subRows = [];
+  removalRows = [];
+  txOps.length = 0;
   settings.clear();
   usersById.clear();
   sessionRows.clear();
@@ -569,6 +631,132 @@ test("POST /api/push/subscribe returns 409 when the endpoint is already register
 });
 
 // ── guardrail 7a: /api/push/apns — the iOS device-token encryption pin ───────
+
+// ── per-user cap + removal tombstones (push-registration.ts) ─────────────────
+
+function webBody(slug: string, extra: Record<string, unknown> = {}) {
+  return { endpoint: `${FCM}/${slug}`, keys: { p256dh: "p-key", auth: "a-key" }, ...extra };
+}
+function seedAgedWebSub(userId: string, slug: string, ageMs: number): SubRow {
+  const row = seedWebSub(userId, slug);
+  row.createdAt = new Date(Date.now() - ageMs);
+  return row;
+}
+
+test("both registration routes take the per-user lock BEFORE the cap count, and a full account stays at exactly the cap", async () => {
+  settings.set("maxPushSubscriptions", "2");
+  const { userId, token } = await mintSession();
+  seedAgedWebSub(userId, "oldest", 3_000);
+  seedAgedWebSub(userId, "middle", 2_000);
+
+  const web = await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("newest") }));
+  assert.equal(web.status, 200);
+  const lockAt = txOps.findIndex((op) => op === `sql:SELECT pg_advisory_xact_lock(4620, hashtext(?))|${userId}`);
+  assert.notEqual(lockAt, -1, `no per-user lock in ${JSON.stringify(txOps)}`);
+  assert.ok(lockAt < txOps.indexOf("count"), "the lock precedes the cap count");
+  assert.deepEqual(subRows.map((r) => r.endpoint), [`${FCM}/middle`, `${FCM}/newest`]);
+
+  txOps.length = 0;
+  const ios = await callRoute(apnsPost, pushReq("apns", { token, body: { deviceToken: "cd".repeat(32) } }));
+  assert.equal(ios.status, 200);
+  assert.equal(txOps[0], `sql:SELECT pg_advisory_xact_lock(4620, hashtext(?))|${userId}`);
+  assert.ok(txOps.indexOf("count") > 0, "the lock precedes the cap count");
+  assert.equal(subRows.filter((r) => r.userId === userId).length, 2, "still exactly at the cap");
+});
+
+test("Remove device sticks: after DELETE {id} the browser's page-load resync is refused 410 and re-creates nothing", async () => {
+  const { userId, token } = await mintSession();
+  const row = seedWebSub(userId, "laptop");
+
+  const del = await callRoute(subscribeDelete, pushReq("subscribe", { method: "DELETE", token, body: { id: row.id } }));
+  assert.equal(del.status, 200);
+  assert.equal(subRows.length, 0);
+  // A tombstone holds a hash of the endpoint, never the endpoint itself.
+  assert.equal(removalRows.length, 1);
+  assert.match(removalRows[0].endpointHash, /^[0-9a-f]{64}$/);
+
+  const resync = await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("laptop", { resync: true }) }));
+  assert.equal(resync.status, 410);
+  assert.deepEqual(Object.keys(await resync.json()), ["error"]);
+  assert.equal(subRows.length, 0, "the removed browser did not re-register itself");
+
+  // The user turning push back on from that browser is a deliberate subscribe:
+  // it works, and it clears the tombstone so later resyncs refresh normally.
+  const again = await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("laptop") }));
+  assert.equal(again.status, 200);
+  assert.equal(subRows.length, 1);
+  assert.equal(removalRows.length, 0);
+  const refresh = await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("laptop", { resync: true }) }));
+  assert.equal(refresh.status, 200);
+  assert.equal(subRows.length, 1);
+});
+
+test("a resync never evicts: an unknown endpoint at the cap is refused 410 and every other device stays", async () => {
+  settings.set("maxPushSubscriptions", "2");
+  const { userId, token } = await mintSession();
+  const kept = [seedAgedWebSub(userId, "a", 2_000).id, seedAgedWebSub(userId, "b", 1_000).id];
+
+  const res = await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("unknown", { resync: true }) }));
+  assert.equal(res.status, 410);
+  assert.deepEqual(subRows.map((r) => r.id), kept);
+  assert.equal(removalRows.length, 0);
+});
+
+test("a cap-evicted browser is tombstoned: its resync can't come back and evict another device in turn", async () => {
+  settings.set("maxPushSubscriptions", "2");
+  const { userId, token } = await mintSession();
+  seedAgedWebSub(userId, "old", 3_000);
+  seedAgedWebSub(userId, "mid", 2_000);
+
+  assert.equal((await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("fresh") }))).status, 200);
+  assert.deepEqual(subRows.map((r) => r.endpoint), [`${FCM}/mid`, `${FCM}/fresh`]);
+
+  // Room again (one browser unsubscribed itself — that writes no tombstone), so
+  // only the tombstone can refuse the evicted browser now.
+  const optOut = await callRoute(subscribeDelete, pushReq("subscribe", { method: "DELETE", token, body: { endpoint: `${FCM}/mid` } }));
+  assert.equal(optOut.status, 200);
+  assert.deepEqual(subRows.map((r) => r.endpoint), [`${FCM}/fresh`]);
+
+  const back = await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("old", { resync: true }) }));
+  assert.equal(back.status, 410);
+  assert.deepEqual(subRows.map((r) => r.endpoint), [`${FCM}/fresh`]);
+});
+
+test("removal tombstones are bounded per user: the newest are kept, iOS rows write none", async () => {
+  const base = Date.now() - 1_000_000;
+  for (let i = 0; i < MAX_PUSH_REMOVALS_PER_USER; i++) {
+    removalRows.push({ id: `old-${i}`, userId: "u-many", endpointHash: `h${i}`, removedAt: new Date(base + i) });
+  }
+  removalRows.push({ id: "other-user", userId: "u-other", endpointHash: "h0", removedAt: new Date(base - 1) });
+  const tx = txObj as unknown as Parameters<typeof tombstoneRemovedPushRowsInTx>[0];
+
+  const iosEndpoint = apnsEndpointFor("ef".repeat(32));
+  await tombstoneRemovedPushRowsInTx(tx, "u-many", [
+    { endpoint: `${FCM}/newest`, platform: "web" },
+    { endpoint: iosEndpoint, platform: "ios" },
+  ]);
+  const mine = removalRows.filter((r) => r.userId === "u-many");
+  assert.equal(mine.length, MAX_PUSH_REMOVALS_PER_USER);
+  assert.ok(mine.some((r) => r.endpointHash === pushEndpointHash(`${FCM}/newest`)));
+  assert.equal(mine.some((r) => r.endpointHash === pushEndpointHash(iosEndpoint)), false, "the app re-registers deliberately");
+  assert.equal(mine.some((r) => r.id === "old-1"), true, "only one slot was needed");
+  assert.equal(mine.some((r) => r.id === "old-0"), false, "the oldest tombstone made room");
+  assert.equal(removalRows.some((r) => r.id === "other-user"), true, "another user's tombstones are untouched");
+});
+
+test("guardrail 6g: after the sign-out/password wipe a resync DOES restore the browser — the wipe writes no tombstone", async () => {
+  const { userId, token } = await mintSession();
+  seedWebSub(userId, "mine");
+  const noop = { deleteMany: async () => ({ count: 0 }) };
+  const footholdTx = { pushSubscription: pushModel, discordLinkToken: noop, discordMergeCode: noop, verificationToken: noop };
+  await clearSessionFootholdsInTx(footholdTx as unknown as Parameters<typeof clearSessionFootholdsInTx>[0], userId);
+  assert.equal(subRows.length, 0);
+  assert.equal(removalRows.length, 0);
+
+  const res = await callRoute(subscribePost, pushReq("subscribe", { token, body: webBody("mine", { resync: true }) }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(subRows.map((r) => [r.userId, r.endpoint]), [[userId, `${FCM}/mine`]]);
+});
 
 test("POST /api/push/apns stores the APNs deviceToken encrypted (guardrail 7a) with the E2E publicKey in PLAINTEXT and platform ios", async () => {
   const { userId, token } = await mintSession();

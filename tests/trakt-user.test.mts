@@ -85,6 +85,8 @@ type UserRow = { id: string; role: string; permissions: bigint; name: string | n
 let users: UserRow[] = [];
 type LedgerRow = { userId: string; tmdbId: number; mediaType: string; outcome: string; updatedAt: Date };
 let ledger: LedgerRow[] = [];
+// Errors the next account.update calls throw, in order (the rotated-token write).
+let accountUpdateFailures: Error[] = [];
 
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
@@ -105,14 +107,18 @@ const accountModel = {
     const a = accounts.find((r) => r.provider === w.provider && r.providerAccountId === w.providerAccountId);
     return a ? { userId: a.userId } : null;
   },
-  findFirst: async (args: { where: { userId: string; provider: string } }) => {
-    const a = accounts.find((r) => r.userId === args.where.userId && r.provider === args.where.provider);
+  findFirst: async (args: { where: { id?: string; userId: string; provider: string } }) => {
+    const a = accounts.find((r) =>
+      r.userId === args.where.userId && r.provider === args.where.provider &&
+      (args.where.id === undefined || r.id === args.where.id));
     return a ? { ...a } : null;
   },
   findMany: async (args: { where: { userId: string; provider: string } }) =>
     accounts.filter((r) => r.userId === args.where.userId && r.provider === args.where.provider).map((a) => ({ access_token: a.access_token })),
   update: async (args: { where: { id: string }; data: Partial<AccountRow> }) => {
     rec("account.update", args);
+    const failure = accountUpdateFailures.shift();
+    if (failure) throw failure;
     const a = accounts.find((r) => r.id === args.where.id)!;
     Object.assign(a, args.data);
     return a;
@@ -165,8 +171,16 @@ const connModel = {
     Object.assign(conns.find((x) => x.userId === args.where.userId)!, args.data);
     return {};
   },
-  updateMany: async (args: { where: { userId: string }; data: Partial<ConnRow> }) => {
+  updateMany: async (args: {
+    where: { userId: string; user?: { accounts: { some: { id: string; provider: string } } } };
+    data: Partial<ConnRow>;
+  }) => {
     rec("traktConnection.updateMany", args);
+    // The relation filter: only while that account row is still the user's.
+    const need = args.where.user?.accounts.some;
+    if (need && !accounts.some((a) => a.id === need.id && a.userId === args.where.userId && a.provider === need.provider)) {
+      return { count: 0 };
+    }
     for (const c of conns) if (c.userId === args.where.userId) Object.assign(c, args.data);
     return { count: 1 };
   },
@@ -273,6 +287,7 @@ beforeEach(() => {
   ratings = [];
   users = [];
   ledger = [];
+  accountUpdateFailures = [];
   lockedReads = 0;
   resetLogDedup();
   trakt.__resetTraktPendingForTests();
@@ -831,6 +846,102 @@ test("device flow: a failure AFTER the code was redeemed hands the new grant bac
   for (let i = 0; i < 50 && !calls.some((c) => c.path === "/oauth/revoke"); i++) await new Promise((r) => setImmediate(r));
   assert.equal(calls.find((c) => c.path === "/oauth/revoke")?.body?.token, "acc-fail");
   assert.equal(accounts.length, 0);
+});
+
+// A transient database error, shaped like Prisma's (name + code — guardrail 23b).
+function prismaError(code: string): Error {
+  const err = new Error(`prisma ${code}`) as Error & { code: string };
+  err.name = "PrismaClientKnownRequestError";
+  err.code = code;
+  return err;
+}
+
+function refreshScript(): (c: Call) => Response {
+  return (c) => {
+    if (c.path === "/oauth/token") {
+      return json({ access_token: "access-2", refresh_token: "refresh-2", expires_in: 86_400, created_at: Math.floor(Date.now() / 1000) });
+    }
+    if (c.path.startsWith("/sync/watchlist/")) return json([], 200, { "x-pagination-page-count": "1" });
+    throw new Error(`unexpected ${c.path}`);
+  };
+}
+
+test("sync: a failed write of the ROTATED tokens is retried, so a passing DB fault doesn't strand the grant", async () => {
+  configure();
+  settings.set(FLAG_AUTO, "true");
+  settings.set(FLAG_FOR_YOU, "false");
+  addUser("u1");
+  connect("u1", { expires_at: 0 });
+  accountUpdateFailures = [prismaError("P2028")];
+  respond = refreshScript();
+  const result = await trakt.syncTraktUsers();
+  assert.equal(result.errors, 0);
+  assert.equal(opsOf("account.update").length, 2, "one failure, one retry");
+  assert.equal(calls.filter((c) => c.path === "/oauth/token").length, 1, "Trakt is not asked to rotate again");
+  assert.equal(accounts.find((a) => a.userId === "u1")!.refresh_token, "refresh-2");
+});
+
+test("sync: a rotated grant that can't be stored at all is a run error that deletes nothing", async () => {
+  configure();
+  settings.set(FLAG_AUTO, "true");
+  settings.set(FLAG_FOR_YOU, "true");
+  addUser("u1");
+  connect("u1", { expires_at: 0 });
+  watched.push({ userId: "u1", tmdbId: 1, mediaType: "MOVIE", title: "x", plays: 1, lastWatchedAt: new Date() });
+  accountUpdateFailures = Array.from({ length: trakt.TOKEN_WRITE_RETRY_DELAYS_MS.length + 1 }, () => prismaError("P2028"));
+  respond = refreshScript();
+  const result = await trakt.syncTraktUsers();
+  assert.equal(result.errors, 1);
+  assert.equal(result.tokensRevoked, 0);
+  assert.equal(opsOf("account.update").length, trakt.TOKEN_WRITE_RETRY_DELAYS_MS.length + 1);
+  assert.equal(accounts.some((a) => a.userId === "u1"), true, "the grant is not deleted");
+  assert.equal(watched.length, 1, "nor the history");
+  assert.ok(errors.some((e) => e.includes("sync failed for user u1") && e.includes("storing it failed")));
+});
+
+test("sync: an account deleted under the refresh (P2025) is not retried", async () => {
+  configure();
+  settings.set(FLAG_AUTO, "true");
+  settings.set(FLAG_FOR_YOU, "false");
+  addUser("u1");
+  connect("u1", { expires_at: 0 });
+  accountUpdateFailures = [prismaError("P2025")];
+  respond = refreshScript();
+  const result = await trakt.syncTraktUsers();
+  assert.equal(result.errors, 1);
+  assert.equal(opsOf("account.update").length, 1);
+});
+
+test("sync: a reconnect to ANOTHER Trakt account mid-read writes none of the old account's history and leaves the new one's stamps unset", async () => {
+  configure();
+  settings.set(FLAG_AUTO, "false");
+  settings.set(FLAG_FOR_YOU, "true");
+  addUser("u1");
+  connect("u1");
+  respond = (c) => {
+    if (c.path === "/sync/last_activities") return json({ movies: { watched_at: "2026-10-08T10:00:00.000Z" } });
+    if (c.path === "/sync/watched/movies") return json([{ plays: 1, last_watched_at: "2026-10-01T00:00:00Z", movie: { title: "Old", ids: { tmdb: 1 } } }]);
+    if (c.path === "/sync/watched/shows?extended=noseasons") return json([]);
+    if (c.path === "/sync/ratings/movies") return json([{ rating: 9, rated_at: "2026-10-01T00:00:00Z", movie: { title: "Old", ids: { tmdb: 1 } } }]);
+    if (c.path === "/sync/ratings/shows") {
+      // The user reconnects a different Trakt account now: storeTraktConnection
+      // replaces the account row and resets the import bookkeeping.
+      accounts = [{
+        id: "acct-u1-new", userId: "u1", provider: "trakt", providerAccountId: "uuid-other",
+        access_token: "access-new", refresh_token: "refresh-new", expires_at: Math.floor(Date.now() / 1000) + 86_400,
+      }];
+      Object.assign(conns[0], { historyActivityAt: null, historyImportedAt: null, syncedAt: null, status: null });
+      return json([]);
+    }
+    throw new Error(`unexpected ${c.path}`);
+  };
+  const result = await trakt.syncTraktUsers();
+  assert.equal(result.historyImported, 0);
+  assert.equal(watched.length, 0, "the old account's history is not written");
+  assert.equal(ratings.length, 0, "nor its ratings");
+  assert.equal(conns[0].historyActivityAt, null);
+  assert.equal(conns[0].historyImportedAt, null);
+  assert.equal(conns[0].status, null, "the new connection is not stamped as synced by the old account's run");
 });
 
 test("no success logs (guardrail 7) and nothing unexpected reached console.error", () => {

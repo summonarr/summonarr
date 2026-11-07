@@ -3,12 +3,13 @@
 // GitHub-style 365-day heatmap: one small square per day, darker = more plays.
 // The data comes from getActivityCalendarUncached() in play-history.ts.
 
-import { useState } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 import {
   HeatmapCellPopover,
   type HeatmapCellAnchor,
 } from "@/components/admin/heatmap-cell-popover";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { zoneShortLabel } from "@/lib/stats-time-zone";
 
 // Sun-first gutter: catalog keys for the labelled rows, translated at render.
 const DOW_LABEL_KEYS = ["", "adminActivity.weekday.mon", "", "adminActivity.weekday.wed", "", "adminActivity.weekday.fri", ""];
@@ -36,18 +37,36 @@ function cellBg(count: number, max: number): string {
   return `color-mix(in oklab, var(--ds-accent) ${(30 + intensity * 60).toFixed(1)}%, transparent)`;
 }
 
+// Arrow-key target in the clickable-day grid: the active day nearest to
+// `target` that lies strictly in direction `dir` from `from` (indexes into the
+// 365-day list, where ±1 is the cell above/below and ±7 the next column), or
+// null at the edge. Days with no plays aren't interactive, so they're skipped.
+function nearestActive(active: number[], from: number, target: number, dir: 1 | -1): number | null {
+  let best: number | null = null;
+  for (const i of active) {
+    if (dir === 1 ? i <= from : i >= from) continue;
+    if (best === null || Math.abs(i - target) < Math.abs(best - target)) best = i;
+  }
+  return best;
+}
+
 // `today` arrives as an ISO date string from the server page so the server
 // render and the browser's hydration agree on the 365-day window. DO NOT
 // replace it with `new Date()` in render: the server and the browser would
 // read the clock at different moments (and possibly on different days), and
-// React reports that mismatch as hydration error #418 (guardrail 16).
+// React reports that mismatch as hydration error #418 (guardrail 16). It is
+// the statistics zone's date at UTC midnight (zonedTodayIso), so the UTC date
+// walk below yields that zone's day keys, the same days the data is bucketed
+// by; `timeZone` names the zone for the legend.
 export function ActivityCalendar({
   data,
   today: todayIso,
+  timeZone,
   detailBase,
 }: {
   data: CalendarData[];
   today: string;
+  timeZone: string;
   // When provided, day cells with plays become clickable and open the
   // drill-down popover. Holds the fixed filter context (everything except the
   // clicked day, which is filled in on click). Omit to render a static calendar.
@@ -65,6 +84,11 @@ export function ActivityCalendar({
       viewPlaysHref?: string;
     } | null
   >(null);
+  // Roving tabindex: the clickable days are ONE Tab stop (the day last focused,
+  // else the most recent active day) and the arrow keys move between them, so a
+  // keyboard user isn't made to tab through up to 365 cells to leave the grid.
+  const [focusDate, setFocusDate] = useState<string | null>(null);
+  const cellRefs = useRef(new Map<string, HTMLDivElement>());
 
   function openCell(el: HTMLDivElement, date: string, count: number) {
     if (!detailBase || count === 0) return;
@@ -114,6 +138,46 @@ export function ActivityCalendar({
     const d = new Date(today);
     d.setUTCDate(d.getUTCDate() - i);
     days.push({ date: d.toISOString().split("T")[0], dow: d.getUTCDay() });
+  }
+
+  // Indexes (into `days`) of the clickable cells, oldest first.
+  const activeIdx: number[] = [];
+  if (detailBase) {
+    days.forEach((d, i) => {
+      if ((countMap.get(d.date) ?? 0) > 0) activeIdx.push(i);
+    });
+  }
+  const dayIndex = new Map(days.map((d, i) => [d.date, i]));
+  const lastActive = activeIdx.length > 0 ? days[activeIdx[activeIdx.length - 1]].date : null;
+  const rovingDate =
+    focusDate !== null && (countMap.get(focusDate) ?? 0) > 0 && dayIndex.has(focusDate)
+      ? focusDate
+      : lastActive;
+
+  function onCellKey(e: KeyboardEvent<HTMLDivElement>, date: string, count: number) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openCell(e.currentTarget, date, count);
+      return;
+    }
+    const from = dayIndex.get(date);
+    if (from === undefined) return;
+    let to: number | null;
+    switch (e.key) {
+      case "ArrowUp": to = nearestActive(activeIdx, from, from - 1, -1); break;
+      case "ArrowDown": to = nearestActive(activeIdx, from, from + 1, 1); break;
+      case "ArrowLeft": to = nearestActive(activeIdx, from, from - 7, -1); break;
+      case "ArrowRight": to = nearestActive(activeIdx, from, from + 7, 1); break;
+      case "Home": to = activeIdx[0] ?? null; break;
+      case "End": to = activeIdx[activeIdx.length - 1] ?? null; break;
+      default: return;
+    }
+    // Also at an edge: an arrow key must not scroll the overflow container.
+    e.preventDefault();
+    if (to === null || to === from) return;
+    const next = days[to].date;
+    setFocusDate(next);
+    cellRefs.current.get(next)?.focus();
   }
 
   const weeks: { date: string; dow: number; count: number }[][] = [];
@@ -247,9 +311,25 @@ export function ActivityCalendar({
                     return (
                       <div
                         key={day.date}
+                        ref={
+                          clickable
+                            ? (el) => {
+                                if (el) cellRefs.current.set(day.date, el);
+                                else cellRefs.current.delete(day.date);
+                              }
+                            : undefined
+                        }
                         title={t("adminActivity.calendar.cellTitle", { date: day.date, count: day.count })}
                         role={clickable ? "button" : undefined}
-                        tabIndex={clickable ? 0 : undefined}
+                        tabIndex={clickable ? (day.date === rovingDate ? 0 : -1) : undefined}
+                        // Outline, not a ring: a box-shadow would sit under the
+                        // next cells, which paint after this one.
+                        className={
+                          clickable
+                            ? "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[color:var(--ds-fg)]"
+                            : undefined
+                        }
+                        onFocus={clickable ? () => setFocusDate(day.date) : undefined}
                         onClick={
                           clickable
                             ? (e) => openCell(e.currentTarget, day.date, day.count)
@@ -257,12 +337,7 @@ export function ActivityCalendar({
                         }
                         onKeyDown={
                           clickable
-                            ? (e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  openCell(e.currentTarget, day.date, day.count);
-                                }
-                              }
+                            ? (e) => onCellKey(e, day.date, day.count)
                             : undefined
                         }
                         style={{
@@ -307,7 +382,9 @@ export function ActivityCalendar({
             ))}
             <span>{t("adminActivity.calendar.more")}</span>
             <span style={{ marginLeft: "auto" }}>
-              {t("adminActivity.calendar.daysUtc")}
+              <span title={t("adminActivity.stats.zoneDaysTitle", { zone: timeZone })}>
+                {t("adminActivity.calendar.daysInZone", { zone: zoneShortLabel(timeZone) })}
+              </span>
             </span>
           </div>
         </div>

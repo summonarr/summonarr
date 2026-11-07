@@ -66,3 +66,32 @@ test("suggestWrongSide: only when one side fits the folder year and the other is
   assert.equal(suggestWrongSide(p, null, "2017"), null, "an unknown year is never guessed");
   assert.equal(suggestWrongSide("NoYear/f.mkv", "1995", "2017"), null);
 });
+
+import { badMatchSideKey, fixAllEligible } from "../src/lib/library-diff.ts";
+test("Fix all sends only what the cards offer a Fix for: a verdict, the id, and that side's item key", () => {
+  const m = (o: Record<string, unknown>) => ({ arrVerdict: "plex" as "plex" | "jellyfin" | null, arrTmdbId: 5 as number | null, plexRatingKey: "1001" as string | null, jellyfinItemId: "abcd" as string | null, ...o });
+  assert.equal(fixAllEligible(m({})), true);
+  assert.equal(fixAllEligible(m({ arrVerdict: "jellyfin" })), true);
+  assert.equal(fixAllEligible(m({ plexRatingKey: null })), false, "a Plex verdict with no ratingKey says re-sync to fix");
+  assert.equal(fixAllEligible(m({ plexRatingKey: "" })), false);
+  assert.equal(fixAllEligible(m({ arrVerdict: "jellyfin", jellyfinItemId: null })), false, "a Jellyfin verdict with no item id too");
+  assert.equal(fixAllEligible(m({ arrVerdict: "jellyfin", plexRatingKey: null })), true, "only the WRONG side's key matters");
+  assert.equal(fixAllEligible(m({ arrVerdict: null })), false);
+  assert.equal(fixAllEligible(m({ arrTmdbId: null })), false);
+  assert.equal(badMatchSideKey(m({}), "plex"), "1001");
+  assert.equal(badMatchSideKey(m({ jellyfinItemId: "" }), "jellyfin"), null);
+});
+
+test("structural: Fix all filters with that rule, the cards use the same key rule, and the run outlives the list emptying", () => {
+  const src = readFileSync(new URL("../src/components/admin/library-diff-client.tsx", import.meta.url), "utf8");
+  const fixAll = src.slice(src.indexOf("function FixAllArrButton"), src.indexOf("function ArrFilterButton"));
+  assert.match(fixAll, /const fixable = matches\.filter\(fixAllEligible\);/);
+  assert.match(src, /badMatchSideKey\(match, "plex"\) \? \(/);
+  assert.match(src, /badMatchSideKey\(match, "jellyfin"\) \? \(/);
+  // Searching every match away, or a run that fixed them all, used to unmount
+  // the button — which stopped the run and discarded its results.
+  assert.match(fixAll, /stopRef\.current = false;\s*onStart\(\);/);
+  assert.match(src, /\{\(filteredBadMatches\.length > 0 \|\| fixAllStarted\) && \(\s*<section>/);
+  assert.doesNotMatch(src, /\{filteredBadMatches\.length > 0 && \(/);
+  assert.match(src, /<FixAllArrButton matches=\{filteredBadMatches\} onStart=\{onFixAllStart\} \/>/);
+});

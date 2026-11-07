@@ -5,7 +5,7 @@ import { attachArrPending } from "./arr-availability";
 import { attachRequestedStatus } from "./request-availability";
 import { attachRatingsUnified } from "./omdb-availability";
 import { getBlacklistSet, blacklistKey } from "./blacklist";
-import { getUserHiddenSet } from "./hidden";
+import { getUserHiddenSet, hiddenKeyOf } from "./hidden";
 import { getVisibleServerInstancesForUserId } from "./media-visibility";
 import type { TmdbMedia } from "./tmdb-types";
 import { localizeMedia } from "./tmdb-localize";
@@ -13,11 +13,14 @@ import { getContentLocale } from "./i18n/server";
 
 // All five enrichment passes (plus the content-language overlay) run in parallel against the same input slice; results are merged by
 // composite key so no pass can accidentally overwrite a field written by another.
-export async function attachAllAvailability(
-  items: TmdbMedia[],
+//
+// Generic over the item type: a caller's own fields (a rank, play counts) come
+// back typed, because every result starts from the caller's item.
+export async function attachAllAvailability<T extends TmdbMedia>(
+  items: T[],
   userId?: string,
   options?: { blockRatings?: boolean; skipRatings?: boolean; show4k?: boolean; includeHidden?: boolean },
-): Promise<TmdbMedia[]> {
+): Promise<T[]> {
   if (items.length === 0) return items;
 
   // Admin-blacklisted titles stay VISIBLE in discovery but are marked so the UI can
@@ -42,18 +45,25 @@ export async function attachAllAvailability(
     getVisibleServerInstancesForUserId(userId),
   ]);
 
+  // The caller's "not interested" titles leave BEFORE enrichment (no-op when
+  // the set is empty or the caller opted out via includeHidden): enriched first,
+  // they still cost library and request lookups, ratings misses (MDBList/OMDB
+  // calls) and translation fetches whose results were then thrown away.
+  const work = hiddenSet.size === 0 ? items : items.filter((i) => !hiddenSet.has(hiddenKeyOf(i)));
+  if (work.length === 0) return work;
+
   // The viewer's language for TMDB text (titles, overviews), resolved from the
   // request like the UI's own language. English — and any call outside a request
-  // scope — is a no-op that returns `items` itself.
+  // scope — is a no-op that returns `work` itself.
   const [withPlex, withJellyfin, withArr, withRequests, withRatings, localized] = await Promise.all([
-    attachPlexAvailability(items, visible.plex),
-    attachJellyfinAvailability(items, visible.jellyfin),
-    attachArrPending(items, { include4k: options?.show4k ?? false }),
-    attachRequestedStatus(items, userId),
+    attachPlexAvailability(work, visible.plex),
+    attachJellyfinAvailability(work, visible.jellyfin),
+    attachArrPending(work, { include4k: options?.show4k ?? false }),
+    attachRequestedStatus(work, userId),
     options?.skipRatings
-      ? Promise.resolve(items)
-      : attachRatingsUnified(items, { blocking: options?.blockRatings ?? false }),
-    getContentLocale().then((locale) => localizeMedia(items, locale)),
+      ? Promise.resolve(work)
+      : attachRatingsUnified(work, { blocking: options?.blockRatings ?? false }),
+    getContentLocale().then((locale) => localizeMedia(work, locale)),
   ]);
 
   const plexMap     = new Map(withPlex.map((i)     => [`${i.id}:${i.mediaType}`, i.plexAvailable]));
@@ -61,14 +71,17 @@ export async function attachAllAvailability(
   const arrMap      = new Map(withArr.map((i)       => [`${i.id}:${i.mediaType}`, { arrPending: i.arrPending, arr4kPending: i.arr4kPending, arr4kAvailable: i.arr4kAvailable }]));
   const reqMap      = new Map(withRequests.map((i)  => [`${i.id}:${i.mediaType}`, { requested: i.requested, requestedByMe: i.requestedByMe }]));
   const ratingsMap  = new Map(withRatings.map((i)   => [`${i.id}:${i.mediaType}`, i]));
-  const textMap     = localized === items ? null : new Map(localized.map((i) => [`${i.id}:${i.mediaType}`, i]));
+  const textMap     = localized === work ? null : new Map(localized.map((i) => [`${i.id}:${i.mediaType}`, i]));
 
-  const enriched = items.map((item) => {
+  return work.map((item) => {
     const k = `${item.id}:${item.mediaType}`;
     const arr = arrMap.get(k);
     const text = textMap?.get(k);
     return {
-      ...(ratingsMap.get(k) ?? item),
+      // The caller's item first, so its own fields survive whatever shape the
+      // ratings pass returns; the ratings fields then win over it.
+      ...item,
+      ...ratingsMap.get(k),
       // Only the overlay's own fields — never let it overwrite enrichment.
       ...(text
         ? {
@@ -90,11 +103,6 @@ export async function attachAllAvailability(
       requested:         reqMap.get(k)?.requested     ?? false,
       requestedByMe:     reqMap.get(k)?.requestedByMe ?? false,
       ...(blSet.size > 0 && blSet.has(blacklistKey(item.id, item.mediaType)) ? { blacklisted: true } : {}),
-    };
+    } as T;
   });
-
-  // Drop the caller's "not interested" titles (no-op when the set is empty or the
-  // caller opted out via includeHidden).
-  if (hiddenSet.size === 0) return enriched;
-  return enriched.filter((i) => !hiddenSet.has(`${i.id}:${i.mediaType}`));
 }

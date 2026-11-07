@@ -31,7 +31,7 @@ export function RebuildRecommendationsButton() {
   const router = useRouter();
   const t = useT();
   const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+  const [message, setMessage] = useState<{ text: string; type: "success" | "warning" | "error" } | null>(null);
   const [cooldown, setCooldown] = useState(0);
 
   // The outcome is a one-off report, not state: clear it once it has been
@@ -39,7 +39,7 @@ export function RebuildRecommendationsButton() {
   // the rest of the visit.
   useEffect(() => {
     if (!message) return;
-    const timer = setTimeout(() => setMessage(null), message.type === "error" ? 15000 : 8000);
+    const timer = setTimeout(() => setMessage(null), message.type === "success" ? 8000 : 15000);
     return () => clearTimeout(timer);
   }, [message]);
 
@@ -63,6 +63,8 @@ export function RebuildRecommendationsButton() {
         reason?: string;
         usersUpdated?: number;
         usersEligible?: number;
+        usersFailed?: number;
+        graphFailed?: boolean;
       };
 
       // The advisory lock answers {skipped, reason} with a 200 and no `error`,
@@ -72,6 +74,22 @@ export function RebuildRecommendationsButton() {
       if (res.ok && data.skipped) {
         setMessage({ text: data.reason ?? t("browse.forYou.rebuild.alreadyRunning"), type: "success" });
         setCooldown(30);
+        return;
+      }
+      // Finished, but some users failed (200 + `error`): the rest of the shelves
+      // — usually the viewer's own — WERE rebuilt, so this is a warning and the
+      // grid refreshes. Only graphFailed means nothing changed at all.
+      if (res.ok && data.error && !data.graphFailed) {
+        setMessage({
+          text: t("browse.forYou.rebuild.partial", {
+            updated: data.usersUpdated ?? 0,
+            count: data.usersEligible ?? 0,
+            failed: data.usersFailed ?? 0,
+          }),
+          type: "warning",
+        });
+        setCooldown(60);
+        router.refresh();
         return;
       }
       if (!res.ok || data.error) {
@@ -155,7 +173,14 @@ export function RebuildRecommendationsButton() {
       </button>
       <span role="status" className="ds-mono" style={{ fontSize: 11 }}>
         {message && (
-          <span style={{ color: message.type === "success" ? "var(--ds-success)" : "var(--ds-danger)" }}>
+          <span
+            style={{
+              color:
+                message.type === "success" ? "var(--ds-success)"
+                : message.type === "warning" ? "var(--ds-warning)"
+                : "var(--ds-danger)",
+            }}
+          >
             {message.text}
           </span>
         )}
