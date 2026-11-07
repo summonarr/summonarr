@@ -94,6 +94,25 @@ test("queue: markLive runs only for an ACCEPTED live answer — after the load g
   assert.match(code(QUEUE_DATA), /\}, \[gate, t, markLive\]\);/, "load's deps carry markLive");
 });
 
+// Every 20 s the poll turned the Refresh button into a disabled spinner and the
+// stale note into "refreshing", and one failed tick raised the error banner
+// beside a queue that was still on screen. Same rule as the Arr System page.
+test("queue: a background poll refreshes quietly — no spinner or disabled Refresh every tick, and one failed poll is no banner", () => {
+  const data = code(QUEUE_DATA);
+  const body = loadBody(data);
+  assert.match(body, /if \(kind !== "poll"\) setLoading\(true\);/);
+  assert.equal(count(body, "setLoading(true)"), 1, "nothing else turns the flag on");
+  const gate = body.indexOf("if (!gate.settle(id)) return;");
+  assert.ok(gate > -1 && body.indexOf("setLoading(false);") > gate, "cleared only by the load the gate accepted");
+  // A poll's failure shows only from the second in a row; any answer resets the count.
+  const success = body.indexOf('if ("report" in next)');
+  assert.match(blockAfter(body, success), /pollFailures\.current = 0;/);
+  const quiet = body.indexOf('if (kind === "poll" && ++pollFailures.current < 2) return;');
+  assert.ok(quiet > success, "after the success branch");
+  assert.ok(quiet < body.lastIndexOf("setError(next.error);"), "before the banner");
+  assert.match(data, /const pollFailures = useRef\(0\);/);
+});
+
 test("queue: the snapshot only paints an empty page and touches nothing but the report", () => {
   const call = snapshotCall(code(QUEUE_DATA));
   assert.match(call, /setReport\(\(cur\) => cur \?\? data\)/, "never replaces rows on screen (live, or a removal's optimistic drop)");

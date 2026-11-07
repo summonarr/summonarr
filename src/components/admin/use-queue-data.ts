@@ -63,10 +63,17 @@ export function useQueueData({
     setReport((cur) => cur ?? data),
   );
 
+  // Background polls that failed in a row. One is a blip beside a queue that
+  // is still on screen — the next tick usually answers — so only the second in
+  // a row is shown; a manual load's failure always is (the Arr System page's
+  // rule).
+  const pollFailures = useRef(0);
   const load = useCallback(async (kind: LoadKind = "manual") => {
     const id = gate.begin(kind);
     if (id === null) return;
-    setLoading(true);
+    // A poll refreshes quietly: nothing spins every tick, and Refresh stays
+    // enabled (a manual load supersedes the poll — createLoadGate).
+    if (kind !== "poll") setLoading(true);
     let next: { report: QueueReport } | { error: string };
     try {
       const res = await fetch(queueUrl());
@@ -77,10 +84,14 @@ export function useQueueData({
     if (!gate.settle(id)) return;
     setLoading(false);
     if ("report" in next) {
+      pollFailures.current = 0;
       setReport(next.report);
       setError("");
       markLive();
-    } else setError(next.error);
+      return;
+    }
+    if (kind === "poll" && ++pollFailures.current < 2) return;
+    setError(next.error);
   }, [gate, t, markLive]);
 
   useEffect(() => {
