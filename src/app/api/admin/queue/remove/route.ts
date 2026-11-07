@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
 import { isQueueRemoveAction, isQueueRemoveMethod, type QueueRemoveMethod } from "@/lib/arr-queue";
-import { parseQueueService, QueueGoneError, QueueInstanceError, removeFromQueue } from "@/lib/arr-queue-data";
+import { removeFromQueue } from "@/lib/arr-queue-data";
+import { queueActionFailure, serviceGate } from "@/lib/arr-queue-http";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
-import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import { sanitizeForLog } from "@/lib/sanitize";
 
 const MAX_BODY_BYTES = 64 * 1024;
 // The page sends ONE record id per download (`removalIds` — any record of a
@@ -16,7 +14,6 @@ const MAX_BODY_BYTES = 64 * 1024;
 // per matched download in ONE bulk call (guardrail 5c / 5e). The bound only
 // keeps a body from being absurd.
 const MAX_IDS = 5_000;
-const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 
 // Admin → Download Queue, one row's Remove (ADMIN). Sends Radarr/Sonarr's own
 // bulk queue DELETE for the record id(s) it is given, on that instance —
@@ -29,14 +26,16 @@ const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 //   method "changeCategory"  — move it to the client's post-import category
 //   method "ignore"          — leave it in the client; the arr stops tracking it
 // The older `removeFromClient: boolean` body is still read when `method` is absent.
+// An absent or null instance is the default one, as on grab (serviceGate).
 // The instance must be a configured one. Audited after the arr accepted it
 // (guardrail 26 — the swallowing logAudit, the DELETE has already happened).
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const body = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
   if (body instanceof NextResponse) return body;
-  const service = parseQueueService(body.service);
-  const instance = body.instance === undefined ? "" : body.instance;
+  const target = await serviceGate(body.service, body.instance, t, "apiAdmin.queue.removeBodyInvalid");
+  if (target instanceof NextResponse) return target;
+  const { service, instance } = target;
   const ids = body.ids;
   const action = body.action;
   const legacy = body.removeFromClient;
@@ -44,8 +43,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     ? body.method
     : legacy === undefined || legacy === true ? "removeFromClient" : legacy === false ? "ignore" : null;
   if (
-    !service ||
-    typeof instance !== "string" || instance.length > 100 ||
     !Array.isArray(ids) || ids.length === 0 || ids.length > MAX_IDS ||
     !ids.every((id) => typeof id === "number" && Number.isSafeInteger(id) && id > 0) ||
     !isQueueRemoveAction(action) ||
@@ -53,23 +50,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   ) {
     return NextResponse.json({ error: t("apiAdmin.queue.removeBodyInvalid") }, { status: 400 });
   }
-  const label = SERVICE_LABEL[service];
-  if (!(await isFeatureEnabled(`feature.integration.${service}`))) {
-    return NextResponse.json({ error: t("apiAdmin.missing.integrationDisabled", { service: label }) }, { status: 404 });
-  }
   const uniqueIds = [...new Set(ids as number[])];
   let sentIds: number[];
   try {
     sentIds = await removeFromQueue(service, instance, uniqueIds, action, method as QueueRemoveMethod);
   } catch (err) {
-    if (err instanceof QueueInstanceError) {
-      return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service: label }) }, { status: 404 });
-    }
-    if (err instanceof QueueGoneError || (err instanceof ArrResponseError && err.status === 404)) {
-      return NextResponse.json({ error: t("apiAdmin.queue.gone") }, { status: 409 });
-    }
-    console.warn(`[queue] ${service} instance "${sanitizeForLog(instance)}" remove failed:`, arrErrorMessage(err));
-    return NextResponse.json({ error: t("apiAdmin.queue.removeFailed", { service: label }) }, { status: 502 });
+    return queueActionFailure(err, target, t, { goneKey: "apiAdmin.queue.gone", failedKey: "apiAdmin.queue.removeFailed", what: "remove" });
   }
   void logAudit({
     userId: session.user.id,

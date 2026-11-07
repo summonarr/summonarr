@@ -26,16 +26,26 @@ type Entry = { scope: string; owner: string; guid: string; indexerId: number; ti
 
 const handles = processSingleton("release-handles", () => new Map<string, Entry>());
 
+// Eviction never takes a CLAIMED handle: its grab is in flight, and a grab the
+// arr definitely refuses hands it back (releaseReleaseHandle) for a retry. An
+// evicted one turned that retry into "search again". Claims are few (one per
+// grab in flight), so skipping them keeps both bounds within a handful.
+
 function sweep(now: number): void {
   for (const [k, e] of handles) if (e.expiresAt <= now) handles.delete(k);
-  // Still full of live entries: drop the oldest (insertion order) rather than
-  // refuse the newcomer — the admin searching now is the one who will grab.
-  while (handles.size >= MAX_RELEASE_HANDLES) handles.delete(handles.keys().next().value as string);
+  // Still full of live entries: drop the oldest unclaimed (insertion order)
+  // rather than refuse the newcomer — the admin searching now is the one who
+  // will grab. One walk: only claimed entries left ends it.
+  for (const [k, e] of handles) {
+    if (handles.size < MAX_RELEASE_HANDLES) break;
+    if (!e.claimed) handles.delete(k);
+  }
 }
 
 // Make room for `incoming` new handles of `owner` within their share: their
-// own oldest go first (insertion order), never anyone else's. A single list
-// larger than the share still goes in whole — the owner is searching anew.
+// own oldest unclaimed go first (insertion order), never anyone else's. A
+// single list larger than the share still goes in whole — the owner is
+// searching anew.
 function trimOwner(owner: string, incoming: number, now: number): void {
   let own = 0;
   for (const e of handles.values()) if (e.owner === owner && e.expiresAt > now) own++;
@@ -43,7 +53,7 @@ function trimOwner(owner: string, incoming: number, now: number): void {
   if (excess <= 0) return;
   for (const [k, e] of handles) {
     if (excess <= 0) break;
-    if (e.owner !== owner) continue;
+    if (e.owner !== owner || e.claimed) continue;
     handles.delete(k);
     if (e.expiresAt > now) excess--;
   }

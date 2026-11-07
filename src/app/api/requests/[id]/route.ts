@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAuth, withPermission } from "@/lib/api-auth";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage, arrErrorMessageForClient, arrWriteOutcomeUnknown } from "@/lib/arr";
+import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage, arrErrorMessageForClient, arrWriteOutcomeUnknown, ArrItemNotFoundError } from "@/lib/arr";
 import { addSeriesToSonarr, listQualityProfiles, type AddProgress } from "@/lib/arr";
 import { MissingInstanceError, NothingMissingError, SeriesNotOnInstanceError, findSeriesIdOnInstance, searchMissing } from "@/lib/arr-missing-data";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -128,6 +128,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         // Removed in Sonarr since the push (or pushed elsewhere): Re-push
         // adds it back — an answer, translated, not a logged failure.
         arrError = t("apiUser.requests.searchSeriesNotInSonarr");
+      } else if (err instanceof ArrItemNotFoundError) {
+        // The movie twin: Radarr no longer holds it, and Re-push adds it back.
+        arrError = t("apiUser.requests.releases.notInArr", { service: "Radarr" });
       } else {
         // The detail to the log; the caller (a MANAGE_REQUESTS delegate, maybe)
         // gets the failure's kind, never the arr's internal URL (guardrail 5g).

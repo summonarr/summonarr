@@ -17,7 +17,7 @@ export type AuditParams = {
   sessionId?: string | null;
 };
 
-// One builder for both writers so the sanitization set cannot drift between
+// One builder for every writer so the sanitization set cannot drift between
 // them. userAgent is a raw attacker-controlled request header rendered into the
 // admin audit table (tooltip title attribute), so it gets the full
 // sanitizeForLog strip (controls + bidi overrides); ipAddress is normally a
@@ -60,6 +60,22 @@ export async function logAuditReturningId(params: AuditParams): Promise<string |
 // logAuditOrFail is for writes that must succeed (e.g. inside a transaction where failure should roll back)
 export async function logAuditOrFail(params: AuditParams): Promise<void> {
   await prisma.auditLog.create({ data: auditRowData(params) });
+}
+
+// logAuditOrFail answering the row's id — for a row that must exist before the
+// caller goes on and that it finalizes later (the audit-log export's paper trail).
+export async function logAuditOrFailReturningId(params: AuditParams): Promise<string> {
+  const row = await prisma.auditLog.create({ data: auditRowData(params), select: { id: true } });
+  return row.id;
+}
+
+// logAuditOrFail on a transaction client: the row is written INSIDE the caller's
+// $transaction, so a failed write rolls back the mutation it audits (guardrail 26).
+// Never caught here — a swallowed error inside a tx turns its COMMIT into a
+// silent ROLLBACK (guardrail 23). Await it in sequence with the tx's other
+// queries (guardrail 23c).
+export async function logAuditTx(tx: Pick<typeof prisma, "auditLog">, params: AuditParams): Promise<void> {
+  await tx.auditLog.create({ data: auditRowData(params) });
 }
 
 // PII retention window for audit rows, in days. Both scrub paths (the

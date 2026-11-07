@@ -9,21 +9,15 @@ import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { useT } from "@/components/i18n/i18n-provider";
+import { stripRelPrefix, toMatchKey } from "@/lib/library-paths";
 
 type MediaSampleData = { mountPoint: string; samples: string[] };
 type ServerSamples   = { movie: MediaSampleData; tv: MediaSampleData };
 
-// Removes `prefix` from the start of `path` (the prefix may or may not end in "/").
-// This is a browser-side preview of the prefix stripping the server does.
-function applyPrefix(path: string, prefix: string): string {
-  if (!prefix) return path;
-  const p = prefix.endsWith("/") ? prefix : prefix + "/";
-  return path.startsWith(p) ? path.slice(p.length) : path;
-}
-
 function LibraryMatchMediaBlock({
-  mediaLabel, ariaLabel, data, prefix, onChangePrefix, placeholder,
+  mediaType, mediaLabel, ariaLabel, data, prefix, onChangePrefix, placeholder,
 }: {
+  mediaType: "MOVIE" | "TV";
   mediaLabel: string; ariaLabel: string; data: MediaSampleData | null;
   prefix: string; onChangePrefix: (v: string) => void; placeholder: string;
 }) {
@@ -68,8 +62,12 @@ function LibraryMatchMediaBlock({
         <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-1">
           <p className="text-[10px] text-zinc-500 uppercase tracking-wide mb-1">{t("settings.form.libraryMatch.preview")}</p>
           {data.samples.map((s, i) => {
-            const after   = applyPrefix(s, prefix);
-            const changed = after !== s;
+            // The server's own rule (library-paths.ts), so the preview can't
+            // drift from it: the prefix is stripped, then the match key taken —
+            // for TV that is the first folder left, the show the key names.
+            const stripped = stripRelPrefix(s, prefix);
+            const after    = toMatchKey(stripped, mediaType);
+            const changed  = stripped !== s;
             return (
               <p key={i} className={`text-[11px] font-mono truncate ${changed ? "text-green-400" : "text-zinc-500"}`} title={after}>
                 {after}
@@ -103,6 +101,7 @@ function LibraryMatchServerBlock({
       {data && (
         <div className="space-y-5">
           <LibraryMatchMediaBlock
+            mediaType="MOVIE"
             mediaLabel={t("nav.movies")}
             ariaLabel={t("settings.form.libraryMatch.prefixAriaMovie", { server: label })}
             data={data.movie}
@@ -112,6 +111,7 @@ function LibraryMatchServerBlock({
           />
           <div className="border-t border-zinc-800" />
           <LibraryMatchMediaBlock
+            mediaType="TV"
             mediaLabel={t("nav.tvShows")}
             ariaLabel={t("settings.form.libraryMatch.prefixAriaTv", { server: label })}
             data={data.tv}

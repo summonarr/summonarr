@@ -119,14 +119,11 @@ export type JobPoll = { state: "unknown" } | { state: "running" } | { state: "do
 /** A job's state for its owner. Someone else's job id reads as unknown. */
 export function pollReleaseSearchJob(owner: string, jobId: string, now: number = Date.now()): JobPoll {
   if (!JOB_RE.test(jobId)) return { state: "unknown" };
+  // Every expired answer goes here, this one's included: a job still in the map is live.
   sweepExpired(now);
   const j = jobs.get(jobId);
   if (!j || j.owner !== owner) return { state: "unknown" };
   if (j.answer === null) return { state: "running" };
-  if (j.finishedAt !== null && now - j.finishedAt > RESULT_TTL_MS) {
-    jobs.delete(jobId);
-    return { state: "unknown" };
-  }
   return { state: "done", answer: j.answer };
 }
 

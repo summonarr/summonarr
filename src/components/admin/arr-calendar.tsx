@@ -48,6 +48,7 @@ import type { CalendarEntry, CalendarKind, CalendarStatus } from "@/lib/arr-cale
 import {
   CALENDAR_DAYS,
   addDays,
+  calendarBodyState,
   calendarDays,
   calendarRowCount,
   calendarViewQuery,
@@ -116,6 +117,10 @@ const PREMIERE_LABEL = {
 } as const;
 
 const canSearch = (c: CalendarCell) => c.status === "missing" && (c.service === "radarr" || c.episodeId !== null);
+
+// A read that never settles (a stuck proxy, a half-open connection) would hold
+// the spinner forever; the server's own arr reads give up well before this.
+const LOAD_TIMEOUT_MS = 90_000;
 
 /**
  * The calendar read for one window. The live load and its snapshot both use
@@ -191,7 +196,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(calendarReadUrl(from, withUnmonitored));
+      const res = await fetch(calendarReadUrl(from, withUnmonitored), { signal: AbortSignal.timeout(LOAD_TIMEOUT_MS) });
       const data = (await res.json().catch(() => null)) as (Report & { error?: string }) | null;
       if (id !== seq.current) return;
       if (!res.ok || !data) {
@@ -317,6 +322,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
   // Nor can it be made while an instance the filters include couldn't be read:
   // the amber line above names it, and its schedule is unknown, not empty.
   const viewFailed = report !== null && failedInView(report.errors, instanceFilter, typeFilter);
+  const body = calendarBodyState({ hasReport: report !== null, hasError: error !== "", allDown, viewFailed, rows: days.length, inWindow: scoped.length });
   const statusText = (c: CalendarCell) =>
     c.status === "downloading" && c.progress !== null
       ? t("adminArr.status.downloadingProgress", { progress: pctFmt.format(c.progress) })
@@ -422,29 +428,30 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
         </p>
       ))}
 
-      {report === null ? (
-        error ? null : <div className="flex items-center gap-2 py-10 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> {t("adminArr.common.loading")}</div>
-      ) : days.length === 0 ? (
+      {body === "loading" && (
+        <div className="flex items-center gap-2 py-10 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> {t("adminArr.common.loading")}</div>
+      )}
+      {body === "filteredEmpty" && (
         // Titles are in the window but the status/type chips hide them all.
-        error || allDown ? null : scoped.length > 0 ? (
-          <EmptyState
-            icon={CalendarDays}
-            title={t("adminArr.calendar.emptyFiltered")}
-            description={t("adminArr.calendar.emptyFilteredHint")}
-            action={
-              <Button variant="outline" size="sm" onClick={() => { setStatusFilter("all"); setTypeFilter("all"); }}>
-                {t("adminArr.calendar.clearFilters")}
-              </Button>
-            }
-          />
-        ) : viewFailed ? null : (
-          <EmptyState
-            icon={CalendarDays}
-            title={t("adminArr.calendar.empty")}
-            description={t(unmonitored ? "adminArr.calendar.emptyHintAll" : "adminArr.calendar.emptyHint")}
-          />
-        )
-      ) : (
+        <EmptyState
+          icon={CalendarDays}
+          title={t("adminArr.calendar.emptyFiltered")}
+          description={t("adminArr.calendar.emptyFilteredHint")}
+          action={
+            <Button variant="outline" size="sm" onClick={() => { setStatusFilter("all"); setTypeFilter("all"); }}>
+              {t("adminArr.calendar.clearFilters")}
+            </Button>
+          }
+        />
+      )}
+      {body === "empty" && (
+        <EmptyState
+          icon={CalendarDays}
+          title={t("adminArr.calendar.empty")}
+          description={t(unmonitored ? "adminArr.calendar.emptyHintAll" : "adminArr.calendar.emptyHint")}
+        />
+      )}
+      {body === "grid" && (
         <div className="grid grid-cols-1 gap-4 transition-opacity" style={loading ? { opacity: 0.6 } : undefined} aria-busy={loading}>
           {days.map((day) => {
             const isToday = day.key === localDayKey(todayMs);

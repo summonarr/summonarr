@@ -129,11 +129,13 @@ const IDENTITY_SELECT = {
 } as const;
 
 interface ResolvedTitle extends WatchTitle {
-  title: string;
+  // The library row's name; null when it has none (the stored row then carries
+  // a placeholder until the library names it).
+  title: string | null;
 }
 
-function titleNamer(names: ReadonlyMap<string, string>): (t: WatchTitle) => string {
-  return (t) => names.get(watchTitleKey(t.tmdbId, t.mediaType)) ?? `TMDB #${t.tmdbId}`;
+function titleNamer(names: ReadonlyMap<string, string>): (t: WatchTitle) => string | null {
+  return (t) => names.get(watchTitleKey(t.tmdbId, t.mediaType)) ?? null;
 }
 
 function errorText(err: unknown): string {
@@ -163,22 +165,45 @@ async function stillRegisteredInTx(tx: TxClient, source: Source, slug: string): 
   }
 }
 
+// "removed": the server was removed meanwhile. "stale": the read point is no
+// longer the one the deltas were counted from. Either way nothing was written.
+type CommitOutcome = "committed" | "removed" | "stale";
+
 // Write one identity's merged rows and its read point together, so a failure
 // leaves both as they were and the same plays are read — and counted — once.
-// The stored rows are read INSIDE the transaction: the merge adds to them.
-// Returns false, having written nothing, when the server was removed meanwhile.
+//
+// The read point is a compare-and-swap on `fromReadTo`, the one the deltas were
+// folded from. Another import that read the same window and committed first
+// (possible once the advisory lock is lost mid-run: advisory-lock.ts) already
+// counted these plays, so this one writes nothing. The swap goes first: from
+// then on the cursor row is locked to this transaction, and the stored rows,
+// read after it, are the ones the merge adds to.
 async function commitIdentity(
   source: Source,
   slug: string,
   identityId: string,
+  fromReadTo: Date | null,
   deltas: ReadonlyMap<string, PlayDelta>,
   favorites: ReadonlySet<string> | null,
   names: ReadonlyMap<string, string>,
   readTo: Date | null,
-): Promise<boolean> {
+): Promise<CommitOutcome> {
   return prisma.$transaction(
-    async (tx) => {
-      if (!(await stillRegisteredInTx(tx, source, slug))) return false;
+    async (tx): Promise<CommitOutcome> => {
+      if (!(await stillRegisteredInTx(tx, source, slug))) return "removed";
+      const importedAt = new Date();
+      let swapped = (await tx.serverWatchCursor.updateMany({
+        where: { mediaServerUserId: identityId, readTo: fromReadTo },
+        data: { readTo, importedAt },
+      })).count === 1;
+      if (!swapped && fromReadTo === null) {
+        // Never read: no cursor row yet. A concurrent first commit's insert wins.
+        swapped = (await tx.serverWatchCursor.createMany({
+          data: [{ mediaServerUserId: identityId, readTo, importedAt }],
+          skipDuplicates: true,
+        })).count === 1;
+      }
+      if (!swapped) return "stale";
       if (deltas.size > 0 || favorites !== null) {
         const existing: WatchedTitleRow[] = await tx.serverWatchedTitle.findMany({
           where: { mediaServerUserId: identityId },
@@ -195,15 +220,14 @@ async function commitIdentity(
           }
         }
       }
-      await tx.serverWatchCursor.upsert({
-        where: { mediaServerUserId: identityId },
-        create: { mediaServerUserId: identityId, readTo, importedAt: new Date() },
-        update: { readTo, importedAt: new Date() },
-      });
-      return true;
+      return "committed";
     },
     { timeout: BATCH_TX_TIMEOUT },
   );
+}
+
+function warnStale(source: Source, identityId: string): void {
+  console.warn(`[server-history] ${source} server user ${identityId}: its read point moved during this import (another run counted these plays); nothing written`);
 }
 
 // Plex ratingKey (a movie's own, or a show's) → its title on THIS server,
@@ -220,7 +244,7 @@ async function plexTitles(slug: string, keys: readonly string[]): Promise<Map<st
   }
   const index = indexPlexRowsByKey(rows);
   const out = new Map<string, ResolvedTitle>();
-  for (const [k, r] of index) out.set(k, { tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title?.trim() || `TMDB #${r.tmdbId}` });
+  for (const [k, r] of index) out.set(k, { tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title?.trim() || null });
   return out;
 }
 
@@ -241,7 +265,7 @@ async function jellyfinTitles(slug: string, ids: readonly string[]): Promise<Map
     for (const r of rows) {
       for (const id of [r.jellyfinItemId, ...(r.jellyfinItemIds ?? [])]) {
         if (id && wanted.has(id) && !out.has(id)) {
-          out.set(id, { tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title?.trim() || `TMDB #${r.tmdbId}` });
+          out.set(id, { tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title?.trim() || null });
         }
       }
     }
@@ -249,9 +273,10 @@ async function jellyfinTitles(slug: string, ids: readonly string[]): Promise<Map
   return out;
 }
 
+// Only real names: a title the library can't name keeps whatever is stored.
 function namesOf(titles: Iterable<ResolvedTitle>): Map<string, string> {
   const out = new Map<string, string>();
-  for (const t of titles) out.set(watchTitleKey(t.tmdbId, t.mediaType), t.title);
+  for (const t of titles) if (t.title !== null) out.set(watchTitleKey(t.tmdbId, t.mediaType), t.title);
   return out;
 }
 
@@ -331,9 +356,11 @@ async function importPlexServer(slug: string, everyone: boolean, signal: AbortSi
     const next = nextReadTo(readTo, [walkNewest]) ?? walkStartedAt;
     if (deltas.size === 0 && readTo !== null && next.getTime() === readTo.getTime()) continue;
     try {
+      const outcome = await commitIdentity("plex", slug, identity.id, readTo, deltas, null, names, next);
       // The server was removed during the walk: the rest would be skipped too.
-      if (!(await commitIdentity("plex", slug, identity.id, deltas, null, names, next))) return;
-      result.identities++;
+      if (outcome === "removed") return;
+      if (outcome === "stale") warnStale("plex", identity.id);
+      else result.identities++;
     } catch (err) {
       result.failedIdentities++;
       console.error(`[server-history] Plex history write failed for server user ${identity.id}: ${errorText(err)}`);
@@ -395,9 +422,11 @@ async function importJellyfinServer(slug: string, everyone: boolean, signal: Abo
       // A full read that found nothing dated anchors at its own start, so the
       // next read is incremental instead of re-reading the whole list.
       const next = nextReadTo(readTo, played.map((p) => p.lastPlayedAt)) ?? (readTo === null ? readStartedAt : null);
+      const outcome = await commitIdentity("jellyfin", slug, identity.id, readTo, deltas, favoriteKeys, namesOf(titles.values()), next);
       // The server was removed meanwhile: the rest would be skipped too.
-      if (!(await commitIdentity("jellyfin", slug, identity.id, deltas, favoriteKeys, namesOf(titles.values()), next))) return;
-      result.identities++;
+      if (outcome === "removed") return;
+      if (outcome === "stale") warnStale("jellyfin", identity.id);
+      else result.identities++;
     } catch (err) {
       result.failedIdentities++;
       console.error(`[server-history] Jellyfin history read failed for server user ${identity.id}: ${errorText(err)}`);

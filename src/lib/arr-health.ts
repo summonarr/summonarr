@@ -116,23 +116,38 @@ function isWebhook(n: NotificationResource): boolean {
   return typeof n.implementation === "string" && n.implementation.toLowerCase() === "webhook";
 }
 
+// A path's length without its trailing slashes, in one scan — never a /\/+$/
+// regex: the URL is the arr's, and that regex backtracks over every run of
+// slashes in it, which a URL keeps (guardrail 5i).
+function endWithoutTrailingSlashes(p: string): number {
+  let end = p.length;
+  while (end > 0 && p.charCodeAt(end - 1) === 47) end--;
+  return end;
+}
+
 // The path suffix every Summonarr webhook URL ends with, whatever host or base
 // path the admin used to reach Summonarr.
 function pointsAtSummonarr(url: unknown, service: ArrHealthService): URL | null {
   if (typeof url !== "string") return null;
   try {
     const u = new URL(url);
-    // Trailing slashes dropped in one scan, never a /\/+$/ regex: the URL is
-    // the arr's, and that regex backtracks over every run of slashes in it,
-    // which a URL keeps (guardrail 5i).
-    const p = u.pathname;
-    let end = p.length;
-    while (end > 0 && p.charCodeAt(end - 1) === 47) end--;
-    return p.endsWith(`/api/webhooks/${service}`, end) ? u : null;
+    return u.pathname.endsWith(`/api/webhooks/${service}`, endWithoutTrailingSlashes(u.pathname)) ? u : null;
   } catch {
     return null;
   }
 }
+
+// The Connect list's Webhook entries that point at A Summonarr — this one or
+// another deployment sharing the arr — in list order.
+function summonarrHooks(notifications: unknown, service: ArrHealthService): Array<{ n: NotificationResource; url: URL }> {
+  const list = Array.isArray(notifications) ? (notifications as NotificationResource[]) : [];
+  return list
+    .filter((n) => n && typeof n === "object" && isWebhook(n))
+    .map((n) => ({ n, url: pointsAtSummonarr(fieldValue(n, "url"), service) }))
+    .filter((h): h is { n: NotificationResource; url: URL } => h.url !== null);
+}
+
+const hookIdOf = (n: NotificationResource): number | null => (typeof n.id === "number" && Number.isInteger(n.id) ? n.id : null);
 
 /**
  * Whether this Radarr/Sonarr version has the event at all: the resource carries
@@ -157,18 +172,40 @@ function missingEventsOf(n: NotificationResource, service: ArrHealthService): st
  * When several entries point at Summonarr, the one with the right token wins.
  */
 export function evaluateWebhook(notifications: unknown, service: ArrHealthService, secret: string): WebhookStatus {
-  const list = Array.isArray(notifications) ? (notifications as NotificationResource[]) : [];
-  const hooks = list
-    .filter((n) => n && typeof n === "object" && isWebhook(n))
-    .map((n) => ({ n, url: pointsAtSummonarr(fieldValue(n, "url"), service) }))
-    .filter((h): h is { n: NotificationResource; url: URL } => h.url !== null);
+  const hooks = summonarrHooks(notifications, service);
   if (hooks.length === 0) return { state: "missing", id: null, missingEvents: [...WEBHOOK_EVENTS[service]] };
   const withToken = secret ? hooks.find((h) => h.url.searchParams.get("token") === secret) : undefined;
   const chosen = withToken ?? hooks[0];
-  const id = typeof chosen.n.id === "number" && Number.isInteger(chosen.n.id) ? chosen.n.id : null;
+  const id = hookIdOf(chosen.n);
   const missingEvents = missingEventsOf(chosen.n, service);
   if (!withToken) return { state: "tokenMismatch", id, missingEvents };
   return { state: missingEvents.length > 0 ? "eventsMissing" : "ok", id, missingEvents };
+}
+
+/**
+ * Which Connect entry a one-click setup writes `url` (this deployment's hook
+ * URL) into — its id, or null to create a new entry. Unlike the verdict above,
+ * this one changes the arr, and a Radarr/Sonarr can be shared by two
+ * Summonarrs (staging and production): an entry is only adopted when it is
+ * this deployment's.
+ *   1. The entry carrying our token is ours.
+ *   2. Else one at our address (origin and path, the token aside) is ours with
+ *      a stale token — a rotation, or a cleared secret.
+ *   3. Else the ONLY Summonarr entry is ours at an old address (Summonarr
+ *      moved) and is repaired in place.
+ *   4. Else every entry belongs to another deployment: create our own.
+ * An entry that points at another Summonarr may still be taken by rule 3 when
+ * it is the only one — nothing in the arr tells the two apart.
+ */
+export function webhookSetupTarget(notifications: unknown, service: ArrHealthService, secret: string, url: string): number | null {
+  const hooks = summonarrHooks(notifications, service);
+  const ours = secret ? hooks.find((h) => h.url.searchParams.get("token") === secret) : undefined;
+  if (ours) return hookIdOf(ours.n);
+  const address = (u: URL) => `${u.origin}${u.pathname.slice(0, endWithoutTrailingSlashes(u.pathname))}`;
+  const here = address(new URL(url));
+  const atOurAddress = hooks.find((h) => address(h.url) === here);
+  if (atOurAddress) return hookIdOf(atOurAddress.n);
+  return hooks.length === 1 ? hookIdOf(hooks[0].n) : null;
 }
 
 /**

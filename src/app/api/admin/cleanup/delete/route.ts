@@ -9,7 +9,7 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { mapLimit } from "@/lib/concurrency";
 import { ArrResponseError, arrErrorKind, arrErrorMessage, arrWriteOutcomeUnknown } from "@/lib/arr";
 import type { ArrErrorKind } from "@/lib/arr-error-kind";
-import { deleteArrEntry, failedArrInstances, invalidateArrLibraryIndexCache, loadArrLibraryIndex, resolveArrTargets, type ArrLibraryEntry } from "@/lib/library-cleanup-arr";
+import { cleanupTargetsFingerprint, deleteArrEntry, failedArrInstances, invalidateArrLibraryIndexCache, loadArrLibraryIndex, resolveArrTargets, type ArrLibraryEntry } from "@/lib/library-cleanup-arr";
 import { CLEANUP_MAX_ITEMS, cleanupKey, parseCleanupItems, type CleanupMediaType } from "@/lib/library-cleanup";
 import { cleanupRequestIdentity, computeCleanupReport, type CleanupRow, type TitleKey } from "@/lib/library-cleanup-data";
 import { cleanupDisabledResponse } from "@/lib/library-cleanup-gate";
@@ -24,11 +24,18 @@ import { dropArrTitleSnapshots } from "@/lib/arr-snapshot";
 //                     the live rules, resolves every Radarr/Sonarr entry each
 //                     one occupies (every instance), and returns those targets
 //                     plus their count. Nothing is changed.
-//   POST ?execute=true with { …same body, confirmTargets: <count> }
+//   POST ?execute=true with { …same body, confirmTargets: <count>,
+//                             confirmFingerprint: <targetsFingerprint> }
 //                   → re-resolves the same way and refuses (409) unless the
-//                     echoed count matches what it found NOW — the
-//                     backfill-playtime confirmation idea: it proves the admin
+//                     echoed count — and, when sent, the fingerprint of the
+//                     exact target set — matches what it found NOW: the
+//                     backfill-playtime confirmation idea. It proves the admin
 //                     saw the dry run, and fails closed if anything shifted.
+//                     The count alone can't see a same-sized different set
+//                     (one copy gone, another appeared on a second instance);
+//                     the fingerprint can. It stays optional so an API caller
+//                     that echoes only the count keeps working; the page
+//                     always sends it.
 //
 // A title that stops being a candidate between the two calls (someone requested
 // or started watching it, an admin protected it) drops out of both the targets
@@ -59,7 +66,7 @@ import { dropArrTitleSnapshots } from "@/lib/arr-snapshot";
 
 const TITLE_CONCURRENCY = 2;
 
-type Body = { items?: unknown; blacklist?: unknown; confirmTargets?: unknown };
+type Body = { items?: unknown; blacklist?: unknown; confirmTargets?: unknown; confirmFingerprint?: unknown };
 
 const targetLabel = (e: Pick<ArrLibraryEntry, "service" | "instance">) => `${e.service}:${e.instance || "default"}`;
 
@@ -143,24 +150,29 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     targets: p.targets.map((t) => ({ service: t.service, instance: t.instance, arrId: t.arrId, title: t.title, sizeOnDisk: t.sizeOnDisk })),
   }));
   const reclaimableBytes = planned.reduce((n, p) => n + p.targets.reduce((m, t) => m + t.sizeOnDisk, 0), 0);
+  const targetsFingerprint = cleanupTargetsFingerprint(planned.map((p) => ({ tmdbId: p.row.tmdbId, mediaType: p.row.mediaType, targets: p.targets })));
 
   if (!execute) {
     return NextResponse.json({
       dryRun: true,
       targetCount,
+      targetsFingerprint,
       reclaimableBytes,
       blacklist,
       items: plan,
       skipped,
-      hint: `Re-POST with ?execute=true and the same body plus {"confirmTargets": ${targetCount}} to delete.`,
+      hint: `Re-POST with ?execute=true and the same body plus {"confirmTargets": ${targetCount}, "confirmFingerprint": "${targetsFingerprint}"} to delete.`,
     });
   }
 
-  if (typeof parsed.confirmTargets !== "number" || parsed.confirmTargets !== targetCount || targetCount === 0) {
+  // Sent (the page always sends it): it must name exactly the set found now.
+  const setChanged = parsed.confirmFingerprint !== undefined && parsed.confirmFingerprint !== targetsFingerprint;
+  if (typeof parsed.confirmTargets !== "number" || parsed.confirmTargets !== targetCount || targetCount === 0 || setChanged) {
     return NextResponse.json(
       {
         error: targetCount === 0 ? t("apiAdmin.cleanup.nothingToDelete") : t("apiAdmin.cleanup.confirmationRequired"),
         targetCount,
+        targetsFingerprint,
         items: plan,
         skipped,
       },
@@ -202,6 +214,15 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       };
     }
     const stampedIds = toStamp.map((r) => r.id);
+    // Every bookkeeping write that failed for this title, in the order it ran.
+    // The result carries them as ONE optional string (bookkeepingError), joined —
+    // never the first or the last alone, so one failure can't mask another (an
+    // unstamp or re-assert failure is the one guardrail 14b cares about).
+    const bookkeeping: string[] = [];
+    const noteBookkeeping = (err: unknown) => {
+      bookkeeping.push(err instanceof Error ? err.message : String(err));
+    };
+    const joinedBookkeeping = (): string | undefined => (bookkeeping.length > 0 ? bookkeeping.join("; ") : undefined);
 
     const deleted: string[] = [];
     // `error` is the English detail (older pages print it); the page translates
@@ -245,8 +266,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // whatever the row's stamp says now: that is what overrides (or writes
     // back) the other call's. Run after a delete that went through AND after
     // one whose outcome is unknown — "maybe deleted" holds the stamp exactly as
-    // "deleted" does. Best-effort: the error is returned, never thrown.
-    const reassertStamps = async (): Promise<string | undefined> => {
+    // "deleted" does. Best-effort: the error is recorded, never thrown.
+    const reassertStamps = async (): Promise<void> => {
       try {
         const own = (await prisma.mediaRequest.findMany({
           where: { ...cleanupRequestIdentity(tmdbId, mediaType, targets.map((e) => e.tvdbId)), mediaType, status: "AVAILABLE" },
@@ -255,10 +276,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         if (own.length > 0) {
           await prisma.mediaRequest.updateMany({ where: { id: { in: own }, status: "AVAILABLE" }, data: { cleanedUpAt: now } });
         }
-        return undefined;
       } catch (err) {
         console.error(`[cleanup] re-asserting ${mediaType}:${tmdbId}'s cleanup stamp after its delete failed:`, err);
-        return err instanceof Error ? err.message : String(err);
+        noteBookkeeping(err);
       }
     };
 
@@ -272,21 +292,20 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       // maybe-deleted title unstamped.
       const unstamp = uncertain ? toStamp.filter((r) => stillHeldOn.has(r.arrInstance)).map((r) => r.id) : stampedIds;
       // Reported on the title, never thrown (the stamp's reasoning above).
-      let unstampError: string | undefined;
       if (unstamp.length > 0) {
         try {
           await prisma.mediaRequest.updateMany({ where: { id: { in: unstamp }, cleanedUpAt: now }, data: { cleanedUpAt: null } });
         } catch (err) {
           console.error(`[cleanup] un-stamping ${mediaType}:${tmdbId}'s requests after every delete was refused failed:`, err);
-          unstampError = err instanceof Error ? err.message : String(err);
+          noteBookkeeping(err);
         }
       }
-      const reassertError = uncertain ? await reassertStamps() : undefined;
-      const bookkeepingError = unstampError ?? reassertError;
+      if (uncertain) await reassertStamps();
+      const failedBookkeeping = joinedBookkeeping();
       return {
         tmdbId, mediaType, title, status: "failed" as const, deleted, failed, blacklisted: false,
         ...(uncertain ? { uncertain: true } : {}),
-        ...(bookkeepingError ? { bookkeepingError } : {}),
+        ...(failedBookkeeping ? { bookkeepingError: failedBookkeeping } : {}),
       };
     }
 
@@ -298,7 +317,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // which would 500 the response after Radarr/Sonarr removed the files and
     // leave the admin not knowing which titles went — so a failed unstamp, vote
     // clear or blacklist write is recorded on this title's result, never thrown.
-    let bookkeepingError: string | undefined;
     // A partial result: the same reasoning as above, per instance. An instance
     // that refused its delete still holds the title, so its requests' stamps
     // would only mask a genuine future loss there (one whose outcome is unknown
@@ -313,17 +331,16 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         requestsStamped -= unstampIds.length;
       } catch (err) {
         console.error(`[cleanup] un-stamping ${mediaType}:${tmdbId}'s requests on the instances whose delete failed failed:`, err);
-        bookkeepingError = err instanceof Error ? err.message : String(err);
+        noteBookkeeping(err);
       }
     }
-    const reassertError = await reassertStamps();
-    bookkeepingError ??= reassertError;
+    await reassertStamps();
     if (complete) {
       try {
         await clearDeletionVotesForTmdbs([{ tmdbId, mediaType }]);
       } catch (err) {
         console.error(`[cleanup] clearing deletion votes for ${mediaType}:${tmdbId} after its delete failed:`, err);
-        bookkeepingError = err instanceof Error ? err.message : String(err);
+        noteBookkeeping(err);
       }
       if (blacklist) {
         // The files are already gone; a failed blacklist write is reported, not thrown.
@@ -336,7 +353,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
           blacklisted = true;
         } catch (err) {
           console.error(`[cleanup] blacklisting ${mediaType}:${tmdbId} after its delete failed:`, err);
-          bookkeepingError ??= err instanceof Error ? err.message : String(err);
+          noteBookkeeping(err);
         }
       }
     }
@@ -359,12 +376,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       },
       ...auditContext(req, session),
     });
+    const doneBookkeeping = joinedBookkeeping();
     return {
       tmdbId, mediaType, title,
       status: complete ? ("deleted" as const) : ("partial" as const),
       deleted, failed, blacklisted,
       ...(uncertain ? { uncertain: true } : {}),
-      ...(bookkeepingError ? { bookkeepingError } : {}),
+      ...(doneBookkeeping ? { bookkeepingError: doneBookkeeping } : {}),
     };
   });
 

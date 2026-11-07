@@ -136,9 +136,15 @@ shadowPrismaModel(prisma, "playHistory", {
 });
 // When set, the session read waits on it — parks a computation mid-load.
 let sessionsGate: Promise<void> | null = null;
+// When set, the next session read rejects once — a transient DB error mid-load.
+let sessionsFailOnce = false;
 shadowPrismaModel(prisma, "activeSession", {
   findMany: async () => {
     hit("activeSession.findMany");
+    if (sessionsFailOnce) {
+      sessionsFailOnce = false;
+      throw new Error("simulated pool timeout");
+    }
     if (sessionsGate) await sessionsGate;
     return [];
   },
@@ -201,6 +207,7 @@ function setFeatures(cleanup: boolean, neverWatched: boolean) {
 beforeEach(() => {
   reads = new Map();
   sessionsGate = null;
+  sessionsFailOnce = false;
   settings.clear();
   for (const [k, v] of Object.entries({
     playHistoryEnabled: "true",
@@ -349,6 +356,30 @@ test("an invalidation landing while the shared computation runs is never stored"
   sessionsGate = null;
   release();
   await pending;
+  reads = new Map();
+  await nwReport.getNeverWatchedReport();
+  assert.deepEqual(factLoads(), expectLoads(1), "nothing was stored");
+});
+
+test("a shared load that FAILED is retried by the next computation, never replayed to it — and nothing is stored from it", async () => {
+  sessionsFailOnce = true;
+  const s = await stats.getStorageStats({ fresh: true });
+  assert.equal(s.neverWatched, null, "the never-watched report ran first and hit the transient error");
+  assert.deepEqual(s.reclaimable, { titles: 4, bytes: 1_000 + 2_000 + 6_000 }, "the cleanup report retried the load instead of failing with it");
+  assert.equal(count("activeSession.findMany"), 2, "one failed load, one retry");
+  reads = new Map();
+  await nwReport.getNeverWatchedReport();
+  assert.deepEqual(factLoads(), expectLoads(1), "no report was stored from the failed load: the page computes its own");
+});
+
+test("a shared load stays 'started' after it failed, so a report built on its retry is never stored (19b)", async () => {
+  const { index, at } = await getCachedArrLibraryIndex();
+  const shared = shareLibraryWatchFacts(index, at, { now: NOW, seasons: true });
+  sessionsFailOnce = true;
+  await assert.rejects(shared.load(), /simulated pool timeout/);
+  assert.equal(shared.started, true);
+  const report = await nwReport.getNeverWatchedReport({ shared });
+  assert.equal(report.computedAt, NOW.toISOString(), "computed from the shared load's retry");
   reads = new Map();
   await nwReport.getNeverWatchedReport();
   assert.deepEqual(factLoads(), expectLoads(1), "nothing was stored");

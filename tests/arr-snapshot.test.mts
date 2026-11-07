@@ -50,6 +50,31 @@ test("LRU by bytes: the oldest-used answers go first; an over-size answer is not
   assert.equal(readSnapshot("k0", 1000), null, "an over-size answer drops the older copy instead of keeping a stale one");
 });
 
+test("the total budget is charged what a body costs in memory: two bytes a character once any is past U+00FF", () => {
+  rememberSnapshot("ascii", "x".repeat(1000), 1000);
+  assert.equal(arrSnapshotStats().bytes, 1000, "an ASCII body is charged its length");
+  clearArrSnapshots();
+  // 250 masks of 3 UTF-8 bytes each, plus ASCII: V8 holds the whole string two-byte.
+  const masked = `${"•".repeat(250)}${"a".repeat(750)}`;
+  assert.equal(Buffer.byteLength(masked, "utf8"), 1500);
+  rememberSnapshot("masked", masked, 1000);
+  assert.equal(arrSnapshotStats().bytes, 2000, "1,000 characters held as 2,000 bytes, not the 1,500 on the wire");
+  // CJK: three UTF-8 bytes a character is more than its two in memory — the larger is charged.
+  clearArrSnapshots();
+  rememberSnapshot("cjk", "字".repeat(100), 1000);
+  assert.equal(arrSnapshotStats().bytes, 300);
+  clearArrSnapshots();
+  // The LRU evicts by the charge: answers that fit on the wire but not in memory don't all stay.
+  const half = Math.floor(SNAPSHOT_MAX_ENTRY_BYTES / 2);
+  const twoByte = `•${"b".repeat(half - 1)}`; // ~half the cap on the wire, a whole cap in memory
+  assert.ok(Buffer.byteLength(twoByte, "utf8") <= SNAPSHOT_MAX_ENTRY_BYTES);
+  const fit = Math.floor(SNAPSHOT_MAX_BYTES / (twoByte.length * 2));
+  for (let i = 0; i <= fit; i++) rememberSnapshot(`t${i}`, twoByte, 1000);
+  assert.ok(arrSnapshotStats().bytes <= SNAPSHOT_MAX_BYTES);
+  assert.equal(arrSnapshotStats().entries, fit, "one more than fits by the charge evicts the oldest");
+  assert.equal(readSnapshot("t0", 1000), null);
+});
+
 test("an answer older than the maximum age is never painted", () => {
   rememberSnapshot("k", "{}", 0);
   assert.ok(readSnapshot("k", SNAPSHOT_MAX_AGE_MS));
@@ -201,6 +226,51 @@ test("dropArrTitleSnapshots drops every title-manager view of that title on that
   rememberSnapshot(snapshotKey("http://x/api/admin/arr/title/episodes?service=sonarr&instance=anime&id=21&season=1", "en")!, "{}");
   rememberSnapshot(snapshotKey("http://x/api/admin/arr/title?service=sonarr&instance=anime&tmdbId=0", "en")!, "{}");
   assert.equal(dropArrTitleSnapshots({ service: "sonarr", instance: "anime", arrId: 21, tmdbId: null }), 1);
+});
+
+test("a live read that was out across an invalidation keeps nothing — a clear, or its title dropped — but still answers", async () => {
+  // Each read is held open until released, so the invalidation lands while it is out.
+  const held: Array<() => void> = [];
+  const GET = snapshotted(async () => {
+    await new Promise<void>((resolve) => held.push(resolve));
+    return Response.json({ rows: ["before"] });
+  });
+  const waitHeld = async (n: number) => {
+    while (held.length < n) await new Promise((r) => setImmediate(r));
+  };
+
+  // A config write's clear while the queue read is out.
+  const queue = GET(req("http://x/api/admin/queue"), {}, {});
+  await waitHeld(1);
+  clearArrSnapshots();
+  held[0]();
+  const live = await queue;
+  assert.deepEqual(await live.json(), { rows: ["before"] }, "the live answer goes back unchanged");
+  assert.equal(readSnapshot(snapshotKey("http://x/api/admin/queue", "en")!), null, "but it is not kept");
+
+  // The title manager's Remove while that title's read is out.
+  const title = GET(req("http://x/api/admin/arr/title?service=radarr&instance=&id=7"), {}, {});
+  await waitHeld(2);
+  rememberSnapshot(snapshotKey("http://x/api/admin/arr/title/files?service=radarr&instance=&id=7", "en")!, "{}");
+  assert.equal(dropArrTitleSnapshots({ service: "radarr", instance: "", arrId: 7, tmdbId: null }), 1);
+  held[1]();
+  assert.equal((await title).status, 200);
+  assert.equal(readSnapshot(snapshotKey("http://x/api/admin/arr/title?service=radarr&instance=&id=7", "en")!), null, "the removed title's read is not put back");
+
+  // A drop that dropped nothing invalidates nothing: a read out across it is kept.
+  const other = GET(req("http://x/api/admin/queue?page=2"), {}, {});
+  await waitHeld(3);
+  assert.equal(dropArrTitleSnapshots({ service: "sonarr", instance: "", arrId: 999, tmdbId: null }), 0);
+  held[2]();
+  await other;
+  assert.ok(readSnapshot(snapshotKey("http://x/api/admin/queue?page=2", "en")!));
+
+  // And a read with no invalidation while it was out is kept as before.
+  const plain = GET(req("http://x/api/admin/queue?page=3"), {}, {});
+  await waitHeld(4);
+  held[3]();
+  await plain;
+  assert.ok(readSnapshot(snapshotKey("http://x/api/admin/queue?page=3", "en")!));
 });
 
 test("the title manager's Remove drops the removed title's views once the arr took it off", () => {

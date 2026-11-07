@@ -36,6 +36,7 @@ import {
 import { runReplaceFileJob } from "@/lib/client/replace-file-job";
 import { arrFailureText, upstreamFailureText } from "@/lib/cleanup-error-text";
 import {
+  isNeverWatchedState,
   lastValidPage,
   upstreamCheckCounts,
   upstreamChipKey,
@@ -355,7 +356,17 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
     );
   }
   if (!data) {
-    return <p role="alert" style={{ color: "var(--ds-danger)", fontSize: 13 }}>{error || t("adminManage.neverWatched.error.load")}</p>;
+    // A failed FIRST load hides every control that would reload (filters,
+    // pager, the arr Retry), so this one is the way back without a page reload.
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p role="alert" style={{ color: "var(--ds-danger)", fontSize: 13, margin: 0 }}>{error || t("adminManage.neverWatched.error.load")}</p>
+        <Button size="xs" variant="outline" onClick={() => void reload()} disabled={loading}>
+          {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+          {t("adminManage.common.retry")}
+        </Button>
+      </div>
+    );
   }
 
   const totalPages = Math.max(1, Math.ceil(data.total / limit));
@@ -702,7 +713,7 @@ function effectiveSort(level: NwLevel, sortBy: NwSortKey): NwSortKey {
 
 function StateChips({ r }: { r: NwTitleRow | NwSeasonRow }) {
   const t = useT();
-  const never = r.state === "neverWatched" || r.state === "noPlaysSince";
+  const never = isNeverWatchedState(r.state);
   // Both "never" states read "Never watched"; the since column says whether the
   // title predates recording, and the tooltip spells the state out.
   return (
@@ -754,7 +765,7 @@ function TitleRow({
 }) {
   const t = useT();
   const href = r.mediaType === "MOVIE" ? `/movie/${r.tmdbId}` : `/tv/${r.tmdbId}`;
-  const never = r.state === "neverWatched" || r.state === "noPlaysSince";
+  const never = isNeverWatchedState(r.state);
   const noRule = cleanupEnabled && never && r.cleanup.matched.length === 0;
   return (
     <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>

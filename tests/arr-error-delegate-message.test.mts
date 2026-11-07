@@ -12,8 +12,9 @@
 // `body`, which can quote an indexer URL with its apikey (guardrail 5e).
 //
 // Pinned:
-//  - arrErrorMessageForClient: an ArrResponseError keeps arrErrorMessage's
-//    generic status phrase; a timeout, a refused connection and any other error
+//  - arrErrorMessageForClient: an ArrResponseError gets arrErrorMessage's
+//    generic status phrase in the caller's language (English byte-identical),
+//    never its body; a timeout, a refused connection and any other error
 //    become a translated phrase by kind, with no URL, host, IP or port;
 //  - ArrResponseError.body still reads, but util.inspect / JSON.stringify /
 //    Object.keys never show it;
@@ -255,11 +256,34 @@ test("arrErrorMessageForClient: a SafeFetchError is named by its kind — no URL
   assert.notEqual(tEs("apiUser.common.arrUnreachable"), UNREACHABLE);
 });
 
-test("arrErrorMessageForClient: an ArrResponseError keeps arrErrorMessage's generic status phrase, never its body", () => {
-  for (const status of [401, 404, 500, 502, 503, 504, 400]) {
+test("arrErrorMessageForClient: an ArrResponseError gets its status phrase in the caller's language, never its body", () => {
+  // [status, key, its {status} placeholder?] — the English catalog phrase is
+  // arrErrorMessage's own, byte for byte, so English callers see no change.
+  const cases: Array<[number, string, boolean]> = [
+    [401, "apiUser.common.arrStatusAuth", true],
+    [403, "apiUser.common.arrStatusAuth", true],
+    [404, "apiUser.common.arrStatusNotFound", true],
+    [500, "apiUser.common.arrStatusServer", true],
+    [502, "apiUser.common.arrStatusBadGateway", false],
+    [503, "apiUser.common.arrStatusServer", true],
+    [504, "apiUser.common.arrStatusGatewayTimeout", false],
+    [400, "apiUser.common.arrStatusOther", true],
+    [429, "apiUser.common.arrStatusOther", true],
+  ];
+  for (const [status, key, hasStatus] of cases) {
     const err = new ArrResponseError(status, `{"message":"boom","description":"${BODY_SECRET}"}`);
-    assert.equal(arrErrorMessageForClient(err, tEn), arrErrorMessage(err), String(status));
-    assert.ok(!arrErrorMessageForClient(err, tEn).includes("UPSTREAM-SECRET"), String(status));
+    const vars = hasStatus ? { status } : undefined;
+    const en = arrErrorMessageForClient(err, tEn);
+    const es = arrErrorMessageForClient(err, tEs);
+    assert.equal(en, arrErrorMessage(err), `${status}: English is arrErrorMessage's phrase`);
+    assert.equal(en, tEn(key, vars), `${status}: through ${key}`);
+    assert.equal(es, tEs(key, vars), `${status}: translated through ${key}`);
+    assert.notEqual(es, en, `${status}: the Spanish phrase is not the English one`);
+    assert.ok(es.includes(String(status)), `${status}: the status survives translation`);
+    for (const text of [en, es]) {
+      assert.ok(!text.includes("UPSTREAM-SECRET") && !text.includes("indexer.example"), `${status}: no body in ${text}`);
+      assert.ok(!text.includes("{status}"), `${status}: no raw placeholder in ${text}`);
+    }
   }
 });
 
@@ -335,6 +359,10 @@ test("Approve answered 500 by Radarr: the generic status phrase reaches the dele
   assert.ok(!text.includes("UPSTREAM-SECRET"));
   assert.ok(errors.length > 0);
   for (const line of errors) assert.ok(!line.includes("UPSTREAM-SECRET"), line);
+  // A Spanish caller gets the same status phrase in Spanish (the row rolled back, so approve again).
+  const es = await (await patchOne(token, "r1", { status: "APPROVED" }, "es")).text();
+  assert.equal((JSON.parse(es) as { arrError: string }).arrError, tEs("apiUser.common.arrStatusServer", { status: 500 }));
+  assert.ok(!es.includes("UPSTREAM-SECRET"));
 });
 
 test("batch Approve while Radarr is dark: failed[].error and the arrError summary carry the kind, never the address", async () => {

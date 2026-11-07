@@ -201,5 +201,15 @@
   "trash.starter.defaultInstanceNote": "Aplica-se à instância padrão do Radarr/Sonarr. Para uma instância nomeada, use o seletor de instância nas abas Formatos personalizados, Perfis de qualidade ou Nomenclatura e tamanhos.",
   "trash.sync.lastRefreshed": "Última atualização {ago}",
   "trash.sync.neverRefreshed": "Catálogo ainda não atualizado",
-  "trash.spec.hiddenSelected": "{count} ocultos pelo filtro"
+  "trash.spec.hiddenSelected": "{count} ocultos pelo filtro",
+  "trash.applyLog.noReason": "nenhum detalhe do erro foi retornado",
+  "trash.token.remove": "Remover",
+  "trash.token.removed": "Removido",
+  "trash.spec.selectAria": "Selecionar {name}",
+  "trash.spec.selectAllAria": "Selecionar todas as especificações visíveis",
+  "trash.banner.applyFailed": "Falha ao aplicar",
+  "trash.banner.loadFailed": "Não foi possível carregar a biblioteca de perfis",
+  "trash.banner.syncFailed": "Sincronizar agora encontrou erros",
+  "trash.banner.stoppedEarly": "parou antes de terminar — execute novamente",
+  "trash.sync.disabledOnServer": "A sincronização TRaSH está desativada no servidor — nada foi executado"
 }

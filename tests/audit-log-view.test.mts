@@ -68,3 +68,16 @@ test("a new filter result starts without the old list's load-more error", () => 
   const reset = view.slice(view.indexOf("filterGen.current += 1;"));
   assert.match(reset.slice(0, reset.indexOf("}, [")), /setLoadError\(false\)/);
 });
+
+test("the export menu takes focus on its first item, gives it back to its button on close, and moves with the arrows", () => {
+  const menu = fnBody("ExportButton");
+  assert.match(
+    menu,
+    /useEffect\(\(\) => \{\s*if \(open\) \{\s*wasOpen\.current = true;\s*itemRefs\.current\[0\]\?\.focus\(\);\s*\} else if \(wasOpen\.current\) \{\s*wasOpen\.current = false;\s*triggerRef\.current\?\.focus\(\);\s*\}\s*\}, \[open\]\);/,
+  );
+  assert.match(menu, /<button\s+ref=\{triggerRef\}/);
+  assert.match(menu, /<div role="menu" onKeyDown=\{onMenuKey\}/);
+  assert.match(menu, /ref=\{\(el\) => \{ itemRefs\.current\[0\] = el; \}\} role="menuitem"/);
+  assert.match(menu, /ref=\{\(el\) => \{ itemRefs\.current\[1\] = el; \}\} role="menuitem"/);
+  assert.match(menu, /if \(e\.key !== "ArrowDown" && e\.key !== "ArrowUp"\) return;/);
+});

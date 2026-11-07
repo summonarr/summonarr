@@ -20,6 +20,7 @@ import {
   projectTasks,
   projectTestAll,
   providerChangeApplied,
+  providerChangedBesides,
   testResultOf,
   validationFailuresFromBody,
   withProviderEnabled,
@@ -187,6 +188,11 @@ export class ProviderRejectedError extends Error {
  * them (setProviderEnabled's `acceptWarnings`).
  */
 export class ProviderWarningsError extends ProviderRejectedError {}
+/**
+ * The provider was edited in Radarr/Sonarr while its accepted-warnings test
+ * ran: saving the body read before it would revert that edit. Nothing sent.
+ */
+export class ProviderChangedError extends Error {}
 
 async function readProvider(service: ArrService, instance: string, kind: ProviderKind, id: number) {
   const cfg = await configuredArrCfg(service, instance);
@@ -343,7 +349,9 @@ async function withProviderLock<T>(key: string, fn: () => Promise<T>): Promise<T
  *     anyway"): the arr's own /test is re-run here, server-side, on the changed
  *     resource, and only when it reports no errors — warnings, or nothing — is
  *     it saved with `forceSave`. An error is still ProviderRejectedError, and
- *     the browser can never turn a failing test into a save.
+ *     the browser can never turn a failing test into a save. The resource is
+ *     read again after the test: edited in the arr meanwhile (anything but the
+ *     switches being set) → ProviderChangedError, nothing saved.
  *   • A save that waits on the arr's test and times out is read back: the arr
  *     saves once its test passes, so the answer is what it holds now — read
  *     once, or (`settle: "wait"`, a background save) re-read until it holds
@@ -382,6 +390,11 @@ async function saveProvider(
       const failures = validationFailuresFromBody(err.body);
       if (!failures.warningsOnly) throw new ProviderRejectedError(failures.messages);
     }
+    // The test can hold the body for two minutes, and the save below is the
+    // WHOLE resource read before it: an edit made in Radarr/Sonarr meanwhile
+    // would be silently put back. Re-read, and save only what was tested.
+    const fresh = await readProvider(service, instance, kind, id);
+    if (providerChangedBesides(raw, fresh.raw, change)) throw new ProviderChangedError();
     forceSave = true;
   }
   let saved: unknown;

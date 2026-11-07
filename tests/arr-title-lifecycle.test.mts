@@ -684,6 +684,21 @@ test("add: a created resource with no id is resolved by a re-read, never recorde
   assert.equal(((await res.json()) as { arrId: number }).arrId, 88);
 });
 
+test("add: a created resource with no id that no re-read finds answers arrId null — audited by tmdb id, never as arr id 0", async () => {
+  const token = await mintSession();
+  // Radarr answered 201 with no id, and its library never shows the movie.
+  responder = both((c) => (c.origin === RADARR && c.method === "POST" && c.path === "/api/v3/movie" ? json({}, 201) : undefined), addResponder, radarrBase);
+  const res = await call(addRoute.POST, token, "/admin/arr/title/add", { method: "POST", body: {
+    service: "radarr", tmdbId: 27205, qualityProfileId: 1, rootFolderPath: "/movies/", tags: [], monitored: true, search: false,
+  } });
+  assert.equal(res.status, 201);
+  assert.deepEqual(await res.json(), { arrId: null, title: "Inception" });
+  assert.equal(audits.length, 1, "the add happened: it is audited");
+  assert.equal(audits[0].action, "ARR_TITLE_ADD");
+  assert.equal(audits[0].target, "radarr::tmdb:27205");
+  assert.equal((JSON.parse(audits[0].details as string) as { arrId: unknown }).arrId, null);
+});
+
 test("add: a proxy's 504 on an add Radarr DID create is an add (the 5xx is an unknown outcome, not a refusal)", async () => {
   const token = await mintSession();
   responder = both(statefulAdd(() => json({ message: "Gateway Timeout" }, 504)), addResponder, radarrBase);

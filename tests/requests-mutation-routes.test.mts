@@ -79,6 +79,9 @@ let profilesOk = true;
 // accepts that many commands and answers 500 to every later one.
 let sonarrSearch: { episodes: unknown[]; seriesRows?: unknown[]; acceptCommands?: number } | null = null;
 let commandSeq = 500;
+// What Radarr's library answers for GET /api/v3/movie?tmdbId= (a movie Search).
+// null ⇒ the generic stub below.
+let radarrMovies: unknown[] | null = null;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
@@ -100,6 +103,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     }
   }
 
+  if (radarrMovies && (init?.method ?? "GET") === "GET" && url.pathname.endsWith("/api/v3/movie") && url.searchParams.has("tmdbId")) {
+    return json(radarrMovies);
+  }
   if (url.pathname.includes("/api/v3/qualityprofile")) {
     // The whole QualityProfileResource, as Radarr sends it: the quality-profiles
     // route must forward only `{ id, name }` (its deepEqual below pins that).
@@ -447,6 +453,7 @@ beforeEach(() => {
   arrGatewayTmdbIds = new Set();
   profilesOk = true;
   sonarrSearch = null;
+  radarrMovies = null;
   failTvdbBookkeeping = false;
   agentRows.length = 0;
   invalidateAgentCache();
@@ -1230,6 +1237,18 @@ for (const [label, seriesRows] of [
     assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "an answer, not a logged failure");
   });
 }
+
+test("search on a movie Radarr no longer holds answers a translated arrError pointing at Re-push and queues nothing", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  radarrMovies = [{ id: 9, tmdbId: 604 }]; // another movie only
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, status: "APPROVED" })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).arrError, "Radarr doesn't have this title yet — re-push the request first");
+  assert.ok(!fetchCalls.some((c) => c.url.pathname.endsWith("/api/v3/command")), "no search command");
+  assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "an answer, not a logged failure");
+});
 
 test("the approve write carries a CAS predicate on the CURRENT status", async () => {
   // The transition-table check ran against a stale read, so two concurrent

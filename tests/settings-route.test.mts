@@ -1117,6 +1117,23 @@ test("PATCH: an empty traktClientId is WRITTEN — the Trakt form's Remove must 
   assert.equal(details.before.traktClientId, "[redacted]", "a secret never reaches the audit row");
 });
 
+test("PATCH: an empty trashGithubToken is WRITTEN — the TRaSH token card's Remove must clear the stored token", async () => {
+  // The card had no way to remove a token, and a blank for this key was
+  // dropped as a non-clearable empty, so a stored token could never go.
+  settings.set("trashGithubToken", "ghp_live_token");
+  const admin = await mintSession("ADMIN");
+  const res = await patchLater({ trashGithubToken: "" }, admin.header);
+  assert.equal(res.status, 200);
+  const body = await res.json() as { ignored?: string[] };
+  assert.equal(body.ignored, undefined, "the blank is not reported as ignored");
+  assert.equal(upsertFor("trashGithubToken")[0]?.create.value, "", "clearing the token must reach the database");
+  assert.equal(settings.get("trashGithubToken"), "");
+  const details = JSON.parse(auditRows[0].details as string);
+  assert.deepEqual(details.keys, ["trashGithubToken"]);
+  assert.equal(details.before.trashGithubToken, "[redacted]", "the token never reaches the audit row");
+  assert.ok(!JSON.stringify(details).includes("ghp_live_token"));
+});
+
 test("PATCH: a long MOTD body saves — each audited value is cut with a length marker so details fits VarChar(8000)", async () => {
   // A stored 4,200-char body plus the new one made details ~8.8k characters:
   // the in-transaction audit insert failed and every MOTD save answered 500.
@@ -1137,6 +1154,22 @@ test("PATCH: a long MOTD body saves — each audited value is cut with a length 
   assert.equal(details.after.motdBody, `${"c".repeat(1000)}… [4300 chars]`);
   assert.equal(details.before.motdTitle, "Notice", "a short value is kept as it is");
   assert.equal(details.after.motdTitle, "Notice!");
+});
+
+// The save's audit row is written inside its transaction, and it used to be
+// built by hand there, skipping the control-character strip every other audit row
+// gets on the attacker-controlled User-Agent.
+test("PATCH: the settings audit row strips control characters from the User-Agent like every audit row", async () => {
+  const admin = await mintSession("ADMIN");
+  // A header value is a byte string, so this is what a client can send: C0/C1
+  // controls (ESC starts an ANSI sequence in an operator's terminal) and DEL.
+  const ua = "Mozilla/5.0 \u001b[31mred\u0007\u009b\u007f";
+  const res = await patchLater({ motdTitle: "UA check" }, { ...admin.header, "user-agent": ua });
+  assert.equal(res.status, 200, await res.clone().text());
+  assert.equal(auditRows.length, 1);
+  const stored = String(auditRows[0].userAgent);
+  assert.ok(stored.startsWith("Mozilla/5.0"), `fixture sanity: the header reached the row (${JSON.stringify(stored)})`);
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(stored), `unsanitized User-Agent stored: ${JSON.stringify(stored)}`);
 });
 
 test("PATCH: many long values at once still fit — values are cut harder, and secrets stay [redacted]", async () => {

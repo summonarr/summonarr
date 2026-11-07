@@ -6,7 +6,7 @@
 // first (what goes, and whether an APPROVED request would make the sync put it
 // straight back), then the remove, echoing the id the dry run named.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Loader2, Trash2 } from "@/components/icons";
@@ -32,6 +32,29 @@ export function RemovePanel({ titleRef, instanceLabel, onRemoved }: { titleRef: 
   const [error, setError] = useState("");
   const service = SERVICE_LABEL[titleRef.service];
   const base = { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, deleteFiles, addImportExclusion: exclude };
+  // The panel is an alertdialog: focus moves to its Cancel when it opens (the
+  // Remove button that had it is gone), and back to Remove when Cancel closes it.
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const refocusTrigger = useRef(false);
+  useEffect(() => {
+    if (open) cancelRef.current?.focus();
+    else if (refocusTrigger.current) {
+      refocusTrigger.current = false;
+      triggerRef.current?.focus();
+    }
+  }, [open]);
+
+  // Cancel forgets the choices too: the panel stays mounted across tabs, and
+  // "delete the files" must never be pre-selected the next time it opens.
+  function cancel() {
+    refocusTrigger.current = true;
+    setOpen(false);
+    setPlan(null);
+    setError("");
+    setDeleteFiles(false);
+    setExclude(false);
+  }
 
   async function loadPlan() {
     setOpen(true);
@@ -63,7 +86,7 @@ export function RemovePanel({ titleRef, instanceLabel, onRemoved }: { titleRef: 
     return (
       <div className="flex flex-wrap items-center gap-3 border-t pt-4" style={{ borderColor: "var(--ds-border)" }}>
         <span className="min-w-0 flex-1 text-xs text-zinc-500">{t("adminArr.remove.hint", { name: instanceLabel })}</span>
-        <Button variant="outline" size="sm" onClick={() => void loadPlan()}>
+        <Button ref={triggerRef} variant="outline" size="sm" onClick={() => void loadPlan()}>
           <Trash2 /> {t("adminArr.remove.button", { name: instanceLabel })}
         </Button>
       </div>
@@ -116,7 +139,7 @@ export function RemovePanel({ titleRef, instanceLabel, onRemoved }: { titleRef: 
         </p>
       )}
       <div className="flex flex-wrap justify-end gap-2">
-        <Button variant="ghost" size="sm" onClick={() => { setOpen(false); setPlan(null); setError(""); }} disabled={busy === "remove"}>
+        <Button ref={cancelRef} variant="ghost" size="sm" onClick={cancel} disabled={busy === "remove"}>
           {t("adminArr.common.cancel")}
         </Button>
         <Button

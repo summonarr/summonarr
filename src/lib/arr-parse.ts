@@ -1,12 +1,17 @@
 // Small, zero-import readers for the JSON Radarr/Sonarr send back. Every field
 // of an upstream resource is `unknown` until one of these says otherwise, and
 // every string that reaches the browser is bounded. Shared by the admin title
-// manager, history/blocklist, calendar and system modules (arr-title.ts,
-// arr-history.ts, arr-calendar.ts, arr-system.ts).
+// manager, history/blocklist, calendar, system, queue and Missing modules
+// (arr-title.ts, arr-history.ts, arr-calendar.ts, arr-system.ts, arr-queue.ts,
+// arr-missing.ts).
 
 export const MAX_TEXT = 500;
-const MAX_LABELS = 20;
+export const MAX_LABELS = 20;
 const MAX_LABEL_LEN = 100;
+// An upstream list is capped only by arrFetch's 50 MB and projected
+// synchronously, so a projection keeps at most its cap and READS at most this
+// many times it (guardrail 5i).
+export const PROJECTION_SCAN_FACTOR = 10;
 
 export const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null);
 export const nonNegInt = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
@@ -26,14 +31,24 @@ export function isoOrNull(v: unknown): string | null {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
-/** The `name`s of a list of {id, name} objects (languages, custom formats) — deduplicated, bounded. */
+/**
+ * The `name`s of a list of {id, name} objects (languages, custom formats) —
+ * deduplicated through a Set, at most MAX_LABELS kept, and at most
+ * MAX_LABELS × PROJECTION_SCAN_FACTOR entries read: a list of duplicates never
+ * reaches the cap, so the read is bounded too (guardrail 5i).
+ */
 export function namesOf(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
+  const list = v as Array<{ name?: unknown } | null>;
   const out: string[] = [];
-  for (const x of v as Array<{ name?: unknown } | null>) {
-    const n = typeof x?.name === "string" ? x.name.trim().slice(0, MAX_LABEL_LEN) : "";
-    if (n && !out.includes(n)) out.push(n);
-    if (out.length >= MAX_LABELS) break;
+  const seen = new Set<string>();
+  for (let i = 0, n = Math.min(list.length, MAX_LABELS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_LABELS; i++) {
+    const x = list[i];
+    const name = typeof x?.name === "string" ? x.name.trim().slice(0, MAX_LABEL_LEN) : "";
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      out.push(name);
+    }
   }
   return out;
 }
@@ -86,6 +101,17 @@ export function protocolOf(v: unknown): Protocol {
   if (s === "torrent" || s === "2") return "torrent";
   if (s === "usenet" || s === "1") return "usenet";
   return "unknown";
+}
+
+/**
+ * Whether a paged Radarr/Sonarr read (`page` is 1-based) has reached the end
+ * of its list after this page. `totalRecords` decides when the arr sent one; a
+ * PagingResource without it is read until a short page, never taken as a total
+ * of 0 (which ended every read after its first page, as if it were complete).
+ */
+export function pagedReadEnded(page: number, pageSize: number, batchLength: number, totalRecords: unknown): boolean {
+  if (batchLength === 0) return true;
+  return typeof totalRecords === "number" && Number.isFinite(totalRecords) ? page * pageSize >= totalRecords : batchLength < pageSize;
 }
 
 /**

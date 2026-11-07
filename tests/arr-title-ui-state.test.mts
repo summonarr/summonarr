@@ -157,3 +157,12 @@ test("F077: every read is counted while in flight; a write's answer drops it and
     );
   }
 });
+
+// ── a failed open-time read can be retried ─────────────────────────────────
+
+test("a failed open-time read offers Retry, which reads again as the open did", () => {
+  const body = managerBody();
+  const failed = body.slice(body.indexOf("loadError ? ("), body.indexOf(") : (", body.indexOf("loadError ? (")));
+  assert.match(failed, /onClick=\{\(\) => \{\s*setLoadError\(""\);\s*void load\(titleTargetOfKey\(targetKey\), true\);\s*\}\}/);
+  assert.match(failed, /\{t\("adminArr\.common\.retry"\)\}/);
+});

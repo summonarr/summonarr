@@ -239,7 +239,7 @@ test("g-openapi#1: GET /admin/arr/title types the instance's choice lists as nul
     assert.equal(schema.properties[k]?.nullable, true, k);
     assert.match(schema.properties[k]?.description ?? "", /null when the instance failed/, k);
   }
-  // TitleState's lists are `Choice[] | null` — readCatalogTolerant answers null per failed list.
+  // TitleState's lists are `Choice[] | null` — readCatalog({ tolerant: true }) answers null per failed list.
   assert.match(readFileSync(new URL("../src/lib/arr-title-data.ts", import.meta.url), "utf8"), /qualityProfiles: Choice\[\] \| null;/);
 });
 

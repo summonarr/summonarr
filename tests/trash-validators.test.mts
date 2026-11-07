@@ -163,6 +163,48 @@ test("quality profile: formatItems must be a plain object when present (arrays r
   assert.equal(isQualityProfilePayload({ trash_id: "qp1", name: "n", formatItems: "x" }), false);
 });
 
+test("quality profile: every items entry needs a name, a boolean allowed, and string members", () => {
+  const base = { trash_id: "qp1", name: "n" };
+  // A TRaSH-shaped list (standalone qualities and a group) is accepted.
+  assert.equal(
+    isQualityProfilePayload({
+      ...base,
+      items: [
+        { name: "Remux 1080p", allowed: true, items: ["Remux-1080p", "Bluray-1080p"] },
+        { name: "DVD", allowed: false },
+      ],
+    }),
+    true,
+  );
+  assert.equal(isQualityProfilePayload({ ...base, items: [null] }), false);
+  assert.equal(isQualityProfilePayload({ ...base, items: ["Bluray-1080p"] }), false);
+  assert.equal(isQualityProfilePayload({ ...base, items: [{ allowed: true }] }), false);
+  assert.equal(isQualityProfilePayload({ ...base, items: [{ name: "", allowed: true }] }), false);
+  assert.equal(isQualityProfilePayload({ ...base, items: [{ name: "DVD" }] }), false);
+  assert.equal(isQualityProfilePayload({ ...base, items: [{ name: "DVD", allowed: "true" }] }), false);
+  assert.equal(isQualityProfilePayload({ ...base, items: [{ name: "G", allowed: true, items: "WEBDL-1080p" }] }), false);
+  assert.equal(isQualityProfilePayload({ ...base, items: [{ name: "G", allowed: true, items: ["WEBDL-1080p", 3] }] }), false);
+  assert.equal(isQualityProfilePayload({ ...base, items: [{ name: "G", allowed: true, items: [""] }] }), false);
+});
+
+test("quality profile: every formatItems value must be a non-empty trash_id string", () => {
+  const base = { trash_id: "qp1", name: "n" };
+  assert.equal(isQualityProfilePayload({ ...base, formatItems: { DV: "cf-dv", HDR: "cf-hdr" } }), true);
+  assert.equal(isQualityProfilePayload({ ...base, formatItems: { DV: 7 } }), false);
+  assert.equal(isQualityProfilePayload({ ...base, formatItems: { DV: "" } }), false);
+  assert.equal(isQualityProfilePayload({ ...base, formatItems: { DV: null } }), false);
+  assert.equal(isQualityProfilePayload({ ...base, formatItems: { DV: ["cf-dv"] } }), false);
+});
+
+test("custom format: trash_scores must be an object of finite numbers when present", () => {
+  const base = { trash_id: "cf1", name: "n" };
+  assert.equal(isCustomFormatPayload({ ...base, trash_scores: { default: -10000, "sqp-1": 0 } }), true);
+  assert.equal(isCustomFormatPayload({ ...base, trash_scores: [] }), false);
+  assert.equal(isCustomFormatPayload({ ...base, trash_scores: null }), false);
+  assert.equal(isCustomFormatPayload({ ...base, trash_scores: { default: "100" } }), false);
+  assert.equal(isCustomFormatPayload({ ...base, trash_scores: { default: Infinity } }), false);
+});
+
 test("quality profile: non-object payloads and missing id/name are rejected", () => {
   for (const v of NON_OBJECTS) {
     assert.equal(isQualityProfilePayload(v), false, `expected reject for ${JSON.stringify(v)}`);

@@ -195,3 +195,71 @@ test("C049: the delete confirm takes focus, and gives it back to Delete (n) when
     assert.doesNotMatch(tab.split(fn)[1].split("\n  }\n")[0], /refocusDelete/, fn);
   }
 });
+
+// ── the Files tab's selection while a delete runs ───────────────────────────
+
+test("the files' checkboxes and Select all are locked while a delete or rename runs", () => {
+  const tab = src("files-tab.tsx");
+  const selectAll = tab.slice(tab.indexOf("onChange={(e) => selectAll(e.target.checked)}"), tab.indexOf('t("adminArr.files.selectAll")'));
+  assert.match(selectAll, /disabled=\{busy !== null\}/, "Select all");
+  const row = tab.slice(tab.indexOf("onChange={() => toggle(f.id)}"), tab.indexOf('aria-label={t("adminArr.files.selectAria"'));
+  assert.match(row, /disabled=\{busy !== null\}/, "each file's checkbox");
+});
+
+// ── the Remove panel ────────────────────────────────────────────────────────
+
+test("the Remove panel takes focus on Cancel when it opens, and gives it back to Remove when Cancel closes it", () => {
+  const panel = src("remove-panel.tsx");
+  assert.match(
+    panel,
+    /useEffect\(\(\) => \{\s*if \(open\) cancelRef\.current\?\.focus\(\);\s*else if \(refocusTrigger\.current\) \{\s*refocusTrigger\.current = false;\s*triggerRef\.current\?\.focus\(\);\s*\}\s*\}, \[open\]\);/,
+  );
+  assert.match(panel, /<Button ref=\{triggerRef\}[^>]*onClick=\{\(\) => void loadPlan\(\)\}>/);
+  assert.match(panel, /<Button ref=\{cancelRef\}[^>]*onClick=\{cancel\}/);
+  assert.match(body(panel, "function cancel() {"), /^\s*refocusTrigger\.current = true;/, "set before the close renders");
+});
+
+test("Cancel on the Remove panel clears 'delete the files' and the exclusion — nothing pre-selected next time", () => {
+  const cancel = body(src("remove-panel.tsx"), "function cancel() {");
+  assert.match(cancel, /setDeleteFiles\(false\);/);
+  assert.match(cancel, /setExclude\(false\);/);
+  assert.match(cancel, /setOpen\(false\);/);
+  // Never inside loadPlan: `base` is captured at render, so the dry run would send stale flags.
+  assert.doesNotMatch(body(src("remove-panel.tsx"), "async function loadPlan() {"), /setDeleteFiles|setExclude/);
+});
+
+// ── the Settings tab's selects and move confirm ─────────────────────────────
+
+test("Settings keeps a quality profile the list lacks selectable, and a null availability shows as no choice", () => {
+  const tab = src("settings-tab.tsx");
+  assert.match(tab, /\{\(draft\.qualityProfileId === null \|\| !\(qualityProfiles \?\? \[\]\)\.some\(\(p\) => p\.id === draft\.qualityProfileId\)\) && \(\s*<option value=\{draft\.qualityProfileId === null \? "" : String\(draft\.qualityProfileId\)\}>/);
+  assert.match(tab, /\{draft\.minimumAvailability === null && <option value="">—<\/option>\}/);
+  assert.match(tab, /value=\{draft\.minimumAvailability \?\? ""\}/);
+});
+
+test("the move-files confirm takes focus on its first choice, and Cancel gives it back to Save", () => {
+  const tab = src("settings-tab.tsx");
+  assert.match(
+    tab,
+    /useEffect\(\(\) => \{\s*if \(confirmMove\) moveChoiceRef\.current\?\.focus\(\);\s*else if \(refocusSave\.current\) \{\s*refocusSave\.current = false;\s*saveRef\.current\?\.focus\(\);\s*\}\s*\}, \[confirmMove\]\);/,
+  );
+  assert.match(tab, /<button ref=\{moveChoiceRef\} type="button" onClick=\{\(\) => void save\(true\)\}/);
+  const confirm = tab.slice(tab.indexOf('role="alertdialog"'));
+  assert.match(confirm, /onClick=\{\(\) => \{\s*refocusSave\.current = true;\s*setConfirmMove\(false\);\s*\}\}/, "Cancel gives focus back");
+  assert.match(tab, /<Button ref=\{saveRef\} size="sm" onClick=\{\(\) => void save\(\)\}/);
+});
+
+// ── the Add dialog ──────────────────────────────────────────────────────────
+
+test("the Add dialog retries a failed choices read, and says why Submit is off when nothing can be picked", () => {
+  const dialog = src("add-dialog.tsx");
+  const failed = dialog.slice(dialog.indexOf("if (loadError) {"), dialog.indexOf("if (!choices) {"));
+  assert.match(failed, /<Button variant="ghost" size="sm" onClick=\{\(\) => void loadChoices\(\)\}><RefreshCw \/> \{t\("adminArr\.common\.retry"\)\}<\/Button>/);
+  assert.match(dialog, /const loadChoices = useCallback\(async \(\) => \{\s*const seq = \+\+loadSeq\.current;\s*setLoadError\(""\);/, "a retry clears the error (the spinner comes back) and supersedes an older read");
+  assert.match(dialog, /if \(seq !== loadSeq\.current\) return;/);
+  assert.match(dialog, /useEffect\(\(\) => \{\s*void loadChoices\(\);/);
+  assert.match(dialog, /const noRoot = !choices\.rootFolders\.some\(\(r\) => r\.accessible\);/);
+  assert.match(dialog, /\{noRoot && <span className="block">\{t\("adminArr\.add\.noRootFolder", \{ name: instanceLabel \}\)\}<\/span>\}/);
+  assert.match(dialog, /\{noProfile && <span className="block">\{t\("adminArr\.add\.noQualityProfile", \{ name: instanceLabel \}\)\}<\/span>\}/);
+  assert.match(dialog, /const tRef = useTRef\(\);/, "the shared translator ref, not a private copy");
+});

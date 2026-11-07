@@ -30,7 +30,7 @@ import { FilesTab } from "./files-tab";
 import { HistoryTab } from "./history-tab";
 import { RemovePanel } from "./remove-panel";
 import { arrApi, useTRef, type ArrServiceName, type TitleRef } from "./shared";
-import { liveTitleLanding, snapshotMayPaint, titleReadPath, titleTargetKey, titleTargetOfKey } from "./snapshot-rules";
+import { liveTitleLanding, snapshotMayPaint, titleReadPath, titleTargetKey, titleTargetOfKey, type TitleReadTarget } from "./snapshot-rules";
 
 interface TitleState {
   title: ArrTitle;
@@ -43,7 +43,7 @@ export type TitleManagerTab = "settings" | "seasons" | "files" | "history";
 type Tab = TitleManagerTab;
 
 /** Which title: by TMDB id (resolved on the instance) or by the arr's own id. */
-export type TitleManagerTarget = { tmdbId: number } | { arrId: number };
+export type TitleManagerTarget = TitleReadTarget;
 
 // The arr's own status word, translated (a literal map — never a built key);
 // an unknown word shows as the arr sent it.
@@ -348,8 +348,19 @@ export function ArrTitleManager({
             </p>
           ) : !state ? (
             loadError ? (
-              <div role="alert" className="flex items-center justify-center gap-2 px-6 py-16 text-center text-sm" style={{ color: "var(--ds-danger)" }}>
+              <div role="alert" className="flex flex-wrap items-center justify-center gap-2 px-6 py-16 text-center text-sm" style={{ color: "var(--ds-danger)" }}>
                 <AlertTriangle className="h-4 w-4 shrink-0" /> {loadError}
+                {/* Reads again as the open-time read did: clearing the error brings the spinner back. */}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setLoadError("");
+                    void load(titleTargetOfKey(targetKey), true);
+                  }}
+                >
+                  <RefreshCw /> {t("adminArr.common.retry")}
+                </Button>
               </div>
             ) : (
               <div className="flex items-center justify-center gap-3 py-16 text-sm text-zinc-500">

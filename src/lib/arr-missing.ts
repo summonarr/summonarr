@@ -16,12 +16,11 @@
 // `monitored` is reported, never filtered on: an unmonitored title is missing
 // for a different reason (nothing is searching for it), and the page decides
 // whether to show it.
-import { PROJECTION_SCAN_FACTOR } from "./arr-queue";
+import { posInt, PROJECTION_SCAN_FACTOR, text } from "./arr-parse";
 import { sonarrSeriesCompletion, type SonarrSeriesStatsRow } from "./sonarr-completion";
 
-const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
-const count = (v: unknown): number => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : 0);
-const str = (v: unknown): string => (typeof v === "string" ? v : "");
+// Ids are safe integers and every string the page shows is bounded (arr-parse).
+const count = (v: unknown): number => posInt(v) ?? 0;
 
 /** A parseable timestamp as epoch ms, or null. Radarr/Sonarr send ISO strings. */
 export function arrDateMs(v: unknown): number | null {
@@ -115,7 +114,7 @@ export function missingMovie(row: RadarrMovieRow, instance: string, nowMs: numbe
     instance,
     arrId,
     tmdbId: posInt(row.tmdbId),
-    title: str(row.title),
+    title: text(row.title),
     year: posInt(row.year),
     monitored: row.monitored === true,
     posterPath: tmdbPosterPathFromImages(row.images),
@@ -206,7 +205,7 @@ export function missingSeries(row: SonarrSeriesRow, instance: string): MissingSe
     arrId,
     tmdbId: posInt(row.tmdbId),
     tvdbId: posInt(row.tvdbId),
-    title: str(row.title),
+    title: text(row.title),
     year: posInt(row.year),
     monitored: row.monitored === true,
     status: typeof row.status === "string" && row.status !== "" ? row.status : null,
@@ -258,7 +257,7 @@ export function missingEpisodes(rows: readonly SonarrEpisodeRow[], nowMs: number
   const out: MissingEpisode[] = [];
   for (const r of rows) {
     const m = missingEpisodeParts(r, nowMs);
-    if (m) out.push({ seasonNumber: m.seasonNumber, episodeNumber: m.episodeNumber, title: str(r.title), airDateUtc: new Date(m.aired).toISOString() });
+    if (m) out.push({ seasonNumber: m.seasonNumber, episodeNumber: m.episodeNumber, title: text(r.title), airDateUtc: new Date(m.aired).toISOString() });
   }
   return out.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
 }
@@ -324,8 +323,8 @@ function cutoffName(items: unknown, cutoff: unknown): string | null {
   for (const it of items as ProfileItem[]) {
     if (!it || typeof it !== "object") continue;
     // A quality GROUP carries its own id and name; a single quality is keyed by its quality id.
-    if (Array.isArray(it.items) && it.items.length > 0 && it.id === cutoff) return str(it.name) || null;
-    if (it.quality && it.quality.id === cutoff) return str(it.quality.name) || null;
+    if (Array.isArray(it.items) && it.items.length > 0 && it.id === cutoff) return text(it.name) || null;
+    if (it.quality && it.quality.id === cutoff) return text(it.quality.name) || null;
   }
   return null;
 }
@@ -337,7 +336,7 @@ export function qualityProfileInfo(raw: unknown): Map<number, QualityProfileInfo
   for (const p of raw as Array<{ id?: unknown; name?: unknown; cutoff?: unknown; items?: unknown } | null>) {
     const id = posInt(p?.id);
     if (id === null || !p) continue;
-    out.set(id, { name: str(p.name), cutoff: cutoffName(p.items, p.cutoff) });
+    out.set(id, { name: text(p.name), cutoff: cutoffName(p.items, p.cutoff) });
   }
   return out;
 }
@@ -375,7 +374,7 @@ export function cutoffMovie(row: RadarrCutoffRow, instance: string, profiles: Re
     instance,
     arrId,
     tmdbId: posInt(row.tmdbId),
-    title: str(row.title),
+    title: text(row.title),
     year: posInt(row.year),
     posterPath: tmdbPosterPathFromImages(row.images),
     quality: qualityName(row.movieFile),
@@ -445,7 +444,7 @@ export function cutoffSeriesFromEpisodes(
         arrId: seriesId,
         tmdbId: posInt(r.series?.tmdbId),
         tvdbId: posInt(r.series?.tvdbId),
-        title: str(r.series?.title),
+        title: text(r.series?.title),
         year: posInt(r.series?.year),
         posterPath: null,
         profile: profile?.name || null,
@@ -454,7 +453,7 @@ export function cutoffSeriesFromEpisodes(
       };
       bySeries.set(seriesId, row);
     }
-    row.episodes.push({ seasonNumber, episodeNumber, title: str(r.title), quality: qualityName(r.episodeFile) });
+    row.episodes.push({ seasonNumber, episodeNumber, title: text(r.title), quality: qualityName(r.episodeFile) });
   }
   const out = [...bySeries.values()];
   for (const s of out) s.episodes.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);

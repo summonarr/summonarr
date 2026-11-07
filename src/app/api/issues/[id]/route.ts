@@ -1,6 +1,5 @@
-import { NextResponse } from "next/server";
-import { emitNotificationEvent } from "@/lib/notify-agents";
-import { withIssueAdmin } from "@/lib/api-auth";
+import { NextResponse, type NextRequest } from "next/server";
+import { withIssueAdmin, type SummonarrSession } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { prisma } from "@/lib/prisma";
@@ -11,18 +10,19 @@ import {
   searchEpisodeInSonarr,
   resolveTvdbIdFromTmdbId,
   arrErrorMessage,
+  ArrItemNotFoundError,
 } from "@/lib/arr";
-import { notifyUserIssueResolved } from "@/lib/discord-notify";
-import { notifyUserIssueResolvedPush } from "@/lib/push";
-import { createInAppNotification } from "@/lib/in-app-notify";
 import { emitSSE } from "@/lib/sse-emitter";
-import { logAudit, auditContext } from "@/lib/audit";
-import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
+import { logAudit, logAuditTx, auditContext } from "@/lib/audit";
+import { sanitizeOptional } from "@/lib/sanitize";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 import { recordIssueGrab } from "@/lib/issue-grab";
+import { announceIssueResolved, promoteIssueInProgress } from "@/lib/issue-transitions";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
+import type { Issue } from "@/generated/prisma";
 
 const VALID_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
@@ -30,6 +30,118 @@ type ValidStatus = (typeof VALID_STATUSES)[number];
 // IssueGrab row (kept, never pruned), and a MANAGE_ISSUES delegate can reach it —
 // bounded per caller like the sibling Replace release / Replace file routes.
 const REFETCH_LIMIT_PER_MIN = 10;
+
+// PATCH { refetch: true, instance? }: search the issue's scope again on that
+// instance. Takes precedence over status/resolution in the same body (the
+// OpenAPI contract), and answers `{ ...issue, arrError }` — the wire shape the
+// iOS app decodes.
+async function handleRefetch(
+  req: NextRequest,
+  session: SummonarrSession,
+  issue: Issue,
+  rawInstance: unknown,
+  t: Translator,
+): Promise<NextResponse> {
+  const id = issue.id;
+  // Refuse a RESOLVED issue BEFORE contacting Radarr/Sonarr, as the sibling Replace
+  // flow (issues/[id]/releases) does. The post-search status CAS below only avoids
+  // flipping the status back — by then the search has already queued a download for
+  // a closed issue (a stale tab, a native client, a direct API call).
+  if (issue.status === "RESOLVED") {
+    return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeRefetch") }, { status: 409 });
+  }
+  // Which Radarr/Sonarr instance holds the copy this issue is about. Issue has no
+  // arrInstance column — the same title can sit on several instances — so the caller
+  // names it, exactly as the sibling Replace flow does (issues/[id]/releases). Absent
+  // ⇒ the default, so every pre-existing caller is unchanged.
+  //
+  // Without this the search always went to the DEFAULT instance: a SEASON issue filed
+  // against the 4K copy re-grabbed and re-imported the HD one, leaving the reported
+  // problem untouched while the issue moved to IN_PROGRESS as though it were handled.
+  // Validated, never coerced — a bad slug must not silently retarget the default.
+  const instance = typeof rawInstance === "string" ? rawInstance.trim() : "";
+  if (!isValidInstanceSlug(instance)) {
+    return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
+  }
+  if (!checkRateLimit(`issue-refetch:${session.user.id}`, REFETCH_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+  }
+  // A failed search — and, as before, a failed status write after it — answers
+  // with the issue and an `arrError` (the wire shape the iOS app decodes).
+  const refetchFailed = (err: unknown) => {
+    // The instance doesn't hold the title (removed there, or the reported copy
+    // is on another instance): an answer the admin can act on, not a failure.
+    if (err instanceof ArrItemNotFoundError) {
+      const service = issue.mediaType === "MOVIE" ? "Radarr" : "Sonarr";
+      const name = instance === "" ? service : `${service} (${instance})`;
+      return NextResponse.json({ ...issue, arrError: t("apiUser.issues.replaceFile.notOnInstance", { name }) });
+    }
+    console.error("[arr] Issue refetch failed:", arrErrorMessage(err));
+    return NextResponse.json({ ...issue, arrError: t("apiUser.issues.arrFailed") });
+  };
+  let tvdbId: number | null = issue.tvdbId;
+  try {
+    if (issue.mediaType === "MOVIE") {
+      await searchMovieInRadarr(issue.tmdbId, instance);
+    } else {
+      // Resolve authoritatively from tmdbId when the stored tvdbId is absent
+      // (client-supplied tvdbId is no longer trusted, so older/null rows resolve here).
+      tvdbId = issue.tvdbId ?? (await resolveTvdbIdFromTmdbId(issue.tmdbId, instance));
+      if (!tvdbId) throw new Error("Could not resolve a TVDB ID for this series — cannot search in Sonarr");
+      if (issue.scope === "EPISODE" && issue.seasonNumber != null && issue.episodeNumber != null) {
+        await searchEpisodeInSonarr(tvdbId, issue.seasonNumber, issue.episodeNumber, instance);
+      } else if (issue.scope === "SEASON" && issue.seasonNumber != null) {
+        await searchSeasonInSonarr(tvdbId, issue.seasonNumber, instance);
+      } else {
+        // Deliberately SeriesSearch: a refetch is an upgrade search of the
+        // issue's own scope (the arr only replaces a file on disk with an
+        // upgrade), the series-wide twin of the SeasonSearch/EpisodeSearch
+        // above. The Missing plan would queue nothing whenever every episode
+        // is on disk — exactly when the issue is about the files themselves.
+        await searchSeriesInSonarr(tvdbId, instance);
+      }
+    }
+  } catch (err) {
+    return refetchFailed(err);
+  }
+
+  // The arr has queued exactly one search, on `instance`. Record it as an
+  // instance-scoped IssueGrab — as Replace release and Replace file do — so the
+  // Download webhooks tell this admin when the refetched copy lands (they match
+  // by title, instance and the issue's scope, never by release, so a search
+  // matches like a grab). Kept OUTSIDE the try blocks that decide the answer:
+  // the search was accepted, so a failure here (usually P2003 — the issue was
+  // deleted meanwhile) must not read as the refetch failing, or the admin would
+  // queue a second search. It supersedes this admin's earlier pending grabs of
+  // the issue on this instance (one import, one announcement — recordIssueGrab).
+  try {
+    await recordIssueGrab({
+      issueId: id,
+      triggeredById: session.user.id,
+      tmdbId: issue.tmdbId,
+      tvdbId,
+      mediaType: issue.mediaType,
+      title: issue.title,
+      scope: issue.scope,
+      seasonNumber: issue.seasonNumber,
+      episodeNumber: issue.episodeNumber,
+      arrInstance: instance,
+    });
+  } catch (err) {
+    console.warn("[issues] Refetch search queued but recording the grab failed (issue deleted meanwhile?):", err);
+  }
+
+  try {
+    // CAS on status: don't clobber a RESOLVED issue if another admin closed it
+    // while the search was in flight (count 0 — the current, RESOLVED issue is
+    // answered unchanged). An issue already IN_PROGRESS is not re-announced.
+    await promoteIssueInProgress({ issue, from: "notResolved", trigger: "refetch", session, req });
+    const updated = await prisma.issue.findUnique({ where: { id } });
+    return NextResponse.json({ ...(updated ?? issue), arrError: null });
+  } catch (err) {
+    return refetchFailed(err);
+  }
+}
 
 export const PATCH = withIssueAdmin(async (
   req,
@@ -42,122 +154,22 @@ export const PATCH = withIssueAdmin(async (
 
   const { id } = await params;
 
-  const parsed = await readJsonCapped<{ status?: string; resolution?: string; refetch?: boolean; instance?: string }>(req, 16384);
+  const parsed = await readJsonCapped<{ status?: string; resolution?: string; refetch?: unknown; instance?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   const { status, resolution, refetch } = body;
+  // `refetch` queues a real search on every indexer, so only a boolean starts
+  // one: `"false"` or `1` used to pass a truthiness test. Absent (or null) is
+  // the status/resolution edit below.
+  if (refetch !== undefined && refetch !== null && typeof refetch !== "boolean") {
+    return NextResponse.json({ error: t("apiUser.issues.refetchInvalid") }, { status: 400 });
+  }
 
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
-  if (refetch) {
-    // Refuse a RESOLVED issue BEFORE contacting Radarr/Sonarr, as the sibling Replace
-    // flow (issues/[id]/releases) does. The post-search status CAS below only avoids
-    // flipping the status back — by then the search has already queued a download for
-    // a closed issue (a stale tab, a native client, a direct API call).
-    if (issue.status === "RESOLVED") {
-      return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeRefetch") }, { status: 409 });
-    }
-    // Which Radarr/Sonarr instance holds the copy this issue is about. Issue has no
-    // arrInstance column — the same title can sit on several instances — so the caller
-    // names it, exactly as the sibling Replace flow does (issues/[id]/releases). Absent
-    // ⇒ the default, so every pre-existing caller is unchanged.
-    //
-    // Without this the search always went to the DEFAULT instance: a SEASON issue filed
-    // against the 4K copy re-grabbed and re-imported the HD one, leaving the reported
-    // problem untouched while the issue moved to IN_PROGRESS as though it were handled.
-    // Validated, never coerced — a bad slug must not silently retarget the default.
-    const instance = typeof body.instance === "string" ? body.instance.trim() : "";
-    if (!isValidInstanceSlug(instance)) {
-      return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
-    }
-    if (!checkRateLimit(`issue-refetch:${session.user.id}`, REFETCH_LIMIT_PER_MIN, 60_000)) {
-      return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
-    }
-    // A failed search — and, as before, a failed status write after it — answers
-    // with the issue and an `arrError` (the wire shape the iOS app decodes).
-    const refetchFailed = (err: unknown) => {
-      console.error("[arr] Issue refetch failed:", arrErrorMessage(err));
-      return NextResponse.json({ ...issue, arrError: t("apiUser.issues.arrFailed") });
-    };
-    let tvdbId: number | null = issue.tvdbId;
-    try {
-      if (issue.mediaType === "MOVIE") {
-        await searchMovieInRadarr(issue.tmdbId, instance);
-      } else {
-        // Resolve authoritatively from tmdbId when the stored tvdbId is absent
-        // (client-supplied tvdbId is no longer trusted, so older/null rows resolve here).
-        tvdbId = issue.tvdbId ?? (await resolveTvdbIdFromTmdbId(issue.tmdbId, instance));
-        if (!tvdbId) throw new Error("Could not resolve a TVDB ID for this series — cannot search in Sonarr");
-        if (issue.scope === "EPISODE" && issue.seasonNumber != null && issue.episodeNumber != null) {
-          await searchEpisodeInSonarr(tvdbId, issue.seasonNumber, issue.episodeNumber, instance);
-        } else if (issue.scope === "SEASON" && issue.seasonNumber != null) {
-          await searchSeasonInSonarr(tvdbId, issue.seasonNumber, instance);
-        } else {
-          // Deliberately SeriesSearch: a refetch is an upgrade search of the
-          // issue's own scope (the arr only replaces a file on disk with an
-          // upgrade), the series-wide twin of the SeasonSearch/EpisodeSearch
-          // above. The Missing plan would queue nothing whenever every episode
-          // is on disk — exactly when the issue is about the files themselves.
-          await searchSeriesInSonarr(tvdbId, instance);
-        }
-      }
-    } catch (err) {
-      return refetchFailed(err);
-    }
-
-    // The arr has queued exactly one search, on `instance`. Record it as an
-    // instance-scoped IssueGrab — as Replace release and Replace file do — so the
-    // Download webhooks tell this admin when the refetched copy lands (they match
-    // by title, instance and the issue's scope, never by release, so a search
-    // matches like a grab). Kept OUTSIDE the try blocks that decide the answer:
-    // the search was accepted, so a failure here (usually P2003 — the issue was
-    // deleted meanwhile) must not read as the refetch failing, or the admin would
-    // queue a second search. It supersedes this admin's earlier pending grabs of
-    // the issue on this instance (one import, one announcement — recordIssueGrab).
-    try {
-      await recordIssueGrab({
-        issueId: id,
-        triggeredById: session.user.id,
-        tmdbId: issue.tmdbId,
-        tvdbId,
-        mediaType: issue.mediaType,
-        title: issue.title,
-        scope: issue.scope,
-        seasonNumber: issue.seasonNumber,
-        episodeNumber: issue.episodeNumber,
-        arrInstance: instance,
-      });
-    } catch (err) {
-      console.warn("[issues] Refetch search queued but recording the grab failed (issue deleted meanwhile?):", err);
-    }
-
-    try {
-      // CAS on status: don't clobber a RESOLVED issue if another admin closed it
-      // while the search was in flight. updateMany returns count=0 in that case
-      // so we just return the current (RESOLVED) issue without changing status.
-      const claimed = await prisma.issue.updateMany({
-        where: { id, status: { not: "RESOLVED" } },
-        data: { status: "IN_PROGRESS" },
-      });
-      const updated = await prisma.issue.findUnique({ where: { id } });
-      if (claimed.count > 0) {
-        emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
-        void logAudit({
-          userId: session.user.id,
-          userName: session.user.name ?? session.user.email ?? null,
-          action: "ISSUE_STATUS_CHANGE",
-          target: `issue:${id}`,
-          details: { trigger: "refetch", before: { status: issue.status }, after: { status: "IN_PROGRESS" } },
-          ...auditContext(req, session),
-        });
-      }
-      return NextResponse.json({ ...(updated ?? issue), arrError: null });
-    } catch (err) {
-      return refetchFailed(err);
-    }
-  }
+  if (refetch === true) return handleRefetch(req, session, issue, body.instance, t);
 
   if (status && !VALID_STATUSES.includes(status as ValidStatus)) {
     return NextResponse.json(
@@ -181,23 +193,31 @@ export const PATCH = withIssueAdmin(async (
     return NextResponse.json({ error: t("apiUser.issues.resolutionEmpty") }, { status: 400 });
   }
 
+  // Only a status that differs is a status change; re-sending the current one
+  // (a native client may echo it beside a note) writes nothing for it.
+  const isStatusChange = !!status && status !== issue.status;
   const updateData: { status?: ValidStatus; resolution?: string | null; resolvedAt?: Date | null } = {};
-  if (status) updateData.status = status as ValidStatus;
   // resolvedAt follows the status transition only (a resolution-only edit leaves
   // it alone): stamped on → RESOLVED, cleared on any move away from it.
-  if (status && status !== issue.status) updateData.resolvedAt = status === "RESOLVED" ? new Date() : null;
+  if (isStatusChange) {
+    updateData.status = status as ValidStatus;
+    updateData.resolvedAt = status === "RESOLVED" ? new Date() : null;
+  }
   if (sanitizedResolution != null) updateData.resolution = sanitizedResolution;
   // Reopening (RESOLVED → OPEN/IN_PROGRESS) clears the old resolution, matching the
   // reporter-reply reopen in the messages route. Otherwise a later re-resolve with no
   // new note falls back to `issue.resolution` and re-announces the EARLIER fix.
-  if (sanitizedResolution == null && issue.status === "RESOLVED" && status && status !== "RESOLVED") {
+  if (sanitizedResolution == null && issue.status === "RESOLVED" && isStatusChange) {
     updateData.resolution = null;
   }
+
+  // Nothing to change (an empty body, or only the current status): answer the
+  // issue as it is — no write, no issue:updated broadcast, no audit.
+  if (Object.keys(updateData).length === 0) return NextResponse.json(issue);
 
   // Compare-and-swap on status when a status change is requested. The resolution-only
   // update path is not gated — overwriting resolution text concurrently is a benign
   // last-write-wins rather than a state-transition conflict.
-  const isStatusChange = status && status !== issue.status;
   if (isStatusChange) {
     const result = await prisma.issue.updateMany({
       where: { id, status: issue.status },
@@ -209,7 +229,7 @@ export const PATCH = withIssueAdmin(async (
         { status: 409 }
       );
     }
-  } else if (Object.keys(updateData).length > 0) {
+  } else {
     // updateMany (not update) so a concurrent delete returns count:0 instead of
     // throwing an unhandled P2025.
     const r = await prisma.issue.updateMany({ where: { id }, data: updateData });
@@ -226,50 +246,10 @@ export const PATCH = withIssueAdmin(async (
   }
 
   if (status === "RESOLVED" && issue.status !== "RESOLVED") {
-    emitNotificationEvent({
-      event: "issue.resolved",
-      media: { type: issue.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: issue.tmdbId, title: issue.title, posterPath: issue.posterPath ?? null },
-      issue: { id, type: issue.issueType },
-      text: (sanitizedResolution ?? issue.resolution) || null,
-    });
-    // One lookup decides whether the reporter-facing channels run, mirroring
-    // notifyRequestStatusChange and the messages route's `reporterActive`
-    // (guardrail 33 — gate at a chokepoint, never re-scatter it into the
-    // per-channel queries). Account removal disables rather than scrubs, so a
-    // removed reporter keeps a live email, Discord link and push subscriptions
-    // and would otherwise be notified forever.
-    const reporterActive = prisma.user
-      .findUnique({ where: { id: issue.reportedBy }, select: { deactivatedAt: true } })
-      .then((u) => !!u && u.deactivatedAt == null)
-      .catch(() => false);
-
-    // An issue admin resolving their OWN reported issue must not be notified about it
-    // (on a single-admin instance that is the common case). A deactivated reporter
-    // is the same gate: Discord, push, and the inbox all wait on reporterActive.
-    const selfAction = issue.reportedBy === session.user.id;
-    const active = await reporterActive;
-    const res = (sanitizedResolution ?? issue.resolution) ?? "";
-    if (active && !selfAction) {
-      notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, sanitizedResolution ?? issue.resolution, issue.tmdbId).catch(() => {});
-      notifyUserIssueResolvedPush({
-        userId: issue.reportedBy,
-        title: issue.title,
-        tmdbId: issue.tmdbId,
-        mediaType: issue.mediaType,
-        resolution: sanitizedResolution ?? issue.resolution,
-        issueId: id,
-      }).catch(() => {});
-      createInAppNotification(issue.reportedBy, {
-        type: "ISSUE_RESOLVED",
-        title: issue.title,
-        body: res ? `Resolved: ${res.slice(0, 400)}` : "Your reported issue was resolved.",
-        tmdbId: issue.tmdbId,
-        mediaType: issue.mediaType,
-        posterPath: issue.posterPath,
-        // Re-rendered in the reader's language at read time (notification-render.ts).
-        data: { v: 1, resolution: res ? res.slice(0, 400) : null },
-      });
-    }
+    // The issue.resolved event, then the reporter's Discord, push and inbox row
+    // behind one deactivatedAt read (guardrail 33) — skipped when an issue admin
+    // resolves their OWN report (on a single-admin instance the common case).
+    await announceIssueResolved(issue, sanitizedResolution ?? issue.resolution, session.user.id);
   }
 
   return NextResponse.json(updated);
@@ -295,20 +275,18 @@ export const DELETE = withIssueAdmin(async (
   if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   const ctx = auditContext(req, session);
+  // The audit row is written in the delete's own transaction, after it, so a
+  // failed audit write rolls the delete back (guardrail 26) — through the shared
+  // row builder, which sanitizes the client-supplied user agent.
   await prisma.$transaction(async (tx) => {
     await tx.issue.delete({ where: { id } });
-    await tx.auditLog.create({
-      data: {
-        userId: session.user.id,
-        userName: sanitizeText(session.user.name ?? session.user.email ?? "unknown"),
-        action: "ISSUE_DELETE",
-        target: sanitizeText(`issue:${id}`),
-        details: JSON.stringify({ action: "delete", title: issue.title, mediaType: issue.mediaType }),
-        ipAddress: ctx.ipAddress ?? null,
-        userAgent: ctx.userAgent ?? null,
-        provider: ctx.provider ?? null,
-        sessionId: null,
-      },
+    await logAuditTx(tx, {
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email ?? null,
+      action: "ISSUE_DELETE",
+      target: `issue:${id}`,
+      details: { action: "delete", title: issue.title, mediaType: issue.mediaType },
+      ...ctx,
     });
   });
 

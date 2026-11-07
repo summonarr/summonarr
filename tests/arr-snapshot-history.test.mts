@@ -101,7 +101,8 @@ test("one builder: the live load fetches the view's URL and the snapshot is read
   assert.match(SRC, /const viewUrl = useMemo\(\(\) => \(view \? withBasePath\(historyViewPath\(view\)\) : null\), \[view\]\);/);
   assert.match(SRC, /const countUrl = useMemo\(\(\) => \(inst \? withBasePath\(blocklistCountPath\(inst\.service, inst\.slug\)\) : null\), \[inst\]\);/);
   // getJson fetches the string it is given — no second withBasePath.
-  assert.match(SRC, /async function getJson<T>\(url: string, fallback: string\): Promise<\{ data: T \} \| \{ error: string \}> \{\s*try \{\s*const res = await fetch\(url\);/);
+  // (with a timeout, so a read that never settles can't hold the spinner forever)
+  assert.match(SRC, /async function getJson<T>\(url: string, fallback: string\): Promise<\{ data: T \} \| \{ error: string \}> \{\s*try \{\s*const res = await fetch\(url, \{ signal: AbortSignal\.timeout\(LOAD_TIMEOUT_MS\) \}\);/);
   const load = callbackBody("load");
   assert.match(load, /if \(!view \|\| !viewUrl\) return;/);
   assert.match(load, /getJson<ArrPage<ArrHistoryEvent>>\(viewUrl, /);
@@ -148,7 +149,7 @@ test("markLive: only for an accepted live answer of the current view, through th
   const blocklist = load.slice(load.indexOf("} else {\n      const res"));
   for (const [name, branch, accept] of [
     ["history", history, /setHistory\(res\.data\);\s*setHistoryKind\(kind\);\s*jumpedTo\.current = null;\s*markLive\(\);\s*\} else setError\(res\.error\);/],
-    ["blocklist", blocklist, /setBlocklist\(res\.data\);\s*setSelected\([^\n]+\n\s*jumpedTo\.current = null;\s*markLive\(\);\s*\} else setError\(res\.error\);/],
+    ["blocklist", blocklist, /setBlocklist\(res\.data\);\s*(?:\/\/[^\n]*\n\s*)?setBlocklistCount\([^\n]+\n\s*setSelected\([^\n]+\n\s*jumpedTo\.current = null;\s*markLive\(\);\s*\} else setError\(res\.error\);/],
   ] as const) {
     assert.match(branch, accept, `${name}: markLive with the accepted answer`);
     assert.equal([...branch.matchAll(/markLive\(\)/g)].length, 1, `${name}: once`);
@@ -160,6 +161,23 @@ test("markLive: only for an accepted live answer of the current view, through th
   // The count's live answer marks the count's snapshot, with the effect re-run per url.
   assert.match(SRC, /if \(live && "data" in res\) \{\s*setBlocklistCount\(\{ inst: key, total: res\.data\.totalRecords \}\);\s*markCountLive\(\);\s*\}/);
   assert.match(SRC, /\}, \[inst, countUrl, markCountLive\]\);/);
+});
+
+test("the Blocklist tab's count: no second read while the tab is on screen; its own page read keeps the count", () => {
+  // The count effect skips its pageSize=1 read on the Blocklist tab, read through
+  // a ref so the effect still re-runs only per instance (deps pinned above).
+  const effect = SRC.slice(SRC.indexOf("if (!inst || !countUrl) return;"), SRC.indexOf("}, [inst, countUrl, markCountLive]);"));
+  assert.match(effect, /^if \(!inst \|\| !countUrl\) return;\s*(?:\/\/[^\n]*\n\s*)?if \(tabRef\.current === "blocklist"\) return;\s*let live = true;/);
+  assert.ok(effect.indexOf('tabRef.current === "blocklist"') < effect.indexOf("getJson<ArrPage<BlocklistEntry>>(countUrl"), "before the read");
+  assert.match(SRC, /const tabRef = useRef<Tab>\(tab\);\s*useEffect\(\(\) => \{\s*tabRef\.current = tab;\s*\}, \[tab\]\);/);
+  // The ref is kept current BEFORE the count effect runs (effects run in order).
+  assert.ok(SRC.indexOf("tabRef.current = tab;") < SRC.indexOf('if (tabRef.current === "blocklist") return;'));
+  // A live blocklist page sets the count for ITS instance, after the sequence check.
+  const load = callbackBody("load");
+  const blocklist = load.slice(load.indexOf("} else {\n      const res"));
+  assert.match(blocklist, /setBlocklistCount\(\{ inst: instKey\(\{ service: view\.service, slug: view\.instance \}\), total: res\.data\.totalRecords \}\);/);
+  assert.ok(blocklist.indexOf("if (id !== seq.current) return;") < blocklist.indexOf("setBlocklistCount("));
+  assert.ok(blocklist.indexOf("setPage(last);\n          return;") < blocklist.indexOf("setBlocklistCount("), "never for a page past the end");
 });
 
 test("the stale note is rendered under the filter bar, only over a snapshot actually drawn, spinning while the live load is out", () => {

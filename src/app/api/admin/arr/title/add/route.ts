@@ -21,10 +21,11 @@ const ADDS_PER_MIN = 20;
 //       add defaults to preselect, and the arr id when it already has the title.
 //   POST { service, instance, tmdbId, qualityProfileId, rootFolderPath, tags,
 //       search, monitored + minimumAvailability? (Radarr) | monitor +
-//       seriesType? + seasonFolder? (Sonarr) } → 201 { arrId, title }. Every
-//       value must be one the instance offers (400, nothing written); a title
-//       it already has is 409 { arrId }. Audited ARR_TITLE_ADD after the arr
-//       accepted it. No MediaRequest is created — nobody asked for it, so
+//       seriesType? + seasonFolder? (Sonarr) } → 201 { arrId, title } (arrId
+//       null when the arr took the add but named no id, even on a re-read).
+//       Every value must be one the instance offers (400, nothing written); a
+//       title it already has is 409 { arrId }. Audited ARR_TITLE_ADD after the
+//       arr accepted it. No MediaRequest is created — nobody asked for it, so
 //       nobody is notified and no watch grade counts it.
 export const GET = withAdmin(async (req) => {
   const t = translatorForRequest(req);
@@ -72,7 +73,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,
     action: "ARR_TITLE_ADD",
-    target: `${target.service}:${target.instance}:${result.arrId}`,
+    // No arr id to name it by: the title's TMDB id does, never a made-up 0.
+    target: `${target.service}:${target.instance}:${result.arrId ?? `tmdb:${add.tmdbId}`}`,
     details: {
       service: target.service,
       instance: target.instance,

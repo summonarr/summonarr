@@ -255,6 +255,36 @@ test("a config write that clears the snapshots while a re-read is out wins: the 
   assert.equal(readSnapshot(snapshotKey("http://x/api/admin/arr/storage", "en")!, t0 + 17 * MIN), null);
 });
 
+test("a re-read out across a clear never replaces the answer an admin's own read kept after it", async () => {
+  const t0 = 1_000_000_000_000;
+  let release: () => void = () => {};
+  let holding = false;
+  let held = false;
+  let answer = "old";
+  const route = fakeRoute(async () => {
+    const body = { instance: answer };
+    if (holding) {
+      holding = false;
+      held = true;
+      await new Promise<void>((r) => { release = r; });
+    }
+    return Response.json(body);
+  });
+  const url = "http://x/api/admin/arr/storage";
+  await openAt(route.GET, url, t0);
+  holding = true;
+  const run = refreshArrSnapshots({ now: () => t0 + 16 * MIN });
+  while (!held) await new Promise((r) => setImmediate(r));
+  // The background re-read read the old config; then the config changed and an admin's read kept the new answer.
+  const { clearArrSnapshots } = await import("../src/lib/arr-snapshot.ts");
+  clearArrSnapshots();
+  answer = "new";
+  await openAt(route.GET, url, t0 + 16 * MIN);
+  release();
+  await run;
+  assert.equal(readSnapshot(snapshotKey(url, "en")!, t0 + 17 * MIN)?.body, JSON.stringify({ instance: "new" }));
+});
+
 test("the cron route skips without a lock when nothing is due, and is wired into the container's cron loop and the System tab", () => {
   const route = readFileSync(new URL("../src/app/api/cron/refresh-arr-snapshots/route.ts", import.meta.url), "utf8");
   assert.match(route, /if \(dueSnapshots\(\)\.length === 0\) return cronSkippedResponse\(/);

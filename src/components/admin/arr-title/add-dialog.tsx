@@ -9,17 +9,17 @@
 // sync). Nothing here creates a request: nobody is notified, and no watch
 // grade counts it.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogBackdrop, DialogClose, DialogContent, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, Loader2, Plus, X } from "@/components/icons";
+import { AlertTriangle, Check, Loader2, Plus, RefreshCw, X } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { queueFormatters } from "@/components/admin/queue-format";
-import type { Choice, RootFolderChoice } from "@/lib/arr-title";
+import { MINIMUM_AVAILABILITIES, SERIES_TYPES, type Choice, type MinimumAvailability, type RootFolderChoice, type SeriesType } from "@/lib/arr-title";
 import { SONARR_ADD_MONITOR, addSearchIsNoop, type SonarrAddMonitor } from "@/lib/arr-title-add";
-import { arrApi, type ArrServiceName } from "./shared";
+import { arrApi, useTRef, type ArrServiceName } from "./shared";
 import { ManageTitleButton } from "./title-manager";
 
 interface AddChoices {
@@ -42,14 +42,12 @@ const MONITOR_LABEL: Record<SonarrAddMonitor, string> = {
   latestSeason: "adminArr.add.monitor.latestSeason",
   none: "adminArr.add.monitor.none",
 };
-const AVAILABILITY = ["announced", "inCinemas", "released"] as const;
-const AVAILABILITY_LABEL: Record<(typeof AVAILABILITY)[number], string> = {
+const AVAILABILITY_LABEL: Record<MinimumAvailability, string> = {
   announced: "adminArr.availability.announced",
   inCinemas: "adminArr.availability.inCinemas",
   released: "adminArr.availability.released",
 };
-const SERIES_TYPES = ["standard", "daily", "anime"] as const;
-const SERIES_TYPE_LABEL: Record<(typeof SERIES_TYPES)[number], string> = {
+const SERIES_TYPE_LABEL: Record<SeriesType, string> = {
   standard: "adminArr.seriesType.standard",
   daily: "adminArr.seriesType.daily",
   anime: "adminArr.seriesType.anime",
@@ -60,7 +58,8 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
   instance: string;
   tmdbId: number;
   instanceLabel: string;
-  onDone: (arrId: number) => void;
+  /** The new arr id — null when the arr took the add but named none. */
+  onDone: (arrId: number | null) => void;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -79,40 +78,44 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [added, setAdded] = useState(false);
-  const tRef = useRef(t);
-  useEffect(() => {
-    tRef.current = t;
-  }, [t]);
+  const tRef = useTRef();
+  // Each read's own number: a Retry, or the dialog closing, supersedes the one before.
+  const loadSeq = useRef(0);
   // Nothing monitored ⇒ the arr's add-time search does nothing, so the box is
   // off and disabled rather than a tick that silently means nothing.
   const searchNoop = addSearchIsNoop(service, service === "radarr" ? { monitored } : { monitor });
 
+  // The choices read: on open, and again from Retry after a failed one.
+  const loadChoices = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    setLoadError("");
+    const q = new URLSearchParams({ service, instance, tmdbId: String(tmdbId) });
+    const res = await arrApi<AddChoices>(`/api/admin/arr/title/add?${q.toString()}`, undefined, tRef.current("adminArr.add.loadFailed"));
+    if (seq !== loadSeq.current) return;
+    if (!res.ok) {
+      setLoadError(res.error);
+      return;
+    }
+    const c = res.data;
+    setChoices(c);
+    // The instance's configured defaults — what a request's add would use —
+    // but only one the instance still lists: a profile or folder deleted in
+    // the arr since the defaults were saved would preselect a value the
+    // select can't show and the add would refuse.
+    const defaultProfile = c.defaults.qualityProfileId;
+    setProfile(defaultProfile !== null && c.qualityProfiles.some((p) => p.id === defaultProfile) ? defaultProfile : c.qualityProfiles[0]?.id ?? null);
+    setRoot(c.defaults.rootFolderPath && c.rootFolders.some((r) => r.path === c.defaults.rootFolderPath && r.accessible) ? c.defaults.rootFolderPath : c.rootFolders.find((r) => r.accessible)?.path ?? "");
+    const defaultAvailability = c.defaults.minimumAvailability;
+    if (defaultAvailability && (MINIMUM_AVAILABILITIES as readonly string[]).includes(defaultAvailability)) setAvailability(defaultAvailability);
+  }, [service, instance, tmdbId, tRef]);
+
   useEffect(() => {
-    let live = true;
-    void (async () => {
-      const q = new URLSearchParams({ service, instance, tmdbId: String(tmdbId) });
-      const res = await arrApi<AddChoices>(`/api/admin/arr/title/add?${q.toString()}`, undefined, tRef.current("adminArr.add.loadFailed"));
-      if (!live) return;
-      if (!res.ok) {
-        setLoadError(res.error);
-        return;
-      }
-      const c = res.data;
-      setChoices(c);
-      // The instance's configured defaults — what a request's add would use —
-      // but only one the instance still lists: a profile or folder deleted in
-      // the arr since the defaults were saved would preselect a value the
-      // select can't show and the add would refuse.
-      const defaultProfile = c.defaults.qualityProfileId;
-      setProfile(defaultProfile !== null && c.qualityProfiles.some((p) => p.id === defaultProfile) ? defaultProfile : c.qualityProfiles[0]?.id ?? null);
-      setRoot(c.defaults.rootFolderPath && c.rootFolders.some((r) => r.path === c.defaults.rootFolderPath && r.accessible) ? c.defaults.rootFolderPath : c.rootFolders.find((r) => r.accessible)?.path ?? "");
-      const defaultAvailability = c.defaults.minimumAvailability;
-      if (defaultAvailability && (AVAILABILITY as readonly string[]).includes(defaultAvailability)) setAvailability(defaultAvailability);
-    })();
+    void loadChoices();
+    const counter = loadSeq;
     return () => {
-      live = false;
+      counter.current++;
     };
-  }, [service, instance, tmdbId]);
+  }, [loadChoices]);
 
   async function submit() {
     if (profile === null || !root) return;
@@ -121,7 +124,7 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
     const body: Record<string, unknown> = { service, instance, tmdbId, qualityProfileId: profile, rootFolderPath: root, tags, search: search && !searchNoop };
     if (service === "radarr") Object.assign(body, { monitored, minimumAvailability: availability });
     else Object.assign(body, { monitor, seriesType, seasonFolder });
-    const res = await arrApi<{ arrId: number }>("/api/admin/arr/title/add", { method: "POST", body }, t("adminArr.add.failed"));
+    const res = await arrApi<{ arrId: number | null }>("/api/admin/arr/title/add", { method: "POST", body }, t("adminArr.add.failed"));
     setBusy(false);
     if (!res.ok) {
       setError(res.error);
@@ -133,8 +136,9 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
 
   if (loadError) {
     return (
-      <p role="alert" className="m-0 flex items-center gap-2 py-8 text-sm" style={{ color: "var(--ds-danger)" }}>
+      <p role="alert" className="m-0 flex flex-wrap items-center gap-2 py-8 text-sm" style={{ color: "var(--ds-danger)" }}>
         <AlertTriangle className="h-4 w-4 shrink-0" /> {loadError}
+        <Button variant="ghost" size="sm" onClick={() => void loadChoices()}><RefreshCw /> {t("adminArr.common.retry")}</Button>
       </p>
     );
   }
@@ -153,6 +157,9 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
   }
 
   const field = "grid gap-1.5 sm:grid-cols-[160px_1fr] sm:items-center";
+  // Why Submit is off when the instance offers nothing to pick.
+  const noProfile = choices.qualityProfiles.length === 0;
+  const noRoot = !choices.rootFolders.some((r) => r.accessible);
   return (
     <div className="grid gap-4">
       {choices.preview && (
@@ -185,7 +192,7 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
           <div className={field}>
             <span className="text-sm text-zinc-300">{t("adminArr.settings.minimumAvailability")}</span>
             <StyledSelect compact value={availability} onChange={(e) => setAvailability(e.target.value)} aria-label={t("adminArr.settings.minimumAvailability")} className="sm:max-w-sm">
-              {AVAILABILITY.map((a) => <option key={a} value={a}>{t(AVAILABILITY_LABEL[a])}</option>)}
+              {MINIMUM_AVAILABILITIES.map((a) => <option key={a} value={a}>{t(AVAILABILITY_LABEL[a])}</option>)}
             </StyledSelect>
           </div>
         </>
@@ -254,6 +261,15 @@ function AddForm({ service, instance, tmdbId, instanceLabel, onDone }: {
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {error}
         </p>
       )}
+      {(noProfile || noRoot) && (
+        <p className="m-0 flex items-start gap-1.5 text-xs text-amber-400">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            {noProfile && <span className="block">{t("adminArr.add.noQualityProfile", { name: instanceLabel })}</span>}
+            {noRoot && <span className="block">{t("adminArr.add.noRootFolder", { name: instanceLabel })}</span>}
+          </span>
+        </p>
+      )}
       <div className="flex justify-end">
         <Button size="sm" onClick={() => void submit()} disabled={busy || profile === null || !root}>
           {busy ? <Loader2 className="animate-spin" /> : <Plus />} {t("adminArr.add.submit", { name: instanceLabel })}
@@ -302,7 +318,7 @@ export function ArrAddButton({ service, instance, tmdbId, instanceLabel }: {
                 </DialogClose>
               </div>
               <DialogContent>
-                <AddForm service={service} instance={instance} tmdbId={tmdbId} instanceLabel={instanceLabel} onDone={(arrId) => { if (arrId > 0) setAddedArrId(arrId); }} />
+                <AddForm service={service} instance={instance} tmdbId={tmdbId} instanceLabel={instanceLabel} onDone={(arrId) => { if (arrId !== null && arrId > 0) setAddedArrId(arrId); }} />
               </DialogContent>
             </DialogPopup>
           </DialogPortal>

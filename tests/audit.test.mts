@@ -52,11 +52,11 @@ shadowPrismaModel(prisma, "auditLog", {
   create: async (args: CreateArgs) => {
     creates.push(args);
     if (createError) throw createError;
-    return args.data;
+    return { id: `row-${creates.length}`, ...args.data };
   },
 });
 
-const { logAudit, logAuditOrFail, auditContext } = await import("../src/lib/audit.ts");
+const { logAudit, logAuditOrFail, logAuditOrFailReturningId, logAuditTx, auditContext } = await import("../src/lib/audit.ts");
 
 beforeEach(() => {
   creates.length = 0;
@@ -191,6 +191,52 @@ test("logAudit and logAuditOrFail write byte-identical rows for identical params
   await logAuditOrFail(params);
   assert.equal(creates.length, 2);
   assert.deepEqual(creates[1].data, creates[0].data); // one mapping, two error policies
+});
+
+test("logAuditTx writes, on the transaction client it is given, the row logAuditOrFail writes — the user agent's controls and bidi overrides stripped", async () => {
+  const params = {
+    userId: "u9",
+    userName: "Admin",
+    action: "ISSUE_DELETE",
+    target: "issue:abc",
+    details: { action: "delete" },
+    ipAddress: "198.51.100.2",
+    userAgent: "curl/8\x1b[2J\u202Eevil",
+    provider: "credentials",
+  } as const;
+  await logAuditOrFail(params);
+  const txCreates: CreateArgs[] = [];
+  const tx = { auditLog: { create: async (args: CreateArgs) => { txCreates.push(args); return args.data; } } };
+  await logAuditTx(tx as unknown as Parameters<typeof logAuditTx>[0], params);
+  assert.equal(creates.length, 1, "the transaction client is written, never the global one");
+  assert.equal(txCreates.length, 1);
+  assert.deepEqual(txCreates[0].data, creates[0].data);
+  assert.equal(txCreates[0].data.userAgent, "curl/8[2Jevil");
+});
+
+test("logAuditOrFailReturningId writes the logAuditOrFail row, answers its id, and propagates a failed write", async () => {
+  const params = { userId: "u9", userName: "Admin", action: "AUDIT_LOG_EXPORT", target: "audit-log:export", userAgent: "curl/8\x1b[2J\u202Eevil" } as const;
+  await logAuditOrFail(params);
+  const id = await logAuditOrFailReturningId(params);
+  assert.equal(creates.length, 2);
+  assert.deepEqual(creates[1].data, creates[0].data);
+  assert.equal(creates[1].data.userAgent, "curl/8[2Jevil");
+  assert.deepEqual((creates[1] as { select?: unknown }).select, { id: true });
+  assert.equal(id, "row-2");
+  const boom = new Error("insert exploded");
+  createError = boom;
+  await assert.rejects(() => logAuditOrFailReturningId(params), (err: unknown) => err === boom);
+  assert.deepEqual(errors, []);
+});
+
+test("GUARDRAIL 23/26: logAuditTx PROPAGATES a failed write, so the transaction it sits in rolls back", async () => {
+  const boom = new Error("insert exploded");
+  const tx = { auditLog: { create: async () => { throw boom; } } };
+  await assert.rejects(
+    () => logAuditTx(tx as unknown as Parameters<typeof logAuditTx>[0], { userId: "u1", userName: "n", action: "ISSUE_DELETE", target: "issue:x" }),
+    (err: unknown) => err === boom,
+  );
+  assert.deepEqual(errors, []);
 });
 
 // ── auditContext ────────────────────────────────────────────────────────────

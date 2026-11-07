@@ -14,6 +14,9 @@ import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseRe
 import { answerOf, releaseSearchJobResponse, runningReleaseSearchJob, startReleaseSearchJob } from "@/lib/release-search-jobs";
 
 const SEARCH_LIMIT_PER_MIN = 20;
+// Grabs per admin per minute. One search hands out many handles, so the
+// search budget alone doesn't bound how often the arr is told to grab.
+const GRAB_LIMIT_PER_MIN = 20;
 const HANDLE_RE = /^[0-9a-f]{32}$/;
 
 // Admin title manager, interactive search (ADMIN) — pick a release by hand
@@ -37,7 +40,8 @@ const HANDLE_RE = /^[0-9a-f]{32}$/;
 //       client refused it. The handle is spent on success, and on an
 //       unknown outcome; a failure before the grab is sent hands it back. Audited
 //       ARR_RELEASE_GRAB (with the release name) after the arr accepted it;
-//       the guid is never recorded.
+//       the guid is never recorded. 429 past GRAB_LIMIT_PER_MIN per admin,
+//       before the handle is claimed.
 function scopeOf(target: ArrTitleTarget, rawSeason: unknown, rawEpisode: unknown): ReleaseScope | "invalid" {
   const hasSeason = rawSeason !== undefined && rawSeason !== null && rawSeason !== "";
   const hasEpisode = rawEpisode !== undefined && rawEpisode !== null && rawEpisode !== "";
@@ -96,6 +100,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const scope = scopeOf(target, body.season, body.episodeId);
   if (scope === "invalid") return NextResponse.json({ error: t("apiAdmin.arr.releaseScopeInvalid") }, { status: 400 });
+  // Before the claim: a refused grab must not spend the admin's handle.
+  if (!checkRateLimit(`arr-title-grab:${session.user.id}`, GRAB_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   const picked = claimReleaseHandle(handleScope(target, scope), handle);
   if (picked === "unknown") return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
   if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });

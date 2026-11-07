@@ -96,17 +96,11 @@ export function normalizePlexAccountId(accountId: string | null, ownerAccountId:
   return accountId === "1" && ownerAccountId ? ownerAccountId : accountId;
 }
 
-// Where one Plex server's history must be read back to for this run: undefined
-// (the whole history) when any enabled pair has never been read, otherwise the
-// OLDEST pair's read point minus the overlap.
-export function historyStopBefore(pairs: readonly WatchSyncPairInput[]): Date | undefined {
-  let oldest: number | null = null;
-  for (const p of pairs) {
-    if (p.historyReadTo === null) return undefined;
-    const t = p.historyReadTo.getTime();
-    if (oldest === null || t < oldest) oldest = t;
-  }
-  return oldest === null ? undefined : new Date(oldest - WATCH_SYNC_HISTORY_OVERLAP_MS);
+// Where a pair's read must go back to — its Plex history (historyReadTo) or its
+// Jellyfin played list (jellyfinReadTo): undefined (all of it) on a first run,
+// otherwise the read point minus the overlap.
+export function readBackTo(readTo: Date | null): Date | undefined {
+  return readTo === null ? undefined : new Date(readTo.getTime() - WATCH_SYNC_HISTORY_OVERLAP_MS);
 }
 
 // The newest viewedAt in a read — what every pair on that server has now been
@@ -173,12 +167,6 @@ export interface JellyfinPlayedInput {
   seasonNumber: number | null;
   episodeNumber: number | null;
   lastPlayedAt: Date | null;
-}
-
-// Where a pair's Jellyfin played list must be read back to: undefined (all of
-// it) on a first run, otherwise the read point minus the overlap.
-export function jellyfinStopBefore(readTo: Date | null): Date | undefined {
-  return readTo === null ? undefined : new Date(readTo.getTime() - WATCH_SYNC_HISTORY_OVERLAP_MS);
 }
 
 export function newestPlayedAt(items: readonly JellyfinPlayedInput[]): Date | null {
@@ -257,7 +245,6 @@ export interface MarkTargets {
   // TV title absent here is not on that server.
   episodes: ReadonlyMap<number, ReadonlyMap<string, readonly string[]>>;
 }
-export type JellyfinTargets = MarkTargets;
 
 export interface PlannedMark {
   // A Jellyfin item id or a Plex ratingKey, per the direction.
@@ -428,6 +415,11 @@ export function targetIdsFor(p: WatchSyncPlay, targets: MarkTargets): readonly s
 export const WATCH_SYNC_PLAN_CHUNK = 200;
 export const WATCH_SYNC_RUN_BUDGET_MS = 20 * 60 * 1000;
 export const WATCH_SYNC_STOPPED_MESSAGE = "Stopped at the run time limit; continues on the next run";
+// A Plex history read that hit its cap keeps the NEWEST records: what it read is
+// planned and the read point moves past the oldest plays, which were never read.
+// A re-scan reads the same capped window again, so it can't bring them back.
+export const WATCH_SYNC_HISTORY_TRUNCATED_MESSAGE =
+  "Plex history is longer than the read cap: the oldest plays were not read and won't be marked (a re-scan reads the same capped window)";
 
 // Oldest play first; undated plays first of all (they can't be placed after a
 // read point, so a first run takes them before any dated chunk moves it).

@@ -22,10 +22,10 @@ import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
-import { emitSSE } from "@/lib/sse-emitter";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { recordIssueGrab } from "@/lib/issue-grab";
+import { promoteIssueInProgress } from "@/lib/issue-transitions";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -207,20 +207,14 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   if (!guid || typeof guid !== "string") {
     return NextResponse.json({ error: t("apiUser.issues.guidRequired") }, { status: 400 });
   }
-
-  // Only allow characters a real release guid uses. Radarr/Sonarr guids are
-  // URL-like tokens from the indexers and never contain whitespace, quotes,
-  // brackets, backslashes or control characters. Listing what IS allowed is
-  // safer than listing what is not, because nothing unexpected slips through.
-  if (guid.length === 0 || guid.length > 500 || !/^[A-Za-z0-9._:/+\-=?&%#@~,!*$]+$/.test(guid)) {
-    return NextResponse.json({ error: t("apiUser.issues.guidInvalid") }, { status: 400 });
-  }
   // Still checked, no longer used: the handle names the indexer (below).
   if (!Number.isInteger(indexerId) || (indexerId as number) <= 0) {
     return NextResponse.json({ error: t("apiUser.issues.indexerIdInvalid") }, { status: 400 });
   }
-  // `guid` is a handle from this issue's own search. A raw indexer guid (an
-  // older client, a replay) is "search again", like an expired handle.
+  // `guid` is a handle from this issue's own search — the only shape accepted,
+  // and it is never sent anywhere (the handle resolves to the arr's own guid).
+  // A raw indexer guid (an older client, a replay) is "search again", like an
+  // expired handle.
   if (!HANDLE_RE.test(guid)) {
     return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
   }
@@ -238,43 +232,21 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   // so we stop. The grab is an HTTP call and can't run inside a DB transaction,
   // so this check up front is what prevents an unwanted download. If the grab
   // then fails, leaving IN_PROGRESS is fine: an admin did try.
-  let claim: { count: number };
+  //
+  // A real change is announced AND audited right after the CAS: the row already
+  // says IN_PROGRESS, and the 422/502 returns below leave it that way, so other
+  // admins' lists, the reporter's page and the audit log hear about it even
+  // when the grab then fails. The grab itself is audited after it succeeds.
+  let claimed: number;
   try {
-    claim = await prisma.issue.updateMany({
-      where: { id, status: { not: "RESOLVED" } },
-      data: { status: "IN_PROGRESS" },
-    });
+    claimed = await promoteIssueInProgress({ issue, from: "notResolved", trigger: "grab", details: { scope: issue.scope }, session, req });
   } catch (err) {
     releaseReleaseHandle(guid); // nothing was sent: a retry may use it
     throw err;
   }
-  if (claim.count === 0) {
+  if (claimed === 0) {
     releaseReleaseHandle(guid);
     return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeGrab") }, { status: 409 });
-  }
-  const statusChanged = issue.status !== "IN_PROGRESS";
-  // Announce AND audit the status change now: the row already says IN_PROGRESS,
-  // and the 422/502 returns below leave it that way, so other admins' lists and
-  // the reporter's page need to hear about it here — and the audit log needs
-  // the row too, or a flip whose grab then failed had no entry saying who moved
-  // it (guardrail 26: the CAS has committed, so the swallowing logAudit). Only
-  // a real change is broadcast/audited; the grab itself is audited after it
-  // succeeds, below.
-  if (statusChanged) {
-    emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
-    void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email ?? null,
-      action: "ISSUE_STATUS_CHANGE",
-      target: `issue:${id}`,
-      details: {
-        trigger: "grab",
-        scope: issue.scope,
-        before: { status: issue.status },
-        after: { status: "IN_PROGRESS" },
-      },
-      ...auditContext(req, session),
-    });
   }
 
   let resolvedTvdbId: number | null = issue.tvdbId;

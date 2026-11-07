@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { auditContext } from "@/lib/audit";
+import { auditContext, logAuditOrFailReturningId } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { buildAuditLogWhere } from "@/lib/audit-log-filter";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -63,24 +63,16 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   // Audit-log export is itself an audit-relevant action — without a paper-trail row a malicious
   // admin could exfiltrate the entire trail with no record. Write the row BEFORE the stream
   // begins (so a client abort or mid-stream throw can't skip it), then update it with the
-  // final row count / status in the finally block.
-  const auditRow = await prisma.auditLog.create({
-    data: {
-      userId: exporter.userId,
-      userName: exporter.userName,
-      action: "AUDIT_LOG_EXPORT",
-      target: "audit-log:export",
-      details: JSON.stringify({
-        kind: "audit-log",
-        filters,
-        rowCount: 0,
-        truncated: false,
-        status: "started",
-      }),
-      ipAddress: ctx.ipAddress ?? null,
-      userAgent: ctx.userAgent ?? null,
-      provider: ctx.provider ?? null,
-    },
+  // final row count / status in the finally block. Through the shared row
+  // builder (audit.ts), which sanitizes the client-supplied user agent; a failed
+  // write still throws, so no export runs without its row.
+  const auditRowId = await logAuditOrFailReturningId({
+    userId: exporter.userId,
+    userName: exporter.userName,
+    action: "AUDIT_LOG_EXPORT",
+    target: "audit-log:export",
+    details: { kind: "audit-log", filters, rowCount: 0, truncated: false, status: "started" },
+    ...ctx,
   });
 
   // Counted up front so a capped export can SAY so: the file used to end
@@ -97,7 +89,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     console.error("[audit-log/export] count failed:", err);
     try {
       await prisma.auditLog.update({
-        where: { id: auditRow.id },
+        where: { id: auditRowId },
         data: {
           details: JSON.stringify({
             kind: "audit-log",
@@ -198,7 +190,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     // row already final — a partial / aborted export is visible in the trail.
     try {
       await prisma.auditLog.update({
-        where: { id: auditRow.id },
+        where: { id: auditRowId },
         data: {
           details: JSON.stringify({
             kind: "audit-log",

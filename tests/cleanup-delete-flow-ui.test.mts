@@ -99,3 +99,80 @@ test("the page's load drops a superseded answer and merges the draft instead of 
   assert.doesNotMatch(load, /setDraft\(data\.settings\)/, "an unconditional draft reset discards unsaved edits");
   assert.match(pageSrc, /del\.clearPlan\(\);\n\s+await load\(\{ resetDraft: true \}\);/, "a rules save resets the draft on its reload");
 });
+
+// ── the exact target set, not just its size ─────────────────────────────────
+
+test("the execute body echoes the dry run's target-set fingerprint, and the hook keeps a 409's fresh one", () => {
+  const plan = {
+    targetCount: 1,
+    targetsFingerprint: "f".repeat(64),
+    items: [{ tmdbId: 1, mediaType: "MOVIE" as const }],
+  };
+  assert.deepEqual(cleanupExecuteBody(plan, true), {
+    items: [{ tmdbId: 1, mediaType: "MOVIE" }],
+    blacklist: true,
+    confirmTargets: 1,
+    confirmFingerprint: "f".repeat(64),
+  });
+  assert.equal("confirmFingerprint" in cleanupExecuteBody({ targetCount: 1, items: plan.items }, true), false, "an older server's plan sends only the count");
+  const exec = callbackBody(deleteSrc, "execute");
+  assert.match(exec, /setPlan\(\{ targetCount: fresh\.targetCount, targetsFingerprint: fresh\.targetsFingerprint, /, "a 409's fresh plan is confirmed against ITS set");
+});
+
+// ── the hook's callbacks keep their identity ────────────────────────────────
+
+test("the hook reads items/onDeleted through refs updated after commit, so its callbacks aren't rebuilt every render", () => {
+  assert.match(deleteSrc, /const items = useCallback\(\(\) => itemsRef\.current\(\), \[\]\);/);
+  assert.match(deleteSrc, /const onDeleted = useCallback\(\(\) => onDeletedRef\.current\(\), \[\]\);/);
+  const effect = /useEffect\(\(\) => \{\n\s+itemsRef\.current = opts\.items;\n\s+onDeletedRef\.current = opts\.onDeleted;\n\s+\}\);/;
+  assert.match(deleteSrc, effect, "the refs follow the latest props in an effect");
+  assert.equal(deleteSrc.split("itemsRef.current = ").length - 1, 1, "never written during render");
+  assert.doesNotMatch(deleteSrc, /const \{ items, onDeleted \} = opts;/, "the per-render closures are not the callbacks' deps");
+});
+
+// ── the page's error slots, the save, and a failed first load ───────────────
+
+function functionBody(src: string, name: string): string {
+  const start = src.indexOf(`async function ${name}(`);
+  assert.ok(start >= 0, `${name} present`);
+  return src.slice(start, src.indexOf("\n  }\n", start));
+}
+
+test("a load clears only its own error — never the one a protect, unprotect or rules save set", () => {
+  const load = callbackBody(pageSrc, "load");
+  assert.match(load, /setLoadError\(""\);/);
+  assert.doesNotMatch(load, /setActionError|setError\(/, "a background reload never touches an action's error");
+  for (const name of ["saveRules", "setProtected"]) {
+    const body = functionBody(pageSrc, name);
+    assert.match(body, /setActionError\(""\);/, `${name} clears the action error when the admin starts it`);
+    assert.doesNotMatch(body, /setLoadError|setError\(/, `${name} writes only the action error`);
+  }
+  assert.match(pageSrc, /\[loadError, actionError, del\.error\]\.filter\(/, "every error is shown");
+});
+
+test("a rules save installs the saved draft as the report's settings and the draft base BEFORE its reload", () => {
+  const body = functionBody(pageSrc, "saveRules");
+  const base = body.indexOf("draftBase.current = draft;");
+  const settings = body.indexOf("setReport((r) => (r ? { ...r, settings: draft } : r));");
+  const reload = body.indexOf("await load({ resetDraft: true });");
+  assert.ok(base > 0 && settings > 0 && reload > 0, "all three present");
+  assert.ok(base < reload && settings < reload, "Save reads clean even when a Protect supersedes the reload");
+  assert.ok(body.indexOf("if (!res.ok)") < base, "only after the server accepted the save");
+  assert.doesNotMatch(pageSrc, /resetDraftNext/, "a superseded load's reset can't stay armed");
+});
+
+test("a failed first load offers a Retry that reloads", () => {
+  const start = pageSrc.indexOf("if (!report || !draft) {");
+  assert.ok(start > 0);
+  const branch = pageSrc.slice(start, pageSrc.indexOf("\n  }\n", start));
+  assert.match(branch, /<Button[^>]*onClick=\{\(\) => void load\(\)\}/);
+  assert.match(branch, /t\("adminManage\.common\.retry"\)/);
+});
+
+test("the protected section counts every protection and says when the list is capped", () => {
+  assert.match(pageSrc, /const protectedTotal = Math\.max\(report\.protectedTotal \?\? 0, report\.protected\.length\);/);
+  assert.match(pageSrc, /t\("adminManage\.cleanup\.protectedCount", \{ count: protectedTotal \}\)/);
+  assert.doesNotMatch(pageSrc, /protectedCount", \{ count: report\.protected\.length \}/, "the capped list's length is not the count");
+  assert.match(pageSrc, /\{protectedTotal > report\.protected\.length && \(/);
+  assert.match(pageSrc, /t\("adminManage\.cleanup\.protectedCapped", \{ cap: report\.protected\.length, total: protectedTotal \}\)/);
+});

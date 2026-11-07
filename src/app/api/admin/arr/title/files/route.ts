@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrErrorMessage } from "@/lib/arr";
@@ -10,6 +11,7 @@ import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { answerOf, jobResponse, startArrJob } from "@/lib/release-search-jobs";
 import { sanitizeForLog } from "@/lib/sanitize";
 
@@ -30,10 +32,15 @@ import { sanitizeForLog } from "@/lib/sanitize";
 //       another disk is a copy), past a reverse proxy's hold — the admin saw
 //       "delete failed" while the arr finished it. The same owner deleting the
 //       same files of the same title while one runs joins it. Without `async`
-//       the delete answers inline (API callers).
+//       the delete answers inline (API callers). 429 past DELETE_LIMIT_PER_MIN
+//       per admin.
 //   GET ?job=<id> → that delete's poll: 202 { job, running } while it runs,
 //       then the DELETE's own status and body; 404 once it's gone (expired, or
 //       a restart — reload the files, never re-run it blindly).
+// Deletes per admin per minute: one per click (a ticked set is one call), so
+// this bounds a runaway client, not an admin clearing out a title.
+const DELETE_LIMIT_PER_MIN = 30;
+
 const jobKey = (service: string, instance: string, arrId: number, fileIds: readonly number[]) =>
   `title-files\u0000${service}\u0000${instance}\u0000${arrId}\u0000${[...fileIds].sort((a, b) => a - b).join(",")}`;
 
@@ -75,6 +82,9 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
     background = body.async === true;
   }
   if (!fileIds) return NextResponse.json({ error: t("apiAdmin.arr.fileIdsInvalid") }, { status: 400 });
+  if (!checkRateLimit(`arr-title-file-delete:${session.user.id}`, DELETE_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   const ids = fileIds;
   // Read off the request now: a job outlives it.
   const audit = auditContext(req, session);

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readJsonCapped } from "@/lib/body-size";
+import { readOptionalJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { refreshCatalog, fetchTrashTree, describeSchemaError, type RefreshResult, type TrashTree } from "@/lib/trash";
@@ -8,14 +8,8 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { isFeatureEnabled } from "@/lib/features";
 import type { TrashService } from "@/generated/prisma";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
-
-function busyResponse(t: Translator) {
-  return NextResponse.json(
-    { ok: false, error: t("apiAdmin.trash.alreadyRunning"), retryAfter: 30 },
-    { status: 409, headers: { "Retry-After": "30" } },
-  );
-}
+import { lockBusyResponse } from "@/lib/lock-http";
+import { prisma } from "@/lib/prisma";
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -33,13 +27,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   // The body is optional: no body means "refresh both" (the UI sends none). But a
   // body that IS present must be valid JSON, so a typo can't quietly become "refresh both".
-  const contentLength = req.headers.get("content-length");
-  let body: { service?: unknown } = {};
-  if (contentLength && contentLength !== "0") {
-    const parsed = await readJsonCapped<{ service?: unknown }>(req, 8192);
-    if (parsed instanceof NextResponse) return parsed;
-    body = parsed;
-  }
+  // It is read whether or not Content-Length was sent: a chunked body has none.
+  const parsed = await readOptionalJsonCapped<{ service?: unknown }>(req, 8192, {});
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
   if (body.service !== undefined && body.service !== "radarr" && body.service !== "sonarr") {
     return NextResponse.json(
       { error: t("apiAdmin.common.serviceRadarrOrSonarrQuoted") },
@@ -54,7 +45,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   return withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,
-    async () => {
+    async (signal: AbortSignal) => {
       const startTime = Date.now();
       const results: RefreshResult[] = [];
       const errors: string[] = [];
@@ -74,14 +65,44 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       }
       if (sharedTree !== null) {
         for (const service of services) {
+          // The lock's work timeout aborts the refresh at its next batch boundary
+          // (guardrail 41); the partial result is still reported and audited.
+          if (signal.aborted) break;
           try {
-            results.push(await refreshCatalog(service, sharedTree));
+            const r = await refreshCatalog(service, sharedTree, { signal });
+            results.push(r);
+            // Per-file failures (a download, a parse, a validator reject) are part
+            // of this refresh's outcome, as in runTrashSync: without them `ok` and
+            // the audit row read a partly failed refresh as clean.
+            errors.push(...r.errors.map((e) => `${service}: ${e}`));
           } catch (err) {
             const schemaHint = describeSchemaError(err);
-            if (schemaHint) schemaDiagnostic = schemaHint;
-            errors.push(`${service}: ${err instanceof Error ? err.message : String(err)}`);
+            if (schemaHint) {
+              schemaDiagnostic = schemaHint;
+              errors.push(`${service}: ${err instanceof Error ? err.message : String(err)}`);
+            } else {
+              // The tree is already fetched, so this is our own store failing: its
+              // text can name the database host or a query, which stays in the log.
+              console.error(`[trash] ${service} catalog refresh failed:`, err);
+              errors.push(`${service}: ${t("apiAdmin.trash.internalError")}`);
+            }
           }
         }
+      }
+
+      // Same stamp as runTrashSync: at least one service refreshed and the lock
+      // did not cut the pass short. It drives the cron's once-an-hour cadence
+      // gate and the "last refreshed" line on the settings card.
+      const aborted = signal.aborted || results.some((r) => r.aborted);
+      if (results.length > 0 && !aborted) {
+        const value = new Date().toISOString();
+        await prisma.setting.upsert({
+          where: { key: "trashLastRefreshAt" },
+          update: { value },
+          create: { key: "trashLastRefreshAt", value },
+        }).catch((err) => {
+          console.warn("[trash] failed to stamp last-refresh-at:", err instanceof Error ? err.message : err);
+        });
       }
 
       const durationMs = Date.now() - startTime;
@@ -102,6 +123,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         ...(schemaDiagnostic ? { schemaDiagnostic } : {}),
       });
     },
-    () => busyResponse(t),
+    () => lockBusyResponse(t("apiAdmin.trash.alreadyRunning")),
   );
 });

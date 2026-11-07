@@ -39,6 +39,15 @@ export function validateServerUrl(
   return null;
 }
 
+// A stored server address without its trailing slashes ("http://x/" and
+// "http://x//" both give "http://x"), ready for `${base}/path`. One backwards
+// scan: a /\/+$/ regex backtracks over a run of slashes.
+export function trimServerBase(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end--;
+  return url.slice(0, end);
+}
+
 // Removes any embedded userinfo before a stored URL is returned to a client, so
 // a GET never leaks a credential into browser history / devtools / a cache. A
 // non-URL value passes through unchanged.

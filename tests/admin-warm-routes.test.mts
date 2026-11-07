@@ -506,6 +506,36 @@ for (const w of WARMS) {
   });
 }
 
+// ── library-warm as a background job (the Initial DB Fill button) ────────────
+
+test("library-warm { async: true } answers 202 { job } at once, and the poll returns the warm's own answer", async () => {
+  // A cold warm of a large library outlasts a reverse proxy's hold (guardrail
+  // 37a): the button starts it in the background and polls GET ?job=.
+  const t = await mintSession();
+  const lib = WARMS.find((w) => w.name === "library-warm")!;
+  const start = await callWarm(lib, t, JSON.stringify({ async: true }));
+  assert.equal(start.status, 202);
+  const { job } = await start.json() as { job: string };
+  const poll = () => inScope(() => libraryWarm.GET(
+    new NextRequest(`http://localhost:3000/api/admin/library-warm?job=${job}`, { method: "GET", headers: { cookie: `${COOKIE}=${t}` } }),
+    undefined,
+  ));
+  let res = await poll();
+  // A bounded wait on the job's own state, never a fixed sleep.
+  for (let i = 0; i < 500 && res.status === 202; i++) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    res = await poll();
+  }
+  assert.equal(res.status, 200, "the warm's own answer");
+  assert.equal(opsOf("auditLog.create").length, 1, "the background warm is audited like a synchronous one");
+  assert.ok(pgLockCalls.some((c) => c.op === "try" && c.lockId === lib.lockId), "it still takes the warm lock");
+
+  // No body is the synchronous default, unchanged.
+  const other = await mintSession();
+  const sync = await callWarm(lib, other);
+  assert.notEqual(sync.status, 202);
+});
+
 // ── backfill-playtime: dry run by default ────────────────────────────────────
 
 test("backfill defaults to a DRY RUN and writes nothing", async () => {

@@ -31,7 +31,7 @@
 //
 // No DB, network, or DNS: prisma.user/prisma.setting are shadowed in-memory
 // (tests/_helpers.mts), globalThis.fetch is scripted for the two real plex.tv
-// hops getPlexAccounts makes (/api/v2/user owner JSON + /api/users friends
+// hops getPlexAccountsDetailed makes (/api/v2/user owner JSON + /api/users friends
 // XML), and dns/promises.lookup is stubbed for the plex.tv SSRF resolve.
 // Every instance hits those SAME plex.tv origins, so multi-instance fixtures
 // dispatch on the X-Plex-Token header (plexResponderByToken), not the origin.
@@ -159,15 +159,14 @@ function configurePlex(): void {
 const REMOTE_TOKEN = "plex-remote-admin-token";
 
 // Registers a second, named Plex instance ("remote") with its own admin token.
-// No plexRemoteServerUrl on purpose: getPlexAccounts ignores its serverUrl
-// param (both hops are account-level plex.tv calls, not machine-scoped) and
-// the source tolerates the key missing.
+// No plexRemoteServerUrl on purpose: getPlexAccountsDetailed takes no server
+// address (both hops are account-level plex.tv calls, not machine-scoped).
 function configureRemoteInstance(): void {
   settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
   settings.set("plexRemoteAdminToken", REMOTE_TOKEN);
 }
 
-// Multi-instance responder: every instance's getPlexAccounts hits the SAME
+// Multi-instance responder: every instance's getPlexAccountsDetailed hits the SAME
 // plex.tv origins (/api/v2/user + /api/users), so per-instance fixtures are
 // keyed on the X-Plex-Token header — the only wire-level difference between
 // instances. A function value lets a test make one instance die on the wire.
@@ -325,8 +324,9 @@ test("happy path: owner + friend matched by normalized email; exact update shape
   assert.ok(!Number.isNaN(Date.parse(settingUpserts[0].create.value)));
   assert.ok(!Number.isNaN(Date.parse(settingUpserts[0].update.value)));
   // Registry read first (multi-server union), then the default instance's
-  // token-before-ServerUrl pair — the exact legacy Setting keys.
-  assert.deepEqual(settingReadKeys, ["plexInstances", "plexAdminToken", "plexServerUrl"]);
+  // token — the exact legacy Setting key. No ServerUrl: both plex.tv hops are
+  // account-level, so the server address is never needed.
+  assert.deepEqual(settingReadKeys, ["plexInstances", "plexAdminToken"]);
 
   // One admin-facing summary warn, no unmatched noise, no errors.
   assert.deepEqual(warns, ["[plex-backfill] bound 2 existing Plex user(s) to their plex.tv account id."]);
@@ -410,15 +410,12 @@ test("union: a candidate present only in a NAMED instance's account list is boun
   await runPlexUserBackfillIfNeeded();
 
   assert.deepEqual(userUpdates, [{ where: { id: "u-roamer" }, data: { plexUserId: "501" } }]);
-  // Read order pins the union plumbing: registry first, then per instance the
-  // token BEFORE ServerUrl (a tokenless instance must skip without touching
-  // its ServerUrl key), default instance first.
+  // Read order pins the union plumbing: registry first, then each instance's
+  // token, default instance first. ServerUrl is never read (account-level hops).
   assert.deepEqual(settingReadKeys, [
     "plexInstances",
     "plexAdminToken",
-    "plexServerUrl",
     "plexRemoteAdminToken",
-    "plexRemoteServerUrl",
   ]);
   // Two plex.tv hops per instance, each pair carrying its OWN admin token.
   assert.deepEqual(
@@ -435,7 +432,7 @@ test("cross-instance ambiguity: the same email with DIFFERENT ids across instanc
   // each reporting an email under a different plex.tv id means we cannot know
   // which account owns the local record — bind neither. The same id re-listed
   // by both instances is the normal shared-admin/shared-friend case
-  // (getPlexAccounts is account-level) and stays a plain no-op.
+  // (getPlexAccountsDetailed is account-level) and stays a plain no-op.
   candidateRows = [
     { id: "u-xdup", email: "xdup@example.com" },
     { id: "u-shared", email: "shared@example.com" },
@@ -484,7 +481,7 @@ test("per-instance failure isolation: the default instance dying on the wire doe
 
   assert.deepEqual(userUpdates, [{ where: { id: "u-remote" }, data: { plexUserId: "601" } }]);
   assert.equal(settingUpserts.length, 1); // the union still contributed accounts → ranAt stamped
-  // The dead instance degrades to its own labeled warn (getPlexAccounts
+  // The dead instance degrades to its own labeled warn (getPlexAccountsDetailed
   // swallows the per-hop failures and returns []) without aborting the union.
   assert.ok(
     warns.some((w) => w.includes("[plex-backfill] plex returned no accounts; skipping this instance (token may be invalid).")),
@@ -567,10 +564,12 @@ test("PIN: a unique violation on the update is WARNED (another user owns the ple
   assert.equal(settingUpserts.length, 1); // a retry cannot fix a conflict → marker stamped
 });
 
-test("PIN: a NON-race update failure is surfaced, not silently swallowed", async () => {
-  // The catch used to be bare, so a transient DB error left the user in neither
-  // `bound` nor `unmatched` — no warning at all, and the never-retry marker
-  // stamped over a failure nobody could see. It must warn and count as unmatched.
+test("PIN: a NON-race update failure is surfaced as a bind failure and withholds the run marker", async () => {
+  // A transient DB error is not an email mismatch: the user DID match. It used
+  // to land in `unmatched` — the REFUSED warning blamed the email, and the
+  // never-retry marker stamped, so no later boot ever bound the user and Plex
+  // sign-in kept refusing them. It must warn as its own failure and leave the
+  // marker unwritten so the next boot retries.
   candidateRows = [{ id: "u-db", email: "owner@example.com" }];
   configurePlex();
   respond = plexResponder({ owner: { id: 100, email: "owner@example.com" }, friends: [] });
@@ -581,11 +580,13 @@ test("PIN: a NON-race update failure is surfaced, not silently swallowed", async
   await runPlexUserBackfillIfNeeded();
 
   assert.equal(userUpdates.length, 1);
-  assert.ok(
-    warns.some((w) => w.includes("[plex-backfill] Binding owner@example.com failed:")),
-    warns.join("\n"),
-  );
-  assert.ok(warns.some((w) => w.includes("could NOT be bound")), "the user lands in unmatched");
+  assert.equal(warns.length, 1, warns.join("\n"));
+  assert.ok(warns[0].includes("1 matched Plex user(s) could not be saved"), warns[0]);
+  assert.ok(warns[0].includes("owner@example.com (u-db): connection terminated unexpectedly"), warns[0]);
+  assert.ok(warns[0].includes("next boot retries"), warns[0]);
+  assert.ok(!warns.some((w) => w.includes("could NOT be bound") || w.includes("REFUSED")), "not an email mismatch");
+  assert.equal(settingUpserts.length, 0, "the marker is withheld so the next boot binds the user");
+  assert.deepEqual(errors, []);
 });
 
 test("PIN: a partial account fetch that leaves someone unbound withholds the run marker", async () => {

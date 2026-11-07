@@ -13,7 +13,10 @@
 //   and its status Setting.
 // - Every server is isolated: one failing never stops or affects another.
 // - A snapshot is written ONLY after a complete, successful fetch: a scoped
-//   deleteMany + batchCreateMany inside ONE transaction (guardrails 4/13/35). A
+//   deleteMany + batchCreateMany inside ONE transaction (guardrails 4/13/35),
+//   which also writes the snapshot's status — upstreamHealth judges the rows by
+//   it and the cleanup holds titles back on it, so new rows never sit beside an
+//   old status (or the reverse): both commit, or neither does. A
 //   failed or aborted server keeps its previous rows — a partial snapshot would
 //   silently DROP evidence, and dropped evidence is how a watched title ends up
 //   offered for deletion. The one partial read that IS written is a Plex history
@@ -36,9 +39,9 @@
 //   (always Plex) at a fraction of the run, so a big history that finished in
 //   15 minutes failed every day while the servers after it took seconds.
 // - A NAMED server removed while its refresh is in flight writes NOTHING after
-//   the removal: the evidence replace and the status write each lock the
-//   registry row (FOR UPDATE) and re-check the slug is still listed
-//   (stillRegisteredInTx). The removal (/api/admin/media-instances) writes that
+//   the removal: the snapshot's transaction (evidence and status) and a failed
+//   server's status write each lock the registry row (FOR UPDATE) and re-check
+//   the slug is still listed (stillRegisteredInTx). The removal (/api/admin/media-instances) writes that
 //   row first in its own transaction, so the two are ordered either way — a
 //   removal that commits first is seen and skipped; a refresh that commits
 //   first is deleted by the removal. Otherwise a server registered later under
@@ -335,10 +338,11 @@ async function stillRegisteredInTx(tx: TxClient, source: NwSource, slug: string)
   }
 }
 
-// Never throws: the status is observability, and a failed write must not turn a
-// refreshed snapshot into a failed run (or abort the servers after it). A named
-// server is written only while still registered (the header's removal rule);
-// the default's write is the plain upsert it always was.
+// A FAILED server's status (a success's commits with its snapshot, in
+// refreshServer). Never throws: the previous rows are kept either way, and a
+// failed write must not abort the servers after it. A named server is written
+// only while still registered (the header's removal rule); the default's write
+// is the plain upsert it always was.
 async function writeStatus(source: NwSource, slug: string, status: NwUpstreamStatus): Promise<void> {
   const key = upstreamStatusKey(source, slug);
   const value = JSON.stringify(status);
@@ -458,6 +462,24 @@ async function refreshServer(
     if (snapshot.records === 0 && samples > 0) {
       throw new UpstreamEmptyAnswerError(`${mediaInstanceLabel(source, slug)}: no watch records`);
     }
+    const fresh: NwUpstreamStatus = {
+      fetchedAt: now.toISOString(),
+      attemptedAt: now.toISOString(),
+      ok: true,
+      entries: snapshot.records,
+      matched,
+      samples,
+      agreed,
+      error: null,
+      truncated: snapshot.truncated,
+      episodeRecords: snapshot.episodeRecords,
+      unplacedEpisodes: snapshot.unplacedEpisodes,
+    };
+    const statusKey = upstreamStatusKey(source, slug);
+    const statusValue = JSON.stringify(fresh);
+    // Guardrails 23/23c: each write awaited in turn, nothing caught in here — a
+    // failed status write rolls the evidence replace back with it, and the
+    // server is recorded failed below, its previous rows and status kept.
     const written = await prisma.$transaction(
       async (tx) => {
         // Removed while this server was being read: write nothing (header).
@@ -476,24 +498,13 @@ async function refreshServer(
             fetchedAt: now,
           })),
         );
+        await tx.setting.upsert({ where: { key: statusKey }, create: { key: statusKey, value: statusValue }, update: { value: statusValue } });
         return true;
       },
       { timeout: BATCH_TX_TIMEOUT },
     );
     if (!written) return "skipped";
-    status = {
-      fetchedAt: now.toISOString(),
-      attemptedAt: now.toISOString(),
-      ok: true,
-      entries: snapshot.records,
-      matched,
-      samples,
-      agreed,
-      error: null,
-      truncated: snapshot.truncated,
-      episodeRecords: snapshot.episodeRecords,
-      unplacedEpisodes: snapshot.unplacedEpisodes,
-    };
+    status = fresh;
   } catch (err) {
     if (signal?.aborted) return "aborted";
     const prev = await readStatus(source, slug);
@@ -511,8 +522,8 @@ async function refreshServer(
       episodeRecords: prev?.episodeRecords ?? 0,
       unplacedEpisodes: prev?.unplacedEpisodes ?? 0,
     };
+    await writeStatus(source, slug, status);
   }
-  await writeStatus(source, slug, status);
   const result = resultOf(source, slug, status, now);
   logHealth(source, slug, result, status);
   return result;

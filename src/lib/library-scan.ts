@@ -10,6 +10,7 @@ import {
   type ArrVariant,
 } from "./arr";
 import { sanitizeForLog } from "./sanitize";
+import { processSingleton } from "./process-singleton";
 
 export type ScanMediaType = "movie" | "tv";
 
@@ -40,10 +41,13 @@ interface PendingScan {
   variant?: ArrVariant;
 }
 
-const pending = new Map<ScanMediaType, PendingScan>();
+// Process-wide (guardrail 27a): the webhook routes, the cleanup delete and the
+// title manager's remove each carry their own copy of this module, and a
+// per-copy map let a cleanup and an import webhook each scan the same backend.
+const pending = processSingleton("library-scan:pending", () => new Map<ScanMediaType, PendingScan>());
 // Scans currently running. A new schedule arriving mid-scan waits on the running
 // one instead of firing a parallel scan against the same backend.
-const inFlight = new Map<ScanMediaType, Promise<void>>();
+const inFlight = processSingleton("library-scan:inFlight", () => new Map<ScanMediaType, Promise<void>>());
 
 export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, variant?: ArrVariant): Promise<void> {
   const running = inFlight.get(mediaType);

@@ -8,14 +8,18 @@
 // than a reverse proxy keeps one request open — the admin saw a 502 while the
 // arr finished, retried, and every indexer was hit again.
 //
-// The loop is COUNTED, one poll at a time from each answer (never setInterval,
-// never a clock — guardrail 16's lesson in arr-command-status.ts): past
-// `maxPolls` polls it gives up. A 404 (the job expired, or a restart dropped
-// it) is the route's own answer and is returned like any other — its `error`
-// says to search again. A network failure rejects, as a bare fetch would.
+// The poll loop is the shared one (job-poll.ts): COUNTED, and past `maxPolls`
+// polls it gives up. A poll that fails on the way (a network blip, a proxy's
+// own 502–504 with no JSON) is retried, `failLimit` of them in a row being "no
+// answer" (status 0) — one dropped poll no longer ends a search that is still
+// running. A 404 (the job expired, or a restart dropped it) is the route's own
+// answer and is returned like any other — its `error` says to search again;
+// so is the route's own JSON 502. A network failure on the first request
+// rejects, as a bare fetch would.
+import { jobIdOf, pollJob } from "./job-poll";
 
 export interface ReleaseSearchAnswer {
-  /** The HTTP status of the search's answer; 0 when none came (no job id, or out of polls). */
+  /** The HTTP status of the search's answer; 0 when none came (no job id, out of polls, or too many failed polls in a row). */
   status: number;
   data: unknown;
 }
@@ -29,17 +33,13 @@ export interface ReleaseSearchOptions {
   onPoll?: (polls: number) => void;
   intervalMs?: number;
   maxPolls?: number;
+  /** Failed polls in a row before giving up (job-poll.ts's default). */
+  failLimit?: number;
 }
 
 export const RELEASE_SEARCH_POLL_MS = 2_000;
 // The server stops waiting on the arr after 120 s; 150 × 2 s = 5 minutes, past which the job is lost.
 const DEFAULT_MAX_POLLS = 150;
-
-const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-const jobOf = (data: unknown): string | null => {
-  const job = data && typeof data === "object" ? (data as { job?: unknown }).job : undefined;
-  return typeof job === "string" && job !== "" ? job : null;
-};
 
 /**
  * GET `url` with `async=1` and wait for the search's answer. Resolves with the
@@ -50,26 +50,20 @@ export async function runReleaseSearchJob(
   url: string,
   opts: ReleaseSearchOptions = {},
 ): Promise<ReleaseSearchAnswer | null> {
-  const sleep = opts.sleep ?? wait;
   const alive = opts.isAlive ?? (() => true);
-  const interval = opts.intervalMs ?? RELEASE_SEARCH_POLL_MS;
-  const maxPolls = opts.maxPolls ?? DEFAULT_MAX_POLLS;
-  const pollBase = url.split("?")[0];
-  let res = await fetchFn(url + (url.includes("?") ? "&async=1" : "?async=1"));
+  const res = await fetchFn(url + (url.includes("?") ? "&async=1" : "?async=1"));
   if (!alive()) return null;
-  let polls = 0;
-  while (res.status === 202) {
-    const job = jobOf(await res.json().catch(() => null));
-    if (!alive()) return null;
-    if (job === null || polls >= maxPolls) return { status: 0, data: null };
-    opts.onPoll?.(polls);
-    polls++;
-    await sleep(interval);
-    if (!alive()) return null;
-    res = await fetchFn(`${pollBase}?job=${encodeURIComponent(job)}`);
-    if (!alive()) return null;
-  }
   const data: unknown = await res.json().catch(() => null);
   if (!alive()) return null;
-  return { status: res.status, data };
+  if (res.status !== 202) return { status: res.status, data };
+  const job = jobIdOf(data);
+  if (job === null) return { status: 0, data: null };
+  return pollJob(fetchFn, `${url.split("?")[0]}?job=${encodeURIComponent(job)}`, {
+    sleep: opts.sleep,
+    isAlive: alive,
+    onPoll: opts.onPoll,
+    intervalMs: opts.intervalMs ?? RELEASE_SEARCH_POLL_MS,
+    maxPolls: opts.maxPolls ?? DEFAULT_MAX_POLLS,
+    failLimit: opts.failLimit,
+  });
 }

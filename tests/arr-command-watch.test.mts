@@ -727,6 +727,13 @@ test("a watch reads its ids COMMAND_READ_MAX_IDS at a time, one request after an
   assert.equal(reads, 2, "the third chunk is never read");
   const src = readFileSync(new URL("../src/components/admin/arr-command-watch.tsx", import.meta.url), "utf8");
   assert.match(src, /readCommandsInChunks\(ids, \(chunk\) => readChunk\(target, chunk\)\)/, "the browser hook polls through it");
+  // Each read is bounded in time: the watcher counts reads, so one that never
+  // settled would freeze the line (an abort lands in the catch as a failed read).
+  const readChunkSrc = src.slice(src.indexOf("async function readChunk("), src.indexOf("\n}\n", src.indexOf("async function readChunk(")));
+  assert.match(readChunkSrc, /await fetch\(withBasePath\(`\/api\/admin\/arr\/commands\?\$\{q\.toString\(\)\}`\), \{ cache: "no-store", signal: AbortSignal\.timeout\(READ_TIMEOUT_MS\) \}\);/);
+  assert.match(readChunkSrc, /\} catch \{\s*return \{ kind: "failed", error: fallback \};\s*\}$/);
+  const timeout = Number(/const READ_TIMEOUT_MS = ([\d_]+);/.exec(src)?.[1].replace(/_/g, ""));
+  assert.ok(timeout >= 30_000 && timeout <= 120_000, "above the route's arr timeouts, bounded");
 });
 
 // ── the polling loop, driven by hand ─────────────────────────────────────────

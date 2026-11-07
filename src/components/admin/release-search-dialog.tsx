@@ -12,7 +12,7 @@
 // one instance, for the movie, one season or one episode the manager chose —
 // no season picker, it searches at once.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
@@ -101,8 +101,9 @@ export function ReleaseSearchDialog({
   useEffect(() => {
     tRef.current = t;
   }, [t]);
-  const size = sizeFormatter(locale);
-  const age = ageFormatter(locale);
+  // Once per locale, not on every render (each filter keystroke re-renders).
+  const size = useMemo(() => sizeFormatter(locale), [locale]);
+  const age = useMemo(() => ageFormatter(locale), [locale]);
 
   const search = useCallback(async (s: number | null) => {
     const id = ++seq.current;

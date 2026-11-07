@@ -28,12 +28,15 @@
 //    per (serverInstance, MEDIA TYPE): one mount across movies + TV stops at
 //    their shared parent, leaving the library dir on every TV rel so segment 0
 //    is "tv" for every show and the whole TV half collapses onto one key;
-//  - the ARR tie-breaker reads the cached `arr:radarr|sonarr:paths:name` map
-//    (folder-basename → tmdbId): arr agreeing with Plex flags the JELLYFIN
-//    side and vice versa; an arr id matching neither side yields a verdict of
-//    null while still exposing arrTmdbId; a cache hit never re-writes the
-//    cache; unconfigured ARR (no url/key Settings) degrades to null verdicts
-//    with no warning;
+//  - the ARR tie-breaker reads the cached `arr:radarr|sonarr:paths` map (each
+//    title's folder path → tmdbId, the one map the admin library page and
+//    fix-match's file-info share) through its folder-BASENAME index: arr
+//    agreeing with Plex flags the JELLYFIN side and vice versa; an arr id
+//    matching neither side yields a verdict of null while still exposing
+//    arrTmdbId; a basename two titles share gives no verdict; a cache hit never
+//    re-writes the cache; unconfigured ARR (no url/key Settings) degrades to
+//    null verdicts with no warning; a cold map reads every instance at once,
+//    and a map missing a down instance is kept only briefly;
 //  - a FAILED arr map build (DB/fetch error) is non-fatal: it warns with the
 //    [bad-matches] scope — the source comment's "don't swallow silently"
 //    contract — and the mismatch list still returns;
@@ -46,8 +49,9 @@
 // No DB or network: every delegate the module touches (plex/jellyfin library
 // items, setting, tmdbMediaCore, tmdbCache) is shadowed in-memory
 // (tests/_helpers.mts). The ARR verdict path is exercised through the REAL
-// getCache/setCache against seeded arr:*:paths rows, so the dynamic
-// `import("@/lib/arr")` — and any live HTTP — is never reached.
+// getCache/setCache against seeded arr:*:paths rows; the cold-map tests script
+// Radarr through a replaced globalThis.fetch (the safe-fetch test seam) on
+// RFC1918 literals, so no DNS or live HTTP is ever reached.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -62,7 +66,21 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // Dynamic imports so the env/console stubs precede the module-graph load.
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
-const { getBadMatches } = await import("../src/lib/bad-matches.ts");
+const { getBadMatches, getBadMatchReport, loadArrPathIndex, cachedArrNameIndex } = await import("../src/lib/bad-matches.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
+
+// ── scripted Radarr (cold-map tests only) ───────────────────────────────────
+const fetchCalls: string[] = [];
+let respond: (url: URL) => Response | Promise<Response> = (url) => {
+  throw new Error(`unexpected fetch ${url}`);
+};
+globalThis.fetch = (async (input: RequestInfo | URL) => {
+  const url = new URL(String(input));
+  fetchCalls.push(url.origin + url.pathname);
+  return respond(url);
+}) as typeof fetch;
+const okJson = (data: unknown) =>
+  new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json" } });
 
 // ── in-memory delegates ─────────────────────────────────────────────────────
 type MediaType = "MOVIE" | "TV";
@@ -79,15 +97,20 @@ type JfRow = {
 
 let plexRows: PlexRow[] = [];
 let jfRows: JfRow[] = [];
-const plexFindManyCalls: { take?: number }[] = [];
+type FindManyArgs = { take?: number; orderBy?: unknown };
+const plexFindManyCalls: FindManyArgs[] = [];
+const jfFindManyCalls: FindManyArgs[] = [];
 shadowPrismaModel(prisma, "plexLibraryItem", {
-  findMany: async (args: { take?: number }): Promise<PlexRow[]> => {
+  findMany: async (args: FindManyArgs): Promise<PlexRow[]> => {
     plexFindManyCalls.push(args);
     return plexRows;
   },
 });
 shadowPrismaModel(prisma, "jellyfinLibraryItem", {
-  findMany: async (): Promise<JfRow[]> => jfRows,
+  findMany: async (args: FindManyArgs): Promise<JfRow[]> => {
+    jfFindManyCalls.push(args);
+    return jfRows;
+  },
 });
 
 let settingRows: { key: string; value: string }[] = [];
@@ -100,12 +123,13 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 let coreRows: { tmdbId: number; mediaType: MediaType; posterPath: string | null }[] = [];
-const coreCalls: unknown[] = [];
+type CoreWhere = { OR: { mediaType: MediaType; tmdbId: { in: number[] } }[] };
+const coreCalls: { where: CoreWhere }[] = [];
 shadowPrismaModel(prisma, "tmdbMediaCore", {
-  findMany: async (args: { where: { OR: { tmdbId: number; mediaType: MediaType }[] } }) => {
+  findMany: async (args: { where: CoreWhere }) => {
     coreCalls.push(args);
     return coreRows.filter((r) =>
-      args.where.OR.some((c) => c.tmdbId === r.tmdbId && c.mediaType === r.mediaType),
+      args.where.OR.some((c) => c.mediaType === r.mediaType && c.tmdbId.in.includes(r.tmdbId)),
     );
   },
 });
@@ -141,10 +165,11 @@ function jfItem(tmdbId: number, mediaType: MediaType, filePath: string | null, s
   return { tmdbId, mediaType, filePath, jellyfinItemId: `jf-${tmdbId}`, title: `JF ${tmdbId}`, year: "2020", serverInstance };
 }
 
-// Seed a FRESH arr path-map cache row so buildArrPathMap takes the cache-hit
+// Seed a FRESH arr path-map cache row so loadArrPathIndex takes the cache-hit
 // path (real getCache) and never reaches settings / the dynamic arr import.
+// Entries are arr folder paths; the verdict reads their basenames.
 function seedArrPaths(service: "radarr" | "sonarr", entries: [string, number][]): void {
-  const key = `arr:${service}:paths:name`;
+  const key = `arr:${service}:paths`;
   cacheRows.set(key, {
     key,
     data: JSON.stringify(entries),
@@ -177,9 +202,15 @@ beforeEach(() => {
   cacheUpserts.length = 0;
   cacheGets.length = 0;
   plexFindManyCalls.length = 0;
+  jfFindManyCalls.length = 0;
   coreCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
+  fetchCalls.length = 0;
+  respond = (url) => {
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  resetLogDedup();
 });
 
 // ── detection & path alignment ──────────────────────────────────────────────
@@ -198,7 +229,7 @@ test("agreeing libraries across different mounts → no matches, poster lookup s
   assert.equal(coreCalls.length, 0); // posterPathMap short-circuits on zero mismatches
   assert.equal(cacheUpserts.length, 0);
   // The arr path maps are consumed only per-match, so with zero mismatches they
-  // must not be built at all: no `arr:*:paths:name` cache read (and therefore no
+  // must not be built at all: no `arr:*:paths` cache read (and therefore no
   // cold-cache arrFetch fan-out across every syncable instance either).
   assert.ok(
     !cacheGets.some((k) => k.startsWith("arr:")),
@@ -206,8 +237,21 @@ test("agreeing libraries across different mounts → no matches, poster lookup s
   );
   assert.deepEqual(warns, []); // unconfigured ARR degrades silently, not warnly
   // The library reads are capped (LIBRARY_ITEM_CAP) so a huge library can't
-  // be slurped unbounded into one request.
-  assert.equal(plexFindManyCalls[0].take, 25_000);
+  // be slurped unbounded into one request — and ordered like the admin library
+  // page, so a library past the cap is cut at the same rows on every read
+  // rather than an arbitrary subset per table.
+  const pageOrder = [{ serverInstance: "asc" }, { mediaType: "asc" }, { tmdbId: "asc" }];
+  for (const call of [plexFindManyCalls[0], jfFindManyCalls[0]]) {
+    assert.equal(call.take, 25_000);
+    assert.deepEqual(call.orderBy, pageOrder);
+  }
+  assert.equal((await getBadMatchReport()).capped, false);
+});
+
+test("a library table at the row cap is reported as capped (additive to the bad-match list)", async () => {
+  plexRows = Array.from({ length: 25_000 }, (_, i) => plexItem(i + 1, "MOVIE", null));
+  const report = await getBadMatchReport();
+  assert.deepEqual(report, { badMatches: [], capped: true });
 });
 
 test("a tmdbId disagreement at the same relative path is reported with both sides' metadata", async () => {
@@ -365,9 +409,10 @@ test("two Plex servers mirroring one relative path collapse to a single row, def
 
 test("radarr agreeing with Plex flags the jellyfin side; the cache hit never re-writes the cache", async () => {
   seedConflictingMovies();
-  // Cached map keys by the media FOLDER basename — for movies, the file's
-  // parent dir — which is what survives across different bind-mount roots.
-  seedArrPaths("radarr", [["Alpha (2020)", 100]]);
+  // The cached map holds Radarr's folder paths; the verdict reads their
+  // BASENAMES — for movies, the file's parent dir — which is what survives
+  // across different bind-mount roots.
+  seedArrPaths("radarr", [["/radarr/movies/Alpha (2020)", 100]]);
 
   const [match] = await getBadMatches();
   assert.equal(match.arrTmdbId, 100);
@@ -386,8 +431,8 @@ test("radarr agreeing with Jellyfin flags plex; an id matching neither side expo
     jfItem(201, "MOVIE", "/data/movies/Beta (2019)/Beta.mkv"),
   ];
   seedArrPaths("radarr", [
-    ["Alpha (2020)", 999], // arr sides with jellyfin
-    ["Beta (2019)", 555], // arr disagrees with BOTH — a third opinion is not a verdict
+    ["/radarr/movies/Alpha (2020)", 999], // arr sides with jellyfin
+    ["/radarr/movies/Beta (2019)", 555], // arr disagrees with BOTH — a third opinion is not a verdict
   ]);
 
   const matches = await getBadMatches();
@@ -419,7 +464,7 @@ test("TV matches key on the SERIES folder (strip prefix applied) and consult the
     jfItem(3999, "TV", "/data/tv/ShowX/Season 01/e1.mkv"),
     jfItem(400, "TV", "/data/tv/ShowY/Season 02/e5.mkv"),
   ];
-  seedArrPaths("sonarr", [["ShowX", 300]]);
+  seedArrPaths("sonarr", [["/sonarr/tv/ShowX", 300]]);
 
   const matches = await getBadMatches();
   assert.equal(matches.length, 1);
@@ -538,6 +583,8 @@ test("posters: TmdbMediaCore first, details-blob fallback for core misses AND nu
     200: null, // nothing anywhere
     201: null, // blob existed but carried no poster
   });
+  // One `tmdbId IN (…)` per media type, never one OR term per pair.
+  assert.deepEqual(coreCalls.map((c) => c.where), [{ OR: [{ mediaType: "MOVIE", tmdbId: { in: [100, 999, 200, 201] } }] }]);
 });
 
 test("a failing ARR map build warns with the [bad-matches] scope and is non-fatal to the report", async () => {
@@ -557,4 +604,126 @@ test("a failing ARR map build warns with the [bad-matches] scope and is non-fata
     warns.some((w) => w.includes("[bad-matches] ARR path map fetch failed") && w.includes("settings table unavailable")),
     `expected a scoped warn, got: ${JSON.stringify(warns)}`,
   );
+});
+
+// ── season folders and dotted names (single-path groups) ───────────────────
+
+test("a one-show TV library with flat episodes keys on the show folder — a name starting 'Series' is not a season folder", async () => {
+  plexRows = [plexItem(300, "TV", "/plexmedia/tv/Series of Unfortunate Events/e1.mkv")];
+  jfRows = [jfItem(3999, "TV", "/data/tv/Series of Unfortunate Events/e1.mkv")];
+  assert.deepEqual((await getBadMatches()).map((m) => m.relativePath), ["Series of Unfortunate Events"]);
+
+  // A real season folder still keeps the show folder as the key.
+  plexRows = [plexItem(300, "TV", "/plexmedia/tv/Show A/Season 01/e1.mkv")];
+  jfRows = [jfItem(3999, "TV", "/data/tv/Show A/Season 01/e1.mkv")];
+  assert.deepEqual((await getBadMatches()).map((m) => m.relativePath), ["Show A"]);
+});
+
+test("a Jellyfin series folder with a dotted name is a folder, not a file", async () => {
+  // Jellyfin stores the series folder itself; "S.H.I.E.L.D" read as a file
+  // with a ".D" extension moved the mount a level up and keyed the show "tv".
+  plexRows = [plexItem(300, "TV", "/plexmedia/tv/Agents of S.H.I.E.L.D/Season 1/e1.mkv")];
+  jfRows = [jfItem(3999, "TV", "/data/tv/Agents of S.H.I.E.L.D")];
+  assert.deepEqual((await getBadMatches()).map((m) => m.relativePath), ["Agents of S.H.I.E.L.D"]);
+});
+
+// ── the shared Radarr/Sonarr folder map ─────────────────────────────────────
+
+test("a basename two Radarr titles share referees nothing; the same title under two roots still does", async () => {
+  seedConflictingMovies();
+  seedArrPaths("radarr", [["/radarr/a/Alpha (2020)", 100], ["/radarr/b/Alpha (2020)", 555]]);
+  const [ambiguous] = await getBadMatches();
+  assert.deepEqual([ambiguous.arrTmdbId, ambiguous.arrVerdict], [null, null]);
+
+  cacheRows.clear();
+  seedArrPaths("radarr", [["/radarr/hd/Alpha (2020)", 100], ["/radarr/4k/Alpha (2020)", 100]]);
+  const [mirrored] = await getBadMatches();
+  assert.deepEqual([mirrored.arrTmdbId, mirrored.arrVerdict], [100, "jellyfin"]);
+});
+
+const RADARR_HD = "http://10.0.5.1:7878";
+const RADARR_UHD = "http://10.0.5.2:7878";
+function configureTwoRadarrs(): void {
+  settingRows = [
+    { key: "radarrUrl", value: RADARR_HD },
+    { key: "radarrApiKey", value: "hd-key" },
+    { key: "radarrUhdUrl", value: RADARR_UHD },
+    { key: "radarrUhdApiKey", value: "uhd-key" },
+  ];
+  settingFindUnique = async (key) =>
+    key === "arrRadarrInstances" ? { key, value: JSON.stringify([{ slug: "uhd", name: "UHD" }]) } : null;
+}
+const stored = (key: string) => cacheRows.get(key)!;
+const ttlSeconds = (key: string) => Math.round((stored(key).expiresAt.getTime() - stored(key).cachedAt.getTime()) / 1000);
+
+test("a cold map reads every instance at once, and ONE catalogue fetch per instance serves the full-path and basename lookups", async () => {
+  configureTwoRadarrs();
+  let openGate!: () => void;
+  const gate = new Promise<void>((resolve) => { openGate = resolve; });
+  respond = (url) => {
+    if (url.origin === RADARR_HD) {
+      return gate.then(() => okJson([
+        { tmdbId: 100, path: "/movies/Alpha (2020)/" },
+        { tmdbId: 300, path: "/movies/Shared (2001)" },
+      ]));
+    }
+    if (url.origin === RADARR_UHD) {
+      return okJson([
+        { tmdbId: 777, path: "/uhd/Gamma (2021)" },
+        { tmdbId: 301, path: "/movies/Shared (2001)" }, // same folder as the default's: the default wins
+      ]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const pending = loadArrPathIndex("MOVIE");
+  for (let i = 0; i < 50 && fetchCalls.length < 2; i++) await new Promise((r) => setImmediate(r));
+  const bothInFlight = fetchCalls.length === 2;
+  openGate();
+  const index = await pending;
+  assert.ok(bothInFlight, "the second instance is read while the first is still answering");
+
+  assert.deepEqual([...index.byPath], [
+    ["/movies/Alpha (2020)", 100],
+    ["/movies/Shared (2001)", 300],
+    ["/uhd/Gamma (2021)", 777],
+  ]);
+  assert.equal(index.byName.get("Alpha (2020)"), 100);
+  assert.equal(index.incomplete, false);
+  assert.deepEqual(cacheUpserts, ["arr:radarr:paths"], "one cache key, holding the full paths");
+  assert.equal(ttlSeconds("arr:radarr:paths"), 6 * 60 * 60);
+
+  // The basename-only reader (fix-match's file-info) and a second build come
+  // from that one entry — no further fetch.
+  assert.equal((await cachedArrNameIndex("MOVIE"))?.get("Gamma (2021)"), 777);
+  assert.equal((await loadArrPathIndex("MOVIE")).byPath.size, 3);
+  assert.deepEqual(fetchCalls.sort(), [`${RADARR_HD}/api/v3/movie`, `${RADARR_UHD}/api/v3/movie`]);
+  assert.deepEqual(warns, []);
+});
+
+test("a map missing a down instance is kept only briefly, not refetched on every read, and its failure warns once", async () => {
+  configureTwoRadarrs();
+  respond = (url) => {
+    if (url.origin === RADARR_HD) return new Response("boom", { status: 500 });
+    if (url.origin === RADARR_UHD) return okJson([{ tmdbId: 777, path: "/uhd/Gamma (2021)" }]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const first = await loadArrPathIndex("MOVIE");
+  assert.equal(first.incomplete, true);
+  assert.deepEqual([...first.byPath], [["/uhd/Gamma (2021)", 777]], "the instance that answered still counts");
+  assert.ok(ttlSeconds("arr:radarr:paths") <= 5 * 60, `a partial map keeps minutes, not hours (${ttlSeconds("arr:radarr:paths")}s)`);
+  assert.deepEqual(JSON.parse(stored("arr:radarr:paths").data), { entries: [["/uhd/Gamma (2021)", 777]], incomplete: true });
+
+  const again = await loadArrPathIndex("MOVIE");
+  assert.equal(again.incomplete, true);
+  assert.equal(fetchCalls.length, 2, "a read inside the short window is served from the cache");
+
+  // Past the window the same failure is fetched again but not logged again.
+  cacheRows.clear();
+  await loadArrPathIndex("MOVIE");
+  assert.equal(fetchCalls.length, 4);
+  const logged = warns.filter((w) => w.includes("[bad-matches] ARR path map fetch failed"));
+  assert.equal(logged.length, 1, warns.join(" | "));
+  assert.ok(logged[0].includes("radarr instance \"\"") && !logged[0].includes("hd-key"), logged[0]);
 });

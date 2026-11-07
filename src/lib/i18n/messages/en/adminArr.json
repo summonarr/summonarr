@@ -121,6 +121,8 @@
   "adminArr.add.searchHint": "Otherwise it waits for the arr's own RSS sync and scheduled searches.",
   "adminArr.add.noRequest": "This adds the title directly — no request is created and nobody is notified.",
   "adminArr.add.submit": "Add to {name}",
+  "adminArr.add.noRootFolder": "{name} has no root folder it can reach — fix its root folders first.",
+  "adminArr.add.noQualityProfile": "{name} has no quality profiles — add one there first.",
   "adminArr.availability.announced": "Announced",
   "adminArr.availability.inCinemas": "In cinemas",
   "adminArr.availability.released": "Released",

@@ -137,7 +137,7 @@ test("title: a snapshot only fills an empty dialog and touches nothing else", ()
 test("title: Settings keeps edits across the rebase and Save waits for the live read", () => {
   assert.match(MANAGER, /<SettingsTab\s+key=\{version\}/);
   assert.match(MANAGER, /baseIsSnapshot=\{snap\.staleAt !== null\}/);
-  assert.match(SETTINGS, /<Button size="sm" onClick=\{\(\) => void save\(\)\} disabled=\{!dirty \|\| saving \|\| confirmMove \|\| baseIsSnapshot\}>/);
+  assert.match(SETTINGS, /<Button ref=\{saveRef\} size="sm" onClick=\{\(\) => void save\(\)\} disabled=\{!dirty \|\| saving \|\| confirmMove \|\| baseIsSnapshot\}>/);
   assert.match(SETTINGS, /baseIsSnapshot = false,/);
 });
 
@@ -203,6 +203,21 @@ for (const [name, src, setter, field, writing] of [
     assert.match(apply, /\}, \[\]\);$/);
   });
 }
+
+test("files and history: only the newest read lands — an older answer arriving last is dropped", () => {
+  for (const [name, src, setter] of [["files", FILES, "setFiles"], ["history", HISTORY, "setEvents"]] as const) {
+    const load = callbackBody(src, "load");
+    const seq = load.indexOf("const seq = ++loadSeq.current;");
+    const awaited = load.indexOf("await arrApi<");
+    const check = load.indexOf("if (seq !== loadSeq.current) return;");
+    assert.ok(seq >= 0 && seq < awaited, `${name}: numbered before the read goes out`);
+    assert.ok(check > awaited && check < load.indexOf("if (res.ok) {"), `${name}: checked after the answer, before anything lands`);
+    assert.ok(check < load.indexOf(setter) && check < load.indexOf("markLive();") && check < load.indexOf("setError("), `${name}: ${setter}, markLive and setError all wait for the check`);
+  }
+  // History's spinner is the newest read's to clear.
+  const history = callbackBody(HISTORY, "load");
+  assert.ok(history.indexOf("if (seq !== loadSeq.current) return;") < history.indexOf("setLoading(false);"));
+});
 
 test("files and history render the stale note", () => {
   assert.match(FILES, /<ArrSnapshotNote at=\{snap\.staleAt\} refreshing=\{reads > 0\} \/>/);

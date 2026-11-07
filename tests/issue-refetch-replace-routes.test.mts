@@ -306,6 +306,26 @@ test("Refetch: a refused RESOLVED issue or a malformed instance spends no token"
   assert.equal((await refetch(token)).status, 200, "the budget is untouched");
 });
 
+test("Refetch: only a boolean starts a search — \"false\" or 1 is a 400 reaching no arr, recording no IssueGrab and spending no token", async () => {
+  const token = await issueDelegate();
+  issueRow = { ...MOVIE_ISSUE };
+  for (let i = 0; i < 12; i++) {
+    for (const refetch of ["false", 1, "true", {}]) {
+      const res = await send(issueRoute.PATCH, "PATCH", "/api/issues/issue-1", token, { refetch });
+      assert.equal(res.status, 400, JSON.stringify(refetch));
+      assert.equal(((await res.json()) as { error: string }).error, "refetch must be true or false");
+    }
+  }
+  assert.deepEqual(arrCalls(), [], "no Radarr/Sonarr call");
+  assert.equal(grabs.length, 0, "no IssueGrab row");
+  assert.equal(issueRow?.status, "OPEN", "no status change");
+  // `true` still searches — and the 48 refusals spent none of the 10-a-minute budget.
+  const ok = await refetch(token);
+  assert.equal(ok.status, 200);
+  assert.equal(((await ok.json()) as { arrError: unknown }).arrError, null);
+  assert.equal(grabs.length, 1);
+});
+
 // ── F003: the Replace file job joins only an identical request ──────────────
 
 // Parks the DEFAULT Sonarr's file delete until `open()`, so a replace stays running.

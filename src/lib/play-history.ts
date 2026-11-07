@@ -6,7 +6,7 @@ import { posterUrl } from "./tmdb-types";
 import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import { DELIVERED_KBPS_SQL } from "./bitrate";
 import { processSingleton } from "./process-singleton";
-import { coalesce } from "./concurrency";
+import { coalesce, settleLimit } from "./concurrency";
 import { pickPlexRowForKey } from "./plex-dedupe";
 import { LEGACY_PLEX_REASON_LABELS, OTHER_REASONS, UNKNOWN_REASON } from "./transcode-reasons";
 import { TRACKING_STAMP_KEYS, parseStampDate } from "./never-watched";
@@ -177,15 +177,46 @@ export async function resolveShowTmdbId(
   // under the other copy resolved to nobody. `jellyfinItemIds` carries every id,
   // but rows written before that column existed are `[]` — hence the OR rather
   // than a straight swap to `has`.
-  const item = await prisma.jellyfinLibraryItem.findFirst({
+  //
+  // findMany + a pick, never findFirst, for the Plex branch's reason: the OR can
+  // match two rows. A recentOnly sync is insert-only and keyed by tmdbId, so a
+  // show re-identified on the server gets a second row carrying the same item id
+  // until the next full sync, and an unordered findFirst followed physical row
+  // order — persisted onto every episode play.
+  const rows = await prisma.jellyfinLibraryItem.findMany({
     where: {
       mediaType: "TV",
       serverInstance,
       OR: [{ jellyfinItemId: showKey }, { jellyfinItemIds: { has: showKey } }],
     },
-    select: { tmdbId: true },
+    select: { tmdbId: true, jellyfinItemId: true },
+    orderBy: { tmdbId: "asc" },
+    take: SHOW_KEY_HOLDERS_MAX,
   });
-  return item?.tmdbId ?? null;
+  return pickJellyfinRowForKey(rows, showKey)?.tmdbId ?? null;
+}
+
+// The Jellyfin twin of pickPlexRowForKey (plex-dedupe.ts): the row whose
+// canonical `jellyfinItemId` is the key, else the lowest tmdbId — a total order,
+// so the answer never depends on the order the rows arrive in.
+function pickJellyfinRowForKey<T extends { tmdbId: number; jellyfinItemId: string | null }>(
+  rows: readonly T[],
+  key: string,
+): T | null {
+  let best: T | null = null;
+  let bestIsCanonical = false;
+  for (const r of rows) {
+    const canonical = r.jellyfinItemId === key;
+    if (
+      best === null ||
+      (canonical && !bestIsCanonical) ||
+      (canonical === bestIsCanonical && r.tmdbId < best.tmdbId)
+    ) {
+      best = r;
+      bestIsCanonical = canonical;
+    }
+  }
+  return best;
 }
 
 // Thrown by resolveMediaServerUser when a caller passes a serverMachineId that doesn't match the
@@ -372,7 +403,6 @@ export function calculateWatched(
   return (playDurationMs / totalDurationMs) * 100 >= thresholdPercent;
 }
 
-const EXCLUDED_USERNAMES = new Set<string>();
 const MIN_PLAY_DURATION_S = 90;
 // Cap any single accumulation delta. Protects against missed events, machine sleep, or clock skew
 // inflating playtime. cleanupStaleSessions(30) handles ghost sessions; this is the per-event guard.
@@ -440,7 +470,7 @@ export function applyFinalTick(
 // Finalize a completed ActiveSession into a PlayHistory row (with full playback
 // metrics) and remove the ActiveSession. Idempotent across the concurrent
 // finalize paths (SSE stop, poller stall, cleanup) via the createMany dedupe and
-// lastSeenAt CAS. Short/excluded watches are dropped without a history row.
+// lastSeenAt CAS. Short watches are dropped without a history row.
 export async function recordCompletedSession(
   session: ActiveSession,
   opts: { skipSSE?: boolean; stoppedAt?: Date } = {},
@@ -488,17 +518,11 @@ export async function recordCompletedSession(
   const playDurationMs = Math.max(Number(session.playtimeMs), cappedProgressMs);
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 
-  // Both short-circuits use the same lastSeenAt CAS the post-transaction
+  // The short-circuit uses the same lastSeenAt CAS the post-transaction
   // delete below uses. A blind delete here can stomp a row the
   // sync just rewrote (same `id`, new `lastSeenAt`, new `startedAt`) for a
   // fresh playback, leaving the new watch with no ActiveSession — its
   // trailing time and finalize then never fire.
-  if (EXCLUDED_USERNAMES.has(session.serverUsername)) {
-    await prisma.activeSession
-      .deleteMany({ where: { id: session.id, lastSeenAt: session.lastSeenAt } })
-      .catch(() => {});
-    return;
-  }
   if (playDurationS < MIN_PLAY_DURATION_S) {
     await prisma.activeSession
       .deleteMany({ where: { id: session.id, lastSeenAt: session.lastSeenAt } })
@@ -872,6 +896,10 @@ export async function reanchorActiveSessionsOnBoot(): Promise<boolean> {
   }
 }
 
+// Finalizes in flight at once for a batch of ended sessions — below the max:5
+// pool, which the poller's other per-session work shares (guardrail 31).
+export const STALE_FINALIZE_CONCURRENCY = 3;
+
 // Safety net beneath the absence grace: finalize any ActiveSession whose
 // lastSeenAt is older than maxAgeMinutes (no final tick — a stale row has no
 // signal it was still playing).
@@ -883,12 +911,15 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
 
   // No final tick: a stale session has no signal it was still playing — capping wall-clock from
   // lastSeenAt would falsely inflate playtimeMs by up to MAX_PLAYTIME_DELTA_MS for an abandoned watch.
-  // Parallelized with allSettled so one failure doesn't abort the rest, and previously-silent
-  // failures now surface as a single warn.
-  const results = await Promise.allSettled(
+  // Settled so one failure doesn't abort the rest, and failures surface as a warn. Bounded
+  // (guardrail 31): each finalize runs ~4 queries on the max:5 pool, and a media-server
+  // outage of 30+ minutes ages every active session into this one batch.
+  const results = await settleLimit(
+    stale,
+    STALE_FINALIZE_CONCURRENCY,
     // Skip per-session SSE; cron callers fire a single activity:history-updated
     // at the loop boundary so connected clients don't refetch N times per run.
-    stale.map((session) => recordCompletedSession(session, { skipSSE: true })),
+    (session) => recordCompletedSession(session, { skipSSE: true }),
   );
   // If anything actually finalized, emit one SSE for the whole batch.
   if (results.some((r) => r.status === "fulfilled")) {
@@ -901,29 +932,37 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
   }
 }
 
-// Delete PlayHistory rows older than the configured retention window (no-op when
-// retention is unset/0). Returns the number of rows deleted.
+// The playHistoryRetentionDays setting as a day count; 0 = keep forever (unset,
+// zero, negative or junk). The one parse every retention reader shares.
+function retentionDaysFrom(raw: string | null): number {
+  const days = raw ? parseInt(raw, 10) : 0;
+  return Number.isFinite(days) && days > 0 ? days : 0;
+}
+
 // The moment before which retention deletes recorded plays (null = keep
 // forever). Nothing before it can be evidence, so the never-watched verdict
 // never lets a window start earlier (guardrail 14d).
 export async function getRetentionCutoff(now: Date): Promise<Date | null> {
-  const val = (await loadSettings()).playHistoryRetentionDays;
-  const days = val ? parseInt(val, 10) : 0;
-  if (!days || days <= 0) return null;
+  const days = retentionDaysFrom((await loadSettings()).playHistoryRetentionDays);
+  if (days === 0) return null;
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 }
 
+// Delete PlayHistory rows older than the configured retention window (no-op when
+// retention is unset/0). Returns the number of rows deleted. The cutoff is
+// getRetentionCutoff's, so the purge and the never-watched window can't disagree.
 export async function purgeOldHistory(): Promise<number> {
-  const val = (await loadSettings()).playHistoryRetentionDays;
-  const days = val ? parseInt(val, 10) : 0;
-  if (!days || days <= 0) return 0;
-
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const cutoff = await getRetentionCutoff(new Date(Date.now()));
+  if (!cutoff) return 0;
   const result = await prisma.playHistory.deleteMany({
     where: { startedAt: { lt: cutoff } },
   });
   return result.count;
 }
+
+// How many recent plays the per-user stats bundle carries (the admin per-user
+// page's list length).
+export const RECENT_PLAYS_SHOWN = 12;
 
 // Aggregate the full per-user stats bundle (totals, recent plays, top media,
 // daily/heatmap series, codec/resolution/device breakdowns) across a SET of
@@ -962,10 +1001,23 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
       `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn})`,
       ...ids,
     ),
+    // Only what the readers use: the admin per-user page lists RECENT_PLAYS_SHOWN
+    // rows with these fields, the self-service surfaces read the newest startedAt.
     prisma.playHistory.findMany({
       where: { mediaServerUserId: { in: ids } },
       orderBy: { startedAt: "desc" },
-      take: 50,
+      take: RECENT_PLAYS_SHOWN,
+      select: {
+        id: true,
+        title: true,
+        tmdbId: true,
+        mediaType: true,
+        seasonNumber: true,
+        episodeNumber: true,
+        resolution: true,
+        videoCodec: true,
+        startedAt: true,
+      },
     }),
     // Group by tmdbId (cross-source dedupe — Plex + Jellyfin entries for the
     // same show collapse) with title fallback for unmapped rows. Previously
@@ -2000,7 +2052,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   ]);
   // Retention shorter than both windows together means the purge has cut into
   // the previous one even if a few not-yet-purged rows survive past its start.
-  const retentionDays = parseInt(settings.playHistoryRetentionDays ?? "", 10) || 0;
+  const retentionDays = retentionDaysFrom(settings.playHistoryRetentionDays);
   const retentionCutsPrevious = retentionDays > 0 && retentionDays < days * 2;
   // The probe's bound. With retention ≥ both windows the purge deletes exactly
   // the rows older than now − retention — at retention = 2 × days, every row

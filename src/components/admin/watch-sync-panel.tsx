@@ -73,8 +73,10 @@ function lastFor(last: LastResult, dir: "toJellyfin" | "toPlex"): DirResult | nu
 
 function DirectionIcon({ direction, label }: { direction: string; label: string }) {
   const cls = "h-4 w-4 shrink-0 text-[var(--ds-fg-subtle)]";
-  if (direction === "both") return <ArrowLeftRight className={cls} aria-label={label} />;
-  return <ArrowRight className={`${cls}${direction === "toPlex" ? " rotate-180" : ""}`} aria-label={label} />;
+  // role="img": without it an svg's aria-label isn't reliably announced, and
+  // this icon is the pair header's only direction cue.
+  if (direction === "both") return <ArrowLeftRight className={cls} role="img" aria-label={label} />;
+  return <ArrowRight className={`${cls}${direction === "toPlex" ? " rotate-180" : ""}`} role="img" aria-label={label} />;
 }
 
 export function WatchSyncPanel() {
@@ -84,7 +86,13 @@ export function WatchSyncPanel() {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
+  // One change at a time: every control is disabled while one is in flight.
+  const [busy, setBusy] = useState(false);
+  // The pair whose Remove / Re-scan is waiting for the inline confirmation.
+  const [confirming, setConfirming] = useState<{ id: string; kind: "remove" | "rescan" } | null>(null);
+  // Bumped after every background re-read, so the next one is armed whatever
+  // the last one returned (a failed load leaves `data` as it was).
+  const [pollTick, setPollTick] = useState(0);
   const [running, setRunning] = useState(false);
   const [plexSel, setPlexSel] = useState("");
   const [jfSel, setJfSel] = useState("");
@@ -115,15 +123,17 @@ export function WatchSyncPanel() {
   const serverRunning = data?.run?.running === true;
   useEffect(() => {
     if (!serverRunning) return;
-    const id = setTimeout(() => { void load(); }, RUNNING_REFRESH_MS);
+    const id = setTimeout(() => {
+      void load().finally(() => { if (mounted.current) setPollTick((n) => n + 1); });
+    }, RUNNING_REFRESH_MS);
     return () => clearTimeout(id);
-  }, [serverRunning, data, load]);
+  }, [serverRunning, pollTick, load]);
 
   const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString(locale) : "");
   const dirLabel = (d: string) => t(DIRECTION_KEYS[(DIRECTIONS as readonly string[]).includes(d) ? (d as Direction) : "both"]);
 
-  async function send(key: string, url: string, init: RequestInit) {
-    setBusy(key);
+  async function send(url: string, init: RequestInit) {
+    setBusy(true);
     setError("");
     setNote("");
     try {
@@ -136,12 +146,12 @@ export function WatchSyncPanel() {
       setError(t("adminManage.watchSync.error.saveNetwork"));
       return false;
     } finally {
-      if (mounted.current) setBusy(null);
+      if (mounted.current) setBusy(false);
     }
   }
 
   async function addPair(plexUserId: string, jellyfinUserId: string, direction: Direction) {
-    const ok = await send(`add:${plexUserId}:${jellyfinUserId}`, "/api/admin/watch-sync", {
+    const ok = await send("/api/admin/watch-sync", {
       method: "POST",
       body: JSON.stringify({ plexUserId, jellyfinUserId, direction }),
     });
@@ -234,9 +244,12 @@ export function WatchSyncPanel() {
         </p>
       )}
 
-      {(error || note) && (
-        <p role="status" className={`text-sm ${error ? "text-[var(--ds-danger)]" : "text-[var(--ds-fg-muted)]"}`}>{error || note}</p>
-      )}
+      {/* A failure is announced at once (alert); a note waits its turn (status). */}
+      {error ? (
+        <p role="alert" className="text-sm text-[var(--ds-danger)]">{error}</p>
+      ) : note ? (
+        <p role="status" className="text-sm text-[var(--ds-fg-muted)]">{note}</p>
+      ) : null}
 
       <section>
         <SectionHeader
@@ -275,10 +288,10 @@ export function WatchSyncPanel() {
                     <StyledSelect
                       compact
                       value={(DIRECTIONS as readonly string[]).includes(p.direction) ? p.direction : "both"}
-                      disabled={busy !== null}
+                      disabled={busy}
                       aria-label={t("adminManage.watchSync.direction.label")}
                       className="w-auto"
-                      onChange={(e) => void send(`dir:${p.id}`, `/api/admin/watch-sync/${p.id}`, { method: "PATCH", body: JSON.stringify({ direction: e.target.value }) })}
+                      onChange={(e) => void send(`/api/admin/watch-sync/${p.id}`, { method: "PATCH", body: JSON.stringify({ direction: e.target.value }) })}
                     >
                       {DIRECTIONS.map((d) => <option key={d} value={d}>{dirLabel(d)}</option>)}
                     </StyledSelect>
@@ -286,8 +299,8 @@ export function WatchSyncPanel() {
                       <Switch
                         size="sm"
                         checked={p.syncProgress}
-                        disabled={busy !== null}
-                        onCheckedChange={(syncProgress) => void send(`progress:${p.id}`, `/api/admin/watch-sync/${p.id}`, { method: "PATCH", body: JSON.stringify({ syncProgress }) })}
+                        disabled={busy}
+                        onCheckedChange={(syncProgress) => void send(`/api/admin/watch-sync/${p.id}`, { method: "PATCH", body: JSON.stringify({ syncProgress }) })}
                         aria-label={t("adminManage.watchSync.progress.label")}
                       />
                       {t("adminManage.watchSync.progress.label")}
@@ -296,8 +309,8 @@ export function WatchSyncPanel() {
                       <Switch
                         size="sm"
                         checked={p.enabled}
-                        disabled={busy !== null}
-                        onCheckedChange={(enabled) => void send(`toggle:${p.id}`, `/api/admin/watch-sync/${p.id}`, { method: "PATCH", body: JSON.stringify({ enabled }) })}
+                        disabled={busy}
+                        onCheckedChange={(enabled) => void send(`/api/admin/watch-sync/${p.id}`, { method: "PATCH", body: JSON.stringify({ enabled }) })}
                         aria-label={t("adminManage.watchSync.enabled")}
                       />
                       {p.enabled ? t("adminManage.watchSync.enabled") : t("adminManage.watchSync.paused")}
@@ -305,32 +318,58 @@ export function WatchSyncPanel() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      disabled={busy !== null}
-                      onClick={() => {
-                        if (window.confirm(t("adminManage.watchSync.rescanConfirm"))) {
-                          void send(`rescan:${p.id}`, `/api/admin/watch-sync/${p.id}`, { method: "PATCH", body: JSON.stringify({ rescan: true }) })
-                            .then((ok) => { if (ok) setNote(t("adminManage.watchSync.rescanQueued")); });
-                        }
-                      }}
+                      disabled={busy}
+                      aria-expanded={confirming?.id === p.id && confirming.kind === "rescan"}
+                      onClick={() => setConfirming(confirming?.id === p.id && confirming.kind === "rescan" ? null : { id: p.id, kind: "rescan" })}
                     >
                       {t("adminManage.watchSync.rescan")}
                     </Button>
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      disabled={busy !== null}
+                      disabled={busy}
                       aria-label={t("adminManage.watchSync.remove")}
                       title={t("adminManage.watchSync.remove")}
-                      onClick={() => {
-                        if (window.confirm(t("adminManage.watchSync.removeConfirm"))) {
-                          void send(`remove:${p.id}`, `/api/admin/watch-sync/${p.id}`, { method: "DELETE" });
-                        }
-                      }}
+                      aria-expanded={confirming?.id === p.id && confirming.kind === "remove"}
+                      onClick={() => setConfirming(confirming?.id === p.id && confirming.kind === "remove" ? null : { id: p.id, kind: "remove" })}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
                 </div>
+                {/* The inline confirmation the other admin managers use (never a
+                    blocking browser dialog). */}
+                {confirming?.id === p.id && (
+                  <div className="mt-3 space-y-2 rounded-md border border-red-500/40 bg-red-500/10 p-3">
+                    <p className="text-xs text-[var(--ds-danger)]">
+                      {t(confirming.kind === "remove" ? "adminManage.watchSync.removeConfirm" : "adminManage.watchSync.rescanConfirm")}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="destructive"
+                        size="xs"
+                        disabled={busy}
+                        autoFocus
+                        onClick={() => {
+                          const kind = confirming.kind;
+                          setConfirming(null);
+                          if (kind === "remove") {
+                            void send(`/api/admin/watch-sync/${p.id}`, { method: "DELETE" });
+                          } else {
+                            void send(`/api/admin/watch-sync/${p.id}`, { method: "PATCH", body: JSON.stringify({ rescan: true }) })
+                              .then((ok) => { if (ok) setNote(t("adminManage.watchSync.rescanQueued")); });
+                          }
+                        }}
+                      >
+                        {confirming.kind === "remove" ? <Trash2 className="h-3.5 w-3.5" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                        {t(confirming.kind === "remove" ? "adminManage.watchSync.remove" : "adminManage.watchSync.rescan")}
+                      </Button>
+                      <Button variant="ghost" size="xs" onClick={() => setConfirming(null)}>
+                        {t("adminManage.common.cancel")}
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 {toward(p.direction, "toJellyfin") && directionStats(p, "toJellyfin")}
                 {toward(p.direction, "toPlex") && directionStats(p, "toPlex")}
                 {p.syncProgress && p.lastResult?.progress && (
@@ -374,7 +413,7 @@ export function WatchSyncPanel() {
               <option value="">{t("adminManage.watchSync.add.jellyfin")}</option>
               {data.jellyfinUsers.map((u) => <option key={u.id} value={u.id}>{userLabel(u)}</option>)}
             </StyledSelect>
-            <Button size="sm" disabled={!plexSel || !jfSel || busy !== null} onClick={() => void addPair(plexSel, jfSel, dirSel)}>
+            <Button size="sm" disabled={!plexSel || !jfSel || busy} onClick={() => void addPair(plexSel, jfSel, dirSel)}>
               {t("adminManage.watchSync.add.submit")}
             </Button>
           </div>
@@ -395,7 +434,7 @@ export function WatchSyncPanel() {
                     <span className="text-[var(--ds-fg-muted)]">{userLabel(plex)}</span>
                     <ArrowLeftRight className="h-4 w-4 text-[var(--ds-fg-subtle)]" aria-hidden />
                     <span className="text-[var(--ds-fg-muted)]">{userLabel(jf)}</span>
-                    <Button variant="outline" size="xs" disabled={busy !== null} onClick={() => void addPair(s.plexUserId, s.jellyfinUserId, "both")}>
+                    <Button variant="outline" size="xs" disabled={busy} onClick={() => void addPair(s.plexUserId, s.jellyfinUserId, "both")}>
                       {t("adminManage.watchSync.suggestions.pair")}
                     </Button>
                   </li>

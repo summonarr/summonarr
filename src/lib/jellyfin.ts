@@ -1,4 +1,5 @@
 import { safeFetchAdminConfigured } from "./safe-fetch";
+import { trimServerBase } from "./server-url";
 import { warnOnChange } from "./log-dedup";
 import { NO_REASON_REPORTED } from "./transcode-reasons";
 import { parseJellyfinPlayedItem, type JellyfinPlayedItem } from "./upstream-watch";
@@ -38,7 +39,7 @@ export async function authenticateWithJellyfin(
   username: string,
   password: string
 ): Promise<JellyfinUser> {
-  const url = baseUrl.replace(/\/$/, "");
+  const url = trimServerBase(baseUrl);
   const res = await safeFetchAdminConfigured(`${url}/Users/AuthenticateByName`, {
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
@@ -69,30 +70,41 @@ export interface JellyfinQuickConnectResult {
 }
 
 export async function initiateJellyfinQuickConnect(baseUrl: string): Promise<JellyfinQuickConnectResult> {
-  const url = baseUrl.replace(/\/$/, "");
+  const url = trimServerBase(baseUrl);
   const res = await safeFetchAdminConfigured(`${url}/QuickConnect/Initiate`, {
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: { "Authorization": JELLYFIN_IDENTITY, "X-Emby-Authorization": JELLYFIN_IDENTITY, "Content-Type": "application/json" },
   });
   if (!res.ok) throw Object.assign(new Error(`Jellyfin QuickConnect initiate: ${res.status}`), { status: res.status });
-  const data = (await res.json()) as { Secret: string; Code: string };
-  return { secret: data.Secret, code: data.Code };
+  // Checked, like the sibling auth calls: a proxy page or an older server's
+  // other shape would otherwise hand the route an undefined secret (the flow
+  // cookie's hash throws on it) or the user an undefined code to type. No
+  // status on the error, so the route answers its usual initiate failure.
+  const data = (await res.json()) as { Secret?: unknown; Code?: unknown } | null;
+  const secret = data?.Secret;
+  const code = data?.Code;
+  if (typeof secret !== "string" || !secret || typeof code !== "string" || !code) {
+    throw new Error("Jellyfin QuickConnect initiate response missing Secret or Code");
+  }
+  return { secret, code };
 }
 
 export async function pollJellyfinQuickConnect(baseUrl: string, secret: string): Promise<boolean> {
-  const url = baseUrl.replace(/\/$/, "");
+  const url = trimServerBase(baseUrl);
   const res = await safeFetchAdminConfigured(`${url}/QuickConnect/Connect?Secret=${encodeURIComponent(secret)}`, {
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: { "Authorization": JELLYFIN_IDENTITY, "X-Emby-Authorization": JELLYFIN_IDENTITY },
   });
   if (!res.ok) throw Object.assign(new Error(`Jellyfin QuickConnect poll: ${res.status}`), { status: res.status });
-  const data = (await res.json()) as { Authenticated: boolean };
-  return data.Authenticated;
+  // Only a real `true` is signed in; anything else (a string, a missing field)
+  // is "not yet".
+  const data = (await res.json()) as { Authenticated?: unknown } | null;
+  return data?.Authenticated === true;
 }
 
 export async function authenticateWithJellyfinQuickConnect(baseUrl: string, secret: string): Promise<JellyfinUser> {
-  const url = baseUrl.replace(/\/$/, "");
+  const url = trimServerBase(baseUrl);
   const res = await safeFetchAdminConfigured(`${url}/Users/AuthenticateWithQuickConnect`, {
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
@@ -178,7 +190,7 @@ export async function hasJellyfinItemByTmdbId(
   mediaType: "movie" | "tv",
 ): Promise<boolean> {
   const itemType = mediaType === "movie" ? "Movie" : "Series";
-  const url = `${baseUrl.replace(/\/$/, "")}/Items?IncludeItemTypes=${itemType}&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=${PROBE_RECENT_LIMIT}&EnableImages=false`;
+  const url = `${trimServerBase(baseUrl)}/Items?IncludeItemTypes=${itemType}&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=${PROBE_RECENT_LIMIT}&EnableImages=false`;
   try {
     const res = await safeFetchAdminConfigured(url, {
       headers: jellyfinHeaders(apiKey),
@@ -196,7 +208,7 @@ export async function hasJellyfinItemByTmdbId(
 }
 
 export async function getJellyfinMediaFolders(baseUrl: string, apiKey: string): Promise<JellyfinMediaFolder[]> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Library/MediaFolders`;
+  const url = `${trimServerBase(baseUrl)}/Library/MediaFolders`;
   const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,
@@ -209,7 +221,7 @@ export async function getJellyfinMediaFolders(baseUrl: string, apiKey: string): 
 }
 
 export async function refreshJellyfinLibrary(baseUrl: string, apiKey: string): Promise<void> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Library/Refresh`;
+  const url = `${trimServerBase(baseUrl)}/Library/Refresh`;
   const res = await safeFetchAdminConfigured(url, {
     method: "POST",
     headers: jellyfinHeaders(apiKey),
@@ -337,6 +349,10 @@ async function fetchJellyfinPages<T>(
   maxConcurrent = MAX_PARALLEL_PAGES,
 ): Promise<void> {
   const first = await fetchPage<T>(baseQuery, apiKey, 0, pageSize);
+  if (first.total !== null) {
+    await fetchJellyfinPagesByCount(baseQuery, apiKey, first, processItems, pageSize, maxConcurrent);
+    return;
+  }
   processItems(first.items);
 
   // An ABSENT TotalRecordCount is not a count of zero. Some Jellyfin versions and
@@ -347,38 +363,83 @@ async function fetchJellyfinPages<T>(
   // truncation durable. Without a total we cannot fan out, so walk sequentially
   // until a short page marks the end — the same end-of-results signal
   // fetchJellyfinPagesSequential uses.
-  if (first.total === null) {
-    if (first.items.length < pageSize) return;
-    let startIndex = pageSize;
-    // Bounded by the same cap as the fan-out path so a server that never returns
-    // a short page can't loop forever.
-    const maxPages = Math.ceil(MAX_LIBRARY_ITEMS / pageSize);
-    for (let page = 1; page < maxPages; page++) {
-      const next = await fetchPage<T>(baseQuery, apiKey, startIndex, pageSize);
-      processItems(next.items);
-      if (next.items.length < pageSize) return;
-      startIndex += next.items.length;
+  if (first.items.length < pageSize) return;
+  let startIndex = pageSize;
+  // Bounded by the same cap as the fan-out path so a server that never returns
+  // a short page can't loop forever.
+  const maxPages = Math.ceil(MAX_LIBRARY_ITEMS / pageSize);
+  for (let page = 1; page < maxPages; page++) {
+    const next = await fetchPage<T>(baseQuery, apiKey, startIndex, pageSize);
+    processItems(next.items);
+    if (next.items.length < pageSize) return;
+    startIndex += next.items.length;
+  }
+  console.warn(
+    `[jellyfin] page walk hit the ${MAX_LIBRARY_ITEMS}-item cap with no TotalRecordCount; library may be incomplete`,
+  );
+}
+
+// The fan-out walk: every StartIndex is fixed up front from page 0's count and
+// fetched `maxConcurrent` at a time. Those offsets assume the listing holds
+// still. An item deleted mid-walk (an arr upgrade replacing a file) shifts every
+// later item down one under the DateCreated sort, and the item at a page
+// boundary is never read while the walk still ends "healthy" — and a full sync
+// is a scoped replace, so that title would drop out of the library rows. So a
+// walk that served fewer items than page 0 counted is read again, and only the
+// accepted walk reaches processItems (no item is processed twice). The same
+// rule getJellyfinUserPlayedItems applies to its own offset walk.
+async function fetchJellyfinPagesByCount<T>(
+  baseQuery: string,
+  apiKey: string,
+  firstPage: { items: T[]; total: number | null },
+  processItems: (items: T[]) => void,
+  pageSize: number,
+  maxConcurrent: number,
+): Promise<void> {
+  const walk = async (page0: { items: T[]; total: number }) => {
+    // Cap the upstream-reported total before deriving page indexes — a hostile
+    // TotalRecordCount would otherwise pre-allocate an unbounded startIndexes array.
+    const total = Math.min(page0.total, MAX_LIBRARY_ITEMS);
+    const pages: T[][] = [page0.items];
+    let served = page0.items.length;
+    const startIndexes: number[] = [];
+    for (let s = pageSize; s < total; s += pageSize) startIndexes.push(s);
+    for (let i = 0; i < startIndexes.length; i += maxConcurrent) {
+      const batch = startIndexes.slice(i, i + maxConcurrent);
+      const fetched = await Promise.all(batch.map((s) => fetchPage<T>(baseQuery, apiKey, s, pageSize)));
+      for (const p of fetched) {
+        pages.push(p.items);
+        served += p.items.length;
+      }
     }
-    console.warn(
-      `[jellyfin] page walk hit the ${MAX_LIBRARY_ITEMS}-item cap with no TotalRecordCount; library may be incomplete`,
-    );
-    return;
-  }
+    return { pages, served, total, reported: page0.total };
+  };
 
-  // Cap the upstream-reported total before deriving page indexes — a hostile
-  // TotalRecordCount would otherwise pre-allocate an unbounded startIndexes array.
-  const total = Math.min(first.total, MAX_LIBRARY_ITEMS);
-  const startIndexes: number[] = [];
-  for (let s = pageSize; s < total; s += pageSize) startIndexes.push(s);
-  if (startIndexes.length === 0) return;
-
-  for (let i = 0; i < startIndexes.length; i += maxConcurrent) {
-    const batch = startIndexes.slice(i, i + maxConcurrent);
-    const pages = await Promise.all(
-      batch.map((s) => fetchPage<T>(baseQuery, apiKey, s, pageSize)),
-    );
-    for (const p of pages) processItems(p.items);
+  const firstWalk = await walk({ items: firstPage.items, total: firstPage.total ?? 0 });
+  let accepted = firstWalk;
+  if (firstWalk.served < firstWalk.total) {
+    const again = await fetchPage<T>(baseQuery, apiKey, 0, pageSize);
+    // A count on the first read and none on the second: nothing to check the
+    // read against. Failing keeps this instance's stored rows (a failed fetch).
+    if (again.total === null) throw new Error("Jellyfin library listing stopped reporting its count while it was read");
+    const secondWalk = await walk({ items: again.items, total: again.total });
+    if (secondWalk.served < secondWalk.total) {
+      // Short twice with a MOVED count: the library is changing under the read.
+      if (secondWalk.reported !== firstWalk.reported) {
+        throw new Error("Jellyfin library listing changed while it was read");
+      }
+      // Short twice by the SAME count: a server that counts more than it
+      // serves, not a live change. Read it as served and say so once (7b).
+      warnOnChange(
+        // Keyed without the per-run MinDateLastSaved, so one listing is one key.
+        `jellyfin-listing-shortfall:${baseQuery.replace(/&MinDateLastSaved=[^&]*/, "")}`,
+        `${secondWalk.served}/${secondWalk.total}`,
+        `[jellyfin] a library listing reports ${secondWalk.total} item(s) but serves ${secondWalk.served}; read as served`,
+      );
+    }
+    accepted = secondWalk;
   }
+  for (const page of accepted.pages) processItems(page);
 }
 
 // Episodes are fetched sequentially because episode counts per series are unpredictable and concurrent
@@ -447,7 +508,7 @@ async function getJellyfinItemsByType(
   libraryIds?: Set<string>,
   minDateLastSaved?: Date,
 ): Promise<Map<number, JellyfinLibraryItemData>> {
-  const base = baseUrl.replace(/\/$/, "");
+  const base = trimServerBase(baseUrl);
   const items = new Map<number, JellyfinLibraryItemData>();
   const dateFilter = minDateLastSaved
     ? `&MinDateLastSaved=${encodeURIComponent(minDateLastSaved.toISOString())}`
@@ -505,6 +566,12 @@ async function getJellyfinItemsByType(
     }
   };
 
+  // ONE query, scoped or not, so the two can never drift apart (guardrail 37d's
+  // CollapseBoxSetItems=false above all). EnableImages=false + ImageTypeLimit=0:
+  // nothing here consumes ImageTags/ImageBlurHashes, and Jellyfin enriches them
+  // by default (enableImages defaults true) — they were the bulk of >10 MB pages.
+  const query = (parent: string) =>
+    `${base}/Items?${parent}IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`;
   if (libraryIds?.size) {
     // Scoping queries to specific parent IDs is faster and avoids returning BoxSet children twice
     const LIBRARY_CONCURRENCY = 3;
@@ -512,23 +579,12 @@ async function getJellyfinItemsByType(
     for (let i = 0; i < ids.length; i += LIBRARY_CONCURRENCY) {
       await Promise.all(
         ids.slice(i, i + LIBRARY_CONCURRENCY).map((parentId) =>
-          fetchJellyfinPages(
-            // EnableImages=false + ImageTypeLimit=0: nothing here consumes
-            // ImageTags/ImageBlurHashes, and Jellyfin enriches them by default
-            // (enableImages defaults true) — they were the bulk of >10 MB pages.
-            `${base}/Items?ParentId=${encodeURIComponent(parentId)}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
-            apiKey,
-            processItems,
-          )
-        )
+          fetchJellyfinPages(query(`ParentId=${encodeURIComponent(parentId)}&`), apiKey, processItems),
+        ),
       );
     }
   } else {
-    await fetchJellyfinPages(
-      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
-      apiKey,
-      processItems,
-    );
+    await fetchJellyfinPages(query(""), apiKey, processItems);
   }
 
   // Fold the collision bookkeeping into the surviving rows. Sorted so the list
@@ -626,7 +682,7 @@ export async function getJellyfinTVEpisodes(
   libraryIds?: Set<string>,
   seriesItemIdToTmdbId?: Map<string, number>,
 ): Promise<JellyfinTVEpisodeData[]> {
-  const base = baseUrl.replace(/\/$/, "");
+  const base = trimServerBase(baseUrl);
 
   const seriesMap: Map<string, number> = seriesItemIdToTmdbId
     ? seriesItemIdToTmdbId
@@ -661,20 +717,14 @@ export async function getJellyfinTVEpisodes(
     }
   };
 
+  const query = (parent: string) =>
+    `${base}/Items?${parent}IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`;
   if (libraryIds?.size) {
     for (const parentId of Array.from(libraryIds)) {
-      await fetchJellyfinPagesSequential(
-        `${base}/Items?ParentId=${encodeURIComponent(parentId)}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
-        apiKey,
-        processEpisodes,
-      );
+      await fetchJellyfinPagesSequential(query(`ParentId=${encodeURIComponent(parentId)}&`), apiKey, processEpisodes);
     }
   } else {
-    await fetchJellyfinPagesSequential(
-      `${base}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
-      apiKey,
-      processEpisodes,
-    );
+    await fetchJellyfinPagesSequential(query(""), apiKey, processEpisodes);
   }
 
   return Array.from(episodeMap.values());
@@ -686,14 +736,14 @@ export async function getJellyfinEpisodesForShow(
   seriesId: string,
   tmdbId: number,
 ): Promise<JellyfinTVEpisodeData[]> {
-  const base = baseUrl.replace(/\/$/, "");
+  const base = trimServerBase(baseUrl);
   const episodes: JellyfinTVEpisodeData[] = [];
   // DateCreated as in getJellyfinTVEpisodes: fix-match rebuilds the show's
   // TVEpisodeCache rows from here, and an undated episode makes its season
   // `unobservable` on the never-watched report (14d).
   const fields = "ParentIndexNumber,IndexNumber,DateCreated";
   await fetchJellyfinPagesSequential(
-    `${base}/Items?ParentId=${seriesId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
+    `${base}/Items?ParentId=${encodeURIComponent(seriesId)}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
     apiKey,
     (batch: Array<{ ParentIndexNumber?: number; IndexNumber?: number; DateCreated?: string }>) => {
       for (const ep of batch) {
@@ -727,7 +777,7 @@ export async function getJellyfinEpisodeIds(
   apiKey: string,
   seriesId: string,
 ): Promise<JellyfinEpisodeId[]> {
-  const base = baseUrl.replace(/\/$/, "");
+  const base = trimServerBase(baseUrl);
   const out: JellyfinEpisodeId[] = [];
   await fetchJellyfinPagesSequential(
     `${base}/Items?ParentId=${encodeURIComponent(seriesId)}&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber,IndexNumberEnd&EnableImages=false&ImageTypeLimit=0&SortBy=SortName&SortOrder=Ascending`,
@@ -767,7 +817,7 @@ export async function markJellyfinPlayed(
   itemId: string,
   datePlayed: Date | null,
 ): Promise<JellyfinMarkPlayedResult> {
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = trimServerBase(baseUrl);
   const date = datePlayed ? `datePlayed=${encodeURIComponent(datePlayed.toISOString())}` : "";
   const uid = encodeURIComponent(userId);
   const iid = encodeURIComponent(itemId);
@@ -920,7 +970,7 @@ function sourceBitrateBps(
 const SESSIONS_ACTIVE_WITHIN_SECONDS = 960;
 
 export async function getJellyfinSessions(baseUrl: string, apiKey: string): Promise<JellyfinSessionData[]> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Sessions?activeWithinSeconds=${SESSIONS_ACTIVE_WITHIN_SECONDS}`;
+  const url = `${trimServerBase(baseUrl)}/Sessions?activeWithinSeconds=${SESSIONS_ACTIVE_WITHIN_SECONDS}`;
   const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,
@@ -1008,7 +1058,7 @@ export async function terminateJellyfinSession(
   sessionId: string,
   reason?: string,
 ): Promise<{ ok: boolean; status: number }> {
-  const base = baseUrl.replace(/\/$/, "");
+  const base = trimServerBase(baseUrl);
   const id = encodeURIComponent(sessionId);
 
   // Best-effort DisplayMessage — fire WITHOUT awaiting so a client that doesn't
@@ -1054,7 +1104,7 @@ type JellyfinRawUser = {
 };
 
 export async function getJellyfinAllUsers(baseUrl: string, apiKey: string): Promise<JellyfinUserInfo[]> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Users`;
+  const url = `${trimServerBase(baseUrl)}/Users`;
   const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinAdminHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,
@@ -1108,7 +1158,7 @@ export async function getJellyfinUserPlayedItems(
   opts: { signal?: AbortSignal } = {},
 ): Promise<JellyfinUserPlayedItems> {
   if (opts.signal?.aborted) return { items: [], records: 0 };
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = trimServerBase(baseUrl);
   // `GET /Items?userId=` is the SAME handler as the [Obsolete] (10.9+)
   // `/Users/{userId}/Items`, on every release, read from Jellyfin's source
   // (Jellyfin.Api/Controllers/ItemsController.cs): the legacy action's body is
@@ -1186,7 +1236,7 @@ export async function getJellyfinPlayedSince(
   opts: { since?: Date; signal?: AbortSignal } = {},
 ): Promise<JellyfinPlayedItem[]> {
   if (opts.signal?.aborted) return [];
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = trimServerBase(baseUrl);
   const query =
     `${base}/Items?userId=${encodeURIComponent(userId)}&Recursive=true&IncludeItemTypes=Movie,Episode&${JELLYFIN_NO_COLLECTION_GROUPING}&Filters=IsPlayed` +
     "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DatePlayed,SortName&SortOrder=Descending";
@@ -1264,7 +1314,7 @@ const JELLYFIN_PROGRESS_MAX = 500;
 
 /** One user's resumable (in-progress) movies and episodes, newest play first. */
 export async function getJellyfinInProgress(baseUrl: string, apiKey: string, userId: string): Promise<JellyfinItemProgress[]> {
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = trimServerBase(baseUrl);
   const out: JellyfinItemProgress[] = [];
   await fetchJellyfinPagesSequential<unknown>(
     `${base}/Items?userId=${encodeURIComponent(userId)}&Recursive=true&IncludeItemTypes=Movie,Episode&${JELLYFIN_NO_COLLECTION_GROUPING}&Filters=IsResumable` +
@@ -1316,7 +1366,7 @@ export async function getJellyfinFavorites(
   opts: { signal?: AbortSignal } = {},
 ): Promise<JellyfinFavorite[]> {
   if (opts.signal?.aborted) return [];
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = trimServerBase(baseUrl);
   const out: JellyfinFavorite[] = [];
   await fetchJellyfinPagesSequential<unknown>(
     `${base}/Items?userId=${encodeURIComponent(userId)}&Recursive=true&IncludeItemTypes=Movie,Series&${JELLYFIN_NO_COLLECTION_GROUPING}&Filters=IsFavorite` +
@@ -1338,7 +1388,7 @@ const JELLYFIN_IDS_CHUNK = 100;
 
 /** itemId → that item's progress AS SEEN BY the user; absent = gone. */
 export async function getJellyfinUserStates(baseUrl: string, apiKey: string, userId: string, ids: readonly string[]): Promise<Map<string, JellyfinItemProgress>> {
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = trimServerBase(baseUrl);
   const valid = [...new Set(ids.filter((id) => /^[A-Za-z0-9-]{1,64}$/.test(id)))];
   const out = new Map<string, JellyfinItemProgress>();
   for (let i = 0; i < valid.length; i += JELLYFIN_IDS_CHUNK) {
@@ -1360,7 +1410,7 @@ export async function getJellyfinUserStates(baseUrl: string, apiKey: string, use
 /** Set one item's resume position for a user (user data only — no session). 404 on both routes = gone. */
 export async function setJellyfinPosition(baseUrl: string, apiKey: string, userId: string, itemId: string, positionMs: number): Promise<"marked" | "missing"> {
   if (!Number.isFinite(positionMs) || positionMs <= 0) return "missing";
-  const base = baseUrl.replace(/\/+$/, "");
+  const base = trimServerBase(baseUrl);
   const uid = encodeURIComponent(userId);
   const iid = encodeURIComponent(itemId);
   const body = JSON.stringify({ PlaybackPositionTicks: Math.round(positionMs) * TICKS_PER_MS });
@@ -1384,7 +1434,7 @@ export async function setJellyfinDownloadPolicy(
   userId: string,
   enabled: boolean,
 ): Promise<void> {
-  const base = baseUrl.replace(/\/$/, "");
+  const base = trimServerBase(baseUrl);
   const userRes = await safeFetchAdminConfigured(`${base}/Users/${encodeURIComponent(userId)}`, {
     headers: jellyfinAdminHeaders(apiKey),
     timeoutMs: 10_000,
@@ -1413,7 +1463,7 @@ export async function setJellyfinDownloadPolicy(
 }
 
 export async function getJellyfinUserCount(baseUrl: string, apiKey: string): Promise<number> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Users`;
+  const url = `${trimServerBase(baseUrl)}/Users`;
   const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinAdminHeaders(apiKey),
     timeoutMs: 10_000,
@@ -1438,7 +1488,7 @@ export async function listJellyfinMatchEntries(
   mediaType: "MOVIE" | "TV",
   libraryIds?: Set<string>,
 ): Promise<ServerMatchEntry[]> {
-  const base = baseUrl.replace(/\/$/, "");
+  const base = trimServerBase(baseUrl);
   const itemType = mediaType === "MOVIE" ? "Movie" : "Series";
   const query = (parent: string) =>
     `${base}/Items?${parent}IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&${JELLYFIN_NO_COLLECTION_GROUPING}&Recursive=true&Fields=ProviderIds,Path,ProductionYear&EnableImages=false&ImageTypeLimit=0&SortBy=SortName,Id&SortOrder=Ascending`;

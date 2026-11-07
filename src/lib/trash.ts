@@ -247,6 +247,10 @@ async function ghRawFile(repo: string, branch: string, path: string): Promise<st
 
 export interface RefreshResult {
   service: TrashService;
+  // `fetched` counts every upstream file of the kind that is accounted for:
+  // downloaded and valid, or skipped WITHOUT a download because its tree entry
+  // (path + blob sha) is exactly the stored row's. `unchanged` is the part of
+  // `fetched` that needed no write.
   customFormats: { fetched: number; updated: number; unchanged: number };
   customFormatGroups: { fetched: number; updated: number; unchanged: number };
   naming: { fetched: number; updated: number };
@@ -257,18 +261,64 @@ export interface RefreshResult {
   // specs keep their prior good upstreamSha so the next refresh re-attempts them. Surfaced in the
   // diagnostic endpoint so silent rejections become visible.
   validationSkipped?: number;
+  // Catalog specs whose trash_id the upstream tree no longer carries (removed or
+  // re-keyed upstream): `deleted` specs had no application at all; `disabled`
+  // counts applications switched off so the sync stops pushing the stale
+  // definition. Present only when something was pruned.
+  removedUpstream?: { deleted: number; disabled: number };
+  // The lock's AbortSignal stopped the pass early (guardrail 41). A partial pass
+  // prunes nothing.
+  aborted?: true;
 }
 
-// Shared mutable counter so each refreshXxx can record validator rejections without changing
+// Shared mutable counter so each kind's pass can record validator rejections without changing
 // the existing { fetched, updated, unchanged } return shape consumers depend on.
 interface ValidationCounter { count: number }
+
+// Thrown inside a file fetch when the payload fails its type guard — counted
+// as validationSkipped, unlike a network or JSON failure.
+class PayloadShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PayloadShapeError";
+  }
+}
+
+// What a refreshed kind left behind: the counts, the trash_ids the upstream tree
+// still carries, and whether that set is trustworthy enough to prune by.
+interface KindPass {
+  counts: { fetched: number; updated: number; unchanged: number };
+  seen: Set<string>;
+  complete: boolean;
+}
+
+interface RefreshContext {
+  service: TrashService;
+  tree: GhTreeEntry[];
+  // `${kind}::${trashId}` → the stored row's upstream identity.
+  storedByTrashId: Map<string, { sha: string | null; path: string }>;
+  // `${kind}::${path}::${sha}` → the trash_id of the stored row whose content
+  // is exactly that blob. A tree entry found here needs no download.
+  storedByBlob: Map<string, string>;
+  now: Date;
+  errors: string[];
+  validationCounter: ValidationCounter;
+  signal?: AbortSignal;
+}
+
+// Stored on an application whose spec the upstream catalog no longer carries.
+const REMOVED_UPSTREAM_ERROR =
+  "Removed from the TRaSH Guides catalog upstream, so it is no longer applied. Delete this application to drop the spec.";
 
 // Pulls the TRaSH-Guides tree from GitHub and upserts every spec kind (CFs, CF-groups, naming, profiles, sizes) for one service into TrashSpec.
 // `prefetchedTree` lets a caller refreshing BOTH services share one ~573 KB
 // recursive tree fetch instead of pulling the identical tree back-to-back.
+// `signal` (the advisory lock's, guardrail 41) is checked at every download
+// batch: an aborted pass returns what it did, marked `aborted`, and prunes nothing.
 export async function refreshCatalog(
   service: TrashService,
   prefetchedTree?: { entries: GhTreeEntry[]; truncated: boolean },
+  opts: { signal?: AbortSignal } = {},
 ): Promise<RefreshResult> {
   const errors: string[] = [];
   const validationCounter: ValidationCounter = { count: 0 };
@@ -283,450 +333,296 @@ export async function refreshCatalog(
 
   const existing = await prisma.trashSpec.findMany({
     where: { service },
-    select: { kind: true, trashId: true, upstreamSha: true },
+    select: { id: true, kind: true, trashId: true, upstreamSha: true, upstreamPath: true },
   });
-  const existingSha = new Map(
-    existing.map((s) => [`${s.kind}::${s.trashId}`, s.upstreamSha]),
-  );
+  const storedByTrashId = new Map<string, { sha: string | null; path: string }>();
+  const storedByBlob = new Map<string, string>();
+  for (const s of existing) {
+    storedByTrashId.set(`${s.kind}::${s.trashId}`, { sha: s.upstreamSha, path: s.upstreamPath });
+    if (s.upstreamSha) storedByBlob.set(`${s.kind}::${s.upstreamPath}::${s.upstreamSha}`, s.trashId);
+  }
+  const ctx: RefreshContext = {
+    service,
+    tree: trashTree,
+    storedByTrashId,
+    storedByBlob,
+    now,
+    errors,
+    validationCounter,
+    signal: opts.signal,
+  };
+  const paths = TRASH_PATHS[service];
 
-  const cf = await refreshCustomFormats(service, trashTree, existingSha, now, errors, validationCounter);
+  const cf = await refreshDir(ctx, {
+    kind: "CUSTOM_FORMAT",
+    dir: paths.cf,
+    label: "cf",
+    validate: isCustomFormatPayload,
+    toRow: (p) => ({ trashId: p.trash_id, name: p.name }),
+  });
   // CF-Groups must refresh AFTER CFs so member trash_ids resolve against fresh spec rows
-  const cfg = await refreshCustomFormatGroups(service, trashTree, existingSha, now, errors, validationCounter);
-  const naming = await refreshNaming(service, trashTree, existingSha, now, errors, validationCounter);
-  const qp = await refreshQualityProfiles(service, trashTree, existingSha, now, errors, validationCounter);
-  const qs = await refreshQualitySizes(service, trashTree, existingSha, now, errors, validationCounter);
+  const cfg = await refreshDir(ctx, {
+    kind: "CUSTOM_FORMAT_GROUP",
+    dir: paths.cfGroups,
+    label: "cf-group",
+    validate: isCustomFormatGroupPayload,
+    toRow: (p) => ({ trashId: p.trash_id, name: p.name, description: p.trash_description ?? null }),
+  });
+  const naming = await refreshNaming(ctx);
+  const qp = await refreshDir(ctx, {
+    kind: "QUALITY_PROFILE",
+    dir: paths.qualityProfiles,
+    label: "profile",
+    validate: isQualityProfilePayload,
+    toRow: (p) => ({ trashId: p.trash_id, name: p.name }),
+  });
+  const qs = await refreshDir(ctx, {
+    kind: "QUALITY_SIZE",
+    dir: paths.qualitySizes,
+    label: "quality-size",
+    validate: isQualitySizePayload,
+    // A size file's `type` is optional; the file name stands in for it.
+    toRow: (p, file) => ({ trashId: p.trash_id, name: p.type ?? fileSlug(file.path) }),
+  });
+
+  const aborted = opts.signal?.aborted === true;
+  // Prune only from a listing that is whole (not truncated) and a pass that read
+  // all of it: a kind with any fetch/parse/validation error, or no files listed
+  // at all (a moved upstream directory reads as empty), keeps every row.
+  let removedUpstream: { deleted: number; disabled: number } | null = null;
+  if (!aborted && !truncated) {
+    const passes = new Map<TrashSpecKind, KindPass>([
+      ["CUSTOM_FORMAT", cf],
+      ["CUSTOM_FORMAT_GROUP", cfg],
+      ["QUALITY_PROFILE", qp],
+      ["QUALITY_SIZE", qs],
+    ]);
+    const unseen = existing
+      .filter((s) => {
+        const pass = passes.get(s.kind);
+        return pass !== undefined && pass.complete && !pass.seen.has(s.trashId);
+      })
+      .map((s) => s.id);
+    const pruned = await pruneRemovedSpecs(unseen, now);
+    if (pruned.deleted > 0 || pruned.disabled > 0) removedUpstream = pruned;
+  }
 
   return {
     service,
-    customFormats: cf,
-    customFormatGroups: cfg,
+    customFormats: cf.counts,
+    customFormatGroups: cfg.counts,
     naming,
-    qualityProfiles: qp,
-    qualitySizes: qs,
+    qualityProfiles: { fetched: qp.counts.fetched, updated: qp.counts.updated },
+    qualitySizes: { fetched: qs.counts.fetched, updated: qs.counts.updated },
     errors,
     ...(validationCounter.count > 0 ? { validationSkipped: validationCounter.count } : {}),
+    ...(removedUpstream ? { removedUpstream } : {}),
+    ...(aborted ? { aborted: true as const } : {}),
   };
 }
 
-async function refreshCustomFormats(
-  service: TrashService,
-  trashTree: GhTreeEntry[],
-  existingSha: Map<string, string | null>,
-  now: Date,
-  errors: string[],
-  validationCounter: ValidationCounter,
-): Promise<{ fetched: number; updated: number; unchanged: number }> {
-  const dir = TRASH_PATHS[service].cf;
-  const files = trashTree.filter(
-    (t) => t.type === "blob" && t.path.startsWith(`${dir}/`) && t.path.endsWith(".json"),
+function fileSlug(path: string): string {
+  return path.split("/").pop()!.replace(/\.json$/, "");
+}
+
+interface DirDef<T> {
+  kind: TrashSpecKind;
+  dir: string;
+  // Prefix of this kind's lines in RefreshResult.errors.
+  label: string;
+  validate: (v: unknown) => v is T;
+  toRow: (parsed: T, file: GhTreeEntry) => { trashId: string; name: string; description?: string | null };
+}
+
+// One spec kind's directory: skip every file whose blob is already stored,
+// download the rest GH_CONCURRENCY at a time, validate, and upsert each batch's
+// changed rows in one transaction (sequential awaits, BATCH_TX_TIMEOUT —
+// guardrails 4/23c). A validator reject or failed download writes nothing for
+// that file, so its old sha stays and the next refresh retries it.
+async function refreshDir<T>(ctx: RefreshContext, def: DirDef<T>): Promise<KindPass> {
+  const files = ctx.tree.filter(
+    (t) => t.type === "blob" && t.path.startsWith(`${def.dir}/`) && t.path.endsWith(".json"),
   );
+  const counts = { fetched: 0, updated: 0, unchanged: 0 };
+  const seen = new Set<string>();
+  let complete = files.length > 0;
 
-  let fetched = 0;
-  let updated = 0;
-  let unchanged = 0;
+  const toFetch: GhTreeEntry[] = [];
+  for (const f of files) {
+    const storedTrashId = ctx.storedByBlob.get(`${def.kind}::${f.path}::${f.sha}`);
+    if (storedTrashId !== undefined) {
+      counts.fetched++;
+      counts.unchanged++;
+      seen.add(storedTrashId);
+    } else {
+      toFetch.push(f);
+    }
+  }
 
-  const toUpsert: Array<{
-    trashId: string;
-    name: string;
-    payload: TrashCustomFormat;
-    path: string;
-    sha: string;
-  }> = [];
-
-  for (let i = 0; i < files.length; i += GH_CONCURRENCY) {
-    const batch = files.slice(i, i + GH_CONCURRENCY);
+  for (let i = 0; i < toFetch.length; i += GH_CONCURRENCY) {
+    if (ctx.signal?.aborted) {
+      complete = false;
+      break;
+    }
+    const batch = toFetch.slice(i, i + GH_CONCURRENCY);
     const results = await Promise.allSettled(
       batch.map(async (f) => {
         const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
         const parsedRaw = JSON.parse(content) as unknown;
         // Validate shape against the apply-path's contract — malformed payloads are skipped so the
         // prior good upstreamSha is preserved for the next refresh attempt.
-        if (!isCustomFormatPayload(parsedRaw)) {
-          throw new Error(`cf payload shape mismatch: ${f.path}`);
+        if (!def.validate(parsedRaw)) {
+          throw new PayloadShapeError(`${def.label} payload shape mismatch: ${f.path}`);
         }
-        return { parsed: parsedRaw, file: f };
+        return { row: def.toRow(parsedRaw, f), payload: parsedRaw, file: f };
       }),
     );
+
+    const toUpsert: Array<{
+      trashId: string;
+      name: string;
+      description?: string | null;
+      payload: T;
+      path: string;
+      sha: string;
+    }> = [];
     for (const r of results) {
       if (r.status !== "fulfilled") {
+        complete = false;
+        if (r.reason instanceof PayloadShapeError) ctx.validationCounter.count++;
         const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
-        if (message.includes("payload shape mismatch")) validationCounter.count++;
-        errors.push(`cf: ${message}`);
+        ctx.errors.push(`${def.label}: ${message}`);
         continue;
       }
-      fetched++;
-      const { parsed, file } = r.value;
-      const key = `CUSTOM_FORMAT::${parsed.trash_id}`;
-      if (existingSha.get(key) === file.sha) {
-        unchanged++;
+      counts.fetched++;
+      const { row, payload, file } = r.value;
+      seen.add(row.trashId);
+      // The same content may sit at a new path (a moved file): rewrite the row so
+      // its stored path matches and the next refresh can skip the download.
+      const stored = ctx.storedByTrashId.get(`${def.kind}::${row.trashId}`);
+      if (stored && stored.sha === file.sha && stored.path === file.path) {
+        counts.unchanged++;
         continue;
       }
-      toUpsert.push({
-        trashId: parsed.trash_id,
-        name: parsed.name,
-        payload: parsed,
-        path: file.path,
-        sha: file.sha,
-      });
+      toUpsert.push({ ...row, payload, path: file.path, sha: file.sha });
+    }
+
+    if (toUpsert.length > 0) {
+      await prisma.$transaction(async (tx) => {
+        for (const row of toUpsert) {
+          const fields = {
+            name: row.name,
+            ...(row.description !== undefined ? { description: row.description } : {}),
+            payload: row.payload as unknown as object,
+            upstreamPath: row.path,
+            upstreamSha: row.sha,
+            fetchedAt: ctx.now,
+          };
+          await tx.trashSpec.upsert({
+            where: { service_kind_trashId: { service: ctx.service, kind: def.kind, trashId: row.trashId } },
+            update: fields,
+            create: { service: ctx.service, kind: def.kind, trashId: row.trashId, ...fields },
+          });
+        }
+      }, { timeout: BATCH_TX_TIMEOUT });
+      counts.updated += toUpsert.length;
     }
   }
 
-  if (toUpsert.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      for (const row of toUpsert) {
-        await tx.trashSpec.upsert({
-          where: { service_kind_trashId: { service, kind: "CUSTOM_FORMAT", trashId: row.trashId } },
-          update: {
-            name: row.name,
-            payload: row.payload as object,
-            upstreamPath: row.path,
-            upstreamSha: row.sha,
-            fetchedAt: now,
-          },
-          create: {
-            service,
-            kind: "CUSTOM_FORMAT",
-            trashId: row.trashId,
-            name: row.name,
-            payload: row.payload as object,
-            upstreamPath: row.path,
-            upstreamSha: row.sha,
-            fetchedAt: now,
-          },
-        });
-        updated++;
-      }
-    }, { timeout: BATCH_TX_TIMEOUT });
-  }
-
-  return { fetched, updated, unchanged };
+  return { counts, seen, complete };
 }
 
-async function refreshCustomFormatGroups(
-  service: TrashService,
-  trashTree: GhTreeEntry[],
-  existingSha: Map<string, string | null>,
-  now: Date,
-  errors: string[],
-  validationCounter: ValidationCounter,
-): Promise<{ fetched: number; updated: number; unchanged: number }> {
-  const dir = TRASH_PATHS[service].cfGroups;
-  const files = trashTree.filter(
-    (t) => t.type === "blob" && t.path.startsWith(`${dir}/`) && t.path.endsWith(".json"),
-  );
-
-  let fetched = 0;
-  let updated = 0;
-  let unchanged = 0;
-
-  const toUpsert: Array<{
-    trashId: string;
-    name: string;
-    description: string | null;
-    payload: TrashCustomFormatGroup;
-    path: string;
-    sha: string;
-  }> = [];
-
-  for (let i = 0; i < files.length; i += GH_CONCURRENCY) {
-    const batch = files.slice(i, i + GH_CONCURRENCY);
-    const results = await Promise.allSettled(
-      batch.map(async (f) => {
-        const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
-        const parsedRaw = JSON.parse(content) as unknown;
-        if (!isCustomFormatGroupPayload(parsedRaw)) {
-          throw new Error(`cf-group payload shape mismatch: ${f.path}`);
-        }
-        return { parsed: parsedRaw, file: f };
-      }),
-    );
-    for (const r of results) {
-      if (r.status !== "fulfilled") {
-        const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
-        if (message.includes("payload shape mismatch")) validationCounter.count++;
-        errors.push(`cf-group: ${message}`);
-        continue;
-      }
-      fetched++;
-      const { parsed, file } = r.value;
-      const key = `CUSTOM_FORMAT_GROUP::${parsed.trash_id}`;
-      if (existingSha.get(key) === file.sha) {
-        unchanged++;
-        continue;
-      }
-      toUpsert.push({
-        trashId: parsed.trash_id,
-        name: parsed.name,
-        description: parsed.trash_description ?? null,
-        payload: parsed,
-        path: file.path,
-        sha: file.sha,
-      });
-    }
-  }
-
-  if (toUpsert.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      for (const row of toUpsert) {
-        await tx.trashSpec.upsert({
-          where: { service_kind_trashId: { service, kind: "CUSTOM_FORMAT_GROUP", trashId: row.trashId } },
-          update: {
-            name: row.name,
-            description: row.description,
-            payload: row.payload as object,
-            upstreamPath: row.path,
-            upstreamSha: row.sha,
-            fetchedAt: now,
-          },
-          create: {
-            service,
-            kind: "CUSTOM_FORMAT_GROUP",
-            trashId: row.trashId,
-            name: row.name,
-            description: row.description,
-            payload: row.payload as object,
-            upstreamPath: row.path,
-            upstreamSha: row.sha,
-            fetchedAt: now,
-          },
-        });
-        updated++;
-      }
-    }, { timeout: BATCH_TX_TIMEOUT });
-  }
-
-  return { fetched, updated, unchanged };
-}
-
-async function refreshNaming(
-  service: TrashService,
-  trashTree: GhTreeEntry[],
-  existingSha: Map<string, string | null>,
-  now: Date,
-  errors: string[],
-  validationCounter: ValidationCounter,
-): Promise<{ fetched: number; updated: number }> {
-  const path = TRASH_PATHS[service].naming;
-  const file = trashTree.find((t) => t.type === "blob" && t.path === path);
+async function refreshNaming(ctx: RefreshContext): Promise<{ fetched: number; updated: number }> {
+  const path = TRASH_PATHS[ctx.service].naming;
+  const file = ctx.tree.find((t) => t.type === "blob" && t.path === path);
   if (!file) {
-    errors.push(`naming: upstream file missing (${path})`);
+    ctx.errors.push(`naming: upstream file missing (${path})`);
     return { fetched: 0, updated: 0 };
   }
+  const trashId = "default";
+  if (ctx.storedByBlob.get(`NAMING::${file.path}::${file.sha}`) === trashId) {
+    return { fetched: 1, updated: 0 };
+  }
+  if (ctx.signal?.aborted) return { fetched: 0, updated: 0 };
 
   let raw: string;
   try {
     raw = await ghRawFile(TRASH_REPO, TRASH_BRANCH, file.path);
   } catch (err) {
-    errors.push(`naming: ${err instanceof Error ? err.message : String(err)}`);
+    ctx.errors.push(`naming: ${err instanceof Error ? err.message : String(err)}`);
     return { fetched: 0, updated: 0 };
   }
   let parsed: Record<string, unknown>;
   try {
     const parsedRaw = JSON.parse(raw) as unknown;
     if (!isNamingPayload(parsedRaw)) {
-      validationCounter.count++;
-      errors.push(`naming: payload shape mismatch (${file.path})`);
+      ctx.validationCounter.count++;
+      ctx.errors.push(`naming: payload shape mismatch (${file.path})`);
       return { fetched: 1, updated: 0 };
     }
     parsed = parsedRaw;
   } catch (err) {
-    errors.push(`naming: parse failed ${err instanceof Error ? err.message : String(err)}`);
+    ctx.errors.push(`naming: parse failed ${err instanceof Error ? err.message : String(err)}`);
     return { fetched: 0, updated: 0 };
   }
 
-  const trashId = "default";
-  if (existingSha.get(`NAMING::${trashId}`) === file.sha) {
+  const stored = ctx.storedByTrashId.get(`NAMING::${trashId}`);
+  if (stored && stored.sha === file.sha && stored.path === file.path) {
     return { fetched: 1, updated: 0 };
   }
+  const fields = {
+    name: "TRaSH Standard Naming",
+    payload: parsed as object,
+    upstreamPath: file.path,
+    upstreamSha: file.sha,
+    fetchedAt: ctx.now,
+  };
   await prisma.trashSpec.upsert({
-    where: { service_kind_trashId: { service, kind: "NAMING", trashId } },
-    update: {
-      name: "TRaSH Standard Naming",
-      payload: parsed as object,
-      upstreamPath: file.path,
-      upstreamSha: file.sha,
-      fetchedAt: now,
-    },
-    create: {
-      service,
-      kind: "NAMING",
-      trashId,
-      name: "TRaSH Standard Naming",
-      payload: parsed as object,
-      upstreamPath: file.path,
-      upstreamSha: file.sha,
-      fetchedAt: now,
-    },
+    where: { service_kind_trashId: { service: ctx.service, kind: "NAMING", trashId } },
+    update: fields,
+    create: { service: ctx.service, kind: "NAMING", trashId, ...fields },
   });
   return { fetched: 1, updated: 1 };
 }
 
-async function refreshQualityProfiles(
-  service: TrashService,
-  trashTree: GhTreeEntry[],
-  existingSha: Map<string, string | null>,
+// Retires specs the upstream catalog dropped. A spec nobody ever applied is
+// deleted. One that has applications is KEPT, and its enabled applications are
+// switched off with an explanation, so the sync stops pushing a definition
+// TRaSH withdrew while the admin can still see what happened; deleting the
+// application lets the next refresh drop the spec. Nothing here cascades an
+// application away (TrashApplication is onDelete: Cascade).
+async function pruneRemovedSpecs(
+  specIds: string[],
   now: Date,
-  errors: string[],
-  validationCounter: ValidationCounter,
-): Promise<{ fetched: number; updated: number }> {
-  const dir = TRASH_PATHS[service].qualityProfiles;
-  const files = trashTree.filter(
-    (t) => t.type === "blob" && t.path.startsWith(`${dir}/`) && t.path.endsWith(".json"),
-  );
-
-  let fetched = 0;
-  let updated = 0;
-
-  for (let i = 0; i < files.length; i += GH_CONCURRENCY) {
-    const batch = files.slice(i, i + GH_CONCURRENCY);
-    const results = await Promise.allSettled(
-      batch.map(async (f) => {
-        const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
-        const parsedRaw = JSON.parse(content) as unknown;
-        if (!isQualityProfilePayload(parsedRaw)) {
-          throw new Error(`profile payload shape mismatch: ${f.path}`);
-        }
-        const slug = f.path.split("/").pop()!.replace(/\.json$/, "");
-        const trashId = parsedRaw.trash_id ?? slug;
-        const name = parsedRaw.name ?? slug;
-        return { trashId, name, payload: parsedRaw, file: f };
-      }),
-    );
-
-    const toUpsert: Array<{
-      trashId: string;
-      name: string;
-      payload: TrashQualityProfile;
-      path: string;
-      sha: string;
-    }> = [];
-    for (const r of results) {
-      if (r.status !== "fulfilled") {
-        const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
-        if (message.includes("payload shape mismatch")) validationCounter.count++;
-        errors.push(`profile: ${message}`);
-        continue;
-      }
-      fetched++;
-      const { trashId, name, payload, file } = r.value;
-      if (existingSha.get(`QUALITY_PROFILE::${trashId}`) === file.sha) continue;
-      toUpsert.push({ trashId, name, payload, path: file.path, sha: file.sha });
+): Promise<{ deleted: number; disabled: number }> {
+  if (specIds.length === 0) return { deleted: 0, disabled: 0 };
+  const apps = await prisma.trashApplication.findMany({
+    where: { trashSpecId: { in: specIds } },
+    select: { trashSpecId: true },
+  });
+  const applied = new Set(apps.map((a) => a.trashSpecId));
+  const keep = specIds.filter((id) => applied.has(id));
+  const drop = specIds.filter((id) => !applied.has(id));
+  return prisma.$transaction(async (tx) => {
+    let disabled = 0;
+    if (keep.length > 0) {
+      const r = await tx.trashApplication.updateMany({
+        where: { trashSpecId: { in: keep }, enabled: true },
+        data: { enabled: false, lastError: REMOVED_UPSTREAM_ERROR, lastErrorAt: now },
+      });
+      disabled = r.count;
     }
-
-    if (toUpsert.length > 0) {
-      await prisma.$transaction(async (tx) => {
-        for (const row of toUpsert) {
-          await tx.trashSpec.upsert({
-            where: { service_kind_trashId: { service, kind: "QUALITY_PROFILE", trashId: row.trashId } },
-            update: {
-              name: row.name,
-              payload: row.payload as unknown as object,
-              upstreamPath: row.path,
-              upstreamSha: row.sha,
-              fetchedAt: now,
-            },
-            create: {
-              service,
-              kind: "QUALITY_PROFILE",
-              trashId: row.trashId,
-              name: row.name,
-              payload: row.payload as unknown as object,
-              upstreamPath: row.path,
-              upstreamSha: row.sha,
-              fetchedAt: now,
-            },
-          });
-          updated++;
-        }
-      }, { timeout: BATCH_TX_TIMEOUT });
+    let deleted = 0;
+    if (drop.length > 0) {
+      // `none` re-checks inside the write, so an application created since the
+      // read above keeps its spec.
+      const r = await tx.trashSpec.deleteMany({
+        where: { id: { in: drop }, applications: { none: {} } },
+      });
+      deleted = r.count;
     }
-  }
-
-  return { fetched, updated };
-}
-
-async function refreshQualitySizes(
-  service: TrashService,
-  trashTree: GhTreeEntry[],
-  existingSha: Map<string, string | null>,
-  now: Date,
-  errors: string[],
-  validationCounter: ValidationCounter,
-): Promise<{ fetched: number; updated: number }> {
-  const dir = TRASH_PATHS[service].qualitySizes;
-  const files = trashTree.filter(
-    (t) => t.type === "blob" && t.path.startsWith(`${dir}/`) && t.path.endsWith(".json"),
-  );
-
-  let fetched = 0;
-  let updated = 0;
-
-  for (let i = 0; i < files.length; i += GH_CONCURRENCY) {
-    const batch = files.slice(i, i + GH_CONCURRENCY);
-    const results = await Promise.allSettled(
-      batch.map(async (f) => {
-        const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
-        const parsedRaw = JSON.parse(content) as unknown;
-        if (!isQualitySizePayload(parsedRaw)) {
-          throw new Error(`quality-size payload shape mismatch: ${f.path}`);
-        }
-        const slug = f.path.split("/").pop()!.replace(/\.json$/, "");
-        const trashId = parsedRaw.trash_id ?? slug;
-        const name = parsedRaw.type ?? slug;
-        return { trashId, name, payload: parsedRaw, file: f };
-      }),
-    );
-
-    const toUpsert: Array<{
-      trashId: string;
-      name: string;
-      payload: TrashQualitySize;
-      path: string;
-      sha: string;
-    }> = [];
-    for (const r of results) {
-      if (r.status !== "fulfilled") {
-        const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
-        if (message.includes("payload shape mismatch")) validationCounter.count++;
-        errors.push(`quality-size: ${message}`);
-        continue;
-      }
-      fetched++;
-      const { trashId, name, payload, file } = r.value;
-      if (existingSha.get(`QUALITY_SIZE::${trashId}`) === file.sha) continue;
-      toUpsert.push({ trashId, name, payload, path: file.path, sha: file.sha });
-    }
-
-    if (toUpsert.length > 0) {
-      await prisma.$transaction(async (tx) => {
-        for (const row of toUpsert) {
-          await tx.trashSpec.upsert({
-            where: { service_kind_trashId: { service, kind: "QUALITY_SIZE", trashId: row.trashId } },
-            update: {
-              name: row.name,
-              payload: row.payload as unknown as object,
-              upstreamPath: row.path,
-              upstreamSha: row.sha,
-              fetchedAt: now,
-            },
-            create: {
-              service,
-              kind: "QUALITY_SIZE",
-              trashId: row.trashId,
-              name: row.name,
-              payload: row.payload as unknown as object,
-              upstreamPath: row.path,
-              upstreamSha: row.sha,
-              fetchedAt: now,
-            },
-          });
-          updated++;
-        }
-      }, { timeout: BATCH_TX_TIMEOUT });
-    }
-  }
-
-  return { fetched, updated };
+    return { deleted, disabled };
+  }, { timeout: BATCH_TX_TIMEOUT });
 }
 
 export interface ApplyResult {
@@ -740,6 +636,10 @@ export interface ApplyResult {
   // True when the apply landed via a POST after a PUT-404 (Arr resource was deleted out-of-band).
   // Surfaced to the UI and audit log so admins can tell drift recovery from normal applies.
   recreated?: boolean;
+  // QUALITY_SIZE only: every quality this spec sets was set again by a later
+  // spec in the same merge (see applyQualitySizes), so none of its values were
+  // sent. The names are those later specs'.
+  supersededBy?: string[];
 }
 
 function formatArrError(err: unknown): string {
@@ -784,12 +684,21 @@ function normalizeSpecFields(specifications: unknown[]): unknown[] {
   });
 }
 
+// The instance an apply names has no URL/API key. applySpecs records nothing
+// for it: there is no instance to have failed against.
+class ArrNotConfiguredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArrNotConfiguredError";
+  }
+}
+
 async function resolveCfg(service: TrashService, variant: ArrVariant = "hd"): Promise<ArrCfg> {
   const key = service === "RADARR" ? "radarr" : "sonarr";
   const cfg = await getArrCfg(key, variant);
   if (!cfg) {
     const instance = variant === "hd" ? "" : variant;
-    throw new Error(`${service}${instance ? ` (${instance})` : ""} is not configured`);
+    throw new ArrNotConfiguredError(`${service}${instance ? ` (${instance})` : ""} is not configured`);
   }
   return cfg;
 }
@@ -1187,7 +1096,15 @@ export async function applyNaming(
   }
 }
 
-// Overrides the instance's quality-definition min/preferred/max sizes with the given QUALITY_SIZE specs (last writer wins per quality name).
+// Orders QUALITY_SIZE specs for the merge: by name, then trash_id, so the spec
+// that wins a quality two of them set never depends on database row order.
+function compareSizeSpecs(a: { name: string; trashId: string }, b: { name: string; trashId: string }): number {
+  if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+  if (a.trashId !== b.trashId) return a.trashId < b.trashId ? -1 : 1;
+  return 0;
+}
+
+// Overrides the instance's quality-definition min/preferred/max sizes with the given QUALITY_SIZE specs (last writer wins per quality name, in compareSizeSpecs order).
 export async function applyQualitySizes(
   service: TrashService,
   specIds: string[],
@@ -1195,21 +1112,36 @@ export async function applyQualitySizes(
 ): Promise<ApplyResult[]> {
   const arrInstance = variant === "hd" ? "" : variant;
   const cfg = await resolveCfg(service, variant);
-  const specs = await prisma.trashSpec.findMany({
+  const specs = (await prisma.trashSpec.findMany({
     where: { id: { in: specIds }, service, kind: "QUALITY_SIZE" },
-  });
+  })).sort(compareSizeSpecs);
   if (specs.length === 0) return [];
 
   try {
 
-    // Multiple specs may reference the same quality name; last writer wins when merging
+    // Multiple specs may reference the same quality name; the last writer in
+    // compareSizeSpecs order wins. `owner` remembers which spec that was.
     const combined = new Map<string, { min: number; preferred?: number; max: number }>();
-    for (const spec of specs) {
+    const owner = new Map<string, number>();
+    specs.forEach((spec, i) => {
       const payload = spec.payload as unknown as TrashQualitySize;
       for (const q of payload.qualities ?? []) {
         combined.set(q.quality, { min: q.min, preferred: q.preferred, max: q.max });
+        owner.set(q.quality, i);
       }
-    }
+    });
+    // A spec none of whose qualities it still owns contributed nothing.
+    const supersededBy = (i: number): string[] | undefined => {
+      const qualities = (specs[i].payload as unknown as TrashQualitySize).qualities ?? [];
+      if (qualities.length === 0) return undefined;
+      const winners = new Set<number>();
+      for (const q of qualities) {
+        const w = owner.get(q.quality);
+        if (w === undefined || w === i) return undefined;
+        winners.add(w);
+      }
+      return [...winners].sort((a, b) => a - b).map((w) => specs[w].name);
+    };
 
     const remote = await arrFetch<Array<{ id: number; quality: { id: number; name: string }; title: string; weight: number; minSize?: number; maxSize?: number; preferredSize?: number }>>(
       cfg,
@@ -1238,7 +1170,11 @@ export async function applyQualitySizes(
     }
 
     const results: ApplyResult[] = [];
-    for (const spec of specs) results.push(await recordApply(spec, { ok: true }, arrInstance));
+    for (let i = 0; i < specs.length; i++) {
+      const result = await recordApply(specs[i], { ok: true }, arrInstance);
+      const by = supersededBy(i);
+      results.push(by ? { ...result, supersededBy: by } : result);
+    }
     return results;
   } catch (err) {
     const message = formatArrError(err);
@@ -1268,6 +1204,116 @@ interface ProfileBuildRemotes {
   schema: Record<string, unknown>;
   remoteLanguages: Array<{ id: number; name: string }>;
   remoteCfs: Array<{ id: number; name: string; specifications?: Array<{ fields?: Array<{ name?: string; value?: unknown }> }> }>;
+}
+
+// Builds a profile's quality list from the TRaSH profile, keeping TRaSH's
+// grouping and ranking rather than the schema's:
+//   - TRaSH lists items best first; the Radarr/Sonarr API lists them worst
+//     first (a higher index is a better quality), so TRaSH's order is reversed.
+//   - A TRaSH group takes the id of the schema group with its name, else a
+//     fresh id above every schema group id. Its members are pulled out of
+//     wherever the schema put them. A group left with one known quality is sent
+//     as that quality: the arr refuses a one-member group.
+//   - Every schema quality appears exactly once. Those TRaSH doesn't name go
+//     first (lowest), disallowed, in schema order; an untouched schema group
+//     stays a group. A name the schema doesn't know is skipped.
+// `idByName` maps each top-level item's name to its id, for the cutoff.
+function buildProfileItems(
+  schemaItems: RemoteQualityItem[],
+  profileItems: NonNullable<TrashQualityProfile["items"]>,
+): { items: RemoteQualityItem[]; idByName: Map<string, number> } {
+  const leafByName = new Map<string, RemoteQualityItem>();
+  const schemaGroupByName = new Map<string, RemoteQualityItem>();
+  let maxGroupId = 999;
+  for (const item of schemaItems) {
+    if (item.items?.length) {
+      if (item.name && !schemaGroupByName.has(item.name)) schemaGroupByName.set(item.name, item);
+      if (typeof item.id === "number" && item.id > maxGroupId) maxGroupId = item.id;
+      for (const sub of item.items) {
+        if (sub.quality && !leafByName.has(sub.quality.name)) leafByName.set(sub.quality.name, sub);
+      }
+    } else if (item.quality && !leafByName.has(item.quality.name)) {
+      leafByName.set(item.quality.name, item);
+    }
+  }
+
+  const placed = new Set<string>();
+  const usedGroupIds = new Set<number>();
+  const idByName = new Map<string, number>();
+  const nameId = (name: string, id: number) => {
+    if (!idByName.has(name)) idByName.set(name, id);
+  };
+  let nextGroupId = maxGroupId + 1;
+  const take = (name: string, allowed: boolean): RemoteQualityItem | null => {
+    const leaf = leafByName.get(name);
+    if (!leaf || placed.has(name)) return null;
+    placed.add(name);
+    return { ...leaf, allowed };
+  };
+
+  const ranked: RemoteQualityItem[] = [];
+  for (const entry of profileItems) {
+    // An entry without members that names a schema GROUP stands for that group.
+    const schemaGroup = schemaGroupByName.get(entry.name);
+    const memberNames = entry.items?.length
+      ? entry.items
+      : !leafByName.has(entry.name) && schemaGroup
+        ? (schemaGroup.items ?? []).flatMap((sub) => (sub.quality ? [sub.quality.name] : []))
+        : null;
+    if (memberNames === null) {
+      const leaf = take(entry.name, entry.allowed);
+      if (leaf) {
+        ranked.push(leaf);
+        nameId(entry.name, leaf.quality!.id);
+      }
+      continue;
+    }
+    const members: RemoteQualityItem[] = [];
+    for (const n of memberNames) {
+      const leaf = take(n, entry.allowed);
+      if (leaf) members.push(leaf);
+    }
+    if (members.length === 0) continue;
+    if (members.length === 1) {
+      ranked.push(members[0]);
+      nameId(entry.name, members[0].quality!.id);
+      nameId(members[0].quality!.name, members[0].quality!.id);
+      continue;
+    }
+    const id = schemaGroup && typeof schemaGroup.id === "number" && !usedGroupIds.has(schemaGroup.id)
+      ? schemaGroup.id
+      : nextGroupId++;
+    usedGroupIds.add(id);
+    ranked.push({ ...(schemaGroup ?? {}), id, name: entry.name, allowed: entry.allowed, items: members });
+    nameId(entry.name, id);
+  }
+
+  const rest: RemoteQualityItem[] = [];
+  for (const item of schemaItems) {
+    if (item.items?.length) {
+      const subs = item.items.filter((sub) => sub.quality && !placed.has(sub.quality.name));
+      const untouched = subs.length === item.items.length;
+      if (untouched && typeof item.id === "number" && !usedGroupIds.has(item.id)) {
+        for (const sub of subs) placed.add(sub.quality!.name);
+        usedGroupIds.add(item.id);
+        rest.push({ ...item, allowed: false, items: subs.map((sub) => ({ ...sub, allowed: false })) });
+        if (item.name) nameId(item.name, item.id);
+        continue;
+      }
+      for (const sub of subs) {
+        if (placed.has(sub.quality!.name)) continue;
+        placed.add(sub.quality!.name);
+        rest.push({ ...sub, allowed: false });
+        nameId(sub.quality!.name, sub.quality!.id);
+      }
+    } else if (item.quality && !placed.has(item.quality.name)) {
+      placed.add(item.quality.name);
+      rest.push({ ...item, allowed: false });
+      nameId(item.quality.name, item.quality.id);
+    }
+  }
+
+  return { items: [...rest, ...ranked.reverse()], idByName };
 }
 
 async function buildProfileBody(
@@ -1301,26 +1347,41 @@ async function buildProfileBody(
     },
     include: { trashSpec: true },
   });
-  const appliedByTrashId = new Map(
-    applications
-      .filter((a) => a.remoteId != null)
-      .map((a) => [a.trashSpec.trashId, a.remoteId as number]),
-  );
-  const specsMissingApplication = await prisma.trashSpec.findMany({
-    where: {
-      service,
-      kind: "CUSTOM_FORMAT",
-      trashId: { in: [...referencedTrashIds].filter((id) => !appliedByTrashId.has(id)) },
-    },
-  });
+
+  // The live CF list comes BEFORE any stored remoteId is trusted. An arr reset or
+  // a CF deleted and recreated outside Summonarr leaves a stored id naming
+  // nothing, or an unrelated CF: scoring by it would give the real CF 0 and the
+  // unrelated one this CF's score. resolveRemoteId re-checks each id by name; an
+  // id the live list doesn't carry counts as unapplied and joins the cascade.
+  let remoteCfs: RemoteCf[] = shared ? shared.remoteCfs : await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
+  const liveNameById = new Map(remoteCfs.map((r) => [r.id, r.name]));
+  const liveIdByName = new Map(remoteCfs.map((r) => [r.name, r.id]));
+  type SpecRow = (typeof applications)[number]["trashSpec"];
+  const appliedByTrashId = new Map<string, number>();
+  const staleSpecs: SpecRow[] = [];
+  for (const a of applications) {
+    if (a.remoteId == null) continue;
+    const live = resolveRemoteId(a.remoteId, a.trashSpec.name, liveNameById, liveIdByName);
+    if (live != null && liveNameById.has(live)) appliedByTrashId.set(a.trashSpec.trashId, live);
+    else staleSpecs.push(a.trashSpec);
+  }
+  const staleTrashIds = new Set(staleSpecs.map((s) => s.trashId));
+  const specsMissingApplication: SpecRow[] = [
+    ...staleSpecs,
+    ...(await prisma.trashSpec.findMany({
+      where: {
+        service,
+        kind: "CUSTOM_FORMAT",
+        trashId: { in: [...referencedTrashIds].filter((id) => !appliedByTrashId.has(id) && !staleTrashIds.has(id)) },
+      },
+    })),
+  ];
   // Every referenced CF spec that exists is already in memory: a referenced
-  // trashId is either in appliedByTrashId (its row rode along on the
-  // application read above) or it is not (then it is in specsMissingApplication).
-  // Build the score lookup from that union now — the dependency cascade below
+  // trashId either rode along on the application read above or was read just
+  // now. Build the score lookup from that union — the dependency cascade below
   // writes TrashApplication rows and the *arr server, never TrashSpec.payload,
   // so these rows stay current — instead of re-reading the identical set
   // (payload JSON included) a third time per profile.
-  type SpecRow = (typeof specsMissingApplication)[number];
   const specByTrashId = new Map<string, SpecRow>();
   for (const a of applications) specByTrashId.set(a.trashSpec.trashId, a.trashSpec);
   for (const s of specsMissingApplication) specByTrashId.set(s.trashId, s);
@@ -1339,21 +1400,19 @@ async function buildProfileBody(
     }
   }
 
-  // The shared prefetched CF list is valid only while the dependency cascade
-  // created nothing — a cascade-created CF must land in formatItems, so refetch
-  // in that case.
-  const remoteCfs = shared && !cascadeApplied
-    ? shared.remoteCfs
-    : await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
-  // Write the refetch back into the shared batch state. A cascade CREATES custom
-  // formats upstream, and the DB then records them as applied — so the NEXT
-  // profile in the batch computes cascadeApplied=false and takes the shared list,
-  // which without this line is the pre-cascade snapshot missing those very CFs.
-  // Their formatItems entries would be absent and Radarr/Sonarr would read the
-  // scores as unset, silently dropping TRaSH's (often large negative) scores for
-  // every profile after the first cascade. Costs no extra request — the refetch
-  // above already happened.
-  if (shared && cascadeApplied) shared.remoteCfs = remoteCfs;
+  // The CF list read above is valid only while the dependency cascade created
+  // nothing — a cascade-created CF must land in formatItems, so refetch in that
+  // case. Write the refetch back into the shared batch state too: the cascade
+  // CREATED custom formats upstream and the DB now records them as applied, so
+  // the NEXT profile in the batch computes cascadeApplied=false and takes the
+  // shared list — which without the write-back is the pre-cascade snapshot
+  // missing those very CFs. Their formatItems entries would be absent and
+  // Radarr/Sonarr would read the scores as unset, silently dropping TRaSH's
+  // (often large negative) scores for every profile after the first cascade.
+  if (cascadeApplied) {
+    remoteCfs = await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
+    if (shared) shared.remoteCfs = remoteCfs;
+  }
 
   // Some CFs in Arr embed a trash_id field in their spec metadata — use it to map remote CFs we didn't apply ourselves
   for (const cf of remoteCfs) {
@@ -1366,43 +1425,8 @@ async function buildProfileBody(
     }
   }
 
-  const wantedNames = new Set<string>();
-  for (const q of profile.items ?? []) {
-    if (q.allowed) {
-      wantedNames.add(q.name);
-      for (const sub of q.items ?? []) wantedNames.add(sub);
-    }
-  }
-  const items: RemoteQualityItem[] = schemaItems.map((item) => {
-    if (item.items?.length) {
-      const allowed = wantedNames.has(item.name ?? "");
-      return {
-        ...item,
-        allowed,
-        items: item.items.map((sub) => ({
-          ...sub,
-          allowed: allowed && (sub.quality ? wantedNames.has(sub.quality.name) : false),
-        })),
-      };
-    }
-    if (item.quality) {
-      return { ...item, allowed: wantedNames.has(item.quality.name) };
-    }
-    return { ...item, allowed: false };
-  });
-
-  const cutoffName = profile.cutoff ?? "";
-  let cutoff: number | undefined;
-  for (const item of items) {
-    if (item.items?.length && item.name === cutoffName) {
-      cutoff = (item as { id?: number }).id;
-      if (cutoff != null) break;
-    }
-    if (!item.items?.length && item.quality?.name === cutoffName) {
-      cutoff = item.quality.id;
-      break;
-    }
-  }
+  const { items, idByName } = buildProfileItems(schemaItems, profile.items ?? []);
+  const cutoff = idByName.get(profile.cutoff ?? "");
 
   const scoreSet = profile.score_set ?? "default";
   const scoreByTrashId = new Map<string, number>();
@@ -1412,14 +1436,16 @@ async function buildProfileBody(
     const score = trashScores?.[scoreSet] ?? trashScores?.default ?? 0;
     scoreByTrashId.set(trashId, score);
   }
+  // One reverse index, built once the mapping is final, so each remote CF is a
+  // single lookup however many the arr sends (guardrail 5i). The first trash_id
+  // mapped to a remote id keeps it: stored applications, then the cascade, then
+  // trash_id fields.
+  const trashIdByRemoteId = new Map<number, string>();
+  for (const [tid, rid] of appliedByTrashId) {
+    if (!trashIdByRemoteId.has(rid)) trashIdByRemoteId.set(rid, tid);
+  }
   const formatItems: RemoteFormatItem[] = remoteCfs.map((cf) => {
-    let trashId: string | undefined;
-    for (const [tid, rid] of appliedByTrashId.entries()) {
-      if (rid === cf.id) {
-        trashId = tid;
-        break;
-      }
-    }
+    const trashId = trashIdByRemoteId.get(cf.id);
     const score = trashId ? scoreByTrashId.get(trashId) ?? 0 : 0;
     return { format: cf.id, name: cf.name, score };
   });
@@ -1553,12 +1579,45 @@ export async function applyQualityProfiles(
   return results;
 }
 
+// The results for one applySpecs kind group whose apply threw before it could
+// record per-spec outcomes. An unconfigured instance is answered without a DB
+// write (no stray TrashApplication rows for an instance that doesn't exist);
+// any other failure is recorded against each spec, as a per-spec failure is.
+async function failedGroupResults(
+  specs: Array<{ id: string; kind: TrashSpecKind; trashId: string; name: string }>,
+  err: unknown,
+  arrInstance: string,
+): Promise<ApplyResult[]> {
+  const error = formatArrError(err);
+  const notConfigured = err instanceof Error && err.name === "ArrNotConfiguredError";
+  const results: ApplyResult[] = [];
+  for (const spec of specs) {
+    const unrecorded: ApplyResult = { specId: spec.id, kind: spec.kind, trashId: spec.trashId, name: spec.name, ok: false, error };
+    if (notConfigured) {
+      results.push(unrecorded);
+      continue;
+    }
+    try {
+      results.push(await recordApply(spec, { ok: false, error }, arrInstance));
+    } catch (recordErr) {
+      console.warn("[trash] could not record a failed apply:", recordErr instanceof Error ? recordErr.message : recordErr);
+      results.push(unrecorded);
+    }
+  }
+  return results;
+}
+
 // Applies a mixed set of specs by kind in dependency order (groups → CFs → profiles → naming → sizes), deduping CFs already cascaded by a group.
+// Each (service, kind) group is contained: one that throws (its instance not
+// configured, its arr unreachable mid-read) answers ok:false for its own specs
+// and the rest still run, so the caller can return and audit what was written.
 export async function applySpecs(specIds: string[], variant: ArrVariant = "hd"): Promise<ApplyResult[]> {
+  const arrInstance = variant === "hd" ? "" : variant;
   const specs = await prisma.trashSpec.findMany({
     where: { id: { in: specIds } },
-    select: { id: true, service: true, kind: true, payload: true },
+    select: { id: true, service: true, kind: true, trashId: true, name: true, payload: true },
   });
+  const specById = new Map(specs.map((s) => [s.id, s]));
 
   // Dedupe: if a CF-Group is being applied alongside any of its member CFs, drop the redundant
   // standalone CFs — the group's apply cascade already applies them, and a second PUT would just
@@ -1614,11 +1673,17 @@ export async function applySpecs(specIds: string[], variant: ArrVariant = "hd"):
   for (const key of orderedKeys) {
     const ids = groups.get(key)!;
     const [service, kind] = key.split("::") as [TrashService, TrashSpecKind];
-    if (kind === "CUSTOM_FORMAT") all.push(...(await applyCustomFormats(service, ids, variant)));
-    else if (kind === "CUSTOM_FORMAT_GROUP") all.push(...(await applyCustomFormatGroups(service, ids, variant)));
-    else if (kind === "NAMING") all.push(...(await applyNaming(service, ids, variant)));
-    else if (kind === "QUALITY_PROFILE") all.push(...(await applyQualityProfiles(service, ids, variant)));
-    else if (kind === "QUALITY_SIZE") all.push(...(await applyQualitySizes(service, ids, variant)));
+    let results: ApplyResult[] = [];
+    try {
+      if (kind === "CUSTOM_FORMAT") results = await applyCustomFormats(service, ids, variant);
+      else if (kind === "CUSTOM_FORMAT_GROUP") results = await applyCustomFormatGroups(service, ids, variant);
+      else if (kind === "NAMING") results = await applyNaming(service, ids, variant);
+      else if (kind === "QUALITY_PROFILE") results = await applyQualityProfiles(service, ids, variant);
+      else if (kind === "QUALITY_SIZE") results = await applyQualitySizes(service, ids, variant);
+    } catch (err) {
+      results = await failedGroupResults(ids.map((id) => specById.get(id)!), err, arrInstance);
+    }
+    for (const r of results) all.push(r);
   }
   return all;
 }
@@ -1634,10 +1699,11 @@ export interface TrashSyncResult {
 const REFRESH_MIN_INTERVAL_MS = 60 * 60 * 1000;
 
 // Cron entry point: refreshes the catalog from GitHub (gated to hourly) when enabled, then applies all enabled specs across every configured instance per service.
-// `signal` is the advisory lock's AbortSignal (guardrail 41): the apply phase is
-// an unbounded sequential arrFetch walk, so a run that outlives the lock's work
-// timeout must STOP at the next instance boundary and return its partial result
-// — never keep applying lock-free beside the retry the entrypoint schedules.
+// `signal` is the advisory lock's AbortSignal (guardrail 41): the refresh stops
+// at its next GitHub download batch, and the apply phase — an unbounded
+// sequential arrFetch walk — at the next instance boundary, returning the
+// partial result. Never keep working lock-free beside the retry the entrypoint
+// schedules.
 export async function runTrashSync(opts: { signal?: AbortSignal } = {}): Promise<TrashSyncResult> {
   const settings = await prisma.setting.findMany({
     where: {
@@ -1684,8 +1750,9 @@ export async function runTrashSync(opts: { signal?: AbortSignal } = {}): Promise
     }
     if (sharedTree !== null) {
       for (const service of services) {
+        if (opts.signal?.aborted) break;
         try {
-          const r = await refreshCatalog(service, sharedTree);
+          const r = await refreshCatalog(service, sharedTree, { signal: opts.signal });
           refreshed.push(r);
           errors.push(...r.errors.map((e) => `${service}: ${e}`));
         } catch (err) {
@@ -1695,7 +1762,9 @@ export async function runTrashSync(opts: { signal?: AbortSignal } = {}): Promise
     }
     // Only stamp success if at least one service refreshed without throwing — partial-success here
     // is intentional, the gate is "we recently tried", not "the catalog is exhaustively current".
-    if (refreshed.length > 0) {
+    // A refresh the lock's signal cut short is not a try: the next run starts it again.
+    const aborted = opts.signal?.aborted === true || refreshed.some((r) => r.aborted);
+    if (refreshed.length > 0 && !aborted) {
       const value = new Date().toISOString();
       await prisma.setting.upsert({
         where: { key: "trashLastRefreshAt" },
@@ -1775,9 +1844,31 @@ export interface SpecStatus {
 
 // Lists all specs for a service with their per-variant application status, for the admin trash-guides UI.
 export async function listSpecs(service: TrashService, variant: ArrVariant = "hd"): Promise<SpecStatus[]> {
+  // Every column the status needs and no payload: the list covers the whole
+  // catalog (hundreds of custom formats), and none of their JSON is returned.
   const rows = await prisma.trashSpec.findMany({
     where: { service },
-    include: { applications: { where: { arrInstance: variant === "hd" ? "" : variant } } },
+    select: {
+      id: true,
+      service: true,
+      kind: true,
+      trashId: true,
+      name: true,
+      description: true,
+      fetchedAt: true,
+      applications: {
+        where: { arrInstance: variant === "hd" ? "" : variant },
+        select: {
+          id: true,
+          enabled: true,
+          remoteId: true,
+          appliedAt: true,
+          lastError: true,
+          lastErrorAt: true,
+          errorCount: true,
+        },
+      },
+    },
     orderBy: [{ kind: "asc" }, { name: "asc" }],
   });
   return rows.map((r) => {

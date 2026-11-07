@@ -18,6 +18,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
 import { withAdvisoryLock, PLEX_RESYNC_LOCK_ID } from "@/lib/advisory-lock";
+import { libraryJobResponse, startLibraryJob, wantsBackgroundRun } from "@/lib/library-sync-jobs";
 
 export async function POST(request: NextRequest) {
   const t = translatorForRequest(request);
@@ -26,15 +27,36 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
+  // Read here, before the run: the background flag is decided by it.
+  const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
+  if (rawBody instanceof NextResponse) return rawBody;
+
   // Single-flight: a second resync (two admin clicks, a cron call) skips instead
   // of walking the whole Plex library again beside the first. Table writes were
   // already serialized by their transaction locks; this bounds the upstream load.
-  return withCronRunRecording("plex-sync", () => withAdvisoryLock(
+  const run = () => withCronRunRecording("plex-sync", () => withAdvisoryLock(
     PLEX_RESYNC_LOCK_ID,
-    (signal: AbortSignal) => syncPlex(request, actor, signal),
+    (signal: AbortSignal) => syncPlex(request, rawBody, actor, signal),
     // X-Cron-Skipped keeps a busy answer out of the ledger (no run happened).
     () => cronSkippedResponse("plex sync already running"),
   ));
+  // An admin's { async: true } runs in the background and is polled with GET
+  // ?job= (library-sync-jobs.ts): a full walk outlasts a reverse proxy's hold.
+  // Every other caller keeps the synchronous answer.
+  if (actor.trigger === "admin" && wantsBackgroundRun(rawBody)) {
+    return startLibraryJob(actor.userId, `plex\u0000${JSON.stringify([rawBody.instance ?? null, rawBody.full === true])}`, run);
+  }
+  return run();
+}
+
+// The background resync's answer, for the admin who started it.
+export async function GET(request: NextRequest) {
+  const t = translatorForRequest(request);
+  const actor = await getCronActor(request);
+  if (!actor || actor.trigger !== "admin") {
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
+  }
+  return libraryJobResponse(actor.userId, request.nextUrl.searchParams.get("job") ?? "", t);
 }
 
 // A resync that lost its lock stops at a phase boundary (guardrail 41). The
@@ -56,10 +78,8 @@ function windDownResponse(t: Translator): Response {
 // ONLY when it is the sole configured Plex server. With more than one it leaves
 // the cache alone — rewriting from this server alone would destroy every other
 // Plex server's episode rows until the next orchestrator run.
-async function syncPlex(request: NextRequest, actor: CronActor, signal: AbortSignal): Promise<Response> {
+async function syncPlex(request: NextRequest, rawBody: Record<string, unknown>, actor: CronActor, signal: AbortSignal): Promise<Response> {
   const t = translatorForRequest(request);
-  const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
-  if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
   // Which server to resync. Absent ⇒ the default, so every existing caller (the
@@ -131,8 +151,16 @@ async function syncPlex(request: NextRequest, actor: CronActor, signal: AbortSig
   try {
     sections = await getPlexLibrarySections(serverUrl, token);
     [movieIds, tvIds] = await Promise.all([
-      getPlexTmdbIds(serverUrl, token, "MOVIE", recentOnly, selectedPlexKeys, sections, undefined, movieLegacy, undefined, recentSinceEpochSec),
-      getPlexTmdbIds(serverUrl, token, "TV", recentOnly, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy, skipShowFilePaths, recentSinceEpochSec),
+      getPlexTmdbIds(serverUrl, token, "MOVIE", { recentOnly, selectedKeys: selectedPlexKeys, sections, legacyOut: movieLegacy, recentSinceEpochSec }),
+      getPlexTmdbIds(serverUrl, token, "TV", {
+        recentOnly,
+        selectedKeys: selectedPlexKeys,
+        sections,
+        ratingKeyToTmdbOut: ratingKeyToTmdb,
+        legacyOut: tvLegacy,
+        skipShowFilePaths,
+        recentSinceEpochSec,
+      }),
     ]);
     const [resolvedMovies, resolvedTv] = await Promise.all([
       resolvePlexLegacyGuids(movieLegacy, "MOVIE"),

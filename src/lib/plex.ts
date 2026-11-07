@@ -1,4 +1,5 @@
-import { safeFetchTrusted, safeFetchAdminConfigured } from "./safe-fetch";
+import { safeFetchTrusted, safeFetchAdminConfigured, SafeFetchError } from "./safe-fetch";
+import { trimServerBase } from "./server-url";
 import {
   NO_REASON_REPORTED,
   PLEX_AUDIO_TRANSCODED,
@@ -157,30 +158,60 @@ const PAGE_RETRY_DELAY_MS = 2_000;
 // fetchPage shape (its per-page retry is test-pinned precedent). One transient
 // blip used to abort an entire instance's sync arm and defer availability by a
 // full SYNC_INTERVAL. Retries are safe here: pages are idempotent GETs consumed
-// before any DB write begins. attemptFn tags an error `noRetry` for non-429 4xx
-// (a revoked token can never succeed on retry). Deliberately NOT inside
-// plexFetch itself: the allLeaves probes and refreshPlexSection are single-shot
-// best-effort by design.
-async function withPlexRetry<T>(label: string, attemptFn: () => Promise<T>): Promise<T> {
+// before any DB write begins. Only failures that can pass on a second try are
+// retried: a non-429 4xx (a revoked token), a page over the size cap and a page
+// with no MediaContainer answer the same way every time (`isPermanentFailure`).
+// Once `signal` aborts there is no further sleep or attempt (guardrail 41).
+// Deliberately NOT inside plexFetch itself: the allLeaves probes and
+// refreshPlexSection are single-shot best-effort by design.
+async function withPlexRetry<T>(label: string, attemptFn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= PAGE_RETRY_ATTEMPTS; attempt++) {
     if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, PAGE_RETRY_DELAY_MS * attempt));
+      await sleepUnlessAborted(PAGE_RETRY_DELAY_MS * attempt, signal);
+      if (signal?.aborted) break;
       console.warn(`[plex] retry ${attempt}/${PAGE_RETRY_ATTEMPTS} for ${label}`);
     }
     try {
       return await attemptFn();
     } catch (err) {
       lastErr = err;
-      if ((err as { noRetry?: boolean }).noRetry) break;
+      if (isPermanentFailure(err)) break;
     }
   }
   throw lastErr;
 }
 
+// Resolves after `ms`, or at once when `signal` aborts. Never rejects.
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+function isPermanentFailure(err: unknown): boolean {
+  if ((err as { noRetry?: boolean } | null)?.noRetry === true) return true;
+  // A body over LIBRARY_FETCH_MAX_BYTES is over it on every download.
+  return err instanceof SafeFetchError && err.reason === "size";
+}
+
 function tagNoRetryOn4xx(err: Error, status: number): Error {
   if (status >= 400 && status < 500 && status !== 429) return Object.assign(err, { noRetry: true });
   return err;
+}
+
+function noRetry(err: Error): Error {
+  return Object.assign(err, { noRetry: true });
 }
 
 async function plexFetchAllPages<T>(
@@ -189,6 +220,9 @@ async function plexFetchAllPages<T>(
   // Return `true` to stop paging after this batch — the recentOnly early-stop
   // uses it once an entire addedAt-desc page predates the window.
   processItems: (items: T[]) => void | boolean,
+  // Reaches the request and the retry sleeps. Paging itself is stopped by the
+  // caller's processItems; an abort mid-page rejects with the page's error.
+  signal?: AbortSignal,
 ): Promise<void> {
   // Hard ceiling on the walk. `total` comes from the SERVER's reported totalSize, so a
   // hostile or buggy Plex answer that keeps reporting more (or always returns a full
@@ -210,14 +244,17 @@ async function plexFetchAllPages<T>(
       const res = await plexFetch(
         `${baseUrl}${sep}X-Plex-Container-Start=${start}&X-Plex-Container-Size=${PLEX_PAGE_SIZE}`,
         token,
+        FETCH_TIMEOUT_MS,
+        signal,
       );
       if (!res.ok) {
         throw tagNoRetryOn4xx(new Error(`Plex paginated fetch failed: ${res.status} at start=${start}`), res.status);
       }
+      // A JSON parse error stays retryable: a body can arrive truncated.
       const data = await res.json() as { MediaContainer?: { Metadata?: T[]; totalSize?: number; size?: number } };
-      if (!data.MediaContainer) throw new Error(`Plex paginated fetch returned no MediaContainer at start=${start}`);
+      if (!data?.MediaContainer) throw noRetry(new Error(`Plex paginated fetch returned no MediaContainer at start=${start}`));
       return data.MediaContainer;
-    });
+    }, signal);
     const items = container.Metadata ?? [];
     // Use totalSize as the authoritative count. Do NOT fall back to container.size
     // (the current PAGE's item count, ≤ PLEX_PAGE_SIZE) — that makes `start < total`
@@ -238,12 +275,38 @@ async function plexFetchAllPages<T>(
   }
 }
 
-function plexFetch(url: string, token: string, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<Response> {
+// `path` on the configured server address. getPlexConfig hands the address
+// back raw (plex-config.ts), so every request is built here: a trailing slash
+// on the setting never doubles up.
+function plexUrl(serverUrl: string, path: string): string {
+  return `${trimServerBase(serverUrl)}${path}`;
+}
+
+function plexFetch(url: string, token: string, timeoutMs: number = FETCH_TIMEOUT_MS, signal?: AbortSignal): Promise<Response> {
   return safeFetchAdminConfigured(url, {
     headers: plexServerHeaders(token),
     timeoutMs,
     maxResponseBytes: LIBRARY_FETCH_MAX_BYTES,
+    ...(signal ? { signal } : {}),
   });
+}
+
+/**
+ * The tmdb id in ONE modern Guid entry's id (`tmdb://603`); null for another
+ * provider, a malformed or non-positive id (`tmdb://12abc`, `tmdb://0`), or a
+ * value that is not a string — the server's JSON is not trusted for shape.
+ * Every tmdb:// guid reader builds on this one.
+ */
+export function parseTmdbGuid(id: unknown): number | null {
+  if (typeof id !== "string") return null;
+  const m = /^tmdb:\/\/(\d{1,10})$/.exec(id);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+function guidEntries(guids: unknown): unknown[] {
+  return Array.isArray(guids) ? guids : [];
 }
 
 // Plex exposes two GUID shapes: modern items use the Guid[] array; older library agents use a single guid string.
@@ -251,15 +314,11 @@ function plexFetch(url: string, token: string, timeoutMs: number = FETCH_TIMEOUT
 // and the episode-cache paths must agree on the full set (a first-match-only twin left merged ids episode-less).
 function extractAllTmdbIds(item: PlexMetadataItem): number[] {
   const ids: number[] = [];
-  if (item.Guid) {
-    for (const g of item.Guid) {
-      if (g.id.startsWith("tmdb://")) {
-        const n = parseInt(g.id.slice(7), 10);
-        if (!isNaN(n)) ids.push(n);
-      }
-    }
+  for (const g of guidEntries(item.Guid)) {
+    const n = parseTmdbGuid((g as { id?: unknown } | null)?.id);
+    if (n !== null) ids.push(n);
   }
-  if (ids.length === 0 && item.guid) {
+  if (ids.length === 0 && typeof item.guid === "string") {
     const m = item.guid.match(/themoviedb:\/\/(\d+)/);
     if (m) ids.push(parseInt(m[1], 10));
   }
@@ -282,7 +341,7 @@ export interface PlexLegacyGuidRef {
 function extractLegacyExternalId(item: PlexMetadataItem): { tvdbId?: number; imdbId?: string } | null {
   // Only the legacy single-guid string — a modern Guid[] array without a tmdb
   // entry stays excluded (that exclusion is pinned deliberate in tests/plex).
-  if (item.Guid?.length || !item.guid) return null;
+  if (item.Guid?.length || typeof item.guid !== "string" || !item.guid) return null;
   const tv = item.guid.match(/thetvdb:\/\/(\d+)/);
   if (tv) {
     const n = parseInt(tv[1], 10);
@@ -298,7 +357,7 @@ export async function getPlexLibrarySections(
   token: string,
 ): Promise<PlexSection[]> {
   const data = await withPlexRetry("/library/sections", async () => {
-    const res = await plexFetch(`${serverUrl}/library/sections`, token);
+    const res = await plexFetch(plexUrl(serverUrl, "/library/sections"), token);
     if (!res.ok) throw tagNoRetryOn4xx(new Error(`Plex sections: ${res.status}`), res.status);
     return await res.json() as {
       MediaContainer: { Directory?: Array<{ key: string; title: string; type: string }> };
@@ -314,7 +373,7 @@ export async function refreshPlexSection(
   token: string,
   sectionKey: string,
 ): Promise<void> {
-  const res = await plexFetch(`${serverUrl}/library/sections/${sectionKey}/refresh`, token);
+  const res = await plexFetch(plexUrl(serverUrl, `/library/sections/${encodeURIComponent(sectionKey)}/refresh`), token);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(
@@ -379,41 +438,49 @@ export function withDuplicateRatingKeys(existing: PlexLibraryItemData, other: Pl
   return foldDuplicateRatingKeys(existing, plexLibraryRatingKeys(other));
 }
 
-export async function getPlexSectionTmdbIds(
-  serverUrl: string,
-  token: string,
-  sectionKey: string,
-  sectionType: "movie" | "show",
-  recentOnly: boolean,
+/** How one section is walked (getPlexSectionTmdbIds) — every field optional, every default the full walk's. */
+export interface PlexSectionWalkOptions {
+  // The incremental walk: /recentlyAdded instead of /all (guardrail 13 — the
+  // two modes stay distinct). Default false.
+  recentOnly?: boolean;
   // Accumulates every show's ratingKey → tmdb ids across sections so the
   // episode walk can reuse this type=2 listing instead of re-paging it.
   // Accumulated HERE (per section, where each section's rows still exist)
   // rather than inverted from the merged map — the merge keeps only the
   // first-seen entry per tmdbId, which would drop a duplicated show's second
   // ratingKey and lose that copy's exclusive episodes.
-  ratingKeyToTmdbOut?: Map<string, number[]>,
+  ratingKeyToTmdbOut?: Map<string, number[]>;
   // Secondary channel for legacy-agent items with no tmdb id (see
   // PlexLegacyGuidRef). Keyed by ratingKey.
-  legacyOut?: Map<string, PlexLegacyGuidRef>,
+  legacyOut?: Map<string, PlexLegacyGuidRef>;
   // Full-sync callers whose flow ALWAYS runs the type=4 episode walk next set
   // this to skip the one-allLeaves-request-per-show filePath probe here — the
   // episode listing already carries the same file paths (captured via
   // getPlexTVEpisodes' episodeFilePathsOut) and the caller patches them onto
   // the rows post-write. recentOnly and walk-less callers keep the probe.
-  skipShowFilePaths?: boolean,
+  skipShowFilePaths?: boolean;
   // recentOnly window cutoff (epoch seconds). /recentlyAdded is addedAt-desc,
   // so once an ENTIRE page predates this the walk stops — without it the
   // "incremental" sync paged the whole section every run. Trade, stated
   // plainly: the unbounded walk incidentally backfilled arbitrarily old gaps;
   // the windowed walk does not (Jellyfin's MinDateLastSaved already accepts
   // this — a full Resync covers backfill).
-  recentSinceEpochSec?: number,
+  recentSinceEpochSec?: number;
+}
+
+export async function getPlexSectionTmdbIds(
+  serverUrl: string,
+  token: string,
+  sectionKey: string,
+  sectionType: "movie" | "show",
+  opts: PlexSectionWalkOptions = {},
 ): Promise<Map<number, PlexLibraryItemData>> {
+  const { recentOnly = false, ratingKeyToTmdbOut, legacyOut, skipShowFilePaths, recentSinceEpochSec } = opts;
   const plexType = sectionType === "movie" ? 1 : 2;
   const path = recentOnly
-    ? `/library/sections/${sectionKey}/recentlyAdded`
-    : `/library/sections/${sectionKey}/all`;
-  const baseUrl = `${serverUrl}${path}?type=${plexType}&includeGuids=1`;
+    ? `/library/sections/${encodeURIComponent(sectionKey)}/recentlyAdded`
+    : `/library/sections/${encodeURIComponent(sectionKey)}/all`;
+  const baseUrl = plexUrl(serverUrl, `${path}?type=${plexType}&includeGuids=1`);
   const items = new Map<number, PlexLibraryItemData>();
   // Every ratingKey seen for a tmdb id that collided in this section, folded
   // into the surviving entry once after the walk (foldDuplicateRatingKeys) —
@@ -486,7 +553,7 @@ export async function getPlexSectionTmdbIds(
       await Promise.all(showEntries.slice(i, i + BATCH_SIZE).map(async (ratingKey) => {
         try {
           const res = await plexFetch(
-            `${serverUrl}/library/metadata/${ratingKey}/allLeaves?X-Plex-Container-Start=0&X-Plex-Container-Size=1`,
+            plexUrl(serverUrl, `/library/metadata/${encodeURIComponent(ratingKey)}/allLeaves?X-Plex-Container-Start=0&X-Plex-Container-Size=1`),
             token,
           );
           if (!res.ok) return;
@@ -509,23 +576,26 @@ export async function getPlexSectionTmdbIds(
   return items;
 }
 
+/** getPlexTmdbIds' options: the per-section walk's, plus which sections to walk. */
+export interface PlexTmdbIdsOptions extends PlexSectionWalkOptions {
+  // Only these section keys (empty or absent = every section of the type).
+  selectedKeys?: Set<string>;
+  // The server's sections when the caller already listed them (skips the listing).
+  sections?: PlexSection[];
+}
+
 export async function getPlexTmdbIds(
   serverUrl: string,
   token: string,
   mediaType: "MOVIE" | "TV",
-  recentOnly = false,
-  selectedKeys?: Set<string>,
-  sections?: PlexSection[],
-  ratingKeyToTmdbOut?: Map<string, number[]>,
-  legacyOut?: Map<string, PlexLegacyGuidRef>,
-  skipShowFilePaths?: boolean,
-  recentSinceEpochSec?: number,
+  opts: PlexTmdbIdsOptions = {},
 ): Promise<Map<number, PlexLibraryItemData>> {
+  const { selectedKeys, sections, ...walk } = opts;
   const sectionType = mediaType === "MOVIE" ? "movie" : "show";
   const allSections = sections ?? await getPlexLibrarySections(serverUrl, token);
   const matching = allSections.filter((s) => s.type === sectionType && (!selectedKeys?.size || selectedKeys.has(s.key)));
   const results = await Promise.all(
-    matching.map((s) => getPlexSectionTmdbIds(serverUrl, token, s.key, sectionType, recentOnly, ratingKeyToTmdbOut, legacyOut, skipShowFilePaths, recentSinceEpochSec))
+    matching.map((s) => getPlexSectionTmdbIds(serverUrl, token, s.key, sectionType, walk))
   );
   const combined = new Map<number, PlexLibraryItemData>();
   const otherCopyKeys = new Map<number, string[]>();
@@ -554,9 +624,12 @@ export async function getPlexTmdbIds(
 }
 
 function guidValue(item: PlexMetadataItem, scheme: "imdb" | "tvdb"): string | null {
-  const modern = item.Guid?.find((g) => g.id.startsWith(`${scheme}://`))?.id.slice(scheme.length + 3);
-  if (modern) return modern;
-  const legacy = scheme === "imdb" ? /imdb:\/\/(tt\d+)/.exec(item.guid ?? "") : /thetvdb:\/\/(\d+)/.exec(item.guid ?? "");
+  for (const g of guidEntries(item.Guid)) {
+    const id = (g as { id?: unknown } | null)?.id;
+    if (typeof id === "string" && id.startsWith(`${scheme}://`) && id.length > scheme.length + 3) return id.slice(scheme.length + 3);
+  }
+  const guid = typeof item.guid === "string" ? item.guid : "";
+  const legacy = scheme === "imdb" ? /imdb:\/\/(tt\d+)/.exec(guid) : /thetvdb:\/\/(\d+)/.exec(guid);
   return legacy?.[1] ?? null;
 }
 
@@ -579,7 +652,7 @@ export async function listPlexMatchEntries(
   const out: ServerMatchEntry[] = [];
   for (const section of sections) {
     await plexFetchAllPages<PlexMetadataItem>(
-      `${serverUrl}/library/sections/${section.key}/all?type=${mediaType === "MOVIE" ? 1 : 2}&includeGuids=1`,
+      plexUrl(serverUrl, `/library/sections/${encodeURIComponent(section.key)}/all?type=${mediaType === "MOVIE" ? 1 : 2}&includeGuids=1`),
       token,
       (batch) => {
         for (const item of batch) {
@@ -664,7 +737,7 @@ export async function getPlexTVEpisodes(
     if (!ratingKeyToTmdb) {
       const walked = new Map<string, number[]>();
       await plexFetchAllPages<PlexShowMeta>(
-        `${serverUrl}/library/sections/${section.key}/all?type=2&includeGuids=1`,
+        plexUrl(serverUrl, `/library/sections/${encodeURIComponent(section.key)}/all?type=2&includeGuids=1`),
         token,
         (batch) => {
           for (const show of batch) {
@@ -680,7 +753,7 @@ export async function getPlexTVEpisodes(
 
     const episodes: PlexTVEpisodeData[] = [];
     await plexFetchAllPages<PlexEpisodeMeta>(
-      `${serverUrl}/library/sections/${section.key}/all?type=4`,
+      plexUrl(serverUrl, `/library/sections/${encodeURIComponent(section.key)}/all?type=4`),
       token,
       (batch) => {
         for (const ep of batch) {
@@ -723,7 +796,7 @@ export async function getPlexEpisodesForShow(
 ): Promise<PlexTVEpisodeData[]> {
   const episodes: PlexTVEpisodeData[] = [];
   await plexFetchAllPages<PlexEpisodeMeta>(
-    `${serverUrl}/library/metadata/${ratingKey}/allLeaves`,
+    plexUrl(serverUrl, `/library/metadata/${encodeURIComponent(ratingKey)}/allLeaves`),
     token,
     (batch) => {
       for (const ep of batch) {
@@ -812,7 +885,13 @@ export async function getPlexHomeUserToken(adminToken: string, plexUserId: strin
     headers: { "X-Plex-Client-Identifier": PLEX_CLIENT_ID, "X-Plex-Token": adminToken },
     timeoutMs: 15_000,
   });
-  // 4xx: not a home user, or a PIN-protected one — no token, not an error.
+  // A rate limit is no answer about the user: an error, so the run says so
+  // instead of reporting a sharing or PIN problem.
+  if (res.status === 429) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error("Plex home user switch rate-limited (429)");
+  }
+  // Other 4xx: not a home user, or a PIN-protected one — no token, not an error.
   if (res.status >= 400 && res.status < 500) return null;
   if (!res.ok) throw new Error(`Plex home user switch failed: ${res.status}`);
   return parsePlexHomeSwitchToken(await res.text());
@@ -830,7 +909,7 @@ export async function getPlexEpisodeKeys(serverUrl: string, token: string, showK
   if (!/^\d{1,20}$/.test(showKey)) return [];
   const out: PlexEpisodeKey[] = [];
   await plexFetchAllPages<{ ratingKey?: unknown; parentIndex?: unknown; index?: unknown }>(
-    `${serverUrl.replace(/\/+$/, "")}/library/metadata/${showKey}/allLeaves`,
+    plexUrl(serverUrl, `/library/metadata/${showKey}/allLeaves`),
     token,
     (batch) => {
       for (const ep of batch) {
@@ -872,7 +951,7 @@ function plexUserState(m: { viewCount?: unknown; viewOffset?: unknown; duration?
  * didn't return is absent: the item is gone.
  */
 export async function getPlexUserStates(serverUrl: string, token: string, keys: readonly string[]): Promise<Map<string, PlexUserItemState>> {
-  const base = serverUrl.replace(/\/+$/, "");
+  const base = trimServerBase(serverUrl);
   const valid = [...new Set(keys.filter((k) => /^\d{1,20}$/.test(k)))];
   const out = new Map<string, PlexUserItemState>();
   const queue: string[][] = [];
@@ -949,7 +1028,7 @@ export function parsePlexInProgress(items: ReadonlyArray<Record<string, unknown>
  * Metadata[] in client code.
  */
 export async function getPlexInProgress(serverUrl: string, token: string): Promise<PlexInProgressItem[]> {
-  const base = serverUrl.replace(/\/+$/, "");
+  const base = trimServerBase(serverUrl);
   for (const path of ["/library/onDeck", "/hubs/continueWatching/items"]) {
     const res = await plexFetch(`${base}${path}?X-Plex-Container-Start=0&X-Plex-Container-Size=${PLEX_IN_PROGRESS_MAX}`, token);
     if (res.status === 404) { await res.text().catch(() => ""); continue; }
@@ -969,7 +1048,7 @@ export async function getPlexInProgress(serverUrl: string, token: string): Promi
 export async function setPlexProgress(serverUrl: string, token: string, ratingKey: string, timeMs: number): Promise<"marked" | "missing"> {
   if (!/^\d{1,20}$/.test(ratingKey) || !Number.isFinite(timeMs) || timeMs <= 0) return "missing";
   const res = await plexFetch(
-    `${serverUrl.replace(/\/+$/, "")}/:/progress?key=${ratingKey}&identifier=com.plexapp.plugins.library&time=${Math.round(timeMs)}&state=stopped`,
+    plexUrl(serverUrl, `/:/progress?key=${ratingKey}&identifier=com.plexapp.plugins.library&time=${Math.round(timeMs)}&state=stopped`),
     token,
   );
   await res.text().catch(() => "");
@@ -982,7 +1061,7 @@ export async function setPlexProgress(serverUrl: string, token: string, ratingKe
 export async function scrobblePlexItem(serverUrl: string, token: string, ratingKey: string): Promise<"marked" | "missing"> {
   if (!/^\d{1,20}$/.test(ratingKey)) return "missing";
   const res = await plexFetch(
-    `${serverUrl.replace(/\/+$/, "")}/:/scrobble?identifier=com.plexapp.plugins.library&key=${ratingKey}`,
+    plexUrl(serverUrl, `/:/scrobble?identifier=com.plexapp.plugins.library&key=${ratingKey}`),
     token,
   );
   await res.text().catch(() => "");
@@ -1016,6 +1095,9 @@ export interface PlexWatchHistory {
   // The walk stopped at a cap with older history still unread (a record past
   // the cap was seen); the caller must not read the result as complete.
   truncated: boolean;
+  // The walk stopped because the caller's signal fired: the result is partial
+  // and is returned, never thrown (guardrail 41). Callers discard it.
+  aborted: boolean;
 }
 
 export async function getPlexWatchHistory(
@@ -1034,39 +1116,52 @@ export async function getPlexWatchHistory(
 ): Promise<PlexWatchHistory> {
   const maxItems = opts.maxItems ?? PLEX_WATCH_HISTORY_MAX_ITEMS;
   const maxRaw = opts.maxRaw ?? PLEX_WATCH_HISTORY_MAX_RAW;
-  const out: PlexWatchHistory = { entries: [], records: 0, truncated: false };
-  if (opts.signal?.aborted) return out;
+  const out: PlexWatchHistory = { entries: [], records: 0, truncated: false, aborted: false };
+  if (opts.signal?.aborted) {
+    out.aborted = true;
+    return out;
+  }
   let seen = 0;
   let reachedStop = false;
   const filters =
     (opts.accountId && /^\d{1,20}$/.test(opts.accountId) ? `&accountID=${opts.accountId}` : "") +
     (opts.stopBefore ? `&viewedAt%3E=${Math.max(0, Math.floor(opts.stopBefore.getTime() / 1000) - 1)}` : "");
-  await plexFetchAllPages<unknown>(
-    `${serverUrl.replace(/\/+$/, "")}/status/sessions/history/all?sort=viewedAt:desc${filters}`,
-    token,
-    (batch) => {
-      for (const raw of batch) {
-        if (opts.stopBefore && plexHistoryViewedBefore(raw, opts.stopBefore)) {
-          reachedStop = true;
-          break;
+  try {
+    await plexFetchAllPages<unknown>(
+      plexUrl(serverUrl, `/status/sessions/history/all?sort=viewedAt:desc${filters}`),
+      token,
+      (batch) => {
+        for (const raw of batch) {
+          if (opts.stopBefore && plexHistoryViewedBefore(raw, opts.stopBefore)) {
+            reachedStop = true;
+            break;
+          }
+          const counts = countsAsPlexWatchRecord(raw);
+          // Truncated only when a record PAST a cap exists — a history of exactly
+          // maxItems records is complete.
+          if (seen >= maxRaw || (counts && out.records >= maxItems)) {
+            out.truncated = true;
+            break;
+          }
+          seen++;
+          if (counts) out.records++;
+          const entry = parsePlexHistoryItem(raw);
+          if (entry) out.entries.push(entry);
         }
-        const counts = countsAsPlexWatchRecord(raw);
-        // Truncated only when a record PAST a cap exists — a history of exactly
-        // maxItems records is complete.
-        if (seen >= maxRaw || (counts && out.records >= maxItems)) {
-          out.truncated = true;
-          break;
-        }
-        seen++;
-        if (counts) out.records++;
-        const entry = parsePlexHistoryItem(raw);
-        if (entry) out.entries.push(entry);
-      }
-      // Stop paging on abort (guardrail 41 — the caller discards the result) or
-      // at a cap. Overshoot is bounded to the page already in flight.
-      return opts.signal?.aborted === true || out.truncated || reachedStop;
-    },
-  );
+        if (out.truncated || reachedStop) return true;
+        // Stop paging on abort (guardrail 41 — the caller discards the result).
+        // The signal also reaches the page in flight and its retry sleeps.
+        if (opts.signal?.aborted) out.aborted = true;
+        return out.aborted;
+      },
+      opts.signal,
+    );
+  } catch (err) {
+    // An abort that lands mid-page rejects that page: return what was read,
+    // never throw (guardrail 41). Any other failure still throws.
+    if (!opts.signal?.aborted) throw err;
+    out.aborted = true;
+  }
   return out;
 }
 
@@ -1203,9 +1298,12 @@ function friendlyPlexDevice(
 }
 
 export async function getPlexSessions(serverUrl: string, token: string): Promise<PlexSessionData[]> {
-  const res = await plexFetch(`${serverUrl}/status/sessions?includeGuids=1`, token);
+  const res = await plexFetch(plexUrl(serverUrl, "/status/sessions?includeGuids=1"), token);
   if (!res.ok) throw new Error(`Plex sessions: ${res.status}`);
-  const data = await res.json() as { MediaContainer: { Metadata?: PlexSessionRaw[] } };
+  const data = await res.json() as { MediaContainer?: { Metadata?: PlexSessionRaw[] } };
+  // No container is a failed read, never "nothing is playing": an empty answer
+  // would let the poller's absence sweep finalize live sessions.
+  if (!data?.MediaContainer) throw new Error("Plex sessions: no MediaContainer");
   const raw = data.MediaContainer.Metadata ?? [];
 
   return raw.map((s): PlexSessionData => {
@@ -1327,33 +1425,25 @@ export async function getPlexMarkers(
 ): Promise<PlexMarkers> {
   try {
     const res = await plexFetch(
-      `${serverUrl}/library/metadata/${encodeURIComponent(ratingKey)}?includeMarkers=1`,
+      plexUrl(serverUrl, `/library/metadata/${encodeURIComponent(ratingKey)}?includeMarkers=1`),
       token,
     );
     if (!res.ok) return {};
     const data = await res.json() as { MediaContainer?: { Metadata?: PlexMetadataWithMarkersRaw[] } };
     const markers = data.MediaContainer?.Metadata?.[0]?.Marker ?? [];
     const result: PlexMarkers = {};
-    for (const m of markers) {
-      if (m.type === "intro") {
-        if (typeof m.startTimeOffset === "number") result.introStartMs = m.startTimeOffset;
-        if (typeof m.endTimeOffset === "number") result.introEndMs = m.endTimeOffset;
-      } else if (m.type === "credits") {
-        // Plex emits two credit markers on shows with mid-credit scenes:
-        // a non-final block for the credits scroll and a `final: true` block
-        // for the absolute end. Prefer the earliest startTimeOffset (the
-        // start of the credits roll) and the latest endTimeOffset.
-        if (typeof m.startTimeOffset === "number") {
-          result.creditsStartMs = result.creditsStartMs == null
-            ? m.startTimeOffset
-            : Math.min(result.creditsStartMs, m.startTimeOffset);
-        }
-        if (typeof m.endTimeOffset === "number") {
-          result.creditsEndMs = result.creditsEndMs == null
-            ? m.endTimeOffset
-            : Math.max(result.creditsEndMs, m.endTimeOffset);
-        }
-      }
+    // Plex emits two credit markers on shows with mid-credit scenes: a
+    // non-final block for the credits scroll and a `final: true` block for the
+    // absolute end. Each kind keeps the earliest startTimeOffset (the start of
+    // the roll) and the latest endTimeOffset, so the answer never depends on
+    // the order Plex lists them in — intros the same way as credits.
+    for (const m of Array.isArray(markers) ? markers : []) {
+      if (m?.type !== "intro" && m?.type !== "credits") continue;
+      const [startKey, endKey] = m.type === "intro"
+        ? (["introStartMs", "introEndMs"] as const)
+        : (["creditsStartMs", "creditsEndMs"] as const);
+      if (typeof m.startTimeOffset === "number") result[startKey] = Math.min(result[startKey] ?? Infinity, m.startTimeOffset);
+      if (typeof m.endTimeOffset === "number") result[endKey] = Math.max(result[endKey] ?? -Infinity, m.endTimeOffset);
     }
     return result;
   } catch {
@@ -1374,10 +1464,25 @@ export async function terminatePlexSession(
   // `sessionId` MUST be the Session.id GUID, not the short sessionKey — Plex
   // matches /status/sessions/terminate against Session.id and 404s on the
   // short key. Same identifier Tautulli's pmsconnect uses (pmsconnect.py:108).
-  const url = `${serverUrl}/status/sessions/terminate?sessionId=${encodeURIComponent(sessionId)}&reason=${encodeURIComponent(reason)}`;
+  const url = plexUrl(serverUrl, `/status/sessions/terminate?sessionId=${encodeURIComponent(sessionId)}&reason=${encodeURIComponent(reason)}`);
   const res = await plexFetch(url, token);
   return { ok: res.ok, status: res.status };
 }
+
+// "Is this title on Plex yet?" — the post-webhook notify poll. Two reads, and a
+// failure of either reads as "not yet", never a throw:
+//   1. the `guid=tmdb://<id>` filter on each section. UNVERIFIED that PMS
+//      matches an EXTERNAL guid there: python-plexapi resolves tmdb:// to the
+//      item's plex:// guid (via /matches) before it searches by guid, which
+//      suggests the modern agents match only the plex:// one — so this read
+//      alone may never see the import;
+//   2. so each section that answered a clean miss is also checked the way the
+//      Jellyfin twin (hasJellyfinItemByTmdbId) does it: its newest additions
+//      (/recentlyAdded, the listing the recentOnly sync walks), matched here on
+//      every tmdb guid. A fresh import is by definition among them. A miss past
+//      the window degrades safely: the poll gives up and the sync's
+//      library-backed pass notifies later.
+const PLEX_PROBE_RECENT_LIMIT = 200;
 
 export async function hasPlexItemByTmdbId(
   serverUrl: string,
@@ -1388,30 +1493,45 @@ export async function hasPlexItemByTmdbId(
 ): Promise<boolean> {
   const plexType = mediaType === "movie" ? 1 : 2;
   const sectionType = mediaType === "movie" ? "movie" : "show";
-  const base = serverUrl.replace(/\/$/, "");
   const allSections = sections ?? await getPlexLibrarySections(serverUrl, token).catch(() => [] as PlexSection[]);
   const matching = allSections.filter((s) => s.type === sectionType);
+  // Sections whose guid read answered "none": the ones worth a second look. A
+  // section that failed outright would fail the second read too.
+  const missed: PlexSection[] = [];
   for (const section of matching) {
     try {
       const res = await plexFetch(
-        `${base}/library/sections/${section.key}/all?type=${plexType}&includeGuids=1&guid=tmdb://${tmdbId}&X-Plex-Container-Start=0&X-Plex-Container-Size=1`,
+        plexUrl(serverUrl, `/library/sections/${encodeURIComponent(section.key)}/all?type=${plexType}&includeGuids=1&guid=tmdb://${tmdbId}&X-Plex-Container-Start=0&X-Plex-Container-Size=1`),
         token,
       );
       if (!res.ok) continue;
-      const data = await res.json() as { MediaContainer: { totalSize?: number; size?: number } };
+      const data = await res.json() as { MediaContainer?: { totalSize?: number; size?: number } };
+      if (!data?.MediaContainer) continue;
       if ((data.MediaContainer.totalSize ?? data.MediaContainer.size ?? 0) > 0) return true;
+      missed.push(section);
+    } catch { }
+  }
+  for (const section of missed) {
+    try {
+      const res = await plexFetch(
+        plexUrl(serverUrl, `/library/sections/${encodeURIComponent(section.key)}/recentlyAdded?type=${plexType}&includeGuids=1&X-Plex-Container-Start=0&X-Plex-Container-Size=${PLEX_PROBE_RECENT_LIMIT}`),
+        token,
+      );
+      if (!res.ok) continue;
+      const data = await res.json() as { MediaContainer?: { Metadata?: unknown } };
+      const items = Array.isArray(data?.MediaContainer?.Metadata) ? data.MediaContainer.Metadata as PlexMetadataItem[] : [];
+      for (const item of items.slice(0, PLEX_PROBE_RECENT_LIMIT)) {
+        if (item && typeof item === "object" && item.type !== "collection" && extractAllTmdbIds(item).includes(tmdbId)) return true;
+      }
     } catch { }
   }
   return false;
 }
 
 export function extractTmdbIdFromGuids(guids?: PlexGuid[]): number | null {
-  if (!guids) return null;
-  for (const g of guids) {
-    if (g.id.startsWith("tmdb://")) {
-      const n = parseInt(g.id.slice(7), 10);
-      if (!isNaN(n)) return n;
-    }
+  for (const g of guidEntries(guids)) {
+    const n = parseTmdbGuid((g as { id?: unknown } | null)?.id);
+    if (n !== null) return n;
   }
   return null;
 }
@@ -1432,8 +1552,88 @@ export interface PlexAccountsResult {
   friendsOk: boolean;
 }
 
+// ── plex.tv /api/users ───────────────────────────────────────────────────────
+// plex.tv/api/users answers XML (the v2 JSON endpoint doesn't expose the full
+// friend list). ONE reader for it: each <User> start tag's attributes, entity-
+// decoded ("o&apos;brien@x.com" is o'brien@x.com, the address the user signs in
+// with), plus the machineIdentifier of every <Server> nested in it — the
+// servers shared with that user.
+
+interface PlexTvUser {
+  attrs: Map<string, string>;
+  serverIds: Set<string>;
+}
+
+const XML_NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+
+/** XML's five named entities and numeric character references; anything else is left as written. */
+function decodeXmlEntities(value: string): string {
+  if (!value.includes("&")) return value;
+  return value.replace(/&(#[xX][0-9a-fA-F]{1,6}|#[0-9]{1,7}|amp|lt|gt|quot|apos);/g, (whole, body: string) => {
+    if (body[0] !== "#") return XML_NAMED_ENTITIES[body];
+    const cp = body[1] === "x" || body[1] === "X" ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+    return cp > 0 && cp <= 0x10ffff && (cp < 0xd800 || cp > 0xdfff) ? String.fromCodePoint(cp) : whole;
+  });
+}
+
+// The attributes of the start tag whose name ends at `from`: name="value" or
+// name='value' pairs, read until the tag closes — a `>` inside a quoted value
+// never ends it. The first of a repeated name wins.
+function readStartTagAttrs(xml: string, from: number): Map<string, string> {
+  const attrs = new Map<string, string>();
+  const re = /\s*([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/y;
+  re.lastIndex = from;
+  for (let m = re.exec(xml); m !== null; m = re.exec(xml)) {
+    if (!attrs.has(m[1])) attrs.set(m[1], decodeXmlEntities(m[2] ?? m[3] ?? ""));
+  }
+  return attrs;
+}
+
+function parsePlexTvUsers(xml: string): PlexTvUser[] {
+  const starts: number[] = [];
+  const userTag = /<User\b/g;
+  for (let m = userTag.exec(xml); m !== null; m = userTag.exec(xml)) starts.push(m.index);
+  const users: PlexTvUser[] = [];
+  for (let i = 0; i < starts.length; i++) {
+    const block = xml.slice(starts[i], i + 1 < starts.length ? starts[i + 1] : xml.length);
+    const serverIds = new Set<string>();
+    const serverTag = /<Server\b/g;
+    for (let m = serverTag.exec(block); m !== null; m = serverTag.exec(block)) {
+      const id = readStartTagAttrs(block, m.index + "<Server".length).get("machineIdentifier");
+      if (id) serverIds.add(id);
+    }
+    users.push({ attrs: readStartTagAttrs(block, "<User".length), serverIds });
+  }
+  return users;
+}
+
+// The plex.tv account id (the same value getPlexUser returns and sign-in pins
+// to User.plexUserId; Tautulli parses the same attribute as user_id).
+function plexTvUserId(u: PlexTvUser): string | null {
+  const id = u.attrs.get("id");
+  return id && /^\d{1,20}$/.test(id) ? id : null;
+}
+
+// Throws on a network failure; a non-2xx answer is returned as its status.
+async function fetchPlexTvUsers(adminToken: string): Promise<{ users: PlexTvUser[] } | { status: number }> {
+  const res = await safeFetchTrusted("https://plex.tv/api/users", {
+    allowedHosts: PLEX_TV_HOSTS,
+    headers: { "X-Plex-Client-Identifier": PLEX_CLIENT_ID, "X-Plex-Token": adminToken },
+    timeoutMs: 15_000,
+  });
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    return { status: res.status };
+  }
+  return { users: parsePlexTvUsers(await res.text()) };
+}
+
 /**
- * Account list plus per-hop status.
+ * Every account the admin token can see, ACCOUNT-WIDE: the owner plus every
+ * plex.tv friend, on whichever of the owner's servers they share — no
+ * per-server scoping (the one-shot Plex user backfill wants exactly that; a
+ * per-server answer is getPlexFriendEmails / countPlexServerMembers). Comes
+ * with per-hop status.
  *
  * Both hops are swallowed independently below, so a bare array cannot express
  * "the owner came back but the friends list failed" — that is indistinguishable
@@ -1441,10 +1641,7 @@ export interface PlexAccountsResult {
  * backfill needs the difference: it stamps a never-retry marker, and stamping it
  * on a half-fetched list strands every user who only appears in the missing half.
  */
-export async function getPlexAccountsDetailed(
-  serverUrl: string,
-  adminToken: string,
-): Promise<PlexAccountsResult> {
+export async function getPlexAccountsDetailed(adminToken: string): Promise<PlexAccountsResult> {
   const accounts: PlexAccountInfo[] = [];
   let ownerOk = false;
   let friendsOk = false;
@@ -1461,46 +1658,27 @@ export async function getPlexAccountsDetailed(
   }
 
   try {
-    // plex.tv/api/users returns XML (not JSON) — the v2 JSON endpoint doesn't expose the full friend list
-    const res = await safeFetchTrusted("https://plex.tv/api/users", {
-      allowedHosts: PLEX_TV_HOSTS,
-      headers: { "X-Plex-Client-Identifier": PLEX_CLIENT_ID, "X-Plex-Token": adminToken },
-      timeoutMs: 15_000,
-    });
-    if (res.ok) {
-      friendsOk = true;
-      const xml = await res.text();
-      const userBlocks = xml.split(/<User\b/).slice(1);
-      for (const block of userBlocks) {
-        const idMatch = block.match(/\bid="(\d+)"/);
-        const nameMatch = block.match(/\btitle="([^"]+)"/);
-        const emailMatch = block.match(/\bemail="([^"]+)"/);
-        const thumbMatch = block.match(/\bthumb="([^"]+)"/);
-        if (idMatch && nameMatch) {
-          accounts.push({
-            id: idMatch[1],
-            name: nameMatch[1],
-            email: emailMatch?.[1]?.toLowerCase() ?? "",
-            thumb: thumbMatch?.[1] ?? "",
-            isAdmin: false,
-          });
-        }
-      }
+    const answer = await fetchPlexTvUsers(adminToken);
+    // A non-2xx reads as a failed hop (friendsOk false) without a warn here.
+    const users = "users" in answer ? answer.users : [];
+    friendsOk = "users" in answer;
+    for (const u of users) {
+      const id = plexTvUserId(u);
+      const name = u.attrs.get("title");
+      if (!id || !name) continue;
+      accounts.push({
+        id,
+        name,
+        email: u.attrs.get("email")?.toLowerCase() ?? "",
+        thumb: u.attrs.get("thumb") ?? "",
+        isAdmin: false,
+      });
     }
   } catch (err) {
     console.warn("[plex] Failed to fetch shared users:", err instanceof Error ? err.message : String(err));
   }
 
   return { accounts, ownerOk, friendsOk };
-}
-
-// Back-compat array form. Callers that only need the list (the settings-page
-// share count) keep using this; only the backfill needs the per-hop status.
-export async function getPlexAccounts(
-  serverUrl: string,
-  adminToken: string,
-): Promise<PlexAccountInfo[]> {
-  return (await getPlexAccountsDetailed(serverUrl, adminToken)).accounts;
 }
 
 // Reads the server's machineIdentifier. Swallows every error and returns null —
@@ -1513,7 +1691,7 @@ export async function getPlexMachineId(
   timeoutMs: number = FETCH_TIMEOUT_MS,
 ): Promise<string | null> {
   try {
-    const res = await plexFetch(`${serverUrl}/identity`, adminToken, timeoutMs);
+    const res = await plexFetch(plexUrl(serverUrl, "/identity"), adminToken, timeoutMs);
     if (!res.ok) return null;
     const data = (await res.json()) as { MediaContainer?: { machineIdentifier?: string } };
     return data.MediaContainer?.machineIdentifier ?? null;
@@ -1540,7 +1718,7 @@ export async function checkPlexServerAccess(
   token: string,
 ): Promise<"ok" | "unauthorized" | "unreachable"> {
   try {
-    const res = await plexFetch(`${serverUrl.replace(/\/$/, "")}/library/sections`, token, PLEX_IDENTITY_TIMEOUT_MS);
+    const res = await plexFetch(plexUrl(serverUrl, "/library/sections"), token, PLEX_IDENTITY_TIMEOUT_MS);
     if (res.ok) return "ok";
     if (res.status === 401 || res.status === 403) return "unauthorized";
     return "unreachable";
@@ -1571,33 +1749,40 @@ export async function getPlexFriendEmails(adminToken: string, serverUrl?: string
     return { ids: new Set<string>(), emails: new Set<string>() };
   }
 
-  const res = await safeFetchTrusted("https://plex.tv/api/users", {
-    allowedHosts: PLEX_TV_HOSTS,
-    headers: { "X-Plex-Client-Identifier": PLEX_CLIENT_ID, "X-Plex-Token": adminToken },
-    timeoutMs: 15_000,
-  });
-  if (!res.ok) throw new Error(`Failed to fetch Plex users: ${res.status}`);
-  const xml = await res.text();
-
+  const answer = await fetchPlexTvUsers(adminToken);
+  if (!("users" in answer)) throw new Error(`Failed to fetch Plex users: ${answer.status}`);
   const ids = new Set<string>();
   const emails = new Set<string>();
-  const userBlocks = xml.split(/<User\b/).slice(1);
-  for (const block of userBlocks) {
-    const hasServer = block.includes(`machineIdentifier="${machineId}"`);
-    if (!hasServer) continue;
-
-    // The id attribute is the plex.tv account id — the same value getPlexUser
-    // returns and sign-in pins to User.plexUserId (Tautulli parses the same
-    // attribute as user_id). Capture it even when the email is absent/invalid.
-    const idMatch = block.match(/\bid="(\d+)"/);
-    if (idMatch) ids.add(idMatch[1]);
-
-    const emailMatch = block.match(/\bemail="([^"]+)"/);
-    if (!emailMatch) continue;
-    const email = emailMatch[1].toLowerCase();
-    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      emails.add(email);
-    }
+  for (const u of answer.users) {
+    if (!u.serverIds.has(machineId)) continue;
+    // Captured even when the email is absent/invalid: the id is the
+    // id-first join key.
+    const id = plexTvUserId(u);
+    if (id) ids.add(id);
+    const email = u.attrs.get("email")?.toLowerCase();
+    if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) emails.add(email);
   }
   return { ids, emails };
+}
+
+/**
+ * How many accounts can use THIS server: the owner plus every plex.tv friend
+ * it is shared with (the settings page's share count). null when the server
+ * can't be identified or plex.tv doesn't answer — never a guess.
+ */
+export async function countPlexServerMembers(adminToken: string, serverUrl: string): Promise<number | null> {
+  const machineId = await getPlexMachineId(serverUrl, adminToken, PLEX_IDENTITY_TIMEOUT_MS);
+  if (!machineId) return null;
+  try {
+    const answer = await fetchPlexTvUsers(adminToken);
+    if (!("users" in answer)) return null;
+    const ids = new Set<string>();
+    for (const u of answer.users) {
+      const id = plexTvUserId(u);
+      if (id && u.serverIds.has(machineId)) ids.add(id);
+    }
+    return ids.size + 1;
+  } catch {
+    return null;
+  }
 }

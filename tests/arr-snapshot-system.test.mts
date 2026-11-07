@@ -61,6 +61,22 @@ test("markLive only for a live answer the load gate accepted, with that answer",
   assert.match(useReport, /\}, \[url, gate, markLive\]\);/);
 });
 
+test("a background poll refreshes quietly: no spinner or disabled Reload every tick, and one failed poll is no banner", () => {
+  const load = block(useReport, "const load = useCallback(");
+  assert.match(load, /if \(kind !== "poll"\) setLoading\(true\);/);
+  assert.equal(load.match(/setLoading\(true\)/g)?.length, 1, "nothing else turns the flag on");
+  // Cleared only by the load the gate accepted (a superseded poll writes nothing).
+  const settle = load.indexOf("if (!gate.settle(id)) return false;");
+  assert.ok(settle > -1 && load.indexOf("setLoading(false);") > settle);
+  // A poll's failure is shown only from the second in a row; any answer resets the count.
+  const ok = block(load, 'if ("data" in res) {');
+  assert.match(ok, /pollFailures\.current = 0;/);
+  const quiet = load.indexOf('if (kind === "poll" && ++pollFailures.current < 2) return false;');
+  assert.ok(quiet > load.indexOf(ok) + ok.length - 1, "after the success branch");
+  assert.ok(quiet < load.lastIndexOf("setError(res.error);"), "before the banner");
+  assert.match(useReport, /const pollFailures = useRef\(0\);/);
+});
+
 test("the snapshot sets the report and nothing else", () => {
   const apply = useReport.slice(useReport.indexOf("useArrSnapshot<Report<T>>(url, "), useReport.indexOf("const { markLive } = snap;"));
   assert.match(apply, /setReport\(data\)/);

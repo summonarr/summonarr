@@ -24,6 +24,7 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { episodeCode, episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import {
   defaultImportSelection,
+  nextImportSelection,
   SONARR_RELEASE_TYPES,
   type ImportCandidate,
   type ImportMode,
@@ -104,9 +105,17 @@ export function QueueImportDialog({
   const service = row?.service;
   const instance = row?.instance;
   const downloadId = row?.downloadId ?? null;
+  // Which download the files, edits and error on screen belong to. Until the
+  // open row's own load settles they are another row's (or none): the dialog
+  // shows its spinner, never the last row's files or a "load failed" before
+  // anything was asked.
+  const dataKey = service && instance !== undefined && downloadId !== null ? `${service}:${instance}:${downloadId}` : null;
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
+  const pending = row !== null && dataKey !== loadedFor;
 
   useEffect(() => {
     if (!service || instance === undefined || downloadId === null) return;
+    const key = `${service}:${instance}:${downloadId}`;
     let live = true;
     setFiles(null);
     setSelected(new Set());
@@ -133,7 +142,10 @@ export function QueueImportDialog({
       } catch {
         if (live) setError(tRef.current("adminManage.queue.import.loadFailed"));
       } finally {
-        if (live) setLoading(false);
+        if (live) {
+          setLoading(false);
+          setLoadedFor(key);
+        }
       }
     })();
     return () => {
@@ -179,6 +191,9 @@ export function QueueImportDialog({
     if (Object.keys(override).length === 0) {
       setEdits((m) => { const n = { ...m }; delete n[file.path]; return n; });
       setViews((m) => { const n = { ...m }; delete n[file.path]; return n; });
+      // Back to the arr's own verdict: a file it can't import leaves the
+      // selection (its box goes disabled, so it could never be unticked).
+      if (!file.importable) setSelected((sel) => nextImportSelection(sel, file.path, false));
       setEditing(null);
       return null;
     }
@@ -193,7 +208,8 @@ export function QueueImportDialog({
       const view = { ...data.files[0], rechecked: data.rechecked === true };
       setEdits((m) => ({ ...m, [file.path]: override }));
       setViews((m) => ({ ...m, [file.path]: view }));
-      if (view.importable) setSelected((s) => new Set(s).add(file.path));
+      // Ticked when the arr now accepts it, unticked when it no longer does.
+      setSelected((sel) => nextImportSelection(sel, file.path, view.importable));
       setEditing(null);
       return null;
     } catch {
@@ -241,14 +257,14 @@ export function QueueImportDialog({
             </div>
           )}
 
-          {loading ? (
+          {loading || pending || (files === null && !error) ? (
             <div className="flex items-center justify-center gap-3 text-sm text-zinc-500 py-14">
               <Loader2 className="w-5 h-5 animate-spin" />
               {t("adminManage.queue.import.loading")}
             </div>
           ) : files === null ? (
             <div role="alert" className="flex items-center justify-center gap-2 text-sm py-14 px-6 text-center" style={{ color: "var(--ds-danger)" }}>
-              <AlertTriangle className="w-4 h-4 shrink-0" /> {error || t("adminManage.queue.import.loadFailed")}
+              <AlertTriangle className="w-4 h-4 shrink-0" /> {error}
             </div>
           ) : files.length === 0 ? (
             <div className="text-sm text-zinc-500 text-center py-14 px-6">{t("adminManage.queue.import.none", { service: label })}</div>
@@ -363,7 +379,7 @@ export function QueueImportDialog({
             </>
           )}
 
-          {error && files !== null && (
+          {error && files !== null && !pending && (
             <p role="alert" className="m-0 px-6 pb-4 text-xs flex items-center gap-1" style={{ color: "var(--ds-danger)" }}>
               <AlertTriangle className="w-3 h-3 shrink-0" /> {error}
             </p>

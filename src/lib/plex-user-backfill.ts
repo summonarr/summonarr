@@ -80,8 +80,9 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
     // email could attach a local record to the wrong account, so such an email
     // is marked ambiguous and skipped — those users fall into `unmatched` and
     // an admin sets plexUserId explicitly instead. The same id re-listed (an
-    // admin/friend shared across instances — getPlexAccounts is account-level,
-    // so that is the normal multi-server case) is a no-op, not ambiguous.
+    // admin/friend shared across instances — getPlexAccountsDetailed is
+    // account-level, so that is the normal multi-server case) is a no-op, not
+    // ambiguous.
     const idByEmail = new Map<string, string>();
     const ambiguousEmails = new Set<string>();
     let accountsFetched = 0;
@@ -95,15 +96,12 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
       const tokenRow = await prisma.setting.findUnique({ where: { key: plexSettingKey(instance.slug, "AdminToken") } });
       if (!tokenRow?.value) continue; // instance not configured — nothing to fetch from it
 
-      // getPlexAccounts ignores its serverUrl param (owner + friends both come
-      // account-level from plex.tv, not machine-scoped) — tolerate it missing.
-      const serverRow = await prisma.setting.findUnique({ where: { key: plexSettingKey(instance.slug, "ServerUrl") } });
-      const serverUrl = serverRow?.value ?? "";
-
+      // No server address is needed: owner + friends both come account-level
+      // from plex.tv, not machine-scoped.
       const label = mediaInstanceLabel("plex", instance.slug);
       let accounts: PlexAccountInfo[];
       try {
-        const result = await getPlexAccountsDetailed(serverUrl, tokenRow.value);
+        const result = await getPlexAccountsDetailed(tokenRow.value);
         accounts = result.accounts;
         if (!result.ownerOk || !result.friendsOk) {
           // Each hop is swallowed inside getPlexAccountsDetailed, so without this
@@ -149,6 +147,9 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
 
     let bound = 0;
     const unmatched: { id: string; email: string }[] = [];
+    // A matched user whose write failed for another reason (the DB, not the
+    // email): a retry can fix it, so it holds the marker back.
+    const bindFailures: { id: string; email: string; reason: string }[] = [];
     for (const u of candidates) {
       const norm = normalizeEmail(u.email);
       const plexId = ambiguousEmails.has(norm) ? undefined : idByEmail.get(norm);
@@ -176,15 +177,19 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
           );
           continue;
         }
-        // Anything else: swallowing it left the user in neither `bound` nor
-        // `unmatched`, so nothing warned and the marker stamped over a failure
-        // nobody could see.
-        console.warn(
-          `[plex-backfill] Binding ${u.email} failed:`,
-          err instanceof Error ? err.message : String(err),
-        );
-        unmatched.push({ id: u.id, email: u.email });
+        // Anything else is not an email mismatch: the user DID match, and the
+        // write failed. Counted apart from `unmatched` and withheld from the
+        // marker below, so the next boot binds them.
+        bindFailures.push({ id: u.id, email: u.email, reason: err instanceof Error ? err.message : String(err) });
       }
+    }
+
+    if (bindFailures.length > 0) {
+      const affected = bindFailures.map((u) => `${u.email} (${u.id}): ${u.reason}`).join("; ");
+      console.warn(
+        `[plex-backfill] ${bindFailures.length} matched Plex user(s) could not be saved — not stamping the run ` +
+          `marker so the next boot retries. ${affected}`,
+      );
     }
 
     // Withhold the never-retry marker when this run BOTH left someone unbound and
@@ -200,6 +205,7 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
       );
       return;
     }
+    if (bindFailures.length > 0) return;
 
     await prisma.setting.upsert({
       where: { key: PLEX_USER_BACKFILL_RAN_AT_KEY },

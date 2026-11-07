@@ -11,20 +11,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // TRaSH Guides is OFF by default. runTrashSync answers that with an
+  // `errors: ["trashGuidesEnabled is off"]` result, which this route used to
+  // turn into a 500 + an audit row: the entrypoint fast-retries any non-2xx
+  // at CRON_RETRY_INTERVAL (300s), so a stock deployment ran the DAILY job
+  // 288×/day, wrote 288 SETTINGS_CHANGE rows/day and kept the Run-now badge
+  // red. A disabled feature is a skip (200, no audit), decided before the lock
+  // and the run ledger: no run happened, so no lock connection is opened and
+  // X-Cron-Skipped keeps it out of the run history (guardrail 7b).
+  if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
+    return cronSkippedResponse("TRaSH Guides disabled");
+  }
+
   return withCronRunRecording("trash-sync", () => withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,
     async (signal) => {
-      // TRaSH Guides is OFF by default. runTrashSync answers that with an
-      // `errors: ["trashGuidesEnabled is off"]` result, which this route used to
-      // turn into a 500 + an audit row: the entrypoint fast-retries any non-2xx
-      // at CRON_RETRY_INTERVAL (300s), so a stock deployment ran the DAILY job
-      // 288×/day, wrote 288 SETTINGS_CHANGE rows/day and kept the Run-now badge
-      // red. A disabled feature is a skip (200, no audit, no ledger failure),
-      // the same shape warm-mdblist/warm-omdb use for missing credentials.
-      if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
-        return NextResponse.json({ skipped: true, reason: "TRaSH Guides disabled" });
-      }
-
       const startTime = Date.now();
       const result = await runTrashSync({ signal });
       const durationMs = Date.now() - startTime;

@@ -666,6 +666,22 @@ test("the TV preview lists distinct SHOW folders, not many files from one show",
   assert.deepEqual(body.plex.tv.samples, ["ShowA", "ShowB"]);
 });
 
+test("a Plex TV sample keeps the folders above the show, so a 'tv/' strip prefix visibly changes it", async () => {
+  // The server keys a show on the first segment left AFTER the strip prefix.
+  // With tv/ and anime/ under one mount, a first-segment-only sample read "tv"
+  // and "anime" — the preview could never show the prefix that fixes the keys.
+  const t = await mintSession();
+  plexItems = [
+    { serverInstance: "", mediaType: "TV", filePath: "/media/tv/Show A/Season 1/e01.mkv" },
+    { serverInstance: "", mediaType: "TV", filePath: "/media/tv/Show A/Season 2/e01.mkv" },
+    { serverInstance: "", mediaType: "TV", filePath: "/media/anime/Show B/Season 01/e01.mkv" },
+    { serverInstance: "", mediaType: "TV", filePath: "/media/tv/Show C/e01.mkv" },
+  ];
+  const body = await (await paths(t)).json();
+  assert.equal(body.plex.tv.mountPoint, "/media/");
+  assert.deepEqual(body.plex.tv.samples, ["tv/Show A", "anime/Show B", "tv/Show C"]);
+});
+
 test("plex and jellyfin previews are computed independently", async () => {
   const t = await mintSession();
   plexItems = [{ serverInstance: "", mediaType: "MOVIE", filePath: "/plexmedia/movies/a.mkv" }];

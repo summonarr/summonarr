@@ -85,12 +85,15 @@ const { sseEmitter } = await import("../src/lib/sse-emitter.ts");
 const {
   MAX_PLAYTIME_DELTA_MS,
   MediaServerMismatchError,
+  STALE_FINALIZE_CONCURRENCY,
   appendPlayHistoryFilter,
   applyFinalTick,
   calculateWatched,
+  cleanupStaleSessions,
   computePlaytimeIncrement,
   getArcGapDays,
   getCompletionThreshold,
+  getRetentionCutoff,
   getWatchedThreshold,
   isPlayHistoryEnabled,
   isSourceEnabled,
@@ -133,16 +136,20 @@ shadowPrismaModel(prisma, "plexLibraryItem", {
 });
 const jellyfinLibCalls: LibArgs[] = [];
 let jellyfinLibRow: { tmdbId: number | null } | null = null;
+// The Jellyfin branch reads findMany too (two rows can hold one item id).
+let jellyfinLibRows: Array<{ tmdbId: number; jellyfinItemId: string | null }> | null = null;
 shadowPrismaModel(prisma, "jellyfinLibraryItem", {
-  findFirst: async (args: LibArgs) => {
+  findMany: async (args: LibArgs) => {
     jellyfinLibCalls.push(args);
-    return jellyfinLibRow;
+    if (jellyfinLibRows) return jellyfinLibRows;
+    return jellyfinLibRow && jellyfinLibRow.tmdbId != null ? [{ tmdbId: jellyfinLibRow.tmdbId, jellyfinItemId: null }] : [];
   },
 });
 
 const activeSessionDeletes: Array<{ where: Record<string, unknown> }> = [];
 let activeSessionDeleteError: Error | null = null;
 const activeSessionUpdateManyCalls: Array<{ data: { lastSeenAt: Date } }> = [];
+let staleSessionRows: ActiveSession[] = [];
 let activeSessionUpdateManyError: Error | null = null;
 shadowPrismaModel(prisma, "activeSession", {
   deleteMany: async (args: { where: Record<string, unknown> }) => {
@@ -155,7 +162,9 @@ shadowPrismaModel(prisma, "activeSession", {
     if (activeSessionUpdateManyError) throw activeSessionUpdateManyError;
     return { count: 3 };
   },
-  findMany: async () => [], // emitActiveSessionsSnapshot on the non-skipSSE path
+  // cleanupStaleSessions' lastSeenAt-filtered read gets staleSessionRows; the
+  // snapshot read on the non-skipSSE path gets nothing.
+  findMany: async (args?: { where?: { lastSeenAt?: unknown } }) => (args?.where?.lastSeenAt ? staleSessionRows : []),
 });
 
 type HistoryCreateArgs = { data: Array<Record<string, unknown>>; skipDuplicates?: boolean };
@@ -165,9 +174,20 @@ let priorPlayRow: { id: string; referenceId: string | null; watched: boolean } |
 let historyFindFirstError = false;
 const historyDeleteManyCalls: Array<{ where: { startedAt: { lt: Date } } }> = [];
 let historyDeleteCount = 0;
+// When set, each history write yields a macrotask while counted in flight, so a
+// test can see how many finalizes run at once.
+let historyCreateYield = false;
+let historyCreateInFlight = 0;
+let historyCreateMaxInFlight = 0;
 shadowPrismaModel(prisma, "playHistory", {
   createMany: async (args: HistoryCreateArgs) => {
     historyCreates.push(args);
+    if (historyCreateYield) {
+      historyCreateInFlight++;
+      historyCreateMaxInFlight = Math.max(historyCreateMaxInFlight, historyCreateInFlight);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      historyCreateInFlight--;
+    }
     return { count: args.data.length };
   },
   findFirst: async (args: Record<string, unknown>) => {
@@ -254,6 +274,7 @@ beforeEach(() => {
   plexLibRow = null;
   plexLibRows = null;
   jellyfinLibRow = null;
+  jellyfinLibRows = null;
   activeSessionDeletes.length = 0;
   activeSessionDeleteError = null;
   activeSessionUpdateManyCalls.length = 0;
@@ -264,6 +285,8 @@ beforeEach(() => {
   historyFindFirstError = false;
   historyDeleteManyCalls.length = 0;
   historyDeleteCount = 0;
+  historyCreateMaxInFlight = 0;
+  staleSessionRows = [];
   tmdbCacheFindCalls.length = 0;
   tmdbCacheRow = null;
   tmdbCacheError = false;
@@ -700,6 +723,27 @@ test("resolveShowTmdbId: jellyfin keys map via JellyfinLibraryItem, serverInstan
     OR: [{ jellyfinItemId: "jf-item-1" }, { jellyfinItemIds: { has: "jf-item-1" } }],
   });
   assert.equal(plexLibCalls.length, 0);
+});
+
+test("resolveShowTmdbId: two Jellyfin rows holding one item id resolve to the CANONICAL holder, else the lowest tmdbId, whatever order they arrive in", async () => {
+  // A recentOnly sync is insert-only and keyed by tmdbId, so a show re-identified
+  // on the server gets a second row carrying the same item id until the next full
+  // sync. Following arrival order persisted whichever row Postgres returned first.
+  for (const order of [
+    [{ tmdbId: 100, jellyfinItemId: "jf-a" }, { tmdbId: 200, jellyfinItemId: "jf-b" }],
+    [{ tmdbId: 200, jellyfinItemId: "jf-b" }, { tmdbId: 100, jellyfinItemId: "jf-a" }],
+  ]) {
+    jellyfinLibRows = order;
+    assert.equal(await resolveShowTmdbId("jellyfin", "jf-b", ""), 200, "the canonical holder owns the id");
+  }
+  for (const order of [
+    [{ tmdbId: 300, jellyfinItemId: "jf-c" }, { tmdbId: 50, jellyfinItemId: "jf-d" }],
+    [{ tmdbId: 50, jellyfinItemId: "jf-d" }, { tmdbId: 300, jellyfinItemId: "jf-c" }],
+  ]) {
+    jellyfinLibRows = order;
+    assert.equal(await resolveShowTmdbId("jellyfin", "jf-z", ""), 50, "no canonical holder: the lowest tmdbId");
+  }
+  assert.deepEqual(jellyfinLibCalls[0].select, { tmdbId: true, jellyfinItemId: true }, "the pick needs the canonical column");
 });
 
 // ═══ resolveMediaServerUser ═════════════════════════════════════════════════
@@ -1352,6 +1396,42 @@ test("purgeOldHistory: a configured retention deletes rows older than now−N da
     Math.abs(lt.getTime() - (callClock - 30 * 24 * 60 * 60 * 1000)) < 2_000,
     "cutoff must be 30 days before the moment of the call",
   );
+});
+
+test("purgeOldHistory: the cutoff is getRetentionCutoff's — the purge and the never-watched window share one definition", async () => {
+  setSettings({ playHistoryRetentionDays: "45" });
+  const before = await getRetentionCutoff(new Date(Date.now()));
+  await purgeOldHistory();
+  const after = await getRetentionCutoff(new Date(Date.now()));
+  const lt = historyDeleteManyCalls[0].where.startedAt.lt;
+  assert.ok(before && after, "a configured retention has a cutoff");
+  assert.ok(
+    lt.getTime() >= before.getTime() && lt.getTime() <= after.getTime(),
+    "the purge must delete before exactly the moment the never-watched window may open from (guardrail 14d)",
+  );
+});
+
+// ═══ cleanupStaleSessions ═══════════════════════════════════════════════════
+
+test("cleanupStaleSessions: every stale row is finalized with at most STALE_FINALIZE_CONCURRENCY in flight, and the batch emits ONE history SSE", async () => {
+  // A media-server outage of 30+ minutes ages every active session into one
+  // batch; an unbounded fan-out ran all of them against the max:5 pool at once.
+  staleSessionRows = Array.from({ length: 10 }, (_, i) =>
+    makeSession({ id: `plex:stale-${i}`, sessionKey: `stale-${i}`, tmdbId: null, sourceItemId: null }),
+  );
+  historyCreateYield = true;
+  try {
+    await cleanupStaleSessions(30);
+  } finally {
+    historyCreateYield = false;
+  }
+  assert.equal(historyCreates.length, 10, "every stale row is still recorded");
+  assert.ok(historyCreateMaxInFlight >= 1);
+  assert.ok(
+    historyCreateMaxInFlight <= STALE_FINALIZE_CONCURRENCY,
+    `at most ${STALE_FINALIZE_CONCURRENCY} finalizes may run at once, saw ${historyCreateMaxInFlight}`,
+  );
+  assert.equal(sseEvents.filter((e) => e.type === "activity:history-updated").length, 1, "one batched SSE, not one per session");
 });
 
 // ═══ guardrail-7 silence ════════════════════════════════════════════════════

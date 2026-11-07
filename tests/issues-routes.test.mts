@@ -121,7 +121,7 @@ const { HeadersAdapter } = cjsRequire("next/dist/server/web/spec-extension/adapt
 // graph load (static imports would hoist above them).
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
-const { shadowPrismaModel } = await import("./_helpers.mts");
+const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
@@ -213,15 +213,19 @@ const COOKIE = getSessionCookieName();
 
 // ── Setting stub (features, maintenance, rate limit, notify, arr config) ─────
 const settings = new Map<string, string>();
+let settingReads = 0;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
+    settingReads++;
     const v = settings.get(args.where.key);
     return v === undefined ? null : { key: args.where.key, value: v };
   },
-  findMany: async (args: { where: { key: { in: string[] } } }) =>
-    args.where.key.in
+  findMany: async (args: { where: { key: { in: string[] } } }) => {
+    settingReads++;
+    return args.where.key.in
       .filter((k) => settings.has(k))
-      .map((k) => ({ key: k, value: settings.get(k) })),
+      .map((k) => ({ key: k, value: settings.get(k) }));
+  },
 });
 
 // ── issue stub — findUnique returns a SNAPSHOT copy so the route's captured
@@ -230,10 +234,12 @@ let issueSeq = 0;
 let issueRow: Record<string, unknown> | null = null; // the row findUnique returns
 let issueListRows: Array<Record<string, unknown>> = [];
 let issueUpdateManyCount = 1; // scriptable CAS result
+// Every row create() returned this test: what createIssue's duplicate check reads.
+let createdIssues: Array<Record<string, unknown>> = [];
 const issueModel = {
   create: async (args: { data: Record<string, unknown> }) => {
     rec("issue.create", args);
-    return {
+    const row = {
       id: `issue-${++issueSeq}`,
       status: "OPEN",
       resolution: null,
@@ -242,6 +248,22 @@ const issueModel = {
       createdAt: new Date(),
       ...args.data,
     };
+    createdIssues.push(row);
+    return row;
+  },
+  // Equality on every key of the where, plus `status: { in }`.
+  findFirst: async (args: { where: Record<string, unknown> }) => {
+    rec("issue.findFirst", args);
+    const hit = createdIssues.filter((row) => Object.entries(args.where).every(([k, v]) =>
+      v !== null && typeof v === "object" && Array.isArray((v as { in?: unknown[] }).in)
+        ? (v as { in: unknown[] }).in.includes(row[k])
+        : (row[k] ?? null) === v,
+    ));
+    return hit.length > 0 ? { ...hit[hit.length - 1] } : null;
+  },
+  delete: async (args: { where: { id: string } }) => {
+    rec("issue.delete", args);
+    return issueRow ? { ...issueRow } : {};
   },
   findUnique: async (args: { where: { id: string } }) => {
     rec("issue.findUnique", args);
@@ -260,12 +282,23 @@ const issueModel = {
 };
 shadowPrismaModel(prisma, "issue", issueModel);
 
+// What the thread read returns, in the order the query asked for (newest first).
+let messageRows: Array<Record<string, unknown>> = [];
 shadowPrismaModel(prisma, "issueMessage", {
   create: async (args: { data: Record<string, unknown> }) => {
     rec("issueMessage.create", args);
     return { id: `msg-${Date.now()}`, createdAt: new Date(), author: { name: "n", role: "USER" }, ...args.data };
   },
-  findMany: async () => [],
+  findMany: async (args: unknown) => {
+    rec("issueMessage.findMany", args);
+    return messageRows.map((m) => ({ ...m }));
+  },
+});
+
+// The issue DELETE's transaction: its callback runs against the shadowed client.
+shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Promise<unknown>) => {
+  rec("$transaction");
+  return fn(prisma);
 });
 
 shadowPrismaModel(prisma, "issueGrab", {
@@ -337,8 +370,8 @@ shadowPrismaModel(prisma, "pushSubscription", {
 
 // Routes under test (imported AFTER every stub is in place).
 const { GET: getIssues, POST: postIssues } = await import("../src/app/api/issues/route.ts");
-const { PATCH: patchIssueRoute } = await import("../src/app/api/issues/[id]/route.ts");
-const { POST: postMessageRoute } = await import("../src/app/api/issues/[id]/messages/route.ts");
+const { PATCH: patchIssueRoute, DELETE: deleteIssueRoute } = await import("../src/app/api/issues/[id]/route.ts");
+const { GET: getMessagesRoute, POST: postMessageRoute } = await import("../src/app/api/issues/[id]/messages/route.ts");
 const { GET: getReleaseRoute, POST: postReleaseRoute } = await import("../src/app/api/issues/[id]/releases/route.ts");
 const { POST: postClaimRoute } = await import("../src/app/api/issues/[id]/claim/route.ts");
 
@@ -446,6 +479,8 @@ async function flushMicrotasks(): Promise<void> {
 
 beforeEach(() => {
   ops.length = 0;
+  createdIssues = [];
+  messageRows = [];
   afterTasks.length = 0;
   sseEvents.length = 0;
   fetchCalls.length = 0;
@@ -1469,4 +1504,220 @@ test("messages POST: a NAME-LESS manager's reply reaches the reporter as 'Admin'
   assert.equal(note.data.body, "Admin replied: on it");
   assert.equal(note.data.data.author, "Admin");
   assert.ok(!JSON.stringify(note).includes("@example.com"), JSON.stringify(note));
+});
+
+// ═══════════════════ filing the same report twice ════════════════════════════
+
+test("POST filed again while the first is still open answers that issue: one row, one issue:new, one admin fan-out — a different note files anew", async () => {
+  settings.set("rateLimitIssues", "1000");
+  fetchImpl = tmdbVerifyFetch;
+  plexHas = true;
+  const { userId, token } = await mintSession();
+  const body = createBody({ note: "audio drops out at 12:00" });
+
+  const first = await postIssue(token, body);
+  assert.equal(first.status, 201);
+  const firstId = ((await first.json()) as { id: string }).id;
+  const again = await postIssue(token, body);
+  assert.equal(again.status, 201, "the success shape is kept — the web POST and Discord's /issue both read it");
+  assert.equal(((await again.json()) as { id: string }).id, firstId, "the open issue is answered");
+  assert.equal(opsOf("issue.create").length, 1, "no second row");
+  assert.deepEqual(sseEvents.map((e) => e.type), ["issue:new"], "no second announcement");
+  const dupCheck = opsOf("issue.findFirst")[1].args as { where: Record<string, unknown> };
+  assert.equal(dupCheck.where.reportedBy, userId, "only the reporter's own reports count");
+  assert.deepEqual(dupCheck.where.status, { in: ["OPEN", "IN_PROGRESS"] }, "a resolved report can be filed again");
+
+  // The first POST's fan-out does work; the duplicate's does none.
+  assert.equal(afterTasks.length, 2);
+  settingReads = 0;
+  await afterTasks[0]();
+  assert.ok(settingReads > 0, "control: the real fan-out reads its channel settings");
+  settingReads = 0;
+  await afterTasks[1]();
+  assert.equal(settingReads, 0, "the duplicate's fan-out is a no-op");
+
+  // A different note is new information: filed, never dropped.
+  const withNote = await postIssue(token, createBody({ note: "and the subtitles are out of sync" }));
+  assert.equal(withNote.status, 201);
+  assert.notEqual(((await withNote.json()) as { id: string }).id, firstId);
+  assert.equal(opsOf("issue.create").length, 2);
+});
+
+test("POST: a TV issue for a title in no library is refused before any Sonarr lookup; past the gate the lookup runs", async () => {
+  settings.set("rateLimitIssues", "1000");
+  settings.set("sonarrUrl", "http://sonarr.example.com:8989");
+  settings.set("sonarrApiKey", "sonarr-key");
+  fetchImpl = tmdbVerifyFetch;
+  const { token } = await mintSession();
+  const tv = createBody({ mediaType: "TV", tmdbId: 1396 });
+
+  const refused = await postIssue(token, tv);
+  assert.equal(refused.status, 422);
+  assert.deepEqual(await refused.json(), { error: "This title isn't in the library — issues can only be filed for available media." });
+  assert.deepEqual(fetchCalls.map((u) => `${u.hostname}${u.pathname}`), ["api.themoviedb.org/3/tv/1396"], "only the TMDB verify — no tvdb lookup for a refused report");
+
+  // Control: in the library, the tvdb resolution does run (after the gate).
+  fetchCalls.length = 0;
+  jellyfinHas = true;
+  const filed = await postIssue(token, tv);
+  assert.equal(filed.status, 201);
+  assert.ok(fetchCalls.length > 1, `the tvdb lookup ran: ${fetchCalls.map((u) => u.href).join(", ")}`);
+});
+
+// ═══════════════════ GET /api/issues paging ══════════════════════════════════
+
+test("GET pages with an optional keyset cursor over (createdAt, id) desc; a malformed cursor serves the first page; a full page names the next cursor", async () => {
+  const manager = await mintSession({ permissions: String(Permission.MANAGE_ISSUES) });
+  const at = new Date("2026-10-01T12:00:00.000Z");
+  type ListArgs = { where: Record<string, unknown>; orderBy: unknown; take: number };
+  const argsOf = () => opsOf("issue.findMany").at(-1)!.args as ListArgs;
+
+  await listIssues(manager.token, `?cursor=${encodeURIComponent(`${at.toISOString()}|issue-50`)}`);
+  assert.deepEqual(argsOf().where.OR, [{ createdAt: { lt: at } }, { createdAt: at, id: { lt: "issue-50" } }]);
+  assert.deepEqual(argsOf().orderBy, [{ createdAt: "desc" }, { id: "desc" }], "a stable order the cursor can continue");
+  assert.equal(argsOf().take, 50, "the default page size is unchanged");
+
+  // A plain user's page is still their own issues only.
+  const user = await mintSession();
+  await listIssues(user.token, `?limit=500&cursor=${encodeURIComponent(`${at.toISOString()}|issue-50`)}`);
+  assert.equal(argsOf().where.reportedBy, user.userId);
+  assert.ok(Array.isArray(argsOf().where.OR));
+  assert.equal(argsOf().take, 100, "the clamp is unchanged");
+
+  for (const bad of ["garbage", "|issue-1", "not-a-date|issue-1", `${at.toISOString()}|`]) {
+    const res = await listIssues(manager.token, `?cursor=${encodeURIComponent(bad)}`);
+    assert.equal(res.status, 200, bad);
+    assert.deepEqual(argsOf().where, {}, `${bad}: the first page`);
+  }
+
+  // The response stays a bare array; a FULL page carries the next cursor.
+  issueListRows = [
+    { id: "issue-b", title: "B", status: "OPEN", createdAt: new Date("2026-10-03T00:00:00.000Z") },
+    { id: "issue-a", title: "A", status: "OPEN", createdAt: at },
+  ];
+  const full = await listIssues(manager.token, "?limit=2");
+  assert.ok(Array.isArray(await full.json()));
+  assert.equal(full.headers.get("x-next-cursor"), `${at.toISOString()}|issue-a`);
+  const short = await listIssues(manager.token, "?limit=3");
+  assert.equal(short.headers.get("x-next-cursor"), null, "a short page is the last");
+});
+
+// ═══════════════════ PATCH that changes nothing ══════════════════════════════
+
+test("PATCH that changes nothing (the current status, an empty body, refetch:false) answers the issue with no write, no SSE and no audit; a note-only edit still writes", async () => {
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const open = { id: "issue-noop", status: "OPEN", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: null, posterPath: null };
+  for (const body of [{ status: "OPEN" }, {}, { refetch: false }, { status: "OPEN", resolution: "  " }]) {
+    ops.length = 0;
+    sseEvents.length = 0;
+    issueRow = { ...open };
+    const res = await patchIssue(admin.token, "issue-noop", body);
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(((await res.json()) as { id: string; status: string }).status, "OPEN");
+    assert.equal(opsOf("issue.updateMany").length, 0, `${JSON.stringify(body)}: no write`);
+    assert.deepEqual(sseEvents, [], `${JSON.stringify(body)}: nothing to announce`);
+    assert.equal(opsOf("auditLog.create").length, 0, `${JSON.stringify(body)}: nothing to audit`);
+  }
+
+  // A resolution-only edit on an OPEN issue is a real edit (deliberate — not gated).
+  ops.length = 0;
+  sseEvents.length = 0;
+  issueRow = { ...open };
+  const note = await patchIssue(admin.token, "issue-noop", { resolution: "x" });
+  assert.equal(note.status, 200);
+  assert.deepEqual((opsOf("issue.updateMany")[0].args as { data: Record<string, unknown> }).data, { resolution: "x" });
+  assert.deepEqual(sseEvents.map((e) => e.type), ["issue:updated"]);
+});
+
+// ═══════════════════ the IN_PROGRESS promotion, shared ═══════════════════════
+
+test("refetch on an issue already IN_PROGRESS re-announces and re-audits nothing; from OPEN it announces and audits the flip once", async () => {
+  settings.set("radarrUrl", "http://radarr.example.com:7878");
+  settings.set("radarrApiKey", "hd-api-key");
+  fetchImpl = (url: URL) => {
+    if (url.pathname.startsWith("/api/v3/movie")) return jsonResponse([{ id: 42, tmdbId: 603 }]);
+    if (url.pathname === "/api/v3/command") return jsonResponse({ id: 1 });
+    throw new Error(`unexpected refetch fetch: ${url.href}`);
+  };
+  const admin = await mintSession({ role: "ADMIN" });
+  const flips = () => opsOf("auditLog.create").filter((o) => (o.args as { data: { action: string } }).data.action === "ISSUE_STATUS_CHANGE");
+
+  issueRow = { id: "issue-ip", status: "IN_PROGRESS", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
+  const same = await patchIssue(admin.token, "issue-ip", { refetch: true });
+  assert.equal(same.status, 200);
+  assert.equal(((await same.json()) as { arrError: unknown }).arrError, null);
+  assert.equal(opsOf("issue.updateMany").length, 1, "the CAS still runs");
+  assert.deepEqual(sseEvents.filter((e) => e.type === "issue:updated"), [], "IN_PROGRESS → IN_PROGRESS is not news");
+  assert.equal(flips().length, 0, "and not a status change to audit");
+
+  ops.length = 0;
+  sseEvents.length = 0;
+  issueRow = { ...issueRow, id: "issue-op", status: "OPEN" };
+  const fromOpen = await patchIssue(admin.token, "issue-op", { refetch: true });
+  assert.equal(fromOpen.status, 200);
+  assert.deepEqual(sseEvents.filter((e) => e.type === "issue:updated").map((e) => e.status), ["IN_PROGRESS"]);
+  assert.equal(flips().length, 1);
+  assert.deepEqual(JSON.parse((flips()[0].args as { data: { details: string } }).data.details), {
+    trigger: "refetch", before: { status: "OPEN" }, after: { status: "IN_PROGRESS" },
+  });
+});
+
+// ═══════════════════ the resolve announcement, shared ════════════════════════
+
+test("PATCH resolve with no note stores the inbox row the auto-resolve stores: the English body and { v: 1, resolution: null }", async () => {
+  usersById.set("reporter-plain", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: null, notificationEmail: null,
+  });
+  issueRow = { id: "issue-plain", status: "OPEN", reportedBy: "reporter-plain", title: "Dune", mediaType: "MOVIE", tmdbId: 438631, resolution: null, posterPath: null, issueType: "BAD_VIDEO" };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const res = await patchIssue(admin.token, "issue-plain", { status: "RESOLVED" });
+  assert.equal(res.status, 200);
+  const note = (opsOf("notification.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(note.userId, "reporter-plain");
+  assert.equal(note.body, "Your reported issue was resolved.");
+  assert.deepEqual(note.data, { v: 1, resolution: null });
+});
+
+// ═══════════════════ GET /api/issues/[id]/messages ═══════════════════════════
+
+test("messages GET reads the newest 500 and answers them oldest first, as a bare array", async () => {
+  const reporter = await mintSession();
+  issueRow = { id: "issue-thread", status: "OPEN", reportedBy: reporter.userId, title: "t", mediaType: "MOVIE", tmdbId: 1, posterPath: null, claimedBy: null };
+  // The query asks newest first: the stub answers in that order.
+  messageRows = [3, 2, 1].map((n) => ({ id: `m${n}`, body: `message ${n}`, createdAt: new Date(Date.UTC(2026, 9, n)), author: { name: "n", role: "USER" } }));
+
+  const res = await inScope(() => getMessagesRoute(issuesReq(reporter.token, { method: "GET", path: "/issue-thread/messages" }), idCtx("issue-thread")));
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as Array<{ id: string }>;
+  assert.deepEqual(body.map((m) => m.id), ["m1", "m2", "m3"], "oldest first");
+  const args = opsOf("issueMessage.findMany")[0].args as { take: number; orderBy: unknown; include: { author: { select: Record<string, boolean> } } };
+  assert.equal(args.take, 500, "the read is bounded");
+  assert.deepEqual(args.orderBy, [{ createdAt: "desc" }, { id: "desc" }], "the bound keeps the NEWEST messages");
+  assert.equal(args.include.author.select.email, undefined, "the reporter is not sent authors' emails");
+});
+
+// ═══════════════════ DELETE /api/issues/[id] ═════════════════════════════════
+
+test("DELETE audits inside its transaction through the shared row builder: a control character in the user agent is stripped", async () => {
+  issueRow = { id: "issue-del", status: "OPEN", reportedBy: "reporter-d", title: "Heat", mediaType: "MOVIE", tmdbId: 949, posterPath: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const ua = "curl/8\x1b[2J\x9bforged";
+  const req = new NextRequest("http://localhost:3000/api/issues/issue-del", {
+    method: "DELETE",
+    headers: { cookie: `${COOKIE}=${admin.token}`, "user-agent": ua },
+  });
+  const res = await inScope(() => deleteIssueRoute(req, idCtx("issue-del")));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+
+  // In order, inside the one transaction: the delete, then its audit row.
+  const order = ops.map((o) => o.op).filter((op) => ["$transaction", "issue.delete", "auditLog.create"].includes(op));
+  assert.deepEqual(order, ["$transaction", "issue.delete", "auditLog.create"]);
+  const row = (opsOf("auditLog.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(row.action, "ISSUE_DELETE");
+  assert.equal(row.target, "issue:issue-del");
+  assert.deepEqual(JSON.parse(row.details as string), { action: "delete", title: "Heat", mediaType: "MOVIE" });
+  assert.equal(row.userAgent, "curl/8[2Jforged", "ESC and the C1 control are stripped");
+  assert.deepEqual(sseEvents.map((e) => e.type), ["issue:deleted"]);
 });

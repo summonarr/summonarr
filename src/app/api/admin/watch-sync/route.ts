@@ -69,12 +69,21 @@ export const GET = withAdmin(async (req) => {
   const jellyfinUsers = users.filter((u) => u.source === "jellyfin").sort(compareServerUsers);
   pairs.sort((a, b) => compareServerUsers(a.plexUser, b.plexUser) || compareServerUsers(a.jellyfinUser, b.jellyfinUser));
   const paired = new Set(pairs.map((p) => `${p.plexUser.id}\u0000${p.jellyfinUser.id}`));
-  // Suggestions: both identities linked to the same Summonarr account.
+  // Suggestions: both identities linked to the same Summonarr account. The
+  // Jellyfin users are bucketed by account (in their A–Z order), so each Plex
+  // account visits only its own account's users.
+  const jellyfinByAccount = new Map<string, typeof jellyfinUsers>();
+  for (const j of jellyfinUsers) {
+    if (!j.userId) continue;
+    const bucket = jellyfinByAccount.get(j.userId);
+    if (bucket) bucket.push(j);
+    else jellyfinByAccount.set(j.userId, [j]);
+  }
   const suggestions: Array<{ plexUserId: string; jellyfinUserId: string; account: string }> = [];
   for (const p of plexUsers) {
     if (!p.userId) continue;
-    for (const j of jellyfinUsers) {
-      if (j.userId !== p.userId || paired.has(`${p.id}\u0000${j.id}`)) continue;
+    for (const j of jellyfinByAccount.get(p.userId) ?? []) {
+      if (paired.has(`${p.id}\u0000${j.id}`)) continue;
       suggestions.push({ plexUserId: p.id, jellyfinUserId: j.id, account: p.user?.name || p.user?.email || p.username });
     }
   }

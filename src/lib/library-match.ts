@@ -19,7 +19,8 @@
 //   folder's Radarr/Sonarr title. One shared id is agreement — two TMDB entries
 //   for one film (Plex's conflated guids) are not this check's business.
 // - "yearMismatch" only where no Radarr/Sonarr manages the folder, only from a
-//   "Name (YYYY)" folder, and only beyond TWO years either way: a festival
+//   folder that states its year ("Name (YYYY)", "Name (YYYY) {tmdb-…}"), and
+//   only beyond TWO years either way: a festival
 //   premiere and the wide release routinely sit two years apart, and on a real
 //   9,134-movie library a one-year tolerance flagged 11 such films beside ~30
 //   genuine wrong matches. It has no suggestion, so it is never offered a fix.
@@ -29,6 +30,8 @@
 //   the folder's title would make a bogus second copy.
 // - Two Radarr/Sonarr entries for one folder name that share no id (two
 //   instances that disagree) leave that folder unjudged.
+
+import { isMediaFileName } from "./library-paths";
 
 export type MatchServer = "plex" | "jellyfin";
 export type MatchMediaType = "MOVIE" | "TV";
@@ -120,28 +123,37 @@ function segments(path: string): string[] {
   return path.replace(/\\/g, "/").split("/").filter(Boolean);
 }
 
-const FILE_RE = /\.[A-Za-z0-9]{1,5}$/;
+// A show's path is always a folder (a Jellyfin series, a Plex show's
+// Location); a movie's is a file when it ends in a video extension — a BDMV/DVD
+// movie folder, or a dotted name like "M.A.S.H", is still a folder.
+function isFilePath(last: string, mediaType: MatchMediaType | undefined): boolean {
+  return mediaType !== "TV" && isMediaFileName(last);
+}
 
 /** The item's own folder: a file's parent, or the path itself when it is a folder. */
-export function ownFolder(path: string | null): string | null {
+export function ownFolder(path: string | null, mediaType?: MatchMediaType): string | null {
   if (!path) return null;
   const segs = segments(path);
   const last = segs[segs.length - 1];
   if (last === undefined) return null;
-  if (FILE_RE.test(last)) return segs.length >= 2 ? segs[segs.length - 2] : null;
+  if (isFilePath(last, mediaType)) return segs.length >= 2 ? segs[segs.length - 2] : null;
   return last;
 }
 
 /** The file name when the path is a file, else null. */
-export function fileName(path: string | null): string | null {
+export function fileName(path: string | null, mediaType?: MatchMediaType): string | null {
   const last = path ? segments(path).pop() : undefined;
-  return last !== undefined && FILE_RE.test(last) ? last : null;
+  return last !== undefined && isFilePath(last, mediaType) ? last : null;
 }
 
-/** The year a "Name (YYYY)" folder states, else null. */
+/**
+ * The year one folder name states: a trailing "(YYYY)" first, else a "(YYYY)"
+ * anywhere in it ("Film (2017) {tmdb-123}", Radarr's id-tagged layout). The
+ * library diff reads folder years through this too, so both screens agree.
+ */
 export function folderYear(folder: string | null): number | null {
   if (!folder) return null;
-  const m = /\((\d{4})\)\s*$/.exec(folder);
+  const m = /\((\d{4})\)\s*$/.exec(folder) ?? /\((\d{4})\)/.exec(folder);
   return m ? Number(m[1]) : null;
 }
 
@@ -198,6 +210,21 @@ export const YEAR_TOLERANCE = 2;
 
 const KIND_ORDER: Record<MatchFlagKind, number> = { wrongMatch: 0, noTmdbId: 1, yearMismatch: 2 };
 
+// Within a kind: the ones a fix is offered for, then the ones with no
+// suggestion, then the extras.
+const flagRank = (f: MatchFlag) => (f.sibling ? 2 : f.arr?.tmdbId != null ? 0 : 1);
+
+/**
+ * The order flags are listed and stored in. A Sonarr suggestion resolved from
+ * its TVDB id AFTER judging changes a flag's rank, so the stored list is sorted
+ * again with this same rule.
+ */
+export function compareMatchFlags(x: MatchFlag, y: MatchFlag): number {
+  return KIND_ORDER[x.kind] - KIND_ORDER[y.kind]
+    || flagRank(x) - flagRank(y)
+    || (x.title ?? x.folder ?? "").localeCompare(y.title ?? y.folder ?? "");
+}
+
 /** Judge every listed item against Radarr/Sonarr's folders. */
 export function judgeLibraryMatches(
   entries: ServerMatchEntry[],
@@ -232,7 +259,7 @@ export function judgeLibraryMatches(
       continue;
     }
     counts.notManaged++;
-    const folder = ownFolder(entry.path);
+    const folder = ownFolder(entry.path, entry.mediaType);
     if (!placed) {
       judged.push({ entry, folder, arr: null, kind: "noTmdbId" });
       continue;
@@ -254,7 +281,7 @@ export function judgeLibraryMatches(
       title: entry.title,
       year: entry.year,
       folder,
-      file: fileName(entry.path),
+      file: fileName(entry.path, entry.mediaType),
       path: entry.path,
       serverTmdbId: entry.tmdbIds[0] ?? null,
       arr: a ? { service: a.service, instance: a.instance, tmdbId: a.tmdbId, tvdbId: a.tvdbId, title: a.title, year: a.year } : null,
@@ -262,13 +289,7 @@ export function judgeLibraryMatches(
     });
   }
   counts.flagged = flags.length;
-  // Within a kind: the ones a fix is offered for, then the ones with no
-  // suggestion, then the extras.
-  const rank = (f: MatchFlag) => (f.sibling ? 2 : f.arr?.tmdbId != null ? 0 : 1);
-  flags.sort((x, y) =>
-    KIND_ORDER[x.kind] - KIND_ORDER[y.kind]
-    || rank(x) - rank(y)
-    || (x.title ?? x.folder ?? "").localeCompare(y.title ?? y.folder ?? ""));
+  flags.sort(compareMatchFlags);
   return { flags, counts };
 }
 

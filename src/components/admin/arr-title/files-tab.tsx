@@ -23,6 +23,7 @@ import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import type { RenamePreview, TitleFile, TitleFileMedia } from "@/lib/arr-title";
 import { withBasePath } from "@/lib/base-path";
+import { pollJob } from "@/lib/client/job-poll";
 import { arrApi, titleQuery, useTRef, type TitleRef } from "./shared";
 import { snapshotMayPaint } from "./snapshot-rules";
 
@@ -43,11 +44,19 @@ function mediaSummary(m: TitleFileMedia | null, t: T): string {
   ].filter((x): x is string => !!x).join(" · ");
 }
 
+type MediaFormatters = { kbps: Intl.NumberFormat; num: Intl.NumberFormat };
+
+// Built once per locale, not once per file per render.
+function mediaFormatters(locale: string): MediaFormatters {
+  return {
+    kbps: new Intl.NumberFormat(locale, { style: "unit", unit: "kilobit-per-second", unitDisplay: "narrow", maximumFractionDigits: 0 }),
+    num: new Intl.NumberFormat(locale, { maximumFractionDigits: 3 }),
+  };
+}
+
 // The rest of the media info the arr reports, for a file's details.
-function mediaDetails(m: TitleFileMedia | null, t: T, locale: string): Array<[string, string]> {
+function mediaDetails(m: TitleFileMedia | null, t: T, { kbps, num }: MediaFormatters): Array<[string, string]> {
   if (!m) return [];
-  const kbps = new Intl.NumberFormat(locale, { style: "unit", unit: "kilobit-per-second", unitDisplay: "narrow", maximumFractionDigits: 0 });
-  const num = new Intl.NumberFormat(locale, { maximumFractionDigits: 3 });
   const rows: Array<[string, string | null]> = [
     [t("adminArr.files.detail.videoBitrate"), m.videoBitrate ? kbps.format(m.videoBitrate / 1000) : null],
     [t("adminArr.files.detail.fps"), m.videoFps ? num.format(m.videoFps) : null],
@@ -62,9 +71,10 @@ function mediaDetails(m: TitleFileMedia | null, t: T, locale: string): Array<[st
 // A delete runs as a BACKGROUND job on the server — each delete may wait 120 s
 // (a recycle bin on another disk is a copy), past a reverse proxy's hold, and
 // the admin was shown "delete failed" while the arr finished it. Start it, then
-// poll `&job=` for the DELETE's own answer: counted, one poll per answer, never
-// a clock (guardrail 16). A few failed polls in a row (a network blip, a
-// proxy's own 5xx with no JSON) are retried — the delete keeps running there.
+// poll `&job=` for the DELETE's own answer through the shared counted loop
+// (job-poll.ts — never a clock, guardrail 16): a few failed polls in a row (a
+// network blip, a proxy's own 502–504 with no JSON) are retried, and running
+// out of either is "still running" — the delete keeps running there.
 const DELETE_POLL_MS = 1_500;
 const DELETE_MAX_POLLS = 600; // ~15 minutes
 const DELETE_FAILED_POLLS = 5;
@@ -75,33 +85,19 @@ async function runDelete(path: string, fileIds: number[], fallback: string, aliv
   const start = await arrApi<{ deleted?: number; job?: unknown }>(path, { method: "DELETE", body: { fileIds, async: true } }, fallback);
   if (!start.ok) return start;
   if (typeof start.data.job !== "string") return { ok: true, deleted: start.data.deleted ?? 0 };
-  const pollUrl = withBasePath(`${path}&job=${encodeURIComponent(start.data.job)}`);
-  let failed = 0;
-  for (let i = 0; i < DELETE_MAX_POLLS; i++) {
-    await new Promise((r) => window.setTimeout(r, DELETE_POLL_MS));
-    if (!alive()) return null;
-    let status = 0;
-    let data: PollBody | null = null;
-    try {
-      const res = await fetch(pollUrl);
-      status = res.status;
-      data = (await res.json().catch(() => null)) as PollBody | null;
-    } catch {
-      // network: retried below
-    }
-    if (!alive()) return null;
-    if (status === 202) {
-      failed = 0;
-      continue;
-    }
-    if (data === null || typeof data !== "object") {
-      if (++failed >= DELETE_FAILED_POLLS) return { ok: false, running: true };
-      continue;
-    }
-    if (status >= 200 && status < 300) return { ok: true, deleted: typeof data.deleted === "number" ? data.deleted : 0 };
-    return { ok: false, error: typeof data.error === "string" ? data.error : fallback };
-  }
-  return { ok: false, running: true };
+  const answer = await pollJob(fetch, withBasePath(`${path}&job=${encodeURIComponent(start.data.job)}`), {
+    isAlive: alive,
+    intervalMs: DELETE_POLL_MS,
+    maxPolls: DELETE_MAX_POLLS,
+    failLimit: DELETE_FAILED_POLLS,
+  });
+  if (answer === null) return null;
+  const data = answer.data as PollBody | null;
+  // No answer, or one with no JSON (a page from something in between, not the
+  // delete's own): the delete may still be running — never shown as failed.
+  if (answer.status === 0 || data === null || typeof data !== "object") return { ok: false, running: true };
+  if (answer.status >= 200 && answer.status < 300) return { ok: true, deleted: typeof data.deleted === "number" ? data.deleted : 0 };
+  return { ok: false, error: typeof data.error === "string" ? data.error : fallback };
 }
 
 export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChanged: () => void }) {
@@ -109,6 +105,7 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   const tRef = useTRef();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
+  const mediaFmt = useMemo(() => mediaFormatters(locale), [locale]);
   // null until the first read answers; a failed FIRST read is not "no files".
   const [files, setFiles] = useState<TitleFile[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -152,6 +149,10 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   // Live reads out (the snapshot note's "refreshing").
   const [reads, setReads] = useState(0);
   const readsOut = useRef(0);
+  // Only the newest read may land: Reload, a delete's re-read and a rename's
+  // can overlap, and an older answer arriving last would bring back the list
+  // from before the change.
+  const loadSeq = useRef(0);
   const busyRef = useRef(busy);
   useEffect(() => {
     busyRef.current = busy;
@@ -164,11 +165,13 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   const markLive = snap.markLive;
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     readsOut.current++;
     setReads(readsOut.current);
     const res = await arrApi<{ files: TitleFile[] }>(readPath, undefined, tRef.current("adminArr.files.loadFailed"));
     readsOut.current--;
     setReads(readsOut.current);
+    if (seq !== loadSeq.current) return;
     if (res.ok) {
       setFiles(res.data.files);
       setLoadFailed(false);
@@ -185,6 +188,13 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Each file's media lines, worked out once per list — not again on every
+  // checkbox click (a long series lists thousands of files).
+  const fileMedia = useMemo(
+    () => new Map((files ?? []).map((f) => [f.id, { summary: mediaSummary(f.media, t), details: mediaDetails(f.media, t, mediaFmt) }])),
+    [files, t, mediaFmt],
+  );
 
   function toggle(id: number) {
     setSelected((prev) => {
@@ -288,6 +298,7 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
               type="checkbox"
               checked={allSelected}
               onChange={(e) => selectAll(e.target.checked)}
+              disabled={busy !== null}
               className="accent-[var(--ds-accent)]"
             />
             {t("adminArr.files.selectAll")}
@@ -403,15 +414,16 @@ export function FilesTab({ titleRef, onChanged }: { titleRef: TitleRef; onChange
       ) : (
         <ul className="m-0 grid list-none gap-0 rounded-lg p-0" style={{ border: "1px solid var(--ds-border)" }}>
           {files.map((f, i) => {
-            const media = mediaSummary(f.media, t);
-            const details = mediaDetails(f.media, t, locale);
+            const { summary: media, details } = fileMedia.get(f.id) ?? { summary: "", details: [] };
             const expanded = open.has(f.id);
             return (
               <li key={f.id} className="flex items-start gap-3 px-3 py-2.5" style={i > 0 ? { borderTop: "1px solid var(--ds-border)" } : undefined}>
+                {/* Locked while a delete or rename runs: a change of selection would close the confirm holding the delete's only spinner. */}
                 <input
                   type="checkbox"
                   checked={selected.has(f.id)}
                   onChange={() => toggle(f.id)}
+                  disabled={busy !== null}
                   className="mt-1 accent-[var(--ds-accent)]"
                   aria-label={t("adminArr.files.selectAria", { name: f.relativePath })}
                 />

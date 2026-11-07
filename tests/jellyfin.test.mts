@@ -255,6 +255,22 @@ test("QuickConnect poll GETs /QuickConnect/Connect with the encodeURIComponent'd
   await assert.rejects(() => pollJellyfinQuickConnect(B, "s"), /Jellyfin QuickConnect poll: 410/);
 });
 
+test("QuickConnect answers of another shape: initiate without a Secret or Code rejects (no status); poll reads only a real true as signed in", async () => {
+  const B = nextBase();
+  for (const body of [{}, { Secret: "s" }, { Code: "123456" }, { Secret: "", Code: "1" }, { Secret: 5, Code: "1" }, null]) {
+    respond = () => okJson(body);
+    await assert.rejects(
+      () => initiateJellyfinQuickConnect(B),
+      (err: Error & { status?: number }) => /missing Secret or Code/.test(err.message) && err.status === undefined,
+      JSON.stringify(body),
+    );
+  }
+  for (const body of [{ Authenticated: "yes" }, { Authenticated: 1 }, {}, null]) {
+    respond = () => okJson(body);
+    assert.equal(await pollJellyfinQuickConnect(B, "s"), false, JSON.stringify(body));
+  }
+});
+
 test("QuickConnect exchange POSTs /Users/AuthenticateWithQuickConnect with a {Secret} body and maps the User; missing User throws", async () => {
   const B = nextBase();
   respond = () => okJson({ User: { Id: "u-9", Name: "carol" } });
@@ -512,20 +528,73 @@ test("recentOnly: minDateLastSaved rides the query as MinDateLastSaved, and is a
   assert.equal(withoutDate.searchParams.get("MinDateLastSaved"), null, "a full sync must not carry the window filter");
 });
 
+// A library of `total` movies, item i carrying tmdb id i + 1, served by
+// StartIndex/Limit — optionally with some items missing from the listing.
+function libraryPage(url: string, total: number, missing: ReadonlySet<number> = new Set()) {
+  const params = new URL(url).searchParams;
+  const start = Number(params.get("StartIndex"));
+  const limit = Number(params.get("Limit"));
+  const present = Array.from({ length: total }, (_, i) => i).filter((i) => !missing.has(i));
+  const Items = present.slice(start, start + limit).map((i) => ({ Id: `m${i}`, ProviderIds: { Tmdb: String(i + 1) } }));
+  return okJson({ Items, TotalRecordCount: present.length });
+}
+
 test("paging: TotalRecordCount fans out parallel pages at 5000-item StartIndex steps and merges every page into one map", async () => {
   const B = nextBase();
-  respond = (url) => {
-    const start = new URL(url).searchParams.get("StartIndex");
-    if (start === "0") return okJson({ Items: [{ Id: "p0", ProviderIds: { Tmdb: "1" } }], TotalRecordCount: 10_001 });
-    if (start === "5000") return okJson({ Items: [{ Id: "p1", ProviderIds: { Tmdb: "2" } }], TotalRecordCount: 10_001 });
-    if (start === "10000") return okJson({ Items: [{ Id: "p2", ProviderIds: { Tmdb: "3" } }], TotalRecordCount: 10_001 });
-    throw new Error(`unexpected StartIndex in ${url}`);
-  };
+  respond = (url) => libraryPage(url, 10_001);
 
   const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
   const starts = sent.map((s) => new URL(s.url).searchParams.get("StartIndex")).sort();
   assert.deepEqual(starts, ["0", "10000", "5000"], "three pages for a 10001-item library");
-  assert.deepEqual([...items.keys()].sort((x, y) => x - y), [1, 2, 3]);
+  assert.equal(items.size, 10_001);
+});
+
+test("paging: an item deleted mid-walk (every later item shifts down one) is not lost — a short walk is read again", async () => {
+  // Page 0 counts 10,001. Before page 5000 is read, item 3 is deleted: the
+  // pages now serve 10,000 items from an offset that skips item 5000 — it sits
+  // at index 4999, which page 0 already passed. The walk ends "healthy" one
+  // item short; the re-read sees the shifted listing whole.
+  const B = nextBase();
+  let walks = 0;
+  respond = (url) => {
+    const start = new URL(url).searchParams.get("StartIndex");
+    if (start === "0") walks++;
+    if (walks === 1 && start !== "0") return libraryPage(url, 10_001, new Set([3]));
+    return libraryPage(url, 10_001, walks === 1 ? new Set() : new Set([3]));
+  };
+  const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(walks, 2, "the short walk was read again");
+  assert.ok(items.has(5001), "the item at the page boundary survives");
+  assert.equal(items.size, 10_000, "every item still in the library — the deleted one is gone");
+  assert.deepEqual(warns, []);
+});
+
+test("paging: short twice with a MOVED count rejects (the instance keeps its stored rows); short twice by the same count is read as served, warned once", async () => {
+  const B = nextBase();
+  let walks = 0;
+  respond = (url) => {
+    const params = new URL(url).searchParams;
+    if (params.get("StartIndex") === "0") walks++;
+    // Every page after page 0 loses one more item than page 0 counted.
+    const total = walks === 1 ? 10_001 : 10_002;
+    return params.get("StartIndex") === "0" ? libraryPage(url, total) : libraryPage(url, total, new Set([walks]));
+  };
+  await assert.rejects(() => getJellyfinTmdbIds(B, "k", "MOVIE"), /listing changed while it was read/);
+  assert.equal(walks, 2);
+
+  // A server that counts one more item than it ever serves.
+  const B2 = nextBase();
+  respond = (url) => {
+    const params = new URL(url).searchParams;
+    const start = Number(params.get("StartIndex"));
+    const Items = Array.from({ length: Math.max(0, Math.min(5000, 9_999 - start)) }, (_, i) => ({ Id: `s${start + i}`, ProviderIds: { Tmdb: String(start + i + 1) } }));
+    return okJson({ Items, TotalRecordCount: 10_000 });
+  };
+  const items = await getJellyfinTmdbIds(B2, "k", "MOVIE");
+  assert.equal(items.size, 9_999);
+  assert.equal(warns.filter((w) => w.includes("reports 10000 item(s) but serves 9999")).length, 1);
+  await getJellyfinTmdbIds(B2, "k", "MOVIE");
+  assert.equal(warns.filter((w) => w.includes("serves 9999")).length, 1, "an unchanged shortfall is not restated (guardrail 7b)");
 });
 
 test("paging: a response with NO TotalRecordCount walks pages until a short one, instead of stopping after the first", async () => {
@@ -571,6 +640,26 @@ test("library scoping: each libraryId becomes a ParentId-scoped query and the pe
     assert.ok(req.url.includes("IncludeItemTypes=Movie") && req.url.includes("ExcludeItemTypes=BoxSet"));
   }
   assert.deepEqual([...items.keys()].sort((x, y) => x - y), [11, 22]);
+});
+
+test("ParentId is percent-encoded in every scoped query: a stored id holding '&' or '#' never adds a query parameter", async () => {
+  const B = nextBase();
+  const odd = "lib&IncludeItemTypes=Person#x";
+  respond = () => okJson({ Items: [], TotalRecordCount: 0 });
+  await getJellyfinTmdbIds(B, "k", "MOVIE", new Set([odd]));
+  await getJellyfinTVEpisodes(B, "k", new Set([odd]), new Map([["s1", 1]]));
+  await getJellyfinEpisodesForShow(B, "k", "ser&Recursive=false#", 1);
+  assert.equal(sent.length, 3);
+  for (const req of sent) {
+    const params = new URL(req.url).searchParams;
+    assert.equal(params.getAll("IncludeItemTypes").length, 1, req.url);
+    assert.equal(params.getAll("Recursive").length, 1, req.url);
+    assert.ok(!req.url.includes("#"), req.url);
+  }
+  assert.equal(new URL(sent[0].url).searchParams.get("ParentId"), odd);
+  assert.ok(sent[0].url.includes("ParentId=lib%26IncludeItemTypes%3DPerson%23x&"));
+  assert.equal(new URL(sent[1].url).searchParams.get("ParentId"), odd);
+  assert.equal(new URL(sent[2].url).searchParams.get("ParentId"), "ser&Recursive=false#");
 });
 
 // ── collection grouping (guardrail 37d) ─────────────────────────────────────

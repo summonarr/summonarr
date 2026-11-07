@@ -6,17 +6,10 @@ import { prisma } from "@/lib/prisma";
 import { prewarmMdblistCache } from "@/lib/mdblist-prewarm";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
+import { lockBusyResponse } from "@/lib/lock-http";
 
 const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastMdblistWarmAt";
-
-function busyResponse(t: Translator) {
-  return NextResponse.json(
-    { ok: false, error: t("apiAdmin.warm.mdblistRunning"), retryAfter: 30 },
-    { status: 409, headers: { "Retry-After": "30" } },
-  );
-}
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -80,6 +73,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
       return NextResponse.json(result);
     },
-    () => busyResponse(t),
+    () => lockBusyResponse(t("apiAdmin.warm.mdblistRunning")),
   );
 });

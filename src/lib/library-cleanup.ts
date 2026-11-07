@@ -113,6 +113,19 @@ export const CLEANUP_NUMERIC_BOUNDS: Record<NumericField, { min: number; max: nu
 const BOOLEAN_FIELDS: readonly BooleanField[] = ["unwatchedEnabled", "neverWatchedEnabled", "votesEnabled", "excludeAiring", "requireUpstreamCheck"];
 const NUMERIC_FIELDS = Object.keys(CLEANUP_NUMERIC_BOUNDS) as NumericField[];
 
+// One numeric rule field within the bounds the write path enforces (an integer
+// inside CLEANUP_NUMERIC_BOUNDS). The page uses it to keep Save off for a draft
+// the server can only refuse — it never repairs the value.
+export function cleanupNumberInBounds(field: NumericField, value: number): boolean {
+  const { min, max } = CLEANUP_NUMERIC_BOUNDS[field];
+  return Number.isInteger(value) && value >= min && value <= max;
+}
+
+// Every numeric field of a draft within bounds — what a save would accept.
+export function cleanupDraftInBounds(draft: Pick<CleanupSettings, NumericField>): boolean {
+  return NUMERIC_FIELDS.every((f) => cleanupNumberInBounds(f, draft[f]));
+}
+
 // Read side: a missing or malformed row falls back to its default, field by field.
 export function parseCleanupSettings(raw: Readonly<Record<string, string | null | undefined>>): CleanupSettings {
   const out: CleanupSettings = { ...CLEANUP_SETTING_DEFAULTS };
@@ -148,7 +161,7 @@ export function validateCleanupSettingsPatch(
       rows.push({ key: CLEANUP_SETTING_KEYS[field as BooleanField], value: String(value) });
     } else if ((NUMERIC_FIELDS as readonly string[]).includes(field)) {
       const { min, max } = CLEANUP_NUMERIC_BOUNDS[field as NumericField];
-      if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+      if (typeof value !== "number" || !cleanupNumberInBounds(field as NumericField, value)) {
         return { error: t ? t("apiAdmin.cleanup.fieldRange", { field, min, max }) : `${field} must be an integer between ${min} and ${max}` };
       }
       rows.push({ key: CLEANUP_SETTING_KEYS[field as NumericField], value: String(value) });
@@ -229,7 +242,10 @@ export function evaluateCleanupTitle(
   if (settings.votesEnabled && t.votes >= settings.votesMin) matched.push("votes");
 
   const excludedBy: CleanupExclusion[] = [];
-  if (settings.minAgeDays > 0 && newerThan(t.addedAt, settings.minAgeDays)) excludedBy.push("recentlyAdded");
+  // An unknown add date can't prove the title is old enough, so it is held as
+  // recently added — the votes rule doesn't depend on age and would otherwise
+  // pass a title of unknown age straight through.
+  if (settings.minAgeDays > 0 && (t.addedAt === null || newerThan(t.addedAt, settings.minAgeDays))) excludedBy.push("recentlyAdded");
   if (t.requests.some((r) => r.status === "PENDING" || r.status === "APPROVED")) excludedBy.push("activeRequest");
   if (
     settings.recentRequestDays > 0 &&

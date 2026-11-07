@@ -3,7 +3,8 @@
 // One list of Radarr/Sonarr history events — shared by the title manager's
 // History tab (one title) and Admin → Download History (one instance). Sonarr's
 // per-episode records of one download fold into one row (groupHistoryEvents),
-// and a grab's state comes from the list's own records (grabStateOf): failed
+// and a grab's state comes from the list's own records (grabStatesFor, read
+// once per list — never re-scanned per row): failed
 // since, imported since — believed only where the list could hold them
 // (grabStateKnown: not a kind-filtered list, not a page past the first). A
 // grab not yet failed can be marked failed (POST
@@ -19,7 +20,7 @@ import { Chip, type ChipTone } from "@/components/ui/design";
 import { AlertTriangle, Ban, ChevronDown, Loader2 } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { episodeCode, queueFormatters } from "@/components/admin/queue-format";
-import { grabStateKnown, grabStateOf, groupHistoryEvents, type ArrHistoryEvent, type HistoryKind, type HistoryRow } from "@/lib/arr-history";
+import { grabStateKnown, grabStatesFor, groupHistoryEvents, type ArrHistoryEvent, type HistoryKind, type HistoryRow } from "@/lib/arr-history";
 
 const KIND_TONE: Record<HistoryKind, ChipTone> = {
   grabbed: "accent",
@@ -52,6 +53,7 @@ const DELETE_REASON_LABEL: Record<string, string> = {
 
 export const historyKindLabel = (kind: HistoryKind) => KIND_LABEL[kind];
 
+const NO_GRAB_STATE = { failed: false, imported: false } as const;
 const seasonCode = (n: number) => `S${String(n).padStart(2, "0")}`;
 // The marker a successful Mark failed leaves until the list's own records say
 // so. Keyed by download: marking any grab of it failed the whole download.
@@ -99,6 +101,7 @@ export function ArrHistoryList({
     () => groupHistoryEvents(events, paged ? { hasPrevious, hasNext } : null),
     [events, paged, hasPrevious, hasNext],
   );
+  const grabStates = useMemo(() => grabStatesFor(rows, events), [rows, events]);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -108,14 +111,18 @@ export function ArrHistoryList({
   // shows them.
   const [marked, setMarked] = useState<ReadonlySet<string>>(new Set());
   // The inline confirm replaces the button that opened it: focus moves to its
-  // Cancel, and back to the row's Mark failed when it closes unconfirmed.
+  // Cancel, and back to the row's Mark failed when it closes unconfirmed. A
+  // confirmed mark leaves no button to return to — the row now says "marked
+  // failed" — so focus lands on that status instead of falling to the page.
   const cancelRef = useRef<HTMLButtonElement>(null);
   const openers = useRef(new Map<string, HTMLButtonElement>());
+  const statuses = useRef(new Map<string, HTMLSpanElement>());
   const refocus = useRef<string | null>(null);
   useEffect(() => {
     if (confirming !== null) cancelRef.current?.focus();
     else if (refocus.current !== null) {
-      openers.current.get(refocus.current)?.focus();
+      // Whichever the row renders now: its button again, or its failed status.
+      (openers.current.get(refocus.current) ?? statuses.current.get(refocus.current))?.focus();
       refocus.current = null;
     }
   }, [confirming]);
@@ -132,11 +139,11 @@ export function ArrHistoryList({
     });
     const err = await onMarkFailed(row.lead);
     setBusy(null);
-    if (err) {
-      // The button comes back; focus with it.
-      refocus.current = row.key;
-      setErrors((m) => ({ ...m, [row.key]: err }));
-    } else setMarked((s) => new Set(s).add(markKey(row.lead)));
+    // Failed: the button comes back, and focus with it. Accepted: the row's
+    // failed status takes the button's place, and focus goes there.
+    refocus.current = row.key;
+    if (err) setErrors((m) => ({ ...m, [row.key]: err }));
+    else setMarked((s) => new Set(s).add(markKey(row.lead)));
     setConfirming(null);
   }
   function cancel(row: HistoryRow) {
@@ -151,7 +158,7 @@ export function ArrHistoryList({
       {rows.map((row, i) => {
         const e = row.lead;
         const group = row.events.length > 1;
-        const state = grabStateOf(row, events);
+        const state = grabStates.get(row.key) ?? NO_GRAB_STATE;
         const known = grabStateKnown(state, { complete });
         const failed = state.failed || marked.has(markKey(e));
         const isOpen = expanded.has(row.key);
@@ -216,9 +223,19 @@ export function ArrHistoryList({
               {e.kind === "grabbed" && onMarkFailed && e.arrMediaId !== null && (
                 <span className="ml-auto flex flex-wrap items-center justify-end gap-1">
                   {failed ? (
-                    state.failed
-                      ? <Chip tone="declined">{t("adminArr.history.kind.failed")}</Chip>
-                      : <span className="text-xs text-zinc-500">{t("adminArr.history.markedFailed")}</span>
+                    // Focusable from script only: where focus goes after a confirmed mark.
+                    <span
+                      ref={(el) => {
+                        if (el) statuses.current.set(row.key, el);
+                        else statuses.current.delete(row.key);
+                      }}
+                      tabIndex={-1}
+                      className="inline-flex rounded"
+                    >
+                      {state.failed
+                        ? <Chip tone="declined">{t("adminArr.history.kind.failed")}</Chip>
+                        : <span className="text-xs text-zinc-500">{t("adminArr.history.markedFailed")}</span>}
+                    </span>
                   ) : confirming === row.key ? (
                     <>
                       {row.episodeCount > 1 && <span className="text-xs text-zinc-300">{t("adminArr.history.wholeDownload", { count: row.episodeCount })}</span>}

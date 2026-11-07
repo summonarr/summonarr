@@ -146,6 +146,16 @@ function sizeFrom(s: string | undefined): number | null {
 }
 
 
+/** A download id keeps its first DOWNLOAD_ID_MAX characters. */
+export const DOWNLOAD_ID_MAX = 200;
+
+/**
+ * A record's download id as the projection stores it. Anything that matches a
+ * raw record against a projected event's `downloadId` goes through this, so
+ * the two can never disagree on the truncation (issue-replace.ts isInteractiveGrab).
+ */
+export const projectDownloadId = (v: unknown): string | null => textOrNull(v, DOWNLOAD_ID_MAX);
+
 /** One /api/v3/history record → an event, or null when it has no usable id. */
 export function projectHistoryRecord(service: ArrService, instance: string, raw: unknown): ArrHistoryEvent | null {
   const r = obj(raw);
@@ -177,7 +187,7 @@ export function projectHistoryRecord(service: ArrService, instance: string, raw:
     languages: languageNamesOf(r),
     customFormats: namesOf(r.customFormats),
     customFormatScore: int(r.customFormatScore),
-    downloadId: textOrNull(r.downloadId, 200),
+    downloadId: projectDownloadId(r.downloadId),
     indexer: get("indexer", 200),
     downloadClient: get("downloadclientname", 200) ?? get("downloadclient", 200),
     releaseGroup: get("releasegroup", 100),
@@ -380,6 +390,57 @@ export function grabStateOf(row: HistoryRow, events: readonly ArrHistoryEvent[])
     else if (e.kind === "imported") imported = true;
   }
   return { failed, imported };
+}
+
+/**
+ * `grabStateOf` for every row of a list at once, keyed by row key — the list
+ * read ONCE, not once per row (a whole series' history is thousands of
+ * records, and the list re-renders on every expand or confirm; guardrail 5i's
+ * index-once rule). Exactly grabStateOf's answer: a download's newest failure
+ * and import are kept per download, a grab with no downloadId is matched by
+ * failsIdlessGrab's identity (instance, title, release name and — on Sonarr —
+ * episode id).
+ */
+export function grabStatesFor(rows: readonly HistoryRow[], events: readonly ArrHistoryEvent[]): Map<string, GrabState> {
+  const newestFailed = new Map<string, number>();
+  const newestImported = new Map<string, number>();
+  // Failures with no downloadId, by what failsIdlessGrab compares: without and
+  // with the episode id (a Radarr grab matches on the first, a Sonarr one on the second).
+  const idlessFailed = new Map<string, number>();
+  const keep = (m: Map<string, number>, k: string, id: number) => {
+    const cur = m.get(k);
+    if (cur === undefined || id > cur) m.set(k, id);
+  };
+  const idlessKey = (e: ArrHistoryEvent, episodeId?: number) =>
+    JSON.stringify(episodeId === undefined ? [e.instance, e.arrMediaId, e.sourceTitle] : [e.instance, e.arrMediaId, e.sourceTitle, episodeId]);
+  for (const e of events) {
+    if (e.kind !== "failed" && e.kind !== "imported") continue;
+    const k = downloadKey(e);
+    if (k !== null) keep(e.kind === "failed" ? newestFailed : newestImported, k, e.id);
+    else if (e.kind === "failed" && e.arrMediaId !== null) {
+      keep(idlessFailed, idlessKey(e), e.id);
+      if (e.episodeId !== null) keep(idlessFailed, idlessKey(e, e.episodeId), e.id);
+    }
+  }
+  const out = new Map<string, GrabState>();
+  for (const row of rows) {
+    const g = row.lead;
+    if (g.kind !== "grabbed") {
+      out.set(row.key, { failed: false, imported: false });
+      continue;
+    }
+    const k = downloadKey(g);
+    if (k !== null) {
+      out.set(row.key, { failed: (newestFailed.get(k) ?? -Infinity) > g.id, imported: (newestImported.get(k) ?? -Infinity) > g.id });
+      continue;
+    }
+    const idless = g.arrMediaId === null ? undefined
+      : g.service === "radarr" ? idlessFailed.get(idlessKey(g))
+      : g.episodeId !== null ? idlessFailed.get(idlessKey(g, g.episodeId))
+      : undefined;
+    out.set(row.key, { failed: (idless ?? -Infinity) > g.id, imported: false });
+  }
+  return out;
 }
 
 /**

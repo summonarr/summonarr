@@ -61,7 +61,7 @@ shadowPrismaModel(prisma, "setting", {
   upsert: async () => ({}),
 });
 
-const { BlocklistGoneError, removeFromBlocklist } = await import("../src/lib/arr-history-data.ts");
+const { BlocklistGoneError, loadBlocklistPage, removeFromBlocklist } = await import("../src/lib/arr-history-data.ts");
 const { grabStateKnown, grabStateOf, groupHistoryEvents, projectHistoryRecord } = await import("../src/lib/arr-history.ts");
 type ArrHistoryEvent = import("../src/lib/arr-history.ts").ArrHistoryEvent;
 
@@ -165,6 +165,31 @@ test("a Mark failed retry clears the row's earlier error before it runs", () => 
   assert.ok(cleared < body.indexOf("await onMarkFailed("), "before the attempt");
 });
 
+test("a confirmed Mark failed moves focus to the row's failed status, not to the page", () => {
+  const list = readFileSync(new URL("../src/components/admin/arr-history-list.tsx", import.meta.url), "utf8");
+  const start = list.indexOf("async function mark(");
+  const body = list.slice(start, list.indexOf("\n  }\n", start));
+  // Both outcomes name the row as the focus target before the confirm closes.
+  const target = body.indexOf("refocus.current = row.key;");
+  assert.ok(target > body.indexOf("await onMarkFailed("), "after the answer");
+  assert.ok(target < body.indexOf("if (err)"), "for the success branch too, not only the error");
+  assert.ok(target < body.indexOf("setConfirming(null);"), "before the confirm unmounts");
+  // The effect focuses whichever the row renders: its button again, or its status.
+  assert.match(list, /\(openers\.current\.get\(refocus\.current\) \?\? statuses\.current\.get\(refocus\.current\)\)\?\.focus\(\);/);
+  // The status a failed row renders is a script-focusable element registered under the row's key.
+  const status = list.slice(list.indexOf("{failed ? ("), list.indexOf(") : confirming === row.key ? ("));
+  assert.match(status, /ref=\{\(el\) => \{\s*if \(el\) statuses\.current\.set\(row\.key, el\);\s*else statuses\.current\.delete\(row\.key\);\s*\}\}\s*tabIndex=\{-1\}/);
+  assert.match(status, /adminArr\.history\.markedFailed/, "it wraps the 'marked failed' text");
+  assert.match(status, /adminArr\.history\.kind\.failed/, "and the failed chip the reload brings");
+});
+
+test("the list reads its grab states once per list (memoised), never grabStateOf per row in render", () => {
+  const list = readFileSync(new URL("../src/components/admin/arr-history-list.tsx", import.meta.url), "utf8");
+  assert.match(list, /const grabStates = useMemo\(\(\) => grabStatesFor\(rows, events\), \[rows, events\]\);/);
+  assert.match(list, /const state = grabStates\.get\(row\.key\) \?\? NO_GRAB_STATE;/);
+  assert.doesNotMatch(list, /grabStateOf\(/);
+});
+
 // ── C085: an entry shifted by a page past the scan's cap ─────────────────────
 
 /**
@@ -230,4 +255,55 @@ test("an entry that really is gone is still refused, and neighbours inside the s
   responder = shiftedBlocklist(25_000, 0);
   await assert.rejects(removeFromBlocklist("radarr", "", [24_000]), BlocklistGoneError);
   assert.deepEqual(reads(), scan);
+});
+
+// ── a blocklist row's title, looked up when the arr didn't embed it ──────────
+
+/** One blocklist page whose record names movie `movieId` without embedding it; the movie read is scripted. */
+function blocklistNaming(movieId: number, movie: () => Response) {
+  responder = (c) => {
+    if (c.method === "GET" && c.path === "/api/v3/blocklist") {
+      return json({ page: 1, pageSize: 50, totalRecords: 1, records: [{ id: 1, movieId, sourceTitle: "Movie.2024.1080p" }] });
+    }
+    if (c.method === "GET" && c.path === `/api/v3/movie/${movieId}`) return movie();
+    return undefined;
+  };
+}
+const movieReads = (movieId: number) => calls.filter((c) => c.path === `/api/v3/movie/${movieId}`).length;
+const paging = { page: 1, pageSize: 50 };
+
+test("a title lookup that failed on the way (a 5xx) is not remembered as 'no title' — a later load fills it", async () => {
+  let answers = 0;
+  blocklistNaming(4101, () => (answers++ === 0 ? new Response("boom", { status: 500 }) : json({ title: "The Movie", year: 2024, tmdbId: 77 })));
+  const realNow = Date.now;
+  try {
+    const first = await loadBlocklistPage("radarr", "", paging);
+    assert.equal(first.records[0].mediaTitle, "", "the failed lookup leaves the row on its release name");
+    // A burst of reloads straight after doesn't re-ask the arr…
+    await loadBlocklistPage("radarr", "", paging);
+    assert.equal(movieReads(4101), 1);
+    // …but well within the title TTL the next load asks again and fills it.
+    const t0 = realNow();
+    Date.now = () => t0 + 60_000;
+    const later = await loadBlocklistPage("radarr", "", paging);
+    assert.equal(movieReads(4101), 2);
+    assert.equal(later.records[0].mediaTitle, "The Movie");
+    assert.equal(later.records[0].tmdbId, 77);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("a title the arr no longer has (404) reads as unknown and is not re-asked on every load", async () => {
+  blocklistNaming(4102, () => new Response("not found", { status: 404 }));
+  const realNow = Date.now;
+  try {
+    assert.equal((await loadBlocklistPage("radarr", "", paging)).records[0].mediaTitle, "");
+    const t0 = realNow();
+    Date.now = () => t0 + 60_000;
+    assert.equal((await loadBlocklistPage("radarr", "", paging)).records[0].mediaTitle, "");
+    assert.equal(movieReads(4102), 1, "the 404 is remembered");
+  } finally {
+    Date.now = realNow;
+  }
 });

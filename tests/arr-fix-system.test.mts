@@ -458,6 +458,45 @@ test("a switch-ON refused for warnings alone is 409 { warningsOnly }, masked and
   assert.deepEqual(arrCalls(), [], "refused before anything reaches the arr");
 });
 
+test("accepting warnings never saves over an edit made in the arr while the test ran: re-read after the test, 409 and nothing PUT", async () => {
+  const token = await mintSession();
+  // The arr's resource as it reads AFTER the test: the admin changed the indexer's URL in Radarr meanwhile.
+  let reads = 0;
+  let edited: Record<string, unknown> = { ...INDEXER, fields: [{ name: "baseUrl", value: "https://api.other.example" }, { name: "apiKey", value: "********" }] };
+  responder = (c) => {
+    if (c.origin !== RADARR) return undefined;
+    if (c.path === "/api/v3/indexer/3" && c.method === "GET") return json(reads++ === 0 ? INDEXER : edited);
+    if (c.path === "/api/v3/indexer/3" && c.method === "PUT") return json({ ...(c.body as object) }, 202);
+    if (c.path === "/api/v3/indexer/test") return json([warning("No results")], 400);
+    return undefined;
+  };
+  const res = await patch(token, { kind: "indexer", id: 3, enableAutomaticSearch: true, acceptWarnings: true });
+  assert.equal(res.status, 409);
+  const text = await res.text();
+  const body = JSON.parse(text) as { error: string; changed?: boolean; warningsOnly?: boolean };
+  assert.equal(body.changed, true);
+  assert.equal(body.warningsOnly, undefined, "not a warnings prompt: switching anyway again would not help");
+  assert.ok(!text.includes("api.other.example") && !text.includes("nzbgeek"), "no provider fields reach the browser (5e)");
+  assert.deepEqual(writes().map((c) => c.path), ["/api/v3/indexer/test"], "tested, then nothing saved");
+  assert.equal(audits.length, 0);
+
+  // Only the switch being set differs (someone flipped the same switch in the arr): that is no conflict.
+  calls = [];
+  reads = 0;
+  edited = { ...INDEXER, enableAutomaticSearch: true };
+  const ok = await patch(token, { kind: "indexer", id: 3, enableAutomaticSearch: true, acceptWarnings: true });
+  assert.equal(ok.status, 200);
+  assert.deepEqual(writes().map((c) => [c.path, c.query.get("forceSave")]), [["/api/v3/indexer/test", null], ["/api/v3/indexer/3", "true"]]);
+
+  // Another switch flipped in the arr meanwhile IS a change: the save would put it back.
+  calls = [];
+  audits.length = 0;
+  reads = 0;
+  edited = { ...INDEXER, enableRss: false };
+  assert.equal((await patch(token, { kind: "indexer", id: 3, enableAutomaticSearch: true, acceptWarnings: true })).status, 409);
+  assert.deepEqual(writes().map((c) => c.path), ["/api/v3/indexer/test"]);
+});
+
 test("an error with no message still counts as an error; the arr's isWarning decides over severity", () => {
   assert.equal(projectFailures([warning("a"), { errorMessage: "", isWarning: false }]).warningsOnly, false);
   assert.equal(projectFailures([warning("a"), "garbage"]).warningsOnly, false);

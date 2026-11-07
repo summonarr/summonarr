@@ -55,7 +55,10 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // (static imports would hoist above them — the trakt.test pattern).
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
-const { getArrDiskSpace } = await import("../src/lib/arr-stats.ts");
+const { diskSpaceEntries, getArrDiskSpace } = await import("../src/lib/arr-stats.ts");
+const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { MAX_DISK_ENTRIES } = await import("../src/lib/arr-system.ts");
+const { PROJECTION_SCAN_FACTOR } = await import("../src/lib/arr-parse.ts");
 
 // ── prisma stub ─────────────────────────────────────────────────────────────
 // One Setting map serves every reader in the stack: the registry JSON
@@ -113,6 +116,7 @@ function configureInstance(prefix: string, url: string, apiKey: string, entries:
 
 beforeEach(() => {
   settings.clear();
+  invalidateFeatureFlagCache();
   respondByOrigin.clear();
   fetchCalls.length = 0;
   warns.length = 0;
@@ -246,4 +250,52 @@ test("a transport-level failure degrades the instance AND warns with the [arr-st
     warns.some((w) => w.includes("[arr-stats] radarr diskspace failed")),
     "transport failures must be attributed to the instance in the warn",
   );
+});
+
+test("a malformed /diskspace answer (not an array, null or junk entries) never fails the storage card — only valid entries pass", async () => {
+  configureInstance("radarr", RADARR_URL, "rk", null);
+  respondByOrigin.set(new URL(RADARR_URL).origin, () => jsonResponse({ message: "proxy says hi" }));
+  const valid = { path: "/x", label: "", freeSpace: 1, totalSpace: 2 };
+  configureInstance("sonarr", SONARR_URL, "sk", null);
+  respondByOrigin.set(new URL(SONARR_URL).origin, () => jsonResponse([
+    null, 7, "x", [], { label: "no path", freeSpace: 1, totalSpace: 2 }, valid,
+    { path: "/nan", label: "n", freeSpace: "1", totalSpace: 2 },
+    { path: "/nolabel", label: null, freeSpace: 3, totalSpace: 4, accessToken: "never forwarded" },
+  ]));
+  const result = await getArrDiskSpace();
+  assert.deepEqual(result.radarr, [], "a 200 that is not a list reads as no disks, not a throw");
+  assert.deepEqual(result.sonarr, [valid, { path: "/nolabel", label: "", freeSpace: 3, totalSpace: 4 }], "exactly the four fields, in the arr's order");
+  assert.deepEqual(result.unreachable, []);
+});
+
+test("the /diskspace projection is bounded: at most MAX_DISK_ENTRIES kept, PROJECTION_SCAN_FACTOR × that read", () => {
+  const entry = (i: number) => ({ path: `/d${i}`, label: "", freeSpace: 1, totalSpace: 2 });
+  let reads = 0;
+  const huge = new Proxy(Array.from({ length: 100_000 }, (_, i) => entry(i)), {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && /^\d+$/.test(prop)) reads++;
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  assert.equal(diskSpaceEntries(huge).length, MAX_DISK_ENTRIES);
+  assert.ok(reads <= MAX_DISK_ENTRIES * PROJECTION_SCAN_FACTOR, `read ${reads}`);
+  reads = 0;
+  const junk = new Proxy(Array.from({ length: 100_000 }, () => null), {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && /^\d+$/.test(prop)) reads++;
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  assert.deepEqual(diskSpaceEntries(junk), []);
+  assert.ok(reads <= MAX_DISK_ENTRIES * PROJECTION_SCAN_FACTOR, `a list of junk is read a bounded number of times too (read ${reads})`);
+});
+
+test("an integration switched off is not called: its field is null and nothing of it rides `extra` or `unreachable`", async () => {
+  configureInstance("radarr", RADARR_URL, "rk", entriesFor("movies"));
+  configureInstance("radarr4k", RADARR_4K_URL, "rk4", null); // would be unreachable if called
+  configureInstance("sonarr", SONARR_URL, "sk", entriesFor("tv"));
+  settings.set("feature.integration.radarr", "false");
+  const result = await getArrDiskSpace();
+  assert.deepEqual(result, { radarr: null, sonarr: entriesFor("tv"), extra: [], unreachable: [] });
+  assert.deepEqual(fetchCalls.map((c) => new URL(c.url).origin), [new URL(SONARR_URL).origin], "no Radarr call at all");
 });

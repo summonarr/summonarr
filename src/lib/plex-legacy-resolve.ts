@@ -160,7 +160,13 @@ export async function buildPlexShowKeyMap(
 ): Promise<Map<string, number[]>> {
   const ratingKeyToTmdb = new Map<string, number[]>();
   const tvLegacy = new Map<string, PlexLegacyGuidRef>();
-  const tvIds = await getPlexTmdbIds(serverUrl, token, "TV", false, selectedKeys, sections, ratingKeyToTmdb, tvLegacy, true);
+  const tvIds = await getPlexTmdbIds(serverUrl, token, "TV", {
+    selectedKeys,
+    sections,
+    ratingKeyToTmdbOut: ratingKeyToTmdb,
+    legacyOut: tvLegacy,
+    skipShowFilePaths: true,
+  });
   mergeResolvedLegacyItems(await resolvePlexLegacyGuids(tvLegacy, "TV"), tvIds, ratingKeyToTmdb);
   return ratingKeyToTmdb;
 }

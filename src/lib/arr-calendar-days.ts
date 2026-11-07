@@ -258,6 +258,14 @@ function titleIdentity(e: CalendarEntry): string {
   return `${series}:${e.seasonNumber}:${e.episodeNumber}`;
 }
 
+// A row's identity: one title, on one local day, in one service.
+const rowKeyOf = (e: CalendarEntry, dayKey: string) => `${e.service}|${titleIdentity(e)}|${dayKey}`;
+
+/** The row `calendarDays` folds an entry into. */
+export function calendarRowKey(e: CalendarEntry): string {
+  return rowKeyOf(e, localDayKey(entryMs(e)));
+}
+
 /**
  * Entries → local days → one row per title. A movie whose digital and physical
  * dates share a day, or a title two instances (HD + 4K) both carry, is ONE row
@@ -275,7 +283,7 @@ export function calendarDays(entries: readonly CalendarEntry[]): CalendarDay[] {
       day = { key: dayKey, ms, rows: [] };
       days.set(dayKey, day);
     }
-    const rowKey = `${e.service}|${titleIdentity(e)}|${dayKey}`;
+    const rowKey = rowKeyOf(e, dayKey);
     let row = rows.get(rowKey);
     if (!row) {
       row = { key: rowKey, ms, entry: e, tmdbId: e.tmdbId, posterPath: e.posterPath, kinds: [], cells: [] };
@@ -312,7 +320,43 @@ export function calendarDays(entries: readonly CalendarEntry[]): CalendarDay[] {
   return out;
 }
 
-/** How many rows `calendarDays` would draw — what a filter chip's count says. */
+/**
+ * How many rows `calendarDays` would draw — what a filter chip's count says.
+ * Counted by the same row key, without building the days (the chips count
+ * seven filtered lists on every pass).
+ */
 export function calendarRowCount(entries: readonly CalendarEntry[]): number {
-  return calendarDays(entries).reduce((n, d) => n + d.rows.length, 0);
+  const keys = new Set<string>();
+  for (const e of entries) keys.add(calendarRowKey(e));
+  return keys.size;
+}
+
+/**
+ * What the calendar's body shows, in this precedence:
+ *   no report yet — a spinner, or nothing beside a load error;
+ *   rows — the grid;
+ *   no rows with a load error, or with every instance down — nothing (the
+ *     alerts above say why; "nothing on the calendar" is a claim nobody can make);
+ *   titles in the window the chips hide — "nothing matches the filters";
+ *   an instance the filters include couldn't be read — nothing (its schedule
+ *     is unknown, not empty);
+ *   otherwise — "nothing on the calendar".
+ */
+export type CalendarBodyState = "loading" | "none" | "filteredEmpty" | "empty" | "grid";
+
+export function calendarBodyState(v: {
+  hasReport: boolean;
+  hasError: boolean;
+  allDown: boolean;
+  viewFailed: boolean;
+  /** Rows the filters leave (calendarDays' length, or any count of them). */
+  rows: number;
+  /** Entries in the window before the type/status chips. */
+  inWindow: number;
+}): CalendarBodyState {
+  if (!v.hasReport) return v.hasError ? "none" : "loading";
+  if (v.rows > 0) return "grid";
+  if (v.hasError || v.allDown) return "none";
+  if (v.inWindow > 0) return "filteredEmpty";
+  return v.viewFailed ? "none" : "empty";
 }

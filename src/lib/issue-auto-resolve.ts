@@ -3,10 +3,7 @@ import { prisma } from "./prisma";
 import { isFeatureEnabled } from "./features";
 import { logAudit } from "./audit";
 import { emitSSE } from "./sse-emitter";
-import { emitNotificationEvent } from "./notify-agents";
-import { notifyUserIssueResolved } from "./discord-notify";
-import { notifyUserIssueResolvedPush } from "./push";
-import { createInAppNotification } from "./in-app-notify";
+import { announceIssueResolved } from "./issue-transitions";
 
 // Closing an issue when the replacement the admin asked for has landed.
 //
@@ -56,9 +53,9 @@ export interface ClaimedGrab {
  *   "auto-resolve-replacement" — there is no resolution text (nothing here
  *   speaks any user's language), the audit row says why.
  * - The reporter is told through the same channels as a manual resolve, behind
- *   one deactivatedAt read (guardrail 33). When the reporter is the admin whose
- *   grab landed they have just been told by the grab-completed push, so no
- *   second message.
+ *   one deactivatedAt read (guardrail 33) — announceIssueResolved, shared with
+ *   the PATCH. When the reporter is the admin whose grab landed they have just
+ *   been told by the grab-completed push, so no second message.
  */
 export async function autoResolveIssueForGrab(grab: ClaimedGrab, now: Date = new Date()): Promise<boolean> {
   try {
@@ -86,32 +83,7 @@ export async function autoResolveIssueForGrab(grab: ClaimedGrab, now: Date = new
       details: { trigger: "auto-resolve-replacement", title: issue.title, before: { status: issue.status }, after: { status: "RESOLVED" } },
     });
 
-    emitNotificationEvent({
-      event: "issue.resolved",
-      media: { type: issue.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: issue.tmdbId, title: issue.title, posterPath: issue.posterPath ?? null },
-      issue: { id: issue.id, type: issue.issueType },
-      text: null,
-    });
-
-    if (issue.reportedBy === grab.triggeredById) return true;
-    const reporter = await prisma.user
-      .findUnique({ where: { id: issue.reportedBy }, select: { deactivatedAt: true } })
-      .catch(() => null);
-    if (!reporter || reporter.deactivatedAt != null) return true;
-
-    void notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, null, issue.tmdbId).catch(() => {});
-    void notifyUserIssueResolvedPush({
-      userId: issue.reportedBy, title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, resolution: null, issueId: issue.id,
-    }).catch(() => {});
-    createInAppNotification(issue.reportedBy, {
-      type: "ISSUE_RESOLVED",
-      title: issue.title,
-      body: "Your reported issue was resolved.",
-      tmdbId: issue.tmdbId,
-      mediaType: issue.mediaType,
-      posterPath: issue.posterPath,
-      data: { v: 1, resolution: null },
-    });
+    await announceIssueResolved(issue, null, grab.triggeredById);
     return true;
   } catch (err) {
     console.error("[issue-auto-resolve] failed:", err instanceof Error ? err.message : err);

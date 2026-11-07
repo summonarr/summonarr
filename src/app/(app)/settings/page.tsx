@@ -4,7 +4,7 @@ import { Prisma } from "@/generated/prisma";
 import { parseCronLastRun, parseCronRunHistory, countCronRunsSince, CRON_RUN_HISTORY_LIMIT } from "@/lib/cron-auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
-import { getPlexAccounts } from "@/lib/plex";
+import { countPlexServerMembers } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
@@ -34,6 +34,7 @@ import { OidcAllowlistForm } from "@/components/settings/forms/oidc-allowlist-fo
 import { DEFAULT_OIDC_ALLOWLIST, OIDC_ALLOWLIST_SETTING_KEY, parseOidcAllowlist } from "@/lib/oidc-allowlist";
 import { isOidcConfigured } from "@/lib/oidc";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { configuredLibrarySyncServers } from "@/lib/library-sync-jobs";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { ArrWatchForm } from "@/components/settings/forms/arr-watch-form";
 import { ARR_WATCH_DISK_LOW_PERCENT_KEY, parseDiskLowPercent } from "@/lib/arr-watch";
@@ -171,8 +172,7 @@ const ALL_KEYS = [
   "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kMinimumAvailability", "radarr4kWebhookSecret", "radarr4kExternalUrl",
   "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kLanguageProfileId", "sonarr4kWebhookSecret", "sonarr4kExternalUrl",
   "request4kAll",
-  // plexAdminToken is read here so the page can tell the sync buttons whether
-  // Plex is configured — the same url+token pair /api/sync/plex itself checks.
+  // plexAdminToken is read here for the system tab's Plex share count.
   "plexAdminEmail", "plexServerUrl", "plexAdminToken", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
   "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
@@ -266,12 +266,11 @@ export default async function SettingsPage({
     pausedUntil: mdblistSnapshot.pausedUntil,
   };
 
-  // Exactly the gates /api/sync/plex and /api/sync/jellyfin apply themselves, so
-  // the sync buttons can skip a server that is not there instead of POSTing to
-  // it and reading the resulting 400 as a failure. Default instance only, which
-  // is what those buttons sync — they send no `instance` slug (guardrail 35).
-  const plexConfigured = !!(cfg.plexServerUrl && cfg.plexAdminToken);
-  const jellyfinConfigured = !!(cfg.jellyfinUrl && cfg.jellyfinApiKey);
+  // Every connected Plex/Jellyfin server, default and named (guardrail 35), so
+  // the system tab's sync buttons resync each one and skip a server that is not
+  // there instead of POSTing to it and reading the resulting 400 as a failure
+  // (guardrail 36).
+  const syncServers = tab === "system" ? await configuredLibrarySyncServers() : [];
 
   const baseUrl = cfg.siteUrl?.replace(/\/$/, "") ?? process.env.AUTH_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
 
@@ -376,8 +375,10 @@ export default async function SettingsPage({
     // rows exactly as it does findUnique) — no second read needed.
     let currentShares: number | null = null;
     const shareCounts = await Promise.allSettled([
+      // This server's members (owner + the friends it is shared with), not
+      // every plex.tv friend of the admin account.
       cfg.plexServerUrl && cfg.plexAdminToken
-        ? getPlexAccounts(cfg.plexServerUrl, cfg.plexAdminToken).then((a) => a.length)
+        ? countPlexServerMembers(cfg.plexAdminToken, cfg.plexServerUrl)
         : Promise.resolve(null),
       cfg.jellyfinUrl && cfg.jellyfinApiKey
         ? getJellyfinUserCount(cfg.jellyfinUrl, cfg.jellyfinApiKey)
@@ -1206,7 +1207,7 @@ export default async function SettingsPage({
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">{t("settings.metrics.libraryCache.heading")}</h3>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <ResyncLibraryButton plexConfigured={plexConfigured} jellyfinConfigured={jellyfinConfigured} />
+                    <ResyncLibraryButton servers={syncServers} />
                     <SyncTVEpisodesButton />
                     <RatingsWarmButton />
                     <ActivityWarmButton />
@@ -1260,7 +1261,7 @@ export default async function SettingsPage({
                     ));
                   })()}
                 </div>
-                <MasterDbFillButton plexConfigured={plexConfigured} jellyfinConfigured={jellyfinConfigured} />
+                <MasterDbFillButton servers={syncServers} />
               </div>
 
               <div className="border-t border-zinc-800 pt-5">

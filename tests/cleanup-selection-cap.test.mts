@@ -83,3 +83,15 @@ test("the route and the Library cleanup page both read the one shared constant",
   assert.match(page, /\{selectionFull && \(/, "the page says why the rest weren't ticked");
   assert.doesNotMatch(page, /else next\.add\(k\);/, "no uncapped add left");
 });
+
+test("the Library cleanup table draws at most one delete's worth of rows; select-all and the counts read the whole view", () => {
+  const page = readFileSync(new URL("../src/components/admin/library-cleanup.tsx", import.meta.url), "utf8");
+  assert.match(page, /const RENDER_CAP = CLEANUP_MAX_ITEMS;/);
+  assert.match(page, /const shown = visible\.slice\(0, RENDER_CAP\);/);
+  assert.match(page, /\{shown\.map\(\(r\) => \{/, "the table body maps the capped rows");
+  assert.doesNotMatch(page, /\{visible\.map\(/, "never every row");
+  assert.match(page, /const selectableVisible = visible\.filter\(/, "select-all reads the uncapped view");
+  assert.match(page, /const selectableKeys = selectableVisible\.map\(keyOf\);/);
+  assert.match(page, /\{visible\.length > shown\.length && \(/, "the page says rows were left out");
+  assert.match(page, /t\("adminManage\.cleanup\.renderCap", \{ cap: shown\.length, total: visible\.length \}\)/);
+});

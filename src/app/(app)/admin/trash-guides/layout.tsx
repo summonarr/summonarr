@@ -2,7 +2,7 @@ import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { loadTrashInstances } from "./_shared";
 import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { TrashGuidesNav } from "@/components/admin/trash-guides/trash-guides-nav";
@@ -16,9 +16,8 @@ export default async function TrashGuidesLayout({ children }: { children: React.
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const [radarrInstances, sonarrInstances, truncRow] = await Promise.all([
-    getSyncableArrInstances("radarr"),
-    getSyncableArrInstances("sonarr"),
+  const [[radarrInstances, sonarrInstances], truncRow] = await Promise.all([
+    loadTrashInstances(),
     prisma.setting.findUnique({ where: { key: "trashLastRefreshTruncatedAt" } }),
   ]);
 

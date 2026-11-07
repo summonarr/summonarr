@@ -199,6 +199,7 @@ shadowPrismaModel(prisma, "cleanupProtection", {
   findMany: async (args: { where?: { tmdbId?: { in?: number[] } } }) => {
     return protections.filter((p) => inIds(args.where, p.tmdbId));
   },
+  count: async () => protections.length,
   upsert: async (args: { where: { tmdbId_mediaType: { tmdbId: number; mediaType: string } }; create: { title: string | null; reason: string | null } }) => {
     seq.push("cleanupProtection.upsert");
     const { tmdbId, mediaType } = args.where.tmdbId_mediaType;

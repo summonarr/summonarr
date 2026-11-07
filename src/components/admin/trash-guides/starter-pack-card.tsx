@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDelayed } from "@/hooks/use-delayed";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/design";
@@ -23,6 +24,7 @@ import {
 } from "./types";
 import { ApplyLog } from "./apply-log";
 import { RefreshErrorBanner } from "./banners";
+import { useCatalogRefresh, type RunError } from "./use-catalog-refresh";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -54,15 +56,21 @@ export function StarterPackCard({
   const [items, setItems] = useState<StarterPackItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [applyState, setApplyState] = useState<ActionState>("idle");
-  const [refreshState, setRefreshState] = useState<ActionState>("idle");
   // 409 = the trash lock is held: nothing ran, so (like the Settings tab's
   // sync-settings card) it is neither a success nor a failure — an amber
   // "already running" that clears itself, not a red banner.
-  const [refreshSkipped, setRefreshSkipped] = useState(false);
   const [applySkipped, setApplySkipped] = useState(false);
   const [applyLog, setApplyLog] = useState<ApplyResult[]>([]);
-  const [refreshError, setRefreshError] = useState<{ errors: string[]; schemaDiagnostic?: string } | null>(null);
+  // Each failure gets its own banner, titled for what failed: an apply or a
+  // library load was shown under "Refresh Catalog failed", and a load after
+  // an apply overwrote the apply's reason.
+  const [applyError, setApplyError] = useState<RunError | null>(null);
+  const [loadError, setLoadError] = useState<RunError | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // One timer per message, cancelled when its action starts again: an earlier
+  // run's reset re-enabled Apply in the middle of the next one.
+  const laterApply = useDelayed();
+  const laterApplySkipped = useDelayed();
   const lastResolvedKeyRef = useRef<string>("");
 
   const load = useCallback(async () => {
@@ -77,17 +85,23 @@ export function StarterPackCard({
         // A failed load (500 from resolveStarterPack, 401/403 from withAdmin) must not
         // masquerade as "Library is empty." — surface the reason and keep whatever
         // list was already on screen rather than blanking it.
-        setRefreshError({ errors: [data.error ?? `HTTP ${res.status}`], schemaDiagnostic: data.schemaDiagnostic });
+        setLoadError({ errors: [data.error ?? `HTTP ${res.status}`], schemaDiagnostic: data.schemaDiagnostic });
         setLoaded(true);
         return;
       }
       setItems(data.items ?? []);
+      setLoadError(null);
       setLoaded(true);
     } catch (err) {
-      setRefreshError({ errors: [err instanceof Error ? err.message : String(err)] });
+      setLoadError({ errors: [err instanceof Error ? err.message : String(err)] });
       setLoaded(true);
     }
   }, []);
+
+  const refresh = useCatalogRefresh(async () => {
+    await load();
+    onChanged?.();
+  });
 
   useEffect(() => {
     void load();
@@ -133,53 +147,19 @@ export function StarterPackCard({
   function selectRecommended() { setSelected(new Set(recommendedIds)); }
   function clearAll() { setSelected(new Set()); }
 
-  async function handleRefresh() {
-    setRefreshState("running");
-    setRefreshSkipped(false);
+  function handleRefresh() {
     setApplyLog([]);
-    setRefreshError(null);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/trash-guides/refresh`), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (res.status === 409) {
-        setRefreshState("idle");
-        setRefreshSkipped(true);
-        setTimeout(() => setRefreshSkipped(false), 3000);
-        return;
-      }
-      const data = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        error?: string;
-        errors?: string[];
-        schemaDiagnostic?: string;
-      };
-      const hasErrors = !res.ok || !data.ok || (data.errors && data.errors.length > 0);
-      setRefreshState(hasErrors ? "error" : "ok");
-      if (hasErrors) {
-        setRefreshError({
-          errors: data.errors && data.errors.length > 0 ? data.errors : [data.error ?? `HTTP ${res.status}`],
-          schemaDiagnostic: data.schemaDiagnostic,
-        });
-      }
-      await load();
-      onChanged?.();
-    } catch (err) {
-      setRefreshState("error");
-      setRefreshError({ errors: [err instanceof Error ? err.message : String(err)] });
-    }
-    // Clear a success message after 3s; an error stays until the next click.
-    setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
+    void refresh.run();
   }
 
   async function handleApply() {
     if (selected.size === 0) return;
+    laterApply.cancel();
+    laterApplySkipped.cancel();
     setApplyState("running");
     setApplySkipped(false);
     setApplyLog([]);
-    setRefreshError(null);
+    setApplyError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/trash-guides/apply`), {
         method: "POST",
@@ -189,7 +169,7 @@ export function StarterPackCard({
       if (res.status === 409) {
         setApplyState("idle");
         setApplySkipped(true);
-        setTimeout(() => setApplySkipped(false), 3000);
+        laterApplySkipped(() => setApplySkipped(false), 3000);
         return;
       }
       const data = (await res.json().catch(() => ({}))) as {
@@ -205,15 +185,27 @@ export function StarterPackCard({
         // 403 (integration disabled), 429 (rate limit) and 400 (bad body) answer a bare
         // `{ error }` with no per-spec results, so the log stays empty — surface the
         // reason in the banner instead of an error badge pointing at nothing.
-        setRefreshError({ errors: [data.error ?? `HTTP ${res.status}`] });
+        setApplyError({ errors: [data.error ?? `HTTP ${res.status}`] });
       }
       await load();
       onChanged?.();
     } catch (err) {
       setApplyState("error");
-      setRefreshError({ errors: [err instanceof Error ? err.message : String(err)] });
+      setApplyError({ errors: [err instanceof Error ? err.message : String(err)] });
     }
-    setTimeout(() => setApplyState("idle"), 3000);
+    // Clear a success message after 3s; an error stays until dismissed or the
+    // next Apply.
+    laterApply(() => setApplyState((s) => (s === "ok" ? "idle" : s)), 3000);
+  }
+
+  // The inline "One or more failed" goes once the run's banner and log are both gone.
+  function dismissApplyError() {
+    setApplyError(null);
+    if (applyLog.length === 0) setApplyState((s) => (s === "error" ? "idle" : s));
+  }
+  function dismissApplyLog() {
+    setApplyLog([]);
+    if (!applyError) setApplyState((s) => (s === "error" ? "idle" : s));
   }
 
   const grouped = useMemo(() => {
@@ -249,11 +241,11 @@ export function StarterPackCard({
             <Button
               type="button"
               onClick={handleRefresh}
-              disabled={refreshState === "running"}
+              disabled={refresh.state === "running"}
               className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
               title={t("trash.starter.refreshTitle")}
             >
-              {refreshState === "running"
+              {refresh.state === "running"
                 ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("trash.sync.refreshing")}</>
                 : <><RefreshCw className="w-4 h-4 mr-2" />{t("trash.sync.refreshCatalog")}</>}
             </Button>
@@ -360,17 +352,19 @@ export function StarterPackCard({
               {t("trash.starter.erroredCount", { count: errored.length })}
             </span>
           )}
-          {refreshState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.sync.catalogRefreshed")}</span>}
-          {refreshState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.starter.refreshFailedSee")}</span>}
-          {refreshSkipped && <span className="text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.refreshAlreadyRunning")}</span>}
+          {refresh.state === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.sync.catalogRefreshed")}</span>}
+          {refresh.state === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.starter.refreshFailedSee")}</span>}
+          {refresh.skipped && <span className="text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.refreshAlreadyRunning")}</span>}
           {applyState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.starter.selectionApplied")}</span>}
           {applyState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.starter.someFailed")}</span>}
           {applySkipped && <span className="text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.alreadyRunning")}</span>}
         </div>
       </Card>
 
-      {refreshError && <RefreshErrorBanner error={refreshError} onDismiss={() => setRefreshError(null)} />}
-      {applyLog.length > 0 && <ApplyLog results={applyLog} onDismiss={() => setApplyLog([])} />}
+      {loadError && <RefreshErrorBanner error={loadError} title={t("trash.banner.loadFailed")} onDismiss={() => setLoadError(null)} />}
+      {refresh.error && <RefreshErrorBanner error={refresh.error} onDismiss={refresh.dismiss} />}
+      {applyError && <RefreshErrorBanner error={applyError} title={t("trash.banner.applyFailed")} onDismiss={dismissApplyError} />}
+      {applyLog.length > 0 && <ApplyLog results={applyLog} onDismiss={dismissApplyLog} />}
     </div>
   );
 }

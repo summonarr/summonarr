@@ -59,3 +59,22 @@ test("C065: type and eligible are sent only from the Titles tab", () => {
 test("C071: a page that came back empty with rows left steps back to the last valid page", () => {
   assert.match(src, /const last = lastValidPage\(next\.total, limit\);\s*\n\s*if \(next\.rows\.length === 0 && next\.total > 0 && page > last\) \{\s*\n\s*setPage\(last\);/);
 });
+
+test("the 'never' predicate is the shared isNeverWatchedState on the page and the detail chip — never a private copy (14d)", () => {
+  const chip = readFileSync(new URL("../src/components/admin/never-watched-chip.tsx", import.meta.url), "utf8");
+  for (const [name, text] of [["never-watched-report.tsx", src], ["never-watched-chip.tsx", chip]] as const) {
+    assert.match(text, /import \{[^}]*\bisNeverWatchedState\b[^}]*\} from "@\/lib\/never-watched";/, `${name} imports the shared predicate`);
+    assert.doesNotMatch(text, /state === "neverWatched" \|\|[^;]*noPlaysSince/, `${name} spells it out by hand`);
+  }
+  assert.equal(src.split("isNeverWatchedState(r.state)").length - 1, 2, "both row renderers use it");
+  assert.match(chip, /const never = isNeverWatchedState\(info\.state\);/);
+});
+
+test("a failed first load offers a Retry that reloads the view on screen", () => {
+  const start = src.indexOf("if (!data) {");
+  assert.ok(start > 0);
+  const branch = src.slice(start, src.indexOf("\n  }\n", start));
+  assert.match(branch, /role="alert"/, "the error is still announced");
+  assert.match(branch, /<Button[^>]*onClick=\{\(\) => void reload\(\)\}/);
+  assert.match(branch, /t\("adminManage\.common\.retry"\)/);
+});

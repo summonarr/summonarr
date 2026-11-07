@@ -19,6 +19,7 @@ import {
   sortCalendarEntries,
   type CalendarEntry,
 } from "./arr-calendar";
+import { pagedReadEnded } from "./arr-parse";
 import { settleLimit } from "./concurrency";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { prisma } from "./prisma";
@@ -53,8 +54,8 @@ export async function readQueue(cfg: ArrCfg): Promise<unknown[]> {
     // one by one: a spread push of a hostile page past ~125k records throws
     // RangeError, and an uncapped page would let one answer outgrow the page cap.
     for (const r of batch.slice(0, QUEUE_PAGE_SIZE)) records.push(r);
-    const total = typeof res?.totalRecords === "number" ? res.totalRecords : 0;
-    if (batch.length === 0 || page * QUEUE_PAGE_SIZE >= total) break;
+    // No total from the arr: read on until a short page, never "0 = done".
+    if (pagedReadEnded(page, QUEUE_PAGE_SIZE, batch.length, res?.totalRecords)) break;
   }
   return records;
 }
@@ -95,13 +96,16 @@ async function fillSeriesIds(entries: CalendarEntry[]): Promise<void> {
       console.warn("[arr-calendar] tvdb→tmdb lookup failed:", err instanceof Error ? err.message : err);
     }
   }
-  const needPoster = [...new Set(entries.filter((e) => e.posterPath === null && e.tmdbId !== null).map((e) => `${e.service}:${e.tmdbId}`))];
-  if (needPoster.length === 0) return;
-  const movieIds = needPoster.filter((k) => k.startsWith("radarr:")).map((k) => Number(k.slice(7)));
-  const tvIds = needPoster.filter((k) => k.startsWith("sonarr:")).map((k) => Number(k.slice(7)));
+  const movieIds = new Set<number>();
+  const tvIds = new Set<number>();
+  for (const e of entries) {
+    if (e.posterPath !== null || e.tmdbId === null) continue;
+    (e.service === "radarr" ? movieIds : tvIds).add(e.tmdbId);
+  }
+  if (movieIds.size === 0 && tvIds.size === 0) return;
   try {
     const rows = await prisma.tmdbMediaCore.findMany({
-      where: { OR: [{ mediaType: "MOVIE", tmdbId: { in: movieIds } }, { mediaType: "TV", tmdbId: { in: tvIds } }] },
+      where: { OR: [{ mediaType: "MOVIE", tmdbId: { in: [...movieIds] } }, { mediaType: "TV", tmdbId: { in: [...tvIds] } }] },
       select: { tmdbId: true, mediaType: true, posterPath: true },
     });
     const posters = new Map(rows.filter((r) => r.posterPath).map((r) => [`${r.mediaType === "MOVIE" ? "radarr" : "sonarr"}:${r.tmdbId}`, r.posterPath as string]));

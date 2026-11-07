@@ -34,6 +34,13 @@ export function isCustomFormatPayload(v: unknown): v is TrashCustomFormat {
   // specifications drives normalizeSpecFields → Arr POST body. Optional in the upstream schema but,
   // when present, must be array-shaped — plain objects break the apply-time iteration.
   if (v.specifications !== undefined && !Array.isArray(v.specifications)) return false;
+  // trash_scores becomes each profile's formatItems score, sent to the arr as a number.
+  if (v.trash_scores !== undefined) {
+    if (!isObject(v.trash_scores)) return false;
+    for (const score of Object.values(v.trash_scores)) {
+      if (typeof score !== "number" || !Number.isFinite(score)) return false;
+    }
+  }
   return true;
 }
 
@@ -57,8 +64,25 @@ export function isQualityProfilePayload(v: unknown): v is TrashQualityProfile {
   if (!nonEmptyString(v.name)) return false;
   // buildProfileBody reads items[] and formatItems{} — both optional but must be array/object
   // when present so the apply loop doesn't throw on a non-iterable.
-  if (v.items !== undefined && !Array.isArray(v.items)) return false;
-  if (v.formatItems !== undefined && !isObject(v.formatItems)) return false;
+  if (v.items !== undefined) {
+    if (!Array.isArray(v.items)) return false;
+    // Each entry is a quality or a group of them: buildProfileBody reads name,
+    // allowed and the member names.
+    for (const item of v.items) {
+      if (!isObject(item)) return false;
+      if (!nonEmptyString(item.name)) return false;
+      if (typeof item.allowed !== "boolean") return false;
+      if (item.items !== undefined && (!Array.isArray(item.items) || !item.items.every(nonEmptyString))) {
+        return false;
+      }
+    }
+  }
+  if (v.formatItems !== undefined) {
+    if (!isObject(v.formatItems)) return false;
+    // CF name → trash_id. The trash_ids feed a Prisma `in` filter, which
+    // rejects anything that isn't a string.
+    if (!Object.values(v.formatItems).every(nonEmptyString)) return false;
+  }
   return true;
 }
 

@@ -24,6 +24,7 @@ import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { arrErrorKind, arrFetch, getArrCfg, resolveTvdbToTmdb } from "@/lib/arr";
 import type { ArrErrorKind } from "@/lib/arr-error-kind";
 import {
+  compareMatchFlags,
   judgeLibraryMatches,
   type ArrMatchEntry,
   type MatchCounts,
@@ -187,6 +188,9 @@ async function readArrs(sources: LibraryMatchSource[], signal?: AbortSignal): Pr
  * way (guardrail 41) — nothing is stored then, and the previous report stays.
  */
 export async function runLibraryMatchCheck(opts: { signal?: AbortSignal; now?: Date } = {}): Promise<LibraryMatchReport | null> {
+  // The stored report as the run starts: a fix that drops one of its flags
+  // while the servers are being listed is told apart from it at the end.
+  const before = await readLibraryMatchReport();
   const sources: LibraryMatchSource[] = [];
   const [entries, arr] = await Promise.all([readMediaServers(sources, opts.signal), readArrs(sources, opts.signal)]);
   if (opts.signal?.aborted) return null;
@@ -201,27 +205,54 @@ export async function runLibraryMatchCheck(opts: { signal?: AbortSignal; now?: D
     for (const f of flags) {
       if (f.arr && f.arr.tmdbId === null && f.arr.tvdbId !== null) f.arr.tmdbId = map.get(f.arr.tvdbId) ?? null;
     }
+    // A resolved suggestion makes a flag fixable, which moves it up its kind —
+    // sorted again before the cut below, or fixable series could be cut.
+    flags.sort(compareMatchFlags);
   }
   if (opts.signal?.aborted) return null;
 
-  const report: LibraryMatchReport = {
-    version: 1,
-    checkedAt: (opts.now ?? new Date()).toISOString(),
-    sources: sources.sort((a, b) => a.service.localeCompare(b.service) || a.instance.localeCompare(b.instance)),
-    counts,
-    flags: flags.slice(0, MAX_STORED_FLAGS),
-    truncated: Math.max(0, flags.length - MAX_STORED_FLAGS),
-  };
-  await prisma.$transaction(async (tx) => {
+  const checkedAt = (opts.now ?? new Date()).toISOString();
+  const sortedSources = sources.sort((a, b) => a.service.localeCompare(b.service) || a.instance.localeCompare(b.instance));
+  return prisma.$transaction(async (tx) => {
     await tx.$executeRaw(REPORT_ROW_LOCK);
+    // Under the report-row lock every fix serializes on: a flag the stored
+    // report had when this run started and has lost since was dropped by a fix
+    // during the run (guardrail 37e), and this run's listing may predate that
+    // fix — so it stays dropped rather than coming back.
+    const current = parseLibraryMatchReport((await tx.setting.findUnique({ where: { key: LIBRARY_MATCH_REPORT_KEY } }))?.value);
+    const fixed = fixedDuringRun(before, current);
+    const kept = fixed.size > 0 ? flags.filter((f) => !fixed.has(matchFlagKey(f))) : flags;
+    const report: LibraryMatchReport = {
+      version: 1,
+      checkedAt,
+      sources: sortedSources,
+      counts: { ...counts, flagged: counts.flagged - (flags.length - kept.length) },
+      flags: kept.slice(0, MAX_STORED_FLAGS),
+      truncated: Math.max(0, kept.length - MAX_STORED_FLAGS),
+    };
     const value = JSON.stringify(report);
     await tx.setting.upsert({
       where: { key: LIBRARY_MATCH_REPORT_KEY },
       create: { key: LIBRARY_MATCH_REPORT_KEY, value },
       update: { value },
     });
+    return report;
   });
-  return report;
+}
+
+const matchFlagKey = (f: Pick<MatchFlag, "server" | "serverInstance" | "itemKey">) =>
+  `${f.server}\u0000${f.serverInstance}\u0000${f.itemKey}`;
+
+/** Flags the stored report lost between two reads of the SAME report (same checkedAt): the fixes that ran in between. */
+function fixedDuringRun(before: LibraryMatchReport | null, current: LibraryMatchReport | null): Set<string> {
+  const out = new Set<string>();
+  if (!before || !current || before.checkedAt !== current.checkedAt) return out;
+  const still = new Set(current.flags.map(matchFlagKey));
+  for (const f of before.flags) {
+    const key = matchFlagKey(f);
+    if (!still.has(key)) out.add(key);
+  }
+  return out;
 }
 
 /** The stored report, or null when none was stored (or it is from another version). Exported for tests. */
@@ -263,8 +294,10 @@ export async function dropMatchFlagInTx(tx: ReportTx, server: "plex" | "jellyfin
   const report = parseLibraryMatchReport(row?.value);
   if (!report) return;
   const flags = report.flags.filter((f) => !(f.server === server && f.serverInstance === serverInstance && f.itemKey === itemKey));
-  if (flags.length === report.flags.length) return;
-  const next: LibraryMatchReport = { ...report, flags, counts: { ...report.counts, flagged: report.counts.flagged - 1 } };
+  const removed = report.flags.length - flags.length;
+  if (removed === 0) return;
+  // By the number removed: a listing that served one item twice stored it twice.
+  const next: LibraryMatchReport = { ...report, flags, counts: { ...report.counts, flagged: Math.max(0, report.counts.flagged - removed) } };
   await tx.setting.update({ where: { key: LIBRARY_MATCH_REPORT_KEY }, data: { value: JSON.stringify(next) } });
 }
 

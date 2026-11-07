@@ -444,6 +444,75 @@ test("remove refuses a bad body or an unconfigured slug before any upstream call
   assert.deepEqual(audits, []);
 });
 
+test("remove: a null instance is the default one, as on grab — one bulk DELETE on the default Radarr", async () => {
+  responder = liveQueue([radarrRecord(5)]);
+  const res = await call(removeRoute.POST, await mintSession(), "/admin/queue/remove", {
+    method: "POST",
+    body: { service: "radarr", instance: null, ids: [5], action: "remove" },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(bulkDeletes().map((c) => [c.origin, c.body]), [[RADARR, { ids: [5] }]]);
+});
+
+test("remove: a record skipped by a walk over a queue that changed between pages is found on ONE re-read and sent by its own id", async () => {
+  // 251 records over two pages. The first record leaves the queue right after
+  // page 1 is served, so the walk's page 2 starts one record later and record
+  // 251 — page 1's last slot, now page 2's first — is never read.
+  let records = Array.from({ length: 251 }, (_, i) => radarrRecord(i + 1));
+  let page1Reads = 0;
+  responder = (c) => {
+    if (c.path === "/api/v3/queue") {
+      const page = Number(c.query.get("page"));
+      const start = (page - 1) * 250;
+      const res = json({ totalRecords: records.length, records: records.slice(start, start + 250) });
+      if (page === 1 && ++page1Reads === 1) records = records.slice(1);
+      return res;
+    }
+    if (c.method === "DELETE" && c.path === "/api/v3/queue/bulk") return json({});
+    return undefined;
+  };
+  const res = await call(removeRoute.POST, await mintSession(), "/admin/queue/remove", { method: "POST", body: { service: "radarr", ids: [251], action: "remove" } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(bulkDeletes().map((c) => c.body), [{ ids: [251] }]);
+  assert.deepEqual(arrCalls().filter((c) => c.path === "/api/v3/queue").map((c) => c.query.get("page")), ["1", "2", "1"], "the two-page walk, then ONE re-read (250 records now: one page)");
+});
+
+test("remove: a posted id a single-page read doesn't hold is gone — no re-read", async () => {
+  responder = liveQueue([radarrRecord(7)]);
+  assert.equal((await call(removeRoute.POST, await mintSession(), "/admin/queue/remove", { method: "POST", body: { service: "radarr", ids: [8], action: "remove" } })).status, 409);
+  assert.equal(arrCalls().filter((c) => c.path === "/api/v3/queue").length, 1);
+  assert.equal(bulkDeletes().length, 0);
+});
+
+test("the queue past its page ceiling says so: a `truncated` entry for that instance with what was read of how many", async () => {
+  settings.set("feature.integration.sonarr", "false");
+  invalidateFeatureFlagCache();
+  responder = (c) => {
+    if (c.path !== "/api/v3/queue") return undefined;
+    if (c.origin !== RADARR) return json({ totalRecords: 1, records: [radarrRecord(1)] });
+    const page = Number(c.query.get("page"));
+    return json({ totalRecords: 12_345, records: Array.from({ length: 250 }, (_, i) => radarrRecord(page * 1_000 + i)) });
+  };
+  const res = await call(queueRoute.GET, await mintSession(), "/admin/queue");
+  assert.equal(res.status, 200);
+  const body = await res.json() as { truncated?: unknown };
+  assert.deepEqual(body.truncated, [{ service: "radarr", instance: "", read: 10_000, total: 12_345 }]);
+  responder = (c) => (c.path === "/api/v3/queue" ? json({ totalRecords: 1, records: [radarrRecord(1)] }) : undefined);
+  assert.equal("truncated" in (await (await call(queueRoute.GET, await mintSession(), "/admin/queue")).json() as object), false, "absent when every queue was read whole");
+});
+
+test("a TV request found by both its tmdb and its tvdb id names its requester ONCE", async () => {
+  settings.set("feature.integration.radarr", "false");
+  invalidateFeatureFlagCache();
+  requests = [
+    { id: "t1", mediaType: "TV", tmdbId: 300, tvdbId: 3000, status: "PENDING", arrInstance: "", user: { name: "Tess", email: "t@x" } },
+    { id: "t2", mediaType: "TV", tmdbId: 300, tvdbId: 3000, status: "APPROVED", arrInstance: "", user: { name: null, email: "u@x" } },
+  ];
+  responder = (c) => (c.path === "/api/v3/queue" ? json({ totalRecords: 1, records: [sonarrPackRecord(21, 1)] }) : undefined);
+  const body = await (await call(queueRoute.GET, await mintSession(), "/admin/queue")).json() as { items: Array<{ requesters: string[] }> };
+  assert.deepEqual(body.items.map((i) => i.requesters), [["Tess", "u@x"]]);
+});
+
 // ── 2b: import a blocked download ────────────────────────────────────────────
 
 const q = { quality: { id: 7, name: "Bluray-1080p" }, revision: { version: 1 } };
@@ -695,6 +764,18 @@ test("preview on an arr without the reprocess endpoint: the correction still sho
   assert.equal(res.status, 200);
   const body = await res.json() as { rechecked: boolean; files: Array<{ target: string; rejections: string[] }> };
   assert.deepEqual([body.rechecked, body.files.map((f) => [f.target, f.rejections])], [false, [["Right Movie (2023)", ["Sample"]]]]);
+});
+
+test("preview: re-matching past the catalog's title cap is refused AS that — 400 naming the cap, before any catalog read or reprocess", async () => {
+  const rows = Array.from({ length: 21 }, (_, i) => ({ ...manualRows[1], path: `/downloads/Pack/part${i}.mkv`, relativePath: `part${i}.mkv` }));
+  responder = (c) => (c.path === "/api/v3/manualimport" && c.method === "GET" ? json(rows) : undefined);
+  const res = await call(previewRoute.POST, await mintSession(), "/admin/queue/import/preview", {
+    method: "POST",
+    body: { service: "radarr", downloadId: "SAB_1", files: rows.map((r, i) => ({ path: r.path, movieId: 100 + i })) },
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Too many titles re-matched at once — at most 20 per import" });
+  assert.deepEqual(arrCalls().map((c) => `${c.method} ${c.path}`), ["GET /api/v3/manualimport"], "no /movie/{id} read, no reprocess, no command");
 });
 
 test("match search: the instance's own lookup, library titles only (positive id), bounded; a bad term is 400 before any call", async () => {

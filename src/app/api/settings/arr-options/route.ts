@@ -3,6 +3,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
 import { arrSettingKey, isValidInstanceSlug } from "@/lib/arr-instances";
+import { projectChoices, projectRootFolderChoices } from "@/lib/arr-title";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // The instance's major version from /system/status, or null when it can't be
@@ -45,11 +46,17 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const cfg = { url: map[urlKey].replace(/\/$/, ""), apiKey: map[keyKey] };
 
   try {
-    const [rootFolders, qualityProfiles, sonarrMajor] = await Promise.all([
-      arrFetch<{ path: string }[]>(cfg, "/api/v3/rootfolder"),
-      arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/qualityprofile"),
+    const [rawRootFolders, rawProfiles, sonarrMajor] = await Promise.all([
+      arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
+      arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
       service === "sonarr" ? readMajorVersion(cfg) : Promise.resolve(null),
     ]);
+    // Projected, never forwarded: a root folder carries every unmapped folder
+    // beneath it and a profile its whole quality and format list, and the form
+    // reads only these fields. The title manager's own bounded projections
+    // (guardrail 5i: Set-deduped, capped, a bounded scan).
+    const rootFolders = projectRootFolderChoices(rawRootFolders).map((f) => ({ path: f.path }));
+    const qualityProfiles = projectChoices(rawProfiles);
 
     // Sonarr v3 only: language profiles for the per-instance default picker.
     // v4 removed them — the endpoint 404s, or (on some builds) returns a single
@@ -64,9 +71,9 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     let languageProfiles: { id: number; name: string }[] | undefined;
     if (service === "sonarr" && (sonarrMajor === null || sonarrMajor < 4)) {
       try {
-        const raw = await arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/languageprofile");
-        const usable = (Array.isArray(raw) ? raw : []).filter((p) => p?.name !== "Deprecated");
-        if (usable.length > 0) languageProfiles = usable.map((p) => ({ id: p.id, name: p.name }));
+        const raw = await arrFetch<unknown>(cfg, "/api/v3/languageprofile");
+        const usable = projectChoices(raw).filter((p) => p.name !== "Deprecated");
+        if (usable.length > 0) languageProfiles = usable;
       } catch {
         // Sonarr v4 — no language profiles to offer.
       }

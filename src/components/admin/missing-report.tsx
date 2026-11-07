@@ -38,6 +38,7 @@ import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
 import { useArrSnapshot } from "@/components/admin/use-arr-snapshot";
 import { ArrSnapshotNote } from "@/components/admin/arr-snapshot-note";
 import { manageTabFor } from "@/lib/arr-manage-links";
+import { missingDateFormatters } from "@/components/admin/missing-format";
 import { Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleDashed, Loader2, RefreshCw, RotateCcw, Search, X } from "@/components/icons";
 import type { CutoffMovie, CutoffSeries, MissingEpisode, MissingMovie, MissingSeries } from "@/lib/arr-missing";
 import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
@@ -104,13 +105,6 @@ const missingListUrl = (svc: Service, m: Mode) => withBasePath(`/api/admin/missi
 const episodeCode = (e: { seasonNumber: number; episodeNumber: number }) =>
   `S${String(e.seasonNumber).padStart(2, "0")}E${String(e.episodeNumber).padStart(2, "0")}`;
 
-// Server-supplied ISO timestamp → the viewer's locale. UTC so a release date
-// is the day Radarr/Sonarr recorded, not shifted by the viewer's offset.
-function dayFormatter(locale: string) {
-  const fmt = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" });
-  return (iso: string | null) => (iso ? fmt.format(new Date(iso)) : "—");
-}
-
 async function readError(res: Response, fallback: string): Promise<string> {
   const d = (await res.json().catch(() => null)) as { error?: string } | null;
   return d?.error ?? fallback;
@@ -140,7 +134,8 @@ export function MissingReport({
 }) {
   const t = useT();
   const locale = useLocale();
-  const day = useMemo(() => dayFormatter(locale), [locale]);
+  // A release date by its UTC day, an air time in the viewer's own zone (missing-format.ts).
+  const { day, aired } = useMemo(() => missingDateFormatters(locale), [locale]);
   const [service, setService] = useState<Service>(initialService);
   const [mode, setMode] = useState<Mode>(initialMode);
   const [reports, setReports] = useState<Reports>({});
@@ -395,7 +390,6 @@ export function MissingReport({
   const missingSeriesItems = reports["sonarr:missing"]?.items;
   const cutoffMovieItems = reports["radarr:cutoff"]?.items;
   const cutoffSeriesItems = reports["sonarr:cutoff"]?.items;
-  const filters: Filters = { showUnmonitored: mode === "cutoff" || showUnmonitored, instance, query };
 
   // The server sends each list in its default order; the other orders are
   // re-sorts of the filtered copy.
@@ -416,10 +410,17 @@ export function MissingReport({
   const cutoffMovies = useMemo(() => applyFilters(cutoffMovieItems ?? [], { showUnmonitored: true, instance, query: deferredQuery }), [cutoffMovieItems, instance, deferredQuery]);
   const cutoffSeries = useMemo(() => applyFilters(cutoffSeriesItems ?? [], { showUnmonitored: true, instance, query: deferredQuery }), [cutoffSeriesItems, instance, deferredQuery]);
 
-  const tabCount = (svc: Service) => {
-    const r = reports[`${svc}:${mode}`];
-    return r ? applyFilters(r.items as Array<{ title: string; instance: string; monitored?: boolean }>, { ...filters, instance: "all", query: "" }).length : undefined;
-  };
+  // Each tab's count re-filters that service's WHOLE report: once per change of
+  // the reports or the unmonitored switch, not on every keystroke and bulk tick.
+  const tabCounts = useMemo(() => {
+    const countOf = (svc: Service) => {
+      const r = reports[`${svc}:${mode}`];
+      const f: Filters = { showUnmonitored: mode === "cutoff" || showUnmonitored, instance: "all", query: "" };
+      return r ? applyFilters(r.items as Array<{ title: string; instance: string; monitored?: boolean }>, f).length : undefined;
+    };
+    return { sonarr: countOf("sonarr"), radarr: countOf("radarr") };
+  }, [reports, mode, showUnmonitored]);
+  const tabCount = (svc: Service) => tabCounts[svc];
 
   const instanceName = (slug: string) => report?.instances.find((i) => i.slug === slug)?.name || slug || "—";
   const multiInstance = (report?.instances.length ?? 0) > 1;
@@ -544,14 +545,14 @@ export function MissingReport({
     return rows.slice(pageStart, pageStart + PAGE_SIZE);
   }
   const pageRows = onPage(currentRows);
-  const selKey = (r: { instance: string; arrId: number }) => `${current}|${rowKey(r)}`;
+  const selKey = useCallback((r: { instance: string; arrId: number }) => `${current}|${rowKey(r)}`, [current]);
   // A row that is being searched, was searched, or turned out complete can't be
   // ticked; one a bulk run still holds can't either.
-  const isOpen = (r: BulkRow) => {
+  const isOpen = useCallback((r: BulkRow) => {
     const k = selKey(r);
     const st = searches[k];
     return !st?.busy && st?.outcome !== "started" && st?.outcome !== "already" && !bulkPending.has(k);
-  };
+  }, [selKey, searches, bulkPending]);
   // The header box works on the rows on screen: this page.
   const selectable = pageRows.filter(isOpen);
   // A tick outlives a page turn and a filter change, so the selection is every
@@ -561,11 +562,16 @@ export function MissingReport({
   // filter change tick past the cap, and the run then searched fewer titles
   // than the button said.
   const shownKeys = new Set(pageRows.map(selKey));
-  const listedKeys = new Set(currentRows.map(selKey));
-  const selectedListed = currentRows.filter((r) => selected.has(selKey(r)) && isOpen(r));
+  // The passes over the whole list (every page, and the unfiltered report) run
+  // once per change of what they read, not on every render.
+  const listedKeys = useMemo(() => new Set(currentRows.map(selKey)), [currentRows, selKey]);
+  const selectedListed = useMemo(() => currentRows.filter((r) => selected.has(selKey(r)) && isOpen(r)), [currentRows, selected, selKey, isOpen]);
   const selectedShown = selectable.filter((r) => selected.has(selKey(r)));
   const selectedOffPage = selectedListed.length - selectedShown.length;
-  const selectedHidden = ((report?.items ?? []) as ReadonlyArray<BulkRow>).filter((r) => !listedKeys.has(selKey(r)) && selected.has(selKey(r)) && isOpen(r));
+  const selectedHidden = useMemo(
+    () => ((report?.items ?? []) as ReadonlyArray<BulkRow>).filter((r) => !listedKeys.has(selKey(r)) && selected.has(selKey(r)) && isOpen(r)),
+    [report, listedKeys, selected, selKey, isOpen],
+  );
   const selectedHere = [...selectedListed, ...selectedHidden];
   // What a run takes — and so what the button says.
   const toRun = capSelection(selectedHere);
@@ -742,15 +748,49 @@ export function MissingReport({
     );
   };
 
+  // What every list's table starts with, head and row: the tick box, the
+  // expander (the Sonarr lists), the title, and the instance when there are
+  // several. Each list adds its own columns after it.
+  const leadHead = (expander: boolean) => (
+    <>
+      {selectHeader}
+      {expander && <th style={{ ...th, width: 32 }} />}
+      <th style={th}>{t("adminManage.missing.col.title")}</th>
+      {multiInstance && <th style={th}>{t("adminManage.missing.col.instance")}</th>}
+    </>
+  );
+  const leadCells = (
+    svc: Service,
+    r: BulkRow & { year: number | null; posterPath: string | null; tmdbId: number | null },
+    expander: React.ReactNode = null,
+  ) => (
+    <>
+      {selectCell(r)}
+      {expander}
+      <td style={td}>{titleCell(svc, r, r.tmdbId !== null ? `/${svc === "radarr" ? "movie" : "tv"}/${r.tmdbId}` : null)}</td>
+      {multiInstance && <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>{instanceName(r.instance)}</td>}
+    </>
+  );
+  // An expanded series' episodes: code, title, and the list's own last column.
+  const episodeLines = <E extends { seasonNumber: number; episodeNumber: number; title: string }>(label: string, eps: readonly E[], last: (e: E) => React.ReactNode) => (
+    <ul style={{ margin: 0, padding: 0, listStyle: "none", fontSize: 12 }} aria-label={label}>
+      {eps.map((e) => (
+        <li key={`${e.seasonNumber}:${e.episodeNumber}`} className="flex flex-wrap gap-x-3" style={{ padding: "2px 0" }}>
+          <span className="ds-mono" style={{ color: "var(--ds-fg-muted)" }}>{episodeCode(e)}</span>
+          <span style={{ flex: "1 1 200px" }}>{e.title || "—"}</span>
+          <span className="ds-mono" style={{ color: "var(--ds-fg-subtle)" }}>{last(e)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+
   let table: React.ReactNode = null;
   let visibleCount = 0;
   if (current === "radarr:missing") {
     visibleCount = movies.length;
     table = tableShell(
       <>
-        {selectHeader}
-        <th style={th}>{t("adminManage.missing.col.title")}</th>
-        {multiInstance && <th style={th}>{t("adminManage.missing.col.instance")}</th>}
+        {leadHead(false)}
         <th style={th}>{t("adminManage.missing.col.physical")}</th>
         <th style={th}>{t("adminManage.missing.col.digital")}</th>
         <th style={{ ...th, textAlign: "right" }}>{t("adminManage.missing.col.missingFor")}</th>
@@ -758,9 +798,7 @@ export function MissingReport({
       </>,
       onPage(movies).map((m) => (
         <tr key={rowKey(m)} className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-          {selectCell(m)}
-          <td style={td}>{titleCell("radarr", m, m.tmdbId !== null ? `/movie/${m.tmdbId}` : null)}</td>
-          {multiInstance && <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>{instanceName(m.instance)}</td>}
+          {leadCells("radarr", m)}
           <td className="ds-mono" style={{ ...td, fontSize: 12 }}>{day(m.physicalRelease)}</td>
           <td className="ds-mono" style={{ ...td, fontSize: 12 }}>{day(m.digitalRelease)}</td>
           <td className="ds-mono" style={{ ...td, fontSize: 12, textAlign: "right" }}>{t("adminManage.missing.days", { count: m.daysMissing })}</td>
@@ -773,10 +811,7 @@ export function MissingReport({
     const colSpan = multiInstance ? 7 : 6;
     table = tableShell(
       <>
-        {selectHeader}
-        <th style={{ ...th, width: 32 }} />
-        <th style={th}>{t("adminManage.missing.col.title")}</th>
-        {multiInstance && <th style={th}>{t("adminManage.missing.col.instance")}</th>}
+        {leadHead(true)}
         <th style={th}>{t("adminManage.missing.col.missing")}</th>
         <th style={th}>{t("adminManage.missing.col.seasons")}</th>
         <th style={th}>{t("adminManage.missing.col.lastAired")}</th>
@@ -788,10 +823,7 @@ export function MissingReport({
         return (
           <Fragment key={k}>
             <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-              {selectCell(s)}
-              {expanderCell(k, s.title, () => void toggleMissingSeries(s))}
-              <td style={td}>{titleCell("sonarr", s, s.tmdbId !== null ? `/tv/${s.tmdbId}` : null)}</td>
-              {multiInstance && <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>{instanceName(s.instance)}</td>}
+              {leadCells("sonarr", s, expanderCell(k, s.title, () => void toggleMissingSeries(s)))}
               <td style={{ ...td, fontSize: 12 }}>
                 <div>{t("adminManage.missing.episodesOf", { missing: s.missing, count: s.aired })}</div>
                 {s.status && SONARR_STATUSES.has(s.status) && (
@@ -807,7 +839,7 @@ export function MissingReport({
                   ))}
                 </div>
               </td>
-              <td className="ds-mono" style={{ ...td, fontSize: 12 }}>{day(s.lastAired)}</td>
+              <td className="ds-mono" style={{ ...td, fontSize: 12 }}>{aired(s.lastAired)}</td>
               {searchCell("sonarr:missing", s)}
             </tr>
             {expanded.has(k) && (
@@ -823,15 +855,9 @@ export function MissingReport({
                   ) : ep.episodes.length === 0 ? (
                     <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.missing.episodes.empty")}</p>
                   ) : (
-                    <ul style={{ margin: 0, padding: 0, listStyle: "none", fontSize: 12 }} aria-label={t("adminManage.missing.episodes.label", { title: s.title })}>
-                      {ep.episodes.map((e) => (
-                        <li key={`${e.seasonNumber}:${e.episodeNumber}`} className="flex flex-wrap gap-x-3" style={{ padding: "2px 0" }}>
-                          <span className="ds-mono" style={{ color: "var(--ds-fg-muted)" }}>{episodeCode(e)}</span>
-                          <span style={{ flex: "1 1 200px" }}>{e.title || "—"}</span>
-                          <span className="ds-mono" style={{ color: "var(--ds-fg-subtle)" }}>{t("adminManage.missing.episodes.aired", { date: day(e.airDateUtc) })}</span>
-                        </li>
-                      ))}
-                    </ul>
+                    episodeLines(t("adminManage.missing.episodes.label", { title: s.title }), ep.episodes, (e) =>
+                      t("adminManage.missing.episodes.aired", { date: aired(e.airDateUtc) }),
+                    )
                   )}
                 </td>
               </tr>
@@ -844,18 +870,14 @@ export function MissingReport({
     visibleCount = cutoffMovies.length;
     table = tableShell(
       <>
-        {selectHeader}
-        <th style={th}>{t("adminManage.missing.col.title")}</th>
-        {multiInstance && <th style={th}>{t("adminManage.missing.col.instance")}</th>}
+        {leadHead(false)}
         <th style={th}>{t("adminManage.missing.cutoff.col.current")}</th>
         <th style={th}>{t("adminManage.missing.cutoff.col.profile")}</th>
         <th style={th} />
       </>,
       onPage(cutoffMovies).map((m) => (
         <tr key={rowKey(m)} className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-          {selectCell(m)}
-          <td style={td}>{titleCell("radarr", m, m.tmdbId !== null ? `/movie/${m.tmdbId}` : null)}</td>
-          {multiInstance && <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>{instanceName(m.instance)}</td>}
+          {leadCells("radarr", m)}
           <td className="ds-mono" style={{ ...td, fontSize: 12 }}>{m.quality ?? "—"}</td>
           {profileCell(m)}
           {searchCell("radarr:cutoff", m)}
@@ -867,10 +889,7 @@ export function MissingReport({
     const colSpan = multiInstance ? 6 : 5;
     table = tableShell(
       <>
-        {selectHeader}
-        <th style={{ ...th, width: 32 }} />
-        <th style={th}>{t("adminManage.missing.col.title")}</th>
-        {multiInstance && <th style={th}>{t("adminManage.missing.col.instance")}</th>}
+        {leadHead(true)}
         <th style={th}>{t("adminManage.missing.cutoff.col.episodes")}</th>
         <th style={th}>{t("adminManage.missing.cutoff.col.profile")}</th>
         <th style={th} />
@@ -880,10 +899,7 @@ export function MissingReport({
         return (
           <Fragment key={k}>
             <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-              {selectCell(s)}
-              {expanderCell(k, s.title, () => void toggleExpanded(k), true)}
-              <td style={td}>{titleCell("sonarr", s, s.tmdbId !== null ? `/tv/${s.tmdbId}` : null)}</td>
-              {multiInstance && <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>{instanceName(s.instance)}</td>}
+              {leadCells("sonarr", s, expanderCell(k, s.title, () => void toggleExpanded(k), true))}
               <td style={{ ...td, fontSize: 12 }}>{t("adminManage.missing.cutoff.episodeCount", { count: s.episodes.length })}</td>
               {profileCell(s)}
               {searchCell("sonarr:cutoff", s)}
@@ -892,15 +908,7 @@ export function MissingReport({
               <tr style={{ background: "var(--ds-bg-1)" }}>
                 <td colSpan={2} />
                 <td colSpan={colSpan - 1} style={{ padding: "8px 10px 12px" }}>
-                  <ul style={{ margin: 0, padding: 0, listStyle: "none", fontSize: 12 }} aria-label={t("adminManage.missing.cutoff.episodesLabel", { title: s.title })}>
-                    {s.episodes.map((e) => (
-                      <li key={`${e.seasonNumber}:${e.episodeNumber}`} className="flex flex-wrap gap-x-3" style={{ padding: "2px 0" }}>
-                        <span className="ds-mono" style={{ color: "var(--ds-fg-muted)" }}>{episodeCode(e)}</span>
-                        <span style={{ flex: "1 1 200px" }}>{e.title || "—"}</span>
-                        <span className="ds-mono" style={{ color: "var(--ds-fg-subtle)" }}>{e.quality ?? "—"}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  {episodeLines(t("adminManage.missing.cutoff.episodesLabel", { title: s.title }), s.episodes, (e) => e.quality ?? "—")}
                 </td>
               </tr>
             )}

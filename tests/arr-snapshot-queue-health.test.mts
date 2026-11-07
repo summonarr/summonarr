@@ -108,7 +108,8 @@ test("health panel: the live fetch and the snapshot read name the same url, buil
   const src = code(HEALTH);
   assert.equal(count(src, 'const healthUrl = () => withBasePath("/api/admin/arr-health");'), 1, "one builder");
   assert.equal(count(src, '"/api/admin/arr-health"'), 1, "the path appears only in the builder");
-  assert.match(loadBody(src), /await fetch\(healthUrl\(\)\)/);
+  // (with a timeout, so a read that never settles can't hold the spinner forever)
+  assert.match(loadBody(src), /await fetch\(healthUrl\(\), \{ signal: AbortSignal\.timeout\(LOAD_TIMEOUT_MS\) \}\)/);
   assert.match(snapshotCall(src), /^useArrSnapshot<HealthReport>\(healthUrl\(\),/);
 });
 
@@ -125,6 +126,22 @@ test("health panel: markLive runs only after a live report was accepted, never f
   const catchAt = body.indexOf("catch");
   assert.ok(catchAt > body.indexOf("markLive()"), "markLive is in the try, before the catch");
   assert.match(code(HEALTH), /\}, \[t, markLive\]\);/, "load's deps carry markLive");
+});
+
+test("health panel: overlapping loads — only the newest writes the report or the error, and only it clears `loading`", () => {
+  const src = code(HEALTH);
+  const body = loadBody(src);
+  assert.match(src, /const seq = useRef\(0\);\s*const load = useCallback\(/);
+  assert.match(body, /^\{\s*const id = \+\+seq\.current;/, "each load takes the next id first");
+  // The sequence check sits between the answer and every write of it.
+  const check = body.indexOf("if (id !== seq.current) return;");
+  assert.ok(check > body.indexOf("await readJson<"), "after the answer is read");
+  for (const write of ["if (!res.ok || !data)", "setReport(data);", "markLive()"]) {
+    assert.ok(body.indexOf(write) > check, `${write} only for the newest load`);
+  }
+  assert.match(body, /\} catch \{\s*if \(id === seq\.current\) setLoadError\(/, "a superseded failure writes no error");
+  assert.match(body, /\} finally \{\s*if \(id === seq\.current\) setLoading\(false\);\s*\}/, "only the newest clears loading");
+  assert.equal(count(body, "setLoading(false)"), 1);
 });
 
 test("health panel: the snapshot only paints an empty panel; the stale note is shown; props stay { variant }", () => {

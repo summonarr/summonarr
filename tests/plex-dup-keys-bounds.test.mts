@@ -144,7 +144,7 @@ test("a section listing 20k copies of one tmdb id folds in linear work, last cop
   respond = serveSections({ "5": items });
 
   const { work, result } = await countWork(N * WORK_PER_COPY, () =>
-    getPlexSectionTmdbIds("http://plex-bounds-section.test:32400", "t", "5", "movie", false),
+    getPlexSectionTmdbIds("http://plex-bounds-section.test:32400", "t", "5", "movie"),
   );
 
   const winner = result.get(77)!;
@@ -169,7 +169,7 @@ test("400 sections each holding 50 copies of one tmdb id merge in linear work, f
   const list = Object.keys(sections).map((key) => ({ key, title: `Movies ${key}`, type: "movie" as const }));
 
   const { work, result } = await countWork(N * WORK_PER_COPY, () =>
-    getPlexTmdbIds("http://plex-bounds-merge.test:32400", "t", "MOVIE", false, undefined, list),
+    getPlexTmdbIds("http://plex-bounds-merge.test:32400", "t", "MOVIE", { sections: list }),
   );
 
   const winner = result.get(77)!;
@@ -255,10 +255,12 @@ test("a small mixed fixture keeps exactly the winners and keys the pre-fix fold 
       movie("8", [3], "Eight"),
     ],
   });
-  const combined = await getPlexTmdbIds("http://plex-bounds-mixed.test:32400", "t", "MOVIE", false, undefined, [
-    { key: "1", title: "Movies", type: "movie" },
-    { key: "2", title: "More Movies", type: "movie" },
-  ]);
+  const combined = await getPlexTmdbIds("http://plex-bounds-mixed.test:32400", "t", "MOVIE", {
+    sections: [
+      { key: "1", title: "Movies", type: "movie" },
+      { key: "2", title: "More Movies", type: "movie" },
+    ],
+  });
   const view = (id: number) => {
     const d = combined.get(id)!;
     return { title: d.title, ratingKey: d.ratingKey, keys: plexLibraryRatingKeys(d) };

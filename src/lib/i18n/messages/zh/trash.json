@@ -201,5 +201,15 @@
   "trash.starter.defaultInstanceNote": "应用于默认的 Radarr/Sonarr 实例。如需应用到命名实例，请在“自定义格式”“质量配置”或“命名与大小”标签页使用实例选择器。",
   "trash.sync.lastRefreshed": "上次刷新于 {ago}",
   "trash.sync.neverRefreshed": "目录尚未刷新",
-  "trash.spec.hiddenSelected": "{count} 个被筛选隐藏"
+  "trash.spec.hiddenSelected": "{count} 个被筛选隐藏",
+  "trash.applyLog.noReason": "未返回错误详情",
+  "trash.token.remove": "移除",
+  "trash.token.removed": "已移除",
+  "trash.spec.selectAria": "选择 {name}",
+  "trash.spec.selectAllAria": "选择所有可见规范",
+  "trash.banner.applyFailed": "应用失败",
+  "trash.banner.loadFailed": "无法加载配置库",
+  "trash.banner.syncFailed": "立即同步时出错",
+  "trash.banner.stoppedEarly": "未完成即已停止——请重新运行",
+  "trash.sync.disabledOnServer": "服务器上已关闭 TRaSH 同步，未执行任何操作"
 }

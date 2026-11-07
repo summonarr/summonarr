@@ -59,10 +59,14 @@ const instKey = (i: { service: Service; slug: string }) => `${i.service}:${i.slu
 // A blocklist entry's identity: its id alone collides across instances.
 const entryKey = (r: BlocklistEntry) => `${r.service}:${r.instance}:${r.id}`;
 
+// A read that never settles (a stuck proxy, a half-open connection) would hold
+// the spinner forever; the server's own arr reads give up well before this.
+const LOAD_TIMEOUT_MS = 90_000;
+
 // `url` already carries the base path: it is the same string the snapshot is read for.
 async function getJson<T>(url: string, fallback: string): Promise<{ data: T } | { error: string }> {
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(LOAD_TIMEOUT_MS) });
     const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null;
     if (!res.ok || !data) return { error: data?.error ?? fallback };
     return { data };
@@ -120,8 +124,14 @@ export function ArrDownloadHistory({
   // The kind filter `history` was READ with — the one in `kind` may still be loading.
   const [historyKind, setHistoryKind] = useState<HistoryFilterKind | "all">("all");
   const [blocklist, setBlocklist] = useState<ArrPage<BlocklistEntry> | null>(null);
-  // The Blocklist tab's count before the tab is visited: a pageSize=1 read.
+  // The Blocklist tab's count before the tab is visited: a pageSize=1 read —
+  // or, once the tab has been read, that page's own total.
   const [blocklistCount, setBlocklistCount] = useState<{ inst: string; total: number } | null>(null);
+  // The tab on screen, for the count read (which must not re-run on a tab switch).
+  const tabRef = useRef<Tab>(tab);
+  useEffect(() => {
+    tabRef.current = tab;
+  }, [tab]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -219,6 +229,8 @@ export function ArrDownloadHistory({
         }
         const records = res.data.records;
         setBlocklist(res.data);
+        // Kept as the tab's count too, so the badge holds it back on History.
+        setBlocklistCount({ inst: instKey({ service: view.service, slug: view.instance }), total: res.data.totalRecords });
         setSelected((prev) => new Map([...prev].filter(([k]) => records.some((r) => entryKey(r) === k))));
         jumpedTo.current = null;
         markLive();
@@ -243,6 +255,8 @@ export function ArrDownloadHistory({
 
   useEffect(() => {
     if (!inst || !countUrl) return;
+    // On the Blocklist tab its own page read carries the total: no second read.
+    if (tabRef.current === "blocklist") return;
     let live = true;
     const key = instKey(inst);
     void getJson<ArrPage<BlocklistEntry>>(countUrl, "").then((res) => {

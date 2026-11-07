@@ -376,11 +376,10 @@ export function selectNewFailures(
   nowMs = Number.POSITIVE_INFINITY,
 ): { groups: FailureGroup[]; cursor: HistoryCursor; recent: RecentFailure[]; deferred: number } {
   const c = { ms: Date.parse(cursor.at), id: cursor.lastId };
-  const latest = nowMs;
   const fresh = records
     .filter((r) => r.kind === "failed" && r.date !== null)
     .map((r) => ({ r, ms: Date.parse(r.date as string) }))
-    .filter((x) => Number.isFinite(x.ms) && x.ms <= latest && after(x.ms, x.r.id, c))
+    .filter((x) => Number.isFinite(x.ms) && x.ms <= nowMs && after(x.ms, x.r.id, c))
     .sort((a, b) => a.ms - b.ms || a.r.id - b.r.id);
 
   const groups: FailureGroup[] = [];
@@ -395,13 +394,14 @@ export function selectNewFailures(
   for (const { r, ms } of fresh) {
     const id = r.downloadId;
     const open = id ? byDownload.get(id) : undefined;
+    const announcedMs = id ? remembered.get(id) : undefined;
     if (isManualMark(r)) {
       // An admin's mark, not a failure: passed, never announced (before the cap, so it can't use up the budget).
     } else if (open && ms - open.ms <= FAILURE_FOLD_WINDOW_MS) {
       if (r.episode) open.episodes.add(`${r.episode.seasonNumber}:${r.episode.episodeNumber}`);
       else if (r.episodeId !== null) open.episodes.add(`id:${r.episodeId}`);
       open.group.episodes = open.episodes.size;
-    } else if (id && remembered.has(id) && Math.abs(ms - (remembered.get(id) as number)) <= FAILURE_FOLD_WINDOW_MS) {
+    } else if (announcedMs !== undefined && Math.abs(ms - announcedMs) <= FAILURE_FOLD_WINDOW_MS) {
       // Part of a download a previous run already announced.
     } else {
       if (groups.length >= cap) break;

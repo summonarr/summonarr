@@ -9,14 +9,7 @@ import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
-
-function busyResponse(t: Translator) {
-  return NextResponse.json(
-    { ok: false, error: t("apiAdmin.trash.alreadyRunning"), retryAfter: 30 },
-    { status: 409, headers: { "Retry-After": "30" } },
-  );
-}
+import { lockBusyResponse } from "@/lib/lock-http";
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
@@ -85,6 +78,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         durationMs,
       });
     },
-    () => busyResponse(t),
+    () => lockBusyResponse(t("apiAdmin.trash.alreadyRunning")),
   );
 });

@@ -121,6 +121,8 @@
   "adminArr.add.searchHint": "Andernfalls wartet der Titel auf die RSS-Synchronisierung und die geplanten Suchen von Radarr/Sonarr.",
   "adminArr.add.noRequest": "Damit wird der Titel direkt hinzugefügt — es wird keine Anfrage erstellt und niemand benachrichtigt.",
   "adminArr.add.submit": "Zu {name} hinzufügen",
+  "adminArr.add.noRootFolder": "{name} hat keinen erreichbaren Stammordner — korrigiere zuerst dort die Stammordner.",
+  "adminArr.add.noQualityProfile": "{name} hat keine Qualitätsprofile — lege dort zuerst eines an.",
   "adminArr.availability.announced": "Angekündigt",
   "adminArr.availability.inCinemas": "Im Kino",
   "adminArr.availability.released": "Veröffentlicht",

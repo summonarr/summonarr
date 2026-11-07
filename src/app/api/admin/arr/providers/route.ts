@@ -4,7 +4,7 @@ import { snapshotted } from "@/lib/arr-snapshot";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
 import { parseProviderEnableChange, parseProviderKind } from "@/lib/arr-system";
-import { loadProviders, ProviderUseUnsupportedError, ProviderWarningsError, setProviderEnabled } from "@/lib/arr-system-data";
+import { loadProviders, ProviderChangedError, ProviderUseUnsupportedError, ProviderWarningsError, setProviderEnabled } from "@/lib/arr-system-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -32,7 +32,10 @@ import { answerOf, jobResponse, startArrJob } from "@/lib/release-search-jobs";
 //         (masked) reason; a test that only WARNED is 409 { warningsOnly: true,
 //         messages } — nothing saved.
 //       • acceptWarnings: true (after that 409) re-runs the arr's test here and
-//         saves with forceSave only when it reports warnings alone (else 400).
+//         saves with forceSave only when it reports warnings alone (else 400)
+//         — and only when the resource, read again after the test, is still
+//         the one tested (an edit made in the arr meanwhile → 409
+//         { error, changed: true }, nothing saved).
 //       • A testing save the arr hasn't finished within the wait (120 s) is
 //         read back: saved → 200 { provider, timedOut: true }; not (yet) saved
 //         → 504 { error, provider, timedOut: true }.
@@ -96,6 +99,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           { error: t(err.use === "rss" ? "apiAdmin.arr.providerRssUnsupported" : "apiAdmin.arr.providerSearchUnsupported", { service }) },
           { status: 400 },
         );
+      }
+      if (err instanceof ProviderChangedError) {
+        return NextResponse.json({ error: t("apiAdmin.arr.providerChangedMeanwhile", { service }), changed: true }, { status: 409 });
       }
       if (err instanceof ProviderWarningsError) {
         const reason = err.messages.join(" ") || t("apiAdmin.arr.noReason");

@@ -102,6 +102,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 // One plex.tv call with the ADMIN token. 401/403 → AdminTokenRejectedError; a
 // 429 is retried once after its Retry-After (bounded); any other non-2xx throws.
+// The signal reaches the request too: an abort mid-request REJECTS, so a caller
+// that passes one returns its partial result on abort (guardrail 41).
 async function adminFetchJson(
   url: string,
   token: string,
@@ -114,11 +116,14 @@ async function adminFetchJson(
       headers: headers(token, init.body !== undefined),
       ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
       timeoutMs: FETCH_TIMEOUT_MS,
+      ...(init.signal ? { signal: init.signal } : {}),
     });
     if (res.status === 401 || res.status === 403) throw new AdminTokenRejectedError(res.status);
     if (res.status === 429 && attempt === 0) {
       const wait = parseRetryAfterMs(res.headers.get("retry-after")) ?? 1000;
       if (wait <= MAX_RETRY_AFTER_MS && !init.signal?.aborted) {
+        // The retried response replaces this one: release its body first.
+        await res.body?.cancel().catch(() => {});
         await sleep(wait, init.signal);
         continue;
       }
@@ -160,13 +165,21 @@ function graphqlErrorMessages(body: unknown): string[] {
     .slice(0, 3);
 }
 
-// One page of userV2.watchlist. A null/absent watchlist is the friend's privacy
-// setting ("private"), unless the errors read as a server-side failure, which
-// throws so the user is counted as an error and retried next run. Pure.
+// One page of userV2.watchlist. A null userV2 or a null/absent watchlist is the
+// friend's privacy setting ("private"), unless the errors read as a server-side
+// failure, which throws so the user is counted as an error and retried next
+// run. A body with no `data` at all is a failed QUERY (a schema or validation
+// error) and throws too: read as privacy, it would hide the breakage behind
+// "private" for every friend. Pure.
 export function parseWatchlistPage(
   body: unknown,
 ): { status: "private" } | { status: "ok"; nodes: FriendWatchlistNode[]; hasNextPage: boolean; endCursor: string | null } {
-  const user = (body as { data?: { userV2?: unknown } } | null)?.data?.userV2;
+  const data = (body as { data?: unknown } | null)?.data;
+  if (!data || typeof data !== "object") {
+    const errs = graphqlErrorMessages(body);
+    throw new Error(`plex.tv watchlist query returned no data${errs.length ? `: ${errs.join("; ")}` : ""}`);
+  }
+  const user = (data as { userV2?: unknown }).userV2;
   const watchlist = user && typeof user === "object" ? (user as { watchlist?: unknown }).watchlist : undefined;
   if (!watchlist || typeof watchlist !== "object") {
     const errs = graphqlErrorMessages(body);
@@ -250,14 +263,21 @@ export async function fetchFriendWatchlist(
   let after: string | null = null;
   while (nodes.length < opts.maxItems) {
     if (opts.signal?.aborted) break;
-    const body = await adminFetchJson(COMMUNITY_API_URL, token, {
-      method: "POST",
-      body: {
-        query: WATCHLIST_QUERY,
-        variables: { user: { id: friendGraphId }, first: FRIEND_WATCHLIST_PAGE_SIZE, after },
-      },
-      signal: opts.signal,
-    });
+    let body: unknown;
+    try {
+      body = await adminFetchJson(COMMUNITY_API_URL, token, {
+        method: "POST",
+        body: {
+          query: WATCHLIST_QUERY,
+          variables: { user: { id: friendGraphId }, first: FRIEND_WATCHLIST_PAGE_SIZE, after },
+        },
+        signal: opts.signal,
+      });
+    } catch (err) {
+      // An abort that lands mid-request: the pages already read (guardrail 41).
+      if (opts.signal?.aborted) break;
+      throw err;
+    }
     const page = parseWatchlistPage(body);
     if (page.status === "private") {
       // A first page that is private is the friend's setting; a later page going
@@ -303,9 +323,22 @@ export async function resolvePlexAccountUsers(accountIds: readonly string[]): Pr
     }),
   ]);
 
+  // Indexed once, so the per-id loop below is linear in ids + rows.
+  const rowsById = new Map<string, typeof msuRows>();
+  for (const r of msuRows) {
+    const list = rowsById.get(r.sourceUserId);
+    if (list) list.push(r);
+    else rowsById.set(r.sourceUserId, [r]);
+  }
+  const userBySubject = new Map<string, string>();
+  for (const u of subjectUsers) {
+    // First wins, as `find` did (plexUserId is unique, so there is one).
+    if (u.plexUserId && !userBySubject.has(u.plexUserId)) userBySubject.set(u.plexUserId, u.id);
+  }
+
   const candidate = new Map<string, string>();
   for (const id of ids) {
-    const rows = msuRows.filter((r) => r.sourceUserId === id);
+    const rows = rowsById.get(id) ?? [];
     const pins = rows.filter((r) => r.manualUserLink);
     if (pins.length > 0) {
       const pinned = new Set(pins.map((r) => r.userId));
@@ -315,9 +348,9 @@ export async function resolvePlexAccountUsers(accountIds: readonly string[]): Pr
       if (only) candidate.set(id, only);
       continue;
     }
-    const bySubject = subjectUsers.find((u) => u.plexUserId === id);
+    const bySubject = userBySubject.get(id);
     if (bySubject) {
-      candidate.set(id, bySubject.id);
+      candidate.set(id, bySubject);
       continue;
     }
     const linked = new Set(rows.map((r) => r.userId).filter((u): u is string => !!u));

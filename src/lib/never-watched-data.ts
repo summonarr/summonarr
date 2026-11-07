@@ -699,16 +699,28 @@ export function shareLibraryWatchFacts(
   opts: { now: Date; seasons: boolean },
 ): SharedWatchFacts {
   let pending: Promise<LibraryWatchFacts> | null = null;
+  // Stays true after a failed load: `started` must stay conservative, since the
+  // failed attempt (and its retry) may still predate an invalidation.
+  let everStarted = false;
   return {
     arr,
     arrAt,
     now: opts.now,
     seasons: opts.seasons,
     get started() {
-      return pending !== null;
+      return everStarted;
     },
     load() {
-      pending ??= loadLibraryWatchFacts(arr, { seasons: opts.seasons, now: opts.now });
+      if (!pending) {
+        everStarted = true;
+        // A failed load is forgotten so the next consumer retries it, instead of
+        // every computation sharing this object replaying one transient error.
+        const p: Promise<LibraryWatchFacts> = loadLibraryWatchFacts(arr, { seasons: opts.seasons, now: opts.now }).catch((err: unknown) => {
+          if (pending === p) pending = null;
+          throw err;
+        });
+        pending = p;
+      }
       return pending;
     },
   };

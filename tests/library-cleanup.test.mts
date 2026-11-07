@@ -16,9 +16,13 @@
 //      falls back per field.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
+  CLEANUP_NUMERIC_BOUNDS,
   CLEANUP_SETTING_DEFAULTS,
   CLEANUP_SETTING_KEYS,
+  cleanupDraftInBounds,
+  cleanupNumberInBounds,
   evaluateCleanupTitle,
   parseCleanupSettings,
   sonarrStatusIsAiring,
@@ -204,6 +208,17 @@ test("recentlyAdded: added less than minAgeDays ago (votes can match a brand-new
   assert.deepEqual(judge({ ...DOOMED, addedAt: daysAgo(5) }, { ...ALL_RULES, minAgeDays: 0 }).excludedBy, [], "0 turns it off");
 });
 
+test("recentlyAdded: an UNKNOWN add date can't prove the minimum age, so the title is held — votes alone don't pass it", () => {
+  const unknownAge = title({ playCount: 5, lastPlayedAt: daysAgo(10), addedAt: null, votes: 9 });
+  const held = judge(unknownAge, { ...ALL_RULES, minAgeDays: 30 });
+  assert.deepEqual(held.matched, ["votes"]);
+  assert.ok(held.excludedBy.includes("recentlyAdded"));
+  assert.equal(held.candidate, false);
+  const off = judge(unknownAge, { ...ALL_RULES, minAgeDays: 0 });
+  assert.deepEqual(off.excludedBy, [], "with the minimum age off it stays a candidate");
+  assert.equal(off.candidate, true);
+});
+
 test("activeRequest: a PENDING or APPROVED request for the title, whoever made it", () => {
   for (const status of ["PENDING", "APPROVED"] as const) {
     assert.deepEqual(judge({ ...DOOMED, requests: [{ status, availableAt: null }] }).excludedBy, ["activeRequest"], status);
@@ -309,4 +324,34 @@ test("write path: refuses the whole patch on any bad value — never repairs", (
     assert.ok("error" in validateCleanupSettingsPatch(bad), JSON.stringify(bad));
   }
   assert.ok("error" in validateCleanupSettingsPatch({ unwatchedDays: 30, votesMin: -1 }), "one bad field sinks the patch");
+});
+
+test("the page's bounds check accepts exactly what the write path accepts", () => {
+  assert.equal(cleanupDraftInBounds(CLEANUP_SETTING_DEFAULTS), true, "the defaults");
+  for (const [field, { min, max }] of Object.entries(CLEANUP_NUMERIC_BOUNDS) as Array<[keyof typeof CLEANUP_NUMERIC_BOUNDS, { min: number; max: number }]>) {
+    assert.equal(cleanupNumberInBounds(field, min), true, `${field} at its min`);
+    assert.equal(cleanupNumberInBounds(field, max), true, `${field} at its max`);
+    assert.equal(cleanupNumberInBounds(field, max + 1), false, `${field} past its max`);
+    assert.equal(cleanupNumberInBounds(field, min - 1), false, `${field} under its min`);
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, min + 0.5]) {
+      assert.equal(cleanupDraftInBounds({ ...CLEANUP_SETTING_DEFAULTS, [field]: bad }), false, `${field} = ${bad}`);
+    }
+    // Same verdict as the server's strict write path, value by value.
+    for (const v of [min - 1, min, max, max + 1]) {
+      assert.equal(cleanupNumberInBounds(field, v), "rows" in validateCleanupSettingsPatch({ [field]: v }), `${field} = ${v}`);
+    }
+  }
+  for (const field of ["unwatchedDays", "neverWatchedDays", "votesMin"] as const) {
+    assert.equal(cleanupDraftInBounds({ ...CLEANUP_SETTING_DEFAULTS, [field]: 0 }), false, `a cleared ${field} (0) can't be saved`);
+  }
+});
+
+test("the page's number inputs take min/max from CLEANUP_NUMERIC_BOUNDS and keep Save off for a draft out of bounds", () => {
+  const src = readFileSync(new URL("../src/components/admin/library-cleanup.tsx", import.meta.url), "utf8");
+  assert.match(src, /min=\{CLEANUP_NUMERIC_BOUNDS\[field\]\.min\}/);
+  assert.match(src, /max=\{CLEANUP_NUMERIC_BOUNDS\[field\]\.max\}/);
+  assert.doesNotMatch(src, /type="number"[^>]*\b(min|max)=\{\d+\}/, "no hard-coded bound");
+  for (const field of Object.keys(CLEANUP_NUMERIC_BOUNDS)) assert.match(src, new RegExp(`numInput\\("${field}", `), `${field} goes through the shared input`);
+  assert.match(src, /const draftValid = cleanupDraftInBounds\(draft\);/);
+  assert.match(src, /disabled=\{!dirty \|\| !draftValid \|\| savingRules\}/);
 });

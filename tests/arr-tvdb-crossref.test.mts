@@ -50,6 +50,7 @@ let tmdbLookup: unknown[] = [];
 let tvdbLookup: (tvdbId: number) => unknown[] = () => [];
 let tmdbExternalIds: () => Response = () => json({ tvdb_id: null });
 let seriesLibrary: (tvdbId: string | null) => unknown[] = () => [];
+let seriesStatus = 200;
 let sonarrQueue: unknown = { records: [], totalRecords: 0 };
 
 function json(body: unknown, status = 200): Response {
@@ -67,7 +68,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     throw new Error(`unexpected lookup term ${term}`);
   }
   if (url.pathname === "/api/v3/series" && (init?.method ?? "GET") === "POST") return json({ id: 1 });
-  if (url.pathname === "/api/v3/series") return json(seriesLibrary(url.searchParams.get("tvdbId")));
+  if (url.pathname === "/api/v3/series") {
+    return seriesStatus === 200 ? json(seriesLibrary(url.searchParams.get("tvdbId"))) : json({ message: "boom" }, seriesStatus);
+  }
   if (url.pathname === "/api/v3/queue") return json(sonarrQueue);
   throw new Error(`unexpected fetch ${url}`);
 }) as unknown as typeof fetch;
@@ -108,11 +111,12 @@ shadowPrismaModel(prisma, "tmdbCache", {
 const {
   addSeriesToSonarr,
   getSeriesFirstAired,
+  getSonarrSeriesCompletion,
   isSeriesDownloadedInSonarr,
   isSeriesDownloadingInSonarr,
-  isSeriesWantedInSonarr,
   pickSeriesByTvdbCrossRef,
   resolveTmdbToTvdb,
+  resolveTvdbIdFromTmdbId,
 } = await import("../src/lib/arr.ts");
 
 const DAY = 24 * 60 * 60;
@@ -153,6 +157,7 @@ beforeEach(() => {
   tvdbLookup = () => [];
   tmdbExternalIds = () => json({ tvdb_id: null });
   seriesLibrary = () => [];
+  seriesStatus = 200;
   sonarrQueue = { records: [], totalRecords: 0 };
 });
 
@@ -307,20 +312,78 @@ test("webhook verify: stays Sonarr-sourced — a WRONG TMDB cross-reference can'
 
 // ═══ live wanted / downloading verdicts ══════════════════════════════════════
 
-test("wanted: a PARTLY downloaded series is wanted — same guardrail-14a rule as the sync writer", async () => {
+test("live completion: a PARTLY downloaded series is not complete (still wanted) — same guardrail-14a rule as the sync writer", async () => {
+  // The arr-state diagnostic reads "wanted" as `!complete` off this one call.
   tmdbLookup = [dropRow()];
   const lib = (files: number) => (tvdbId: string | null) =>
     tvdbId === String(TVDB)
       ? [{ tvdbId: TVDB, status: "continuing", seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeFileCount: files, episodeCount: 24 } }] }]
       : [];
   seriesLibrary = lib(5);
-  assert.equal(await isSeriesWantedInSonarr(TMDB), true, "5 of 24 aired episodes is still wanted");
+  const partial = await getSonarrSeriesCompletion(TMDB);
+  assert.equal(partial?.complete, false, "5 of 24 aired episodes is still wanted");
+  assert.equal(partial?.episodeFileCount, 5);
+  assert.equal(partial?.episodeCount, 24);
+  assert.equal(partial?.tvdbId, TVDB);
   seriesLibrary = lib(24);
-  assert.equal(await isSeriesWantedInSonarr(TMDB), false, "a complete series is not wanted");
+  assert.equal((await getSonarrSeriesCompletion(TMDB))?.complete, true, "a complete series is not wanted");
   seriesLibrary = lib(0);
-  assert.equal(await isSeriesWantedInSonarr(TMDB), true);
+  assert.equal((await getSonarrSeriesCompletion(TMDB))?.complete, false);
   seriesLibrary = () => [];
-  assert.equal(await isSeriesWantedInSonarr(TMDB), false, "a series not in the library is not wanted");
+  assert.equal(await getSonarrSeriesCompletion(TMDB), null, "a series not in the library has no completion");
+});
+
+// ═══ resolveTvdbIdFromTmdbId — the tvdbId persisted onto an issue ════════════
+
+const unfilteredLibraryReads = () =>
+  calls.filter((c) => c.url.pathname === "/api/v3/series" && c.method === "GET" && !c.url.searchParams.has("tvdbId"));
+
+test("issue tvdbId: a cross-reference confirmed by Sonarr's own library row resolves with ONE filtered read — no lookup, no full library", async () => {
+  seedCrossRef(TMDB, TVDB);
+  tmdbLookup = [dropRow({ tvdbId: 1234 })]; // would answer differently if it were asked
+  seriesLibrary = (tvdbId) => (tvdbId === String(TVDB) ? [{ id: 9, tvdbId: TVDB, tmdbId: TMDB }] : []);
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), TVDB);
+  assert.equal(lookups("tmdb:").length, 0, "Sonarr's own row confirmed it");
+  assert.equal(unfilteredLibraryReads().length, 0, "never the whole library");
+  assert.deepEqual(
+    calls.filter((c) => c.url.pathname === "/api/v3/series").map((c) => c.url.searchParams.get("tvdbId")),
+    [String(TVDB)],
+  );
+});
+
+test("issue tvdbId: a library row naming ANOTHER title, or none (Sonarr v3), never decides — the verified lookup does", async () => {
+  seedCrossRef(TMDB, TVDB);
+  for (const rowTmdbId of [71694, undefined, 0]) {
+    calls.length = 0;
+    seriesLibrary = (tvdbId) => (tvdbId === String(TVDB) ? [{ id: 9, tvdbId: TVDB, ...(rowTmdbId === undefined ? {} : { tmdbId: rowTmdbId }) }] : []);
+    // Sonarr's tmdb lookup names this title at another TVDB id: only it may decide.
+    tmdbLookup = [dropRow({ tvdbId: 1234 })];
+    assert.equal(await resolveTvdbIdFromTmdbId(TMDB), 1234, `row tmdbId=${rowTmdbId}`);
+    assert.equal(lookups("tmdb:").length, 1, `row tmdbId=${rowTmdbId}: the lookup was consulted`);
+    assert.equal(unfilteredLibraryReads().length, 0);
+  }
+});
+
+test("issue tvdbId: no cross-reference goes straight to the lookup; an unverified lookup is null, never a guess", async () => {
+  tmdbLookup = [dropRow()];
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), TVDB);
+  assert.equal(calls.filter((c) => c.url.pathname === "/api/v3/series").length, 0, "no library read without a candidate");
+
+  calls.length = 0;
+  tmdbLookup = [dropRow({ tvdbId: 1, tmdbId: 9 }), dropRow({ tvdbId: 2, tmdbId: 8 })];
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), null);
+  assert.equal(unfilteredLibraryReads().length, 0);
+});
+
+test("issue tvdbId: a Sonarr failure is null, and an unconfigured Sonarr is null with no call", async () => {
+  seedCrossRef(TMDB, TVDB);
+  seriesStatus = 503;
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), null);
+
+  calls.length = 0;
+  settings.clear();
+  assert.equal(await resolveTvdbIdFromTmdbId(TMDB), null);
+  assert.equal(calls.length, 0);
 });
 
 test("downloading: an UNRESOLVABLE series is unknown (null), never a confident 'not in queue'", async () => {

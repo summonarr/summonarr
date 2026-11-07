@@ -1,8 +1,9 @@
 // Admin → Download Queue: the pure rules. Turns raw Radarr/Sonarr
 // /api/v3/queue records into one row per DOWNLOAD and decides which rows need an
-// admin's attention. No I/O; the data half is arr-queue-data.ts. The only import
-// is safeMessage, so a queue or import line can't carry an indexer apikey to
-// the browser (guardrail 5e).
+// admin's attention. No I/O; the data half is arr-queue-data.ts. Its only
+// imports are the zero-import readers in arr-parse.ts — safeMessage among them,
+// so a queue or import line can't carry an indexer apikey to the browser
+// (guardrail 5e).
 //
 //   • Sonarr reports one queue record PER EPISODE, so a season pack is N records
 //     sharing one downloadId. They fold into one row carrying every record id;
@@ -15,7 +16,25 @@
 //     status of failed/warning/client-unavailable. Nothing here guesses from
 //     progress or age; the arr already folds stalled torrents into a warning.
 
-import { safeMessage } from "@/lib/arr-parse";
+import {
+  bytes,
+  isoOrNull,
+  languageNamesOf,
+  MAX_LABELS,
+  namesOf,
+  nonNegInt,
+  posInt,
+  PROJECTION_SCAN_FACTOR,
+  protocolOf,
+  qualityOf,
+  safeMessage,
+  text,
+  textOrNull,
+  type QualityTag,
+} from "@/lib/arr-parse";
+
+export { MAX_LABELS, PROJECTION_SCAN_FACTOR };
+export type { QualityTag };
 
 export type QueueService = "radarr" | "sonarr";
 
@@ -30,8 +49,6 @@ export type QueuePhase =
   | "failed"
   | "clientUnavailable"
   | "unknown";
-
-export type QualityTag = "proper" | "repack" | "real";
 
 export interface QueueEpisode {
   seasonNumber: number;
@@ -94,26 +111,11 @@ export interface QueueItem {
 // report hundreds of status lines; the page needs the first few.
 export const MAX_MESSAGES = 6;
 const MAX_MESSAGE_LEN = 300;
-const MAX_TEXT = 500;
-export const MAX_LABELS = 20;
-const MAX_LABEL_LEN = 100;
 // A record's lists come from the arr, capped only by arrFetch's 50 MB, and the
 // fold runs synchronously (the arr-watch cron, the queue page, the Why?
 // status). So each list is deduped through a Set, kept to its cap, and READ at
-// most this many times its cap (guardrail 5i). arr-system.ts's constant,
-// repeated: this module has no imports, and arr-system imports it.
-export const PROJECTION_SCAN_FACTOR = 10;
-
-const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
-const nonNegInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null);
-const text = (v: unknown, max = MAX_TEXT): string => (typeof v === "string" ? v.slice(0, max) : "");
-const textOrNull = (v: unknown, max = MAX_TEXT): string | null => (typeof v === "string" && v.trim() !== "" ? v.slice(0, max) : null);
-const bytes = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
-function isoOrNull(v: unknown): string | null {
-  if (typeof v !== "string" || v === "") return null;
-  const ms = Date.parse(v);
-  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
-}
+// most PROJECTION_SCAN_FACTOR times its cap (guardrail 5i) — namesOf, from
+// arr-parse, does the same for languages and custom formats.
 
 /**
  * A .NET TimeSpan as Radarr/Sonarr serialize it: "hh:mm:ss", "d.hh:mm:ss",
@@ -239,51 +241,11 @@ function messagesOf(r: QueueRecord): string[] {
   return out;
 }
 
-/** The `name`s of a list of {id, name} objects (languages, custom formats) — deduplicated, bounded. */
-function namesOf(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  const list = v as Array<{ name?: unknown } | null>;
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (let i = 0, n = Math.min(list.length, MAX_LABELS * PROJECTION_SCAN_FACTOR); i < n && out.length < MAX_LABELS; i++) {
-    const x = list[i];
-    const name = typeof x?.name === "string" ? x.name.trim().slice(0, MAX_LABEL_LEN) : "";
-    if (name && !seen.has(name)) {
-      seen.add(name);
-      out.push(name);
-    }
-  }
-  return out;
-}
-
-// A record's languages: its `languages` list, or Sonarr v3's ONE `language`
-// object (QueueResource has no list there). arr-parse.ts's languageNamesOf,
-// repeated: this module has no imports.
-function languageNamesOf(r: { languages?: unknown; language?: unknown }): string[] {
-  const list = namesOf(r.languages);
-  const single = r.language;
-  return list.length > 0 || !single || typeof single !== "object" || Array.isArray(single) ? list : namesOf([single]);
-}
-
-function qualityTagsOf(revision: unknown): QualityTag[] {
-  if (!revision || typeof revision !== "object") return [];
-  const r = revision as { version?: unknown; real?: unknown; isRepack?: unknown };
-  const tags: QualityTag[] = [];
-  if (r.isRepack === true) tags.push("repack");
-  else if (typeof r.version === "number" && r.version > 1) tags.push("proper");
-  if (typeof r.real === "number" && r.real > 0) tags.push("real");
-  return tags;
-}
-
 const scoreOf = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) ? v : null);
-
-function protocolOf(v: unknown): QueueItem["protocol"] {
-  const s = lc(v);
-  return s === "torrent" || s === "usenet" ? s : "unknown";
-}
 
 function toItem(service: QueueService, instance: string, r: QueueRecord, id: number): QueueItem {
   const media = service === "radarr" ? r.movie : r.series;
+  const quality = qualityOf(r.quality);
   const size = bytes(r.size);
   const sizeLeft = Math.min(bytes(r.sizeleft), size);
   const episode = r.episode;
@@ -305,8 +267,9 @@ function toItem(service: QueueService, instance: string, r: QueueRecord, id: num
     tvdbId: service === "sonarr" ? posInt(r.series?.tvdbId) : null,
     arrMediaId: posInt(service === "radarr" ? r.movieId : r.seriesId),
     episodes,
-    quality: textOrNull(r.quality?.quality?.name, 100),
-    qualityTags: qualityTagsOf(r.quality?.revision),
+    quality: quality.quality,
+    qualityTags: quality.qualityTags,
+    // Its `languages` list, or Sonarr v3's ONE `language` object (QueueResource has no list there).
     languages: languageNamesOf(r),
     customFormats: namesOf(r.customFormats),
     customFormatScore: scoreOf(r.customFormatScore),
@@ -332,6 +295,13 @@ function toItem(service: QueueService, instance: string, r: QueueRecord, id: num
 
 const episodeKey = (e: QueueEpisode): string => `${e.seasonNumber}:${e.episodeNumber}`;
 
+// Pipeline stages, the ones needing a hand first: the queue's order, and which
+// of a folded download's records names its phase.
+const PHASE_ORDER: Record<QueuePhase, number> = {
+  importBlocked: 0, failed: 1, clientUnavailable: 2, importPending: 3, importing: 4,
+  downloading: 5, paused: 6, queued: 7, delay: 8, unknown: 9,
+};
+
 // Folding a later episode record into the row its download already started.
 // `episodeKeys` is the row's episodes as a Set: the folded list has no cap (one
 // entry per record), so a scan of it per record was quadratic.
@@ -345,6 +315,9 @@ function mergeInto(row: QueueItem, next: QueueItem, episodeKeys: Set<string>): v
   }
   for (const m of next.messages) if (row.messages.length < MAX_MESSAGES && !row.messages.includes(m)) row.messages.push(m);
   row.attention ||= next.attention;
+  // The most pressing record's phase, like attention: a pack with one import
+  // blocked episode is blocked, not "downloading" because its first record was.
+  if (PHASE_ORDER[next.phase] < PHASE_ORDER[row.phase]) row.phase = next.phase;
   row.canChangeCategory ||= next.canChangeCategory;
   // One release, so these normally repeat; a record that lacked them must not blank the row.
   for (const l of next.languages) if (row.languages.length < MAX_LABELS && !row.languages.includes(l)) row.languages.push(l);
@@ -397,11 +370,6 @@ export function foldQueueRecords(service: QueueService, instance: string, record
   for (const row of rows) row.episodes.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
   return rows;
 }
-
-const PHASE_ORDER: Record<QueuePhase, number> = {
-  importBlocked: 0, failed: 1, clientUnavailable: 2, importPending: 3, importing: 4,
-  downloading: 5, paused: 6, queued: 7, delay: 8, unknown: 9,
-};
 
 /** Rows needing attention first, then by pipeline stage, then by title (stable across polls). */
 export function sortQueueItems(items: QueueItem[]): QueueItem[] {
@@ -760,13 +728,24 @@ export const EMPTY_IMPORT_CATALOG: ImportCatalog = { qualities: new Map(), langu
 export const MAX_OVERRIDE_EPISODES = 500;
 const MAX_RELEASE_GROUP = 100;
 
-/** A correction the arr's own catalogs don't back (unknown movie, episode of another series, …). */
+/**
+ * A correction the arr's own catalogs don't back (unknown movie, episode of
+ * another series, …), or — `tooManyTitles` — more titles re-matched than the
+ * catalog read takes (MAX_CATALOG_TITLES, arr-queue-data.ts).
+ */
 export class ImportOverrideError extends Error {
-  readonly field: "movie" | "series" | "episodes" | "quality" | "languages";
+  readonly field: "movie" | "series" | "episodes" | "quality" | "languages" | "tooManyTitles";
   constructor(field: ImportOverrideError["field"]) {
     super(`invalid ${field}`);
     this.field = field;
   }
+}
+
+/** The arr row's quality revision, in its full shape; a row with none is a first release (v1). */
+function revisionOf(quality: unknown): { version: number; real: number; isRepack: boolean } {
+  const q = quality && typeof quality === "object" ? (quality as { revision?: unknown }).revision : null;
+  const r = q && typeof q === "object" ? (q as { version?: unknown; real?: unknown; isRepack?: unknown }) : null;
+  return { version: posInt(r?.version) ?? 1, real: nonNegInt(r?.real) ?? 0, isRepack: r?.isRepack === true };
 }
 
 const intList = (v: unknown, max: number, min: number): number[] | null =>
@@ -870,8 +849,10 @@ export function applyImportOverride(service: QueueService, row: ManualImportRow,
   if (override.qualityId !== undefined) {
     const quality = catalog.qualities.get(override.qualityId);
     if (quality === undefined) throw new ImportOverrideError("quality");
-    // A hand-picked quality is a plain first release, not a proper/repack.
-    out.quality = { quality, revision: { version: 1, real: 0, isRepack: false } };
+    // The file's own revision stays, as in the arr's quality picker: a PROPER
+    // or REPACK relabelled as a plain v1 would have the arr grab the same
+    // release again as an "upgrade". Rebuilt from the arr row's numbers.
+    out.quality = { quality, revision: revisionOf(row.quality) };
   }
   if (override.languageIds !== undefined) {
     // Sonarr v3 reads only its single `language`: a `languages` array written
@@ -1035,6 +1016,19 @@ export function defaultImportSelection(files: readonly ImportCandidate[]): Set<s
   const matched = files.filter((f) => f.importable);
   const clean = matched.filter((f) => f.rejections.length === 0);
   return new Set((clean.length > 0 ? clean : matched).map((f) => f.path));
+}
+
+/**
+ * The import dialog's selection once a file's verdict changes (a correction
+ * applied or reset): an importable file is ticked, one that can't be imported
+ * any more is unticked — its checkbox is disabled, so it could never be
+ * unticked by hand and would still be counted and sent.
+ */
+export function nextImportSelection(selected: ReadonlySet<string>, path: string, importable: boolean): Set<string> {
+  const next = new Set(selected);
+  if (importable) next.add(path);
+  else next.delete(path);
+  return next;
 }
 
 /** A download id as Radarr/Sonarr report it (a client hash or job id): printable ASCII, bounded. */

@@ -10,6 +10,7 @@
 //   one server only is never random: the other server either holds the SAME
 //   file under a different TMDB id, lists the folder with no TMDB id at all, or
 //   does not have the file. Telling those apart is the source of the diff.
+import { folderYear as folderNameYear } from "./library-match";
 
 export type DiffSourceKind =
   /** The other server holds this very file/folder, matched to a different TMDB id. */
@@ -120,14 +121,15 @@ export function diffCollator(locale: string): Intl.Collator {
 
 /**
  * The "(YYYY)" in a path's folder names, deepest folder first — Radarr/Sonarr's
- * "Title (2017)" layout. null when no folder carries one (a file name is not
- * read: "Film.2017.1080p.mkv" years are too often a different number).
+ * "Title (2017)" layout, each folder read by the match check's own rule. null
+ * when no folder carries one (a file name is not read: "Film.2017.1080p.mkv"
+ * years are too often a different number).
  */
 export function folderYear(relativePath: string): number | null {
   const folders = relativePath.replace(/\\/g, "/").split("/").filter(Boolean).slice(0, -1);
   for (let i = folders.length - 1; i >= 0; i--) {
-    const m = /\((\d{4})\)\s*$/.exec(folders[i]) ?? /\((\d{4})\)/.exec(folders[i]);
-    if (m) return Number(m[1]);
+    const year = folderNameYear(folders[i]);
+    if (year !== null) return year;
   }
   return null;
 }

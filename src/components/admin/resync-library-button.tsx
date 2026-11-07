@@ -6,13 +6,14 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw, XCircle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { runLibrarySyncs, type LibrarySyncServer } from "@/lib/client/library-sync";
+import { librarySyncText } from "./library-sync-text";
 
 export function ResyncLibraryButton({
-  plexConfigured,
-  jellyfinConfigured,
+  servers,
 }: {
-  plexConfigured: boolean;
-  jellyfinConfigured: boolean;
+  /** Every CONFIGURED Plex/Jellyfin server, default and named (guardrails 35, 36). */
+  servers: LibrarySyncServer[];
 }) {
   const t = useT();
   const locale = useLocale();
@@ -26,6 +27,12 @@ export function ResyncLibraryButton({
   // re-enables while the full delete-and-replace is still POSTing.
   const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(resetTimer.current), []);
+  // The resyncs are polled background jobs; leaving the page stops the polls.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   function scheduleReset() {
     clearTimeout(resetTimer.current);
@@ -37,20 +44,12 @@ export function ResyncLibraryButton({
     setStatus("loading");
     setResult(null);
     try {
-      // Call only the servers that are configured. Calling an absent one just
-      // returns "not configured", which used to show up as a red failure for a
-      // server the admin doesn't even run (guardrail 36).
-      //
-      // The booleans come from the page rather than from probing, so an absent
-      // server costs no request at all. They describe the DEFAULT instance,
-      // which is exactly right here: this button sends no `instance` slug, so
-      // the default is all it ever syncs (guardrail 35).
-      const targets = [
-        ...(plexConfigured ? [{ name: "Plex", path: "/api/sync/plex" }] : []),
-        ...(jellyfinConfigured ? [{ name: "Jellyfin", path: "/api/sync/jellyfin" }] : []),
-      ];
-
-      if (targets.length === 0) {
+      // Only the servers that are configured: the page lists them, so an absent
+      // one costs no request and can't read as a red failure (guardrail 36).
+      // Every configured instance, default and named (guardrail 35) — each
+      // request names its own server, so each full replace stays scoped to it
+      // (guardrail 13).
+      if (servers.length === 0) {
         // Not an error — nothing is misconfigured, there is simply nothing to
         // re-scan. Neutral styling says that; red would not.
         setStatus("done");
@@ -59,41 +58,19 @@ export function ResyncLibraryButton({
         return;
       }
 
-      const outcomes = await Promise.all(
-        targets.map(async ({ name, path }) => {
-          try {
-            const res = await fetch(withBasePath(path), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ full: true }),
-            });
-            const data = (await res.json().catch(() => null)) as
-              | { scanned?: { movies: number; tv: number }; error?: string; skipped?: boolean }
-              | null;
-            if (!res.ok || data?.error) {
-              return { name, ok: false, text: `${name} ${data?.error ?? t("adminManage.library.btn.failedStatus", { status: res.status })}` };
-            }
-            // 200 { skipped: true }: a resync of this server is already running.
-            // Not a fault, and it carries no counts.
-            if (data?.skipped) {
-              return { name, ok: true, text: `${name} ${t("adminManage.library.btn.alreadyRunning")}` };
-            }
-            const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
-            return { name, ok: true, text: `${name} ${t("adminManage.library.btn.items", { count, formatted: count.toLocaleString(locale) })}` };
-          } catch {
-            return { name, ok: false, text: `${name} ${t("adminManage.library.btn.networkError")}` };
-          }
-        }),
-      );
+      const outcomes = await runLibrarySyncs(servers, {
+        url: (service) => withBasePath(`/api/sync/${service}`),
+        isAlive: () => alive.current,
+      });
+      if (!outcomes) return;
 
-      const succeeded = outcomes.filter((o) => o.ok);
-      // Red whenever a CONFIGURED server failed — that is a real fault and the
-      // whole point of the distinction. But still refresh if any server did
-      // sync: those rows are what the admin clicked for, and withholding the
-      // refresh left the page showing pre-sync counts.
-      setStatus(succeeded.length === outcomes.length ? "done" : "error");
-      setResult(outcomes.map((o) => o.text).join(" · "));
-      if (succeeded.length > 0) {
+      // Red only when a CONFIGURED server failed — that is a real fault. A
+      // server with no answer yet may still be syncing and is not one. Still
+      // refresh if any server did sync: those rows are what the admin clicked
+      // for, and withholding the refresh left the page showing pre-sync counts.
+      setStatus(outcomes.some((o) => o.outcome.kind === "failed") ? "error" : "done");
+      setResult(outcomes.map((o) => librarySyncText(o.server, o.outcome, t, locale)).join(" · "));
+      if (outcomes.some((o) => o.outcome.kind === "synced")) {
         const search = searchParams.toString();
         router.push(pathname + (search ? `?${search}` : ""));
       }

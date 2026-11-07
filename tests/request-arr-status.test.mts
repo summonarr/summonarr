@@ -811,6 +811,21 @@ test("scrubMessage: a path runs to the end of the message, after a removed value
   assert.equal(scrubMessage("Existing: [Bluray-1080p] / New: [WEBDL-1080p] at 12:30, 1/2 done", []), "Existing: [Bluray-1080p] / New: [WEBDL-1080p] at 12:30, 1/2 done");
 });
 
+test("scrubMessage: a SHORT private value inside another word is left alone; as a word, or at a word's edge, it still goes", () => {
+  // A download client named "SAB" used to turn "disabled" into "di…led".
+  assert.equal(scrubMessage("Download client SAB is disabled", ["SAB"]), "Download client … is disabled");
+  assert.equal(scrubMessage("Download client sab is DISABLED", ["SAB"]), "Download client … is DISABLED", "case-insensitive, both ways");
+  // At a word's start or end it is still the name: "SABnzbd" loses "SAB", "MySAB" too.
+  assert.equal(scrubMessage("SABnzbd stalled", ["SAB"]), "…nzbd stalled");
+  assert.equal(scrubMessage("Grab by MySAB failed", ["SAB"]), "Grab by My… failed");
+  assert.equal(scrubMessage("(SAB) failed: SAB.", ["SAB"]), "(…) failed: ….");
+  // Six characters and up are removed wherever they appear (ids, titles, paths).
+  assert.equal(scrubMessage("xxNZBgeekyy unreachable", ["NZBgeek"]), "xx…yy unreachable");
+  // Only LETTERS keep it: a digit is a boundary, an accented letter is a letter.
+  assert.equal(scrubMessage("job 1SAB2 failed", ["SAB"]), "job 1…2 failed");
+  assert.equal(scrubMessage("désabonné", ["SAB"]), "désabonné");
+});
+
 test("COARSE when a failure is the verdict: the failure message's release title, id, client, indexer and paths never reach a delegate (C157)", async () => {
   requests = [approvedMovie()];
   const planted = {

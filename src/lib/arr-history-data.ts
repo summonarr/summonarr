@@ -17,6 +17,7 @@ import {
   type HistoryFilterKind,
   type RemovedBlocklistEntry,
 } from "./arr-history";
+import { pagedReadEnded } from "./arr-parse";
 import { settleLimit } from "./concurrency";
 import { processSingleton } from "./process-singleton";
 
@@ -42,6 +43,9 @@ export async function loadHistoryPage(
 // the instance's URL and the arr's id; short-lived so a renamed title catches up.
 type TitleInfo = { title: string; year: number | null; tmdbId: number | null; tvdbId: number | null };
 const TITLE_TTL_MS = 10 * 60_000;
+// A failed lookup (a timeout, a 5xx) is not an answer: kept only long enough
+// that a burst of reloads doesn't re-ask, never for a whole TITLE_TTL_MS.
+const TITLE_RETRY_MS = 30_000;
 const MAX_TITLE_CACHE = 5_000;
 const titleCache = processSingleton("arr-blocklist-titles", () => new Map<string, { info: TitleInfo | null; expiresAt: number }>());
 
@@ -50,6 +54,7 @@ async function titleFor(cfg: ArrCfg, service: ArrService, arrId: number, now: nu
   const hit = titleCache.get(key);
   if (hit && hit.expiresAt > now) return hit.info;
   let info: TitleInfo | null = null;
+  let ttl = TITLE_TTL_MS;
   try {
     const r = await arrFetch<{ title?: unknown; year?: unknown; tmdbId?: unknown; tvdbId?: unknown }>(
       cfg, `/api/v3/${service === "radarr" ? "movie" : "series"}/${arrId}`, { quietErrors: true },
@@ -58,11 +63,19 @@ async function titleFor(cfg: ArrCfg, service: ArrService, arrId: number, now: nu
     if (typeof r?.title === "string") {
       info = { title: r.title.slice(0, 300), year: pos(r.year), tmdbId: pos(r.tmdbId), tvdbId: service === "sonarr" ? pos(r.tvdbId) : null };
     }
-  } catch {
-    // Cosmetic: the row keeps its release name; a title removed from the arr reads as unknown.
+  } catch (err) {
+    // Cosmetic: the row keeps its release name. A title removed from the arr
+    // (404) reads as unknown until it expires; any other failure is retried soon.
+    if (!(err instanceof ArrResponseError && err.status === 404)) ttl = TITLE_RETRY_MS;
   }
-  if (titleCache.size >= MAX_TITLE_CACHE) titleCache.clear();
-  titleCache.set(key, { info, expiresAt: now + TITLE_TTL_MS });
+  // Re-inserted at the back, and the oldest entry goes when full — a full
+  // cache never drops every title at once (a burst of re-fetches).
+  titleCache.delete(key);
+  if (titleCache.size >= MAX_TITLE_CACHE) {
+    const oldest = titleCache.keys().next();
+    if (!oldest.done) titleCache.delete(oldest.value);
+  }
+  titleCache.set(key, { info, expiresAt: now + ttl });
   return info;
 }
 
@@ -148,14 +161,16 @@ export async function removeFromBlocklist(
       const entry = removedBlocklistEntry(service, r);
       if (entry && wanted.delete(entry.id)) found.set(entry.id, entry);
     }
-    return { count: records.length, total: typeof raw?.totalRecords === "number" ? raw.totalRecords : 0 };
+    return { count: records.length, totalRecords: raw?.totalRecords };
   };
   if (viewed) await take(viewed.page, viewed.pageSize);
   // Records the scan read through; null once it reached the end of the list.
   let scannedThrough: number | null = 0;
   for (let page = 1; page <= BLOCKLIST_SCAN_PAGES && wanted.size > 0; page++) {
-    const { count, total } = await take(page, BLOCKLIST_SCAN_PAGE);
-    if (count === 0 || page * BLOCKLIST_SCAN_PAGE >= total) {
+    const { count, totalRecords } = await take(page, BLOCKLIST_SCAN_PAGE);
+    // An arr that reported no total has reached the end only on a short page —
+    // a missing total read as 0 called page 1 a complete scan.
+    if (pagedReadEnded(page, BLOCKLIST_SCAN_PAGE, count, totalRecords)) {
       scannedThrough = null;
       break;
     }

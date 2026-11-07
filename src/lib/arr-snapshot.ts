@@ -35,7 +35,10 @@ import { warnOnChange } from "@/lib/log-dedup";
 
 export { SNAPSHOT_HEADER };
 
-/** Total bytes kept across every page, instance and language. */
+/**
+ * Total bytes kept across every page, instance and language — counted as the
+ * bodies sit in memory (snapshotCharge), not as they went over the wire.
+ */
 export const SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024;
 /** A single answer larger than this is not kept (and drops an older copy). */
 export const SNAPSHOT_MAX_ENTRY_BYTES = 4 * 1024 * 1024;
@@ -113,11 +116,17 @@ type AnyHandler = (req: NextRequest, ctx: unknown, session: unknown) => Response
 interface Store {
   entries: Map<string, Entry>;
   bytes: number;
+  /**
+   * Bumped by every invalidation (a config write's clear, a removed title's
+   * drop). A read that was out across one keeps nothing: its answer may be
+   * exactly what the invalidation removed.
+   */
+  generation: number;
   /** Each wrapped route's own handler (and the ctx Next passed it), by route path. */
   handlers: Map<string, { handler: AnyHandler; ctx: unknown }>;
 }
 
-const store = processSingleton<Store>("arr-snapshot:store", () => ({ entries: new Map(), bytes: 0, handlers: new Map() }));
+const store = processSingleton<Store>("arr-snapshot:store", () => ({ entries: new Map(), bytes: 0, generation: 0, handlers: new Map() }));
 
 /**
  * The snapshot key of a read, or null when the read is never snapshotted (a
@@ -134,6 +143,16 @@ export function snapshotKey(url: string | URL, locale: string): string | null {
   return `${locale}|${u.pathname}?${new URLSearchParams(params).toString()}`;
 }
 
+/**
+ * What a kept body costs in memory. V8 holds a string with any character past
+ * U+00FF (a "•" mask, a dash, a non-Latin title) as two bytes per character,
+ * so its UTF-8 length can undercount by up to half. The larger of the two is
+ * charged; an ASCII body is charged its length either way.
+ */
+export function snapshotCharge(body: string, utf8Bytes: number = Buffer.byteLength(body, "utf8")): number {
+  return Math.max(utf8Bytes, /[\u0100-\uffff]/.test(body) ? body.length * 2 : body.length);
+}
+
 function drop(key: string): void {
   const e = store.entries.get(key);
   if (!e) return;
@@ -147,10 +166,12 @@ export function rememberSnapshot(
   now: number = Date.now(),
   meta: { url?: string | null; locale?: string | null; viewed?: boolean } = {},
 ): void {
-  const bytes = Buffer.byteLength(body, "utf8");
+  const utf8Bytes = Buffer.byteLength(body, "utf8");
   const prev = store.entries.get(key);
   drop(key);
-  if (bytes > SNAPSHOT_MAX_ENTRY_BYTES) return;
+  // The per-answer cap is on the wire size; the total budget is charged in memory.
+  if (utf8Bytes > SNAPSHOT_MAX_ENTRY_BYTES) return;
+  const bytes = snapshotCharge(body, utf8Bytes);
   // A background refresh is not a view: it keeps the last time an admin looked.
   const viewedAt = meta.viewed === false && prev ? prev.viewedAt : now;
   // Re-inserting puts the key last: Map order is the LRU order.
@@ -193,6 +214,7 @@ export function readSnapshot(key: string, now: number = Date.now()): { body: str
 export function clearArrSnapshots(): void {
   store.entries.clear();
   store.bytes = 0;
+  store.generation++;
 }
 
 // The title manager's reads. Each names one title by `service`, `instance` and
@@ -230,6 +252,7 @@ export function dropArrTitleSnapshots(title: { service: string; instance: string
     drop(key);
     dropped++;
   }
+  if (dropped > 0) store.generation++;
   return dropped;
 }
 
@@ -244,7 +267,7 @@ export function isArrConfigKey(key: string): boolean {
   return /^(radarr|sonarr)/i.test(key) || key === "feature.integration.radarr" || key === "feature.integration.sonarr";
 }
 
-/** Test seam: what is held, without touching the LRU order. */
+/** Test seam: what is held, without touching the LRU order (`bytes` is the memory charge). */
 export function arrSnapshotStats(): { entries: number; bytes: number } {
   return { entries: store.entries.size, bytes: store.bytes };
 }
@@ -272,13 +295,19 @@ export function snapshotted<Ctx, S>(
         },
       });
     }
+    const generation = store.generation;
     const res = await handler(req, ctx, session);
     if (key) {
       const url = new URL(req.url);
       url.searchParams.delete("cached");
       // Re-run by the background refresh; the latest registration wins (one handler per route).
       store.handlers.set(routePathOf(url.pathname), { handler: handler as unknown as AnyHandler, ctx });
-      await keepIfJson(key, res, { url: url.toString(), locale: localeForRequest(req), viewed: true });
+      // Cleared (a config write) or a title dropped while this read was out:
+      // its answer may be what that removed, so it is not kept. The live answer
+      // itself goes back unchanged.
+      if (store.generation === generation) {
+        await keepIfJson(key, res, { url: url.toString(), locale: localeForRequest(req), viewed: true });
+      }
     }
     return res;
   };
@@ -385,11 +414,13 @@ export async function refreshArrSnapshots(opts: { signal?: AbortSignal; now?: ()
     const reg = store.handlers.get(routePathOf(new URL(d.url).pathname));
     if (!reg) return;
     started++;
+    const generation = store.generation;
     try {
       const req = new NextRequest(d.url, { headers: { "accept-language": d.locale } });
       const res = await reg.handler(req, reg.ctx, SYSTEM_SESSION);
-      // A config write that cleared the store while this read was out must win.
-      if (!store.entries.has(d.key)) return;
+      // A config write that cleared the store while this read was out must win
+      // — also when an admin's own read has kept the view again since.
+      if (store.generation !== generation || !store.entries.has(d.key)) return;
       if (await keepIfJson(d.key, res, { url: d.url, locale: d.locale, viewed: false }, now())) refreshed++;
       else {
         failed++;

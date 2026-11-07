@@ -378,8 +378,8 @@ const { NextRequest } = await import("next/server");
 const { BATCH_TX_TIMEOUT, parseCronLastRun } = await import("../src/lib/cron-auth.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
-const { POST: postPlexSync } = await import("../src/app/api/sync/plex/route.ts");
-const { POST: postJellyfinSync } = await import("../src/app/api/sync/jellyfin/route.ts");
+const { POST: postPlexSync, GET: getPlexSync } = await import("../src/app/api/sync/plex/route.ts");
+const { POST: postJellyfinSync, GET: getJellyfinSync } = await import("../src/app/api/sync/jellyfin/route.ts");
 const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 const { CRON_SKIPPED_HEADER } = await import("../src/lib/cron-auth.ts");
 
@@ -1641,4 +1641,63 @@ test("i18n: the admin Resync's error follows the caller's language; cron (no hin
   assert.deepEqual(await bodyOf(en), { error: "Plex server not configured" });
   await settleFireAndForget();
   assert.equal(fetchCalls.length, 0);
+});
+
+// ── background resync (the admin buttons — guardrail 37a) ───────────────────
+
+function pollReq(path: string, job: string, headers: Record<string, string>): Req {
+  return new NextRequest(`http://localhost:3000${path}?job=${encodeURIComponent(job)}`, { method: "GET", headers });
+}
+
+// Polls until the job stops answering 202 — a bounded wait on the job's own
+// state, never a fixed sleep.
+async function pollUntilDone(get: (r: Req) => Promise<Response>, path: string, job: string, headers: Record<string, string>): Promise<Response> {
+  for (let i = 0; i < 500; i++) {
+    const res = await get(pollReq(path, job, headers));
+    if (res.status !== 202) return res;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("the background resync never finished");
+}
+
+test("an admin's { async: true } resync answers 202 { job } at once, and the poll returns exactly the synchronous answer", async () => {
+  configurePlex();
+  configureJellyfin();
+  const admin = await mintSession("ADMIN");
+  const headers = { cookie: `${COOKIE}=${admin.token}`, origin: "http://localhost:3000" };
+  for (const [label, post, get, path] of [
+    ["plex", postPlexSync, getPlexSync, "/api/sync/plex"],
+    ["jellyfin", postJellyfinSync, getJellyfinSync, "/api/sync/jellyfin"],
+  ] as const) {
+    respond = label === "plex" ? plexMovieResponder([PLEX_ITEM_FULL, PLEX_ITEM_MIN]) : jellyfinMovieResponder([JF_ITEM_FULL]);
+    const start = await post(syncReq(path, { headers, body: JSON.stringify({ full: true, async: true }) }));
+    assert.equal(start.status, 202, `${label}: the start answers at once`);
+    const { job } = await bodyOf(start) as { job: string };
+    assert.match(job, /^[0-9a-f]{32}$/);
+
+    const done = await pollUntilDone(get, path, job, headers);
+    assert.equal(done.status, 200, label);
+    const body = await bodyOf(done);
+    assert.equal(body.full, true, `${label}: the full flag reached the run`);
+    assert.deepEqual(body.scanned, label === "plex" ? { movies: 2, tv: 0 } : { movies: 1, tv: 0 });
+    await settleFireAndForget();
+    assert.ok(ledgerFor(`${label}-sync`)?.ok, `${label}: the run is recorded like any other`);
+
+    // Someone else's job id reads as gone; a USER session can't poll at all.
+    const other = await mintSession("ADMIN");
+    assert.equal((await get(pollReq(path, job, { cookie: `${COOKIE}=${other.token}`, origin: "http://localhost:3000" }))).status, 404);
+    const user = await mintSession("USER");
+    assert.equal((await get(pollReq(path, job, { cookie: `${COOKIE}=${user.token}`, origin: "http://localhost:3000" }))).status, 403);
+  }
+});
+
+test("the async flag is the admin's only: a cron caller asking for it still gets the synchronous answer", async () => {
+  configurePlex();
+  respond = plexMovieResponder([PLEX_ITEM_FULL, PLEX_ITEM_MIN]);
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true, async: true }) }));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await bodyOf(res), { scanned: { movies: 2, tv: 0 }, checked: 0, marked: 0, full: true });
+  await settleFireAndForget();
+  // …and a cron caller has no job to poll.
+  assert.equal((await getPlexSync(pollReq("/api/sync/plex", "0".repeat(32), AS_CRON))).status, 403);
 });

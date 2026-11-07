@@ -36,7 +36,7 @@ test("f28: no second setting.findUnique read for values ALL_KEYS already loaded 
       `${key} is read once via findMany; a findUnique re-read is redundant`,
     );
   }
-  assert.match(src, /getPlexAccounts\(cfg\.plexServerUrl, cfg\.plexAdminToken\)/);
+  assert.match(src, /countPlexServerMembers\(cfg\.plexAdminToken, cfg\.plexServerUrl\)/);
   assert.match(src, /getJellyfinUserCount\(cfg\.jellyfinUrl, cfg\.jellyfinApiKey\)/);
 });
 

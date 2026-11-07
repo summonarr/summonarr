@@ -41,22 +41,30 @@ export function SyncTVEpisodesButton() {
       if (!res.ok || data?.error) {
         setStatus("error");
         setResult(data?.error ?? t("adminManage.users.error.requestFailed", { status: res.status }));
-      } else if (data?.errors && data.errors.length > 0) {
-        setStatus("error");
-        setResult(data.errors.join("; "));
       } else {
+        // Plex and Jellyfin are rebuilt independently: one source failing leaves
+        // its cache untouched while the other's is rewritten, so the counts are
+        // shown beside any errors rather than dropped.
         const total = (data?.plex ?? 0) + (data?.jellyfin ?? 0);
         const parts: string[] = [];
         // Same locale grouping as the total — "Plex 12345 · 13,023 episodes"
         // mixed grouped and ungrouped digits in one line.
         if ((data?.plex ?? 0) > 0) parts.push(`Plex ${(data?.plex ?? 0).toLocaleString(locale)}`);
         if ((data?.jellyfin ?? 0) > 0) parts.push(`Jellyfin ${(data?.jellyfin ?? 0).toLocaleString(locale)}`);
-        setStatus("done");
-        setResult(parts.length > 0
+        const counts = parts.length > 0
           ? t("adminManage.library.btn.episodesWithParts", { count: total, formatted: total.toLocaleString(locale), parts: parts.join(", ") })
-          : t("adminManage.library.btn.episodes", { count: 0, formatted: "0" }));
-        const search = searchParams.toString();
-        router.push(pathname + (search ? `?${search}` : ""));
+          : t("adminManage.library.btn.episodes", { count: 0, formatted: "0" });
+        const errors = data?.errors ?? [];
+        // Still red when a source failed, so the failure stays prominent.
+        setStatus(errors.length > 0 ? "error" : "done");
+        setResult(errors.length > 0
+          ? (total > 0 ? `${counts} · ${errors.join("; ")}` : errors.join("; "))
+          : counts);
+        // Refresh whenever a cache was rewritten — the page's counts read it.
+        if (errors.length === 0 || total > 0) {
+          const search = searchParams.toString();
+          router.push(pathname + (search ? `?${search}` : ""));
+        }
       }
     } catch {
       setStatus("error");

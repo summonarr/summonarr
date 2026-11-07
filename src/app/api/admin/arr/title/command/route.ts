@@ -40,12 +40,15 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (body instanceof NextResponse) return body;
   const target = await arrTitleGate(body.service, body.instance, body.id, t);
   if (target instanceof NextResponse) return target;
+  const invalid = () => NextResponse.json({ error: t("apiAdmin.arr.commandInvalid") }, { status: 400 });
   const action = parseTitleCommand(target.service, body.action);
-  if (!action) return NextResponse.json({ error: t("apiAdmin.arr.commandInvalid") }, { status: 400 });
+  if (!action) return invalid();
   const season = action === "searchSeason" ? parseSeasonNumber(body.seasonNumber) : null;
   const episodeIds = action === "searchEpisodes" ? parseIdArray(body.episodeIds, MAX_EPISODES) : null;
+  // Checked here, before the rate limit, so a malformed body spends no budget;
+  // the switch below re-narrows each value itself rather than casting.
   if ((action === "searchSeason" && season === null) || (action === "searchEpisodes" && !episodeIds)) {
-    return NextResponse.json({ error: t("apiAdmin.arr.commandInvalid") }, { status: 400 });
+    return invalid();
   }
   if (!checkRateLimit(`arr-title-command:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
     return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
@@ -58,9 +61,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       case "search":
         return NextResponse.json(await searchMovie(instance, arrId), { status: 202 });
       case "searchSeason":
-        return NextResponse.json(await searchSeason(instance, arrId, season as number), { status: 202 });
+        if (season === null) return invalid();
+        return NextResponse.json(await searchSeason(instance, arrId, season), { status: 202 });
       case "searchEpisodes":
-        return NextResponse.json(await searchEpisodes(instance, arrId, episodeIds as number[], { missingOnly: body.missingOnly === true }), { status: 202 });
+        if (episodeIds === null) return invalid();
+        return NextResponse.json(await searchEpisodes(instance, arrId, episodeIds, { missingOnly: body.missingOnly === true }), { status: 202 });
       case "searchMissing": {
         // { commands, seasons, episodes, commandIds } — one id per season searched whole, plus one.
         // Refused part-way: still 202, counting only what was queued, plus `partial: true`.

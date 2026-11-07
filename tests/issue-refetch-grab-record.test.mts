@@ -256,6 +256,17 @@ for (const model of ["radarrWantedItem", "radarrAvailableItem", "sonarrWantedIte
   shadowPrismaModel(prisma, model, cacheStub);
 }
 shadowPrismaModel(prisma, "deletionVote", { deleteMany: async () => ({ count: 0 }) });
+// TMDB's TVDB cross-reference, cached: a TV refetch with no stored tvdbId resolves
+// it through this, then confirms it against Sonarr's own library row.
+const tmdbCacheRows = new Map<string, string>([["tmdb-to-tvdb:1399", JSON.stringify({ tvdbId: 121361 })]]);
+shadowPrismaModel(prisma, "tmdbCache", {
+  findUnique: async (args: { where: { key: string } }) => {
+    const data = tmdbCacheRows.get(args.where.key);
+    return data === undefined ? null : { key: args.where.key, data, expiresAt: new Date(Date.now() + 86_400_000) };
+  },
+  upsert: async () => ({}),
+  deleteMany: async () => ({ count: 0 }),
+});
 const txDelegates = {
   $executeRaw: async () => 0,
   mediaRequest: mediaRequestStub,
@@ -269,6 +280,7 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
 );
 
 const { PATCH: patchIssueRoute } = await import("../src/app/api/issues/[id]/route.ts");
+const { ArrItemNotFoundError, searchMovieInRadarr, searchSeriesInSonarr, searchSeasonInSonarr, searchEpisodeInSonarr } = await import("../src/lib/arr.ts");
 const { POST: radarrPOST } = await import("../src/app/api/webhooks/radarr/route.ts");
 const { POST: sonarrPOST } = await import("../src/app/api/webhooks/sonarr/route.ts");
 
@@ -464,9 +476,10 @@ test("the refetch's grab supersedes the same admin's earlier pending grab of the
 test("a search the arr refused records NOTHING and still answers arrError", async () => {
   issues.set(MATRIX.id, { ...MATRIX });
   const admin = await mintAdmin();
-  // Radarr is reachable but doesn't hold the movie: searchMovieInRadarr throws before any command.
+  // Radarr is reachable but refuses the search command.
   fetchImpl = (url) => {
-    if (url.pathname === "/api/v3/movie") return jsonResponse([]);
+    if (url.pathname === "/api/v3/movie") return jsonResponse([{ id: 42, tmdbId: 603 }]);
+    if (url.pathname === "/api/v3/command") return jsonResponse({ message: "boom" }, 500);
     throw new Error(`unexpected Radarr fetch: ${url.href}`);
   };
 
@@ -475,7 +488,45 @@ test("a search the arr refused records NOTHING and still answers arrError", asyn
   assert.deepEqual(await res.json(), { ...MATRIX, arrError: "Arr service request failed" });
   assert.equal(grabs.length, 0, "nothing was queued, so nothing may be announced later");
   assert.equal(issueCas.length, 0, "the status is not moved for a failed search");
+  assert.ok(errors.some((e) => e.includes("[arr] Issue refetch failed")), "a real failure is logged");
+});
+
+test("a title the instance doesn't hold is ArrItemNotFoundError: no command, nothing recorded, and the admin is told which instance lacks it", async () => {
+  issues.set(MATRIX.id, { ...MATRIX });
+  const admin = await mintAdmin();
+  fetchImpl = (url) => {
+    if (url.pathname === "/api/v3/movie") return jsonResponse([{ id: 7, tmdbId: 604 }]); // another movie only
+    throw new Error(`unexpected Radarr fetch: ${url.href}`);
+  };
+
+  await assert.rejects(searchMovieInRadarr(603, "4k"), (e: unknown) => e instanceof ArrItemNotFoundError);
+  assert.ok(!fetchCalls.some((u) => u.pathname === "/api/v3/command"), "no search command is posted");
+
+  const res = await refetch(admin.token, MATRIX.id, { instance: "4k" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {
+    ...MATRIX,
+    arrError: "Radarr (4k) doesn't have this title — it may have been removed there, or the reported copy is on another instance",
+  });
+  assert.equal(grabs.length, 0);
+  assert.equal(issueCas.length, 0);
   assert.ok(!fetchCalls.some((u) => u.pathname === "/api/v3/command"));
+  assert.ok(!errors.some((e) => e.includes("Issue refetch failed")), "an answer, not a logged failure");
+});
+
+test("the Sonarr searches say 'not in the library' the same way — but a missing EPISODE of a series it holds is not that", async () => {
+  let library: unknown[] = [];
+  fetchImpl = (url) => {
+    if (url.pathname === "/api/v3/series") return jsonResponse(library);
+    if (url.pathname === "/api/v3/episode") return jsonResponse([]);
+    throw new Error(`unexpected Sonarr fetch: ${url.href}`);
+  };
+  for (const search of [() => searchSeriesInSonarr(121361), () => searchSeasonInSonarr(121361, 2), () => searchEpisodeInSonarr(121361, 2, 1)]) {
+    await assert.rejects(search(), (e: unknown) => e instanceof ArrItemNotFoundError);
+  }
+  library = [{ id: 9, tvdbId: 121361 }];
+  await assert.rejects(searchEpisodeInSonarr(121361, 2, 1), (e: unknown) => e instanceof Error && !(e instanceof ArrItemNotFoundError));
+  assert.ok(!fetchCalls.some((u) => u.pathname === "/api/v3/command"), "no search command is posted");
 });
 
 test("a failed grab record (the issue deleted meanwhile) never changes the answer — the CAS still runs and the refetch reads as accepted", async () => {

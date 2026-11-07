@@ -198,6 +198,21 @@ test("a series' totals exclude specials; a v3 series without monitorNewItems rea
   assert.equal(projectTitle("radarr", "", { title: "no id" }), null);
 });
 
+test("a series whose only files are specials has a file, while its regular-season counts stay 0", () => {
+  const t = projectTitle("sonarr", "", {
+    id: 6, title: "Y", seasons: [
+      { seasonNumber: 0, monitored: false, statistics: { episodeCount: 0, episodeFileCount: 2 } },
+      { seasonNumber: 1, monitored: true, statistics: { episodeCount: 8, episodeFileCount: 0 } },
+    ],
+  });
+  assert.ok(t);
+  assert.deepEqual([t.hasFile, t.episodeFileCount, t.episodeCount], [true, 0, 8]);
+  const none = projectTitle("sonarr", "", { id: 7, title: "Z", seasons: [{ seasonNumber: 1, statistics: { episodeCount: 3, episodeFileCount: 0 } }] });
+  assert.equal(none?.hasFile, false);
+  // No per-season statistics: the series' own count (which includes specials).
+  assert.equal(projectTitle("sonarr", "", { id: 8, title: "W", statistics: { episodeFileCount: 1 } })?.hasFile, true);
+});
+
 test("calendar statuses: a cinema date never reads as missing; an unmonitored series wins over the episode's flag", () => {
   const now = Date.parse("2026-10-10T12:00:00Z");
   const movies = radarrCalendarEntries("", [{

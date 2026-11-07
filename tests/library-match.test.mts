@@ -18,7 +18,9 @@ const {
   fixableFlag,
   folderYear,
   ownFolder,
+  fileName,
 } = await import("../src/lib/library-match.ts");
+const { folderYear: diffFolderYear } = await import("../src/lib/library-diff.ts");
 const { projectArrRows, parseLibraryMatchReport, dropMatchFlagInTx, moveItemToTitleInTx, LIBRARY_MATCH_REPORT_KEY } =
   await import("../src/lib/library-match-data.ts");
 type ServerMatchEntry = import("../src/lib/library-match.ts").ServerMatchEntry;
@@ -169,6 +171,34 @@ test("folderYear / ownFolder read the folder the item sits in", () => {
   assert.equal(ownFolder(null), null);
 });
 
+test("folderYear reads Radarr's id-tagged folders, and agrees with the library diff's reading of the same folder", () => {
+  assert.equal(folderYear("Film (2017) {tmdb-123}"), 2017);
+  assert.equal(folderYear("Blade Runner (1982) (Final Cut)"), 1982);
+  assert.equal(folderYear("Remake (1990) (2023)"), 2023, "a trailing year still wins");
+  for (const folder of ["Film (2017) {tmdb-123}", "Black Christmas (2006)", "Doctor Who", "Remake (1990) (2023)"]) {
+    assert.equal(diffFolderYear(`${folder}/f.mkv`), folderYear(folder), folder);
+  }
+  // …so the match check now judges such a folder by its year.
+  const { flags } = judgeLibraryMatches([
+    jf({ itemKey: "tagged", path: "/mnt/movies/Black Christmas (2006) {tmdb-16938}/bc.mkv", tmdbIds: [1], year: 1974 }),
+  ], []);
+  assert.deepEqual(flags.map((f) => [f.itemKey, f.kind]), [["tagged", "yearMismatch"]]);
+});
+
+test("a dotted folder name is a folder: a show's path never names a file, a movie's only by a video extension", () => {
+  assert.equal(ownFolder("/tv/Agents of S.H.I.E.L.D", "TV"), "Agents of S.H.I.E.L.D");
+  assert.equal(fileName("/tv/Agents of S.H.I.E.L.D", "TV"), null);
+  assert.equal(ownFolder("/movies/M.A.S.H", "MOVIE"), "M.A.S.H");
+  assert.equal(fileName("/movies/M.A.S.H", "MOVIE"), null);
+  assert.equal(ownFolder("/m/X (1999)/x.mkv", "MOVIE"), "X (1999)");
+  assert.equal(fileName("/m/X (1999)/x.mkv"), "x.mkv");
+  // An unmanaged show is judged — and named — by its own folder, not the library root.
+  const { flags } = judgeLibraryMatches([
+    { ...jf({ itemKey: "shield", path: "/mnt/tv/Agents of S.H.I.E.L.D" }), mediaType: "TV" },
+  ], []);
+  assert.deepEqual(flags.map((f) => [f.kind, f.folder, f.file]), [["noTmdbId", "Agents of S.H.I.E.L.D", null]]);
+});
+
 test("projectArrRows keeps only rows with a folder and reads ids strictly (Sonarr v4's tmdbId 0 is none)", () => {
   const rows = projectArrRows("sonarr", "anime", [
     { tvdbId: 81797, tmdbId: 0, imdbId: "tt0388629", title: "One Piece", year: 1999, path: "/tv/One Piece" },
@@ -222,6 +252,14 @@ test("dropMatchFlagInTx removes exactly the fixed item's flag (server + instance
   const after = parseLibraryMatchReport(r.value())!;
   assert.deepEqual(after.flags.map((f) => `${f.server}:${f.serverInstance}:${f.itemKey}`), ["plex::a", "jellyfin:remote:a", "jellyfin::b"]);
   assert.equal(after.counts.flagged, 3);
+
+  // A listing that served one item twice stored its flag twice: both go, and
+  // the count falls by both.
+  const twice = reportTx(JSON.stringify(report([flag("a"), flag("a"), flag("c")])));
+  await dropMatchFlagInTx(twice.tx as never, "jellyfin", "", "a");
+  const afterTwice = parseLibraryMatchReport(twice.value())!;
+  assert.deepEqual(afterTwice.flags.map((f) => f.itemKey), ["c"]);
+  assert.equal(afterTwice.counts.flagged, 1);
 
   const none = reportTx(JSON.stringify(report([flag("b")])));
   await dropMatchFlagInTx(none.tx as never, "jellyfin", "", "a");

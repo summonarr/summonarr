@@ -5,15 +5,24 @@ import { Button } from "@/components/ui/button";
 import { Database, Loader2, AlertTriangle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { isNoAnswer, jobAnswerError, runLibrarySyncs, type LibrarySyncServer } from "@/lib/client/library-sync";
+import { runReplaceFileJob } from "@/lib/client/replace-file-job";
+import { librarySyncText } from "./library-sync-text";
 
-type Phase = "idle" | "confirm" | "phase1" | "phase2" | "done" | "error";
+// "pending": nothing failed, but a step has not answered yet and may still be
+// running on the server — never shown as a failure.
+type Phase = "idle" | "confirm" | "phase1" | "phase2" | "done" | "pending" | "error";
+
+// The warm is polled every 3 s for up to 30 minutes (a cold large library);
+// running out is "no answer", never a failure.
+const WARM_POLL_MS = 3_000;
+const WARM_MAX_POLLS = 600;
 
 export function MasterDbFillButton({
-  plexConfigured,
-  jellyfinConfigured,
+  servers,
 }: {
-  plexConfigured: boolean;
-  jellyfinConfigured: boolean;
+  /** Every CONFIGURED Plex/Jellyfin server, default and named (guardrails 35, 36). */
+  servers: LibrarySyncServer[];
 }) {
   const t = useT();
   const locale = useLocale();
@@ -24,6 +33,12 @@ export function MasterDbFillButton({
   // gone, button live again — inviting a second concurrent full fill.
   const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(resetTimer.current), []);
+  // Both phases are polled background jobs; leaving the page stops the polls.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   function scheduleReset(ms: number) {
     clearTimeout(resetTimer.current);
@@ -37,66 +52,41 @@ export function MasterDbFillButton({
 
     const libraryParts: string[] = [];
     let libraryDegraded = false;
+    let libraryPending = false;
     try {
-      // Only call the servers that are configured (the page tells us which).
-      // Deciding this up front lets us tell "not set up" apart from "broken":
-      // an unconfigured server is skipped, while a configured one that fails
-      // is always reported (guardrail 36).
-      const targets = [
-        ...(plexConfigured ? [{ name: "Plex", path: "/api/sync/plex" }] : []),
-        ...(jellyfinConfigured ? [{ name: "Jellyfin", path: "/api/sync/jellyfin" }] : []),
-      ];
-
-      if (targets.length === 0) {
+      // Only the servers that are configured (the page lists them). Deciding
+      // this up front tells "not set up" apart from "broken": an unconfigured
+      // server is skipped, while a configured one that fails is always
+      // reported (guardrail 36). Every configured instance, default and named.
+      if (servers.length === 0) {
         setPhase("error");
         setSummary(t("adminManage.library.fill.noServers"));
         scheduleReset(15_000);
         return;
       }
 
-      const outcomes = await Promise.all(
-        targets.map(async ({ name, path }) => {
-          try {
-            const res = await fetch(withBasePath(path), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ full: true }),
-            });
-            // .catch on the parse: a reverse proxy erroring mid-response sends
-            // HTML, and a bare .json() would throw past the per-target guard
-            // into the outer catch, losing the other server's result too.
-            const data = (await res.json().catch(() => null)) as
-              | { scanned?: { movies: number; tv: number }; error?: string; skipped?: boolean }
-              | null;
-            if (!res.ok || data?.error) {
-              return { ok: false, text: `${name} ${data?.error ?? t("adminManage.library.btn.failedStatus", { status: res.status })}` };
-            }
-            // 200 { skipped: true }: a resync of this server is already running,
-            // so its library is being filled — not a failure, and no counts.
-            if (data?.skipped) {
-              return { ok: true, text: `${name} ${t("adminManage.library.btn.alreadyRunning")}` };
-            }
-            const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
-            return { ok: true, text: `${name} ${t("adminManage.library.btn.items", { count, formatted: count.toLocaleString(locale) })}` };
-          } catch {
-            return { ok: false, text: `${name} ${t("adminManage.library.btn.networkError")}` };
-          }
-        }),
-      );
+      const outcomes = await runLibrarySyncs(servers, {
+        url: (service) => withBasePath(`/api/sync/${service}`),
+        isAlive: () => alive.current,
+      });
+      if (!outcomes) return;
+      const texts = outcomes.map((o) => librarySyncText(o.server, o.outcome, t, locale));
 
-      // Every configured server failed ⇒ there is no library to warm from, so
+      // Every configured server FAILED ⇒ there is no library to warm from, so
       // stop rather than running phase 2 over nothing and calling it a success.
-      if (!outcomes.some((o) => o.ok)) {
+      // A server with no answer yet may still be syncing, so it doesn't stop it.
+      if (outcomes.every((o) => o.outcome.kind === "failed")) {
         setPhase("error");
-        setSummary(t("adminManage.library.fill.libraryFailedWith", { detail: outcomes.map((o) => o.text).join(" · ") }));
+        setSummary(t("adminManage.library.fill.libraryFailedWith", { detail: texts.join(" · ") }));
         scheduleReset(15_000);
         return;
       }
       // A partial failure carries on to the TMDB warm — the server that did
       // sync has real rows worth warming — but its text rides along in the
       // summary so it cannot be mistaken for a clean run.
-      libraryParts.push(...outcomes.map((o) => o.text));
-      libraryDegraded = outcomes.some((o) => !o.ok);
+      libraryParts.push(...texts);
+      libraryDegraded = outcomes.some((o) => o.outcome.kind === "failed");
+      libraryPending = outcomes.some((o) => o.outcome.kind === "noAnswer");
     } catch {
       setPhase("error");
       setSummary(t("adminManage.library.fill.libraryFailed"));
@@ -106,17 +96,33 @@ export function MasterDbFillButton({
 
     setPhase("phase2");
     try {
-      const warmRes = await fetch(withBasePath("/api/admin/library-warm"), { method: "POST" });
-      const warmData = (await warmRes.json().catch(() => ({}))) as { fetched?: number; backfilled?: number; skipped?: number; failed?: number; error?: string };
-      if (!warmRes.ok || warmData.error) {
-        setPhase("error");
-        setSummary(warmData.error ?? t("adminManage.library.fill.warmFailedStatus", { status: warmRes.status }));
-        scheduleReset(15_000);
-        return;
-      }
+      // A background job too: a cold warm of a large library outlasts a
+      // reverse proxy's hold (guardrail 37a).
+      const warm = await runReplaceFileJob(fetch, withBasePath("/api/admin/library-warm"), {}, {
+        intervalMs: WARM_POLL_MS,
+        maxPolls: WARM_MAX_POLLS,
+        isAlive: () => alive.current,
+      });
+      if (!warm) return;
       // Name every configured server, even one that scanned 0 items, so a
       // failed server can never silently drop out of the summary.
       const parts: string[] = [...libraryParts];
+      if (isNoAnswer(warm)) {
+        // No answer is not a failure: the warm may still be running.
+        parts.push(t("adminManage.library.fill.warmNoAnswer"));
+        setPhase(libraryDegraded ? "error" : "pending");
+        setSummary(parts.join(" · "));
+        scheduleReset(20_000);
+        return;
+      }
+      const warmError = jobAnswerError(warm);
+      if (warm.status < 200 || warm.status >= 300 || warmError) {
+        setPhase("error");
+        setSummary(warmError ?? t("adminManage.library.fill.warmFailedStatus", { status: warm.status }));
+        scheduleReset(15_000);
+        return;
+      }
+      const warmData = (warm.data ?? {}) as { fetched?: number; backfilled?: number; skipped?: number; failed?: number };
       const fetched    = warmData.fetched    ?? 0;
       const backfilled = warmData.backfilled ?? 0;
       const skipped    = warmData.skipped    ?? 0;
@@ -129,8 +135,8 @@ export function MasterDbFillButton({
       parts.push(`TMDB: ${tmdbParts.join(", ") || t("adminManage.library.btn.items", { count: 0, formatted: "0" })}`);
       // A summary that names a failed server or failed TMDB items must not
       // render green — the two together read as "this worked" over the top of
-      // "this did not".
-      setPhase(libraryDegraded || failed > 0 ? "error" : "done");
+      // "this did not". A server with no answer yet isn't green either.
+      setPhase(libraryDegraded || failed > 0 ? "error" : libraryPending ? "pending" : "done");
       setSummary(parts.join(" · "));
     } catch {
       setPhase("error");
@@ -203,7 +209,7 @@ export function MasterDbFillButton({
           <span
             role={phase === "error" ? "alert" : "status"}
             aria-live={phase === "error" ? "assertive" : "polite"}
-            className={`text-xs ${phase === "error" ? "text-red-400" : "text-green-400"}`}
+            className={`text-xs ${phase === "error" ? "text-red-400" : phase === "pending" ? "text-zinc-400" : "text-green-400"}`}
           >
             {summary}
           </span>

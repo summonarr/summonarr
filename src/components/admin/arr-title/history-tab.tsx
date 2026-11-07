@@ -11,7 +11,7 @@
 // list; "Mark as failed" on a painted row is re-checked live by its route.
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Download, Loader2, RefreshCw } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -54,10 +54,15 @@ export function HistoryTab({
   }, []);
   const snap = useArrSnapshot<{ events: ArrHistoryEvent[] }>(withBasePath(readPath), applySnapshot);
   const markLive = snap.markLive;
+  // Only the newest read may land: a mark's re-read can overlap a Reload, and
+  // an older answer arriving last would bring back the list from before it.
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     const res = await arrApi<{ events: ArrHistoryEvent[] }>(readPath, undefined, tRef.current("adminArr.history.loadFailed"));
+    if (seq !== loadSeq.current) return;
     setLoading(false);
     if (res.ok) {
       setEvents(res.data.events);

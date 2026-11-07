@@ -154,7 +154,16 @@ function appsFor(specId: string, appWhere?: { arrInstance?: string }): AppRow[] 
 type SpecFindManyArgs = {
   where?: Record<string, unknown>;
   include?: { applications?: { where?: { arrInstance?: string } } };
+  select?: Record<string, unknown> & { applications?: { where?: { arrInstance?: string }; select?: Record<string, unknown> } };
 };
+// Projects a row onto a Prisma `select` (true-valued keys only).
+function pick<T extends object>(row: T, select: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(select)) {
+    if (v === true) out[k] = (row as Record<string, unknown>)[k];
+  }
+  return out;
+}
 const specUpserts: Array<{
   where: { service_kind_trashId: { service: Service; kind: string; trashId: string } };
   update: Record<string, unknown>;
@@ -167,20 +176,48 @@ let failSpecFindManyForService: string | null = null;
 // Every trashSpec.findMany `where`, in call order — the profile-body test pins
 // how many CF reads one profile costs.
 const specFindManyWheres: Array<Record<string, unknown> | undefined> = [];
+// Every trashSpec.findMany `select`, in call order (undefined = whole rows).
+const specFindManySelects: Array<Record<string, unknown> | undefined> = [];
+// Every trashSpec.deleteMany `where` — the prune pins read it.
+const specDeleteWheres: Array<Record<string, unknown>> = [];
 
 shadowPrismaModel(prisma, "trashSpec", {
   findMany: async (args: SpecFindManyArgs = {}) => {
     specFindManyWheres.push(args.where);
+    specFindManySelects.push(args.select);
     if (failSpecFindManyForService !== null && (args.where as { service?: string } | undefined)?.service === failSpecFindManyForService) {
       throw new Error(`trashSpec store exploded for ${failSpecFindManyForService} (unit test)`);
     }
     return specRows
       .filter((r) => specMatches(r, args.where))
-      .map((r) =>
-        args.include?.applications
+      .map((r) => {
+        if (args.select) {
+          const out = pick(r, args.select);
+          const appSel = args.select.applications;
+          if (appSel) {
+            out.applications = appsFor(r.id, appSel.where).map((a) => (appSel.select ? pick(a, appSel.select) : a));
+          }
+          return out;
+        }
+        return args.include?.applications
           ? { ...r, applications: appsFor(r.id, args.include.applications.where) }
-          : { ...r },
-      );
+          : { ...r };
+      });
+  },
+  // The prune: `where.id.in` plus `applications: { none: {} }`, honoured here.
+  deleteMany: async (args: { where: Record<string, unknown> }) => {
+    specDeleteWheres.push(args.where);
+    const ids = (args.where.id as { in: string[] }).in;
+    const requireNoApps = (args.where.applications as { none?: unknown } | undefined)?.none !== undefined;
+    let count = 0;
+    for (let i = specRows.length - 1; i >= 0; i--) {
+      const r = specRows[i];
+      if (!ids.includes(r.id)) continue;
+      if (requireNoApps && appRows.some((a) => a.trashSpecId === r.id)) continue;
+      specRows.splice(i, 1);
+      count++;
+    }
+    return { count };
   },
   findUnique: async (args: { where: { id: string }; include?: { applications?: { where?: { arrInstance?: string } } } }) => {
     const row = specRows.find((r) => r.id === args.where.id);
@@ -234,7 +271,7 @@ type AppWhereUnique = { trashSpecId_arrInstance: { trashSpecId: string; arrInsta
 shadowPrismaModel(prisma, "trashApplication", {
   findMany: async (
     args: {
-      where?: { enabled?: boolean; arrInstance?: string; trashSpec?: Record<string, unknown> };
+      where?: { enabled?: boolean; arrInstance?: string; trashSpecId?: { in: string[] }; trashSpec?: Record<string, unknown> };
       include?: { trashSpec?: boolean };
     } = {},
   ) => {
@@ -242,6 +279,7 @@ shadowPrismaModel(prisma, "trashApplication", {
     return appRows
       .filter((a) => w.enabled === undefined || a.enabled === w.enabled)
       .filter((a) => w.arrInstance === undefined || a.arrInstance === w.arrInstance)
+      .filter((a) => w.trashSpecId === undefined || w.trashSpecId.in.includes(a.trashSpecId))
       .filter((a) => {
         if (w.trashSpec === undefined) return true;
         const s = specRows.find((r) => r.id === a.trashSpecId);
@@ -276,6 +314,16 @@ shadowPrismaModel(prisma, "trashApplication", {
     applyAppData(row, args.create);
     appRows.push(row);
     return { ...row };
+  },
+  updateMany: async (args: { where: { trashSpecId: { in: string[] }; enabled?: boolean }; data: Record<string, unknown> }) => {
+    let count = 0;
+    for (const a of appRows) {
+      if (!args.where.trashSpecId.in.includes(a.trashSpecId)) continue;
+      if (args.where.enabled !== undefined && a.enabled !== args.where.enabled) continue;
+      applyAppData(a, args.data);
+      count++;
+    }
+    return { count };
   },
   update: async (args: { where: AppWhereUnique; data: Record<string, unknown> }) => {
     const k = args.where.trashSpecId_arrInstance;
@@ -463,6 +511,8 @@ beforeEach(() => {
   appRows.length = 0;
   specUpserts.length = 0;
   specFindManyWheres.length = 0;
+  specFindManySelects.length = 0;
+  specDeleteWheres.length = 0;
   txCalls.length = 0;
   fetchCalls.length = 0;
   warns.length = 0;
@@ -617,31 +667,48 @@ test("a configured trashGithubToken authenticates BOTH the tree call and the raw
   assert.equal(rawCall.headers.get("authorization"), "token gh-token-123");
 });
 
-test("specs whose upstreamSha is unchanged are counted but not re-upserted; a changed sha still updates", async () => {
-  seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-x265", sha: "sha-cf1" });
-  seedSpec({ service: "RADARR", kind: "NAMING", trashId: "default", sha: "sha-naming" });
-  seedSpec({ service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-1", sha: "sha-stale" });
+test("a tree entry whose path and blob sha match the stored row is skipped WITHOUT a download; a changed sha still updates", async () => {
+  seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-x265", sha: "sha-cf1", path: "docs/json/radarr/cf/x265.json" });
+  seedSpec({ service: "RADARR", kind: "NAMING", trashId: "default", sha: "sha-naming", path: "docs/json/radarr/naming/radarr-naming.json" });
+  seedSpec({ service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-1", sha: "sha-stale", path: "docs/json/radarr/quality-profiles/hd-bluray-web.json" });
+  // Same content, new path: downloaded, and the row's path is rewritten so the
+  // next refresh can skip it too.
+  seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-moved", sha: "sha-mv", path: "docs/json/radarr/cf/old-name.json" });
   respond = router(
     ghRoutes(
       [
         blob("docs/json/radarr/cf/x265.json", "sha-cf1"),
+        blob("docs/json/radarr/cf/new-name.json", "sha-mv"),
         blob("docs/json/radarr/naming/radarr-naming.json", "sha-naming"),
         blob("docs/json/radarr/quality-profiles/hd-bluray-web.json", "sha-qp2"),
       ],
       {
-        "docs/json/radarr/cf/x265.json": CF_PAYLOAD,
-        "docs/json/radarr/naming/radarr-naming.json": NAMING_PAYLOAD,
+        "docs/json/radarr/cf/new-name.json": { trash_id: "cf-moved", name: "Moved" },
         "docs/json/radarr/quality-profiles/hd-bluray-web.json": QP_PAYLOAD,
       },
     ),
   );
   const result = await refreshCatalog("RADARR");
-  assert.deepEqual(result.customFormats, { fetched: 1, updated: 0, unchanged: 1 });
+  // `fetched` counts every file accounted for, the skipped one included.
+  assert.deepEqual(result.customFormats, { fetched: 2, updated: 1, unchanged: 1 });
   assert.deepEqual(result.naming, { fetched: 1, updated: 0 });
   assert.deepEqual(result.qualityProfiles, { fetched: 1, updated: 1 }); // sha-stale → sha-qp2
-  assert.equal(specUpserts.length, 1);
-  assert.equal(specUpserts[0].where.service_kind_trashId.kind, "QUALITY_PROFILE");
+  assert.deepEqual(result.errors, []);
+  // Only the changed and the moved files were downloaded: the unchanged CF and
+  // the unchanged naming file cost no raw.githubusercontent.com request.
+  const rawPaths = fetchCalls
+    .filter((c) => c.url.hostname === "raw.githubusercontent.com")
+    .map((c) => c.url.pathname.replace("/TRaSH-Guides/Guides/master/", ""))
+    .sort();
+  assert.deepEqual(rawPaths, ["docs/json/radarr/cf/new-name.json", "docs/json/radarr/quality-profiles/hd-bluray-web.json"]);
+  assert.deepEqual(
+    specUpserts.map((u) => u.where.service_kind_trashId.trashId).sort(),
+    ["cf-moved", "qp-1"],
+  );
   assert.equal(specRows.find((r) => r.kind === "QUALITY_PROFILE")!.upstreamSha, "sha-qp2");
+  assert.equal(specRows.find((r) => r.trashId === "cf-moved")!.upstreamPath, "docs/json/radarr/cf/new-name.json");
+  // Nothing the tree still carries was pruned.
+  assert.equal(specRows.length, 4);
 });
 
 test("a malformed file and a validator-rejected file are isolated per file; only shape mismatches count as validationSkipped", async () => {
@@ -709,6 +776,122 @@ test("a non-2xx tree response makes refreshCatalog throw with the status and bod
     () => refreshCatalog("RADARR"),
     /GitHub tree fetch failed for TRaSH-Guides\/Guides@master: 403 API rate limit exceeded/,
   );
+});
+
+// ── refreshCatalog: specs removed upstream ──────────────────────────────────
+
+test("a spec the complete upstream tree no longer carries is retired: deleted when never applied, its applications disabled when it was", async () => {
+  configureRadarr();
+  seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-x265", sha: "sha-cf1", path: "docs/json/radarr/cf/x265.json" });
+  const unused = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-gone-unused", sha: "s1" });
+  const applied = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-gone-applied", name: "Gone", sha: "s2" });
+  const app = seedApp(applied.id, "", { remoteId: 7, appliedAt: new Date("2026-01-02T00:00:00.000Z") });
+  // No quality-profile file is listed at all: an empty directory proves nothing
+  // (a moved upstream folder reads the same), so this profile stays.
+  seedSpec({ service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-unlisted", sha: "s3" });
+  respond = router(ghRoutes([blob("docs/json/radarr/cf/x265.json", "sha-cf1")], {}));
+
+  const result = await refreshCatalog("RADARR");
+  assert.deepEqual(result.removedUpstream, { deleted: 1, disabled: 1 });
+  assert.equal(specRows.some((r) => r.id === unused.id), false, "a never-applied spec is deleted");
+  assert.ok(specRows.some((r) => r.id === applied.id), "an applied spec is kept, so the admin sees why it stopped");
+  assert.ok(specRows.some((r) => r.trashId === "qp-unlisted"), "an empty listing must not prune its kind");
+  assert.ok(specRows.some((r) => r.trashId === "cf-x265"));
+  assert.equal(app.enabled, false);
+  assert.match(app.lastError ?? "", /Removed from the TRaSH Guides catalog upstream/);
+  assert.ok(app.lastErrorAt instanceof Date);
+  assert.equal(app.remoteId, 7, "the mapping to the arr's CF is kept");
+  // The delete re-checks for applications inside the write.
+  assert.deepEqual(specDeleteWheres, [{ id: { in: [unused.id] }, applications: { none: {} } }]);
+
+  // The sync no longer pushes the withdrawn definition.
+  settings.set("trashGuidesEnabled", "true");
+  settings.set("trashLastRefreshAt", new Date().toISOString());
+  respond = () => {
+    throw new Error("the retired spec must not reach the arr");
+  };
+  fetchCalls.length = 0;
+  const sync = await runTrashSync();
+  assert.deepEqual(sync.applied, []);
+  assert.equal(fetchCalls.length, 0);
+
+  // A second refresh finds nothing new to retire.
+  respond = router(ghRoutes([blob("docs/json/radarr/cf/x265.json", "sha-cf1")], {}));
+  const again = await refreshCatalog("RADARR");
+  assert.equal("removedUpstream" in again, false);
+  assert.ok(specRows.some((r) => r.id === applied.id));
+});
+
+test("a truncated tree, a file that failed to load, or an aborted pass retires nothing", async () => {
+  const gone = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-gone", sha: "s1" });
+  const gone2 = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-gone-2", sha: "s2" });
+  seedApp(gone2.id, "");
+
+  // Truncated: the listing may simply have cut the file off.
+  respond = router(ghRoutes(
+    [blob("docs/json/radarr/cf/x265.json", "sha-cf1")],
+    { "docs/json/radarr/cf/x265.json": CF_PAYLOAD },
+    { truncated: true },
+  ));
+  const truncatedRun = await refreshCatalog("RADARR");
+  assert.equal("removedUpstream" in truncatedRun, false);
+
+  // One file of the kind failed: its trash_id is unknown, so nothing of that kind goes.
+  respond = router(ghRoutes(
+    [blob("docs/json/radarr/cf/x265.json", "sha-cf1b"), blob("docs/json/radarr/cf/bad.json", "sha-bad")],
+    { "docs/json/radarr/cf/x265.json": CF_PAYLOAD, "docs/json/radarr/cf/bad.json": "not json{" },
+  ));
+  const failedRun = await refreshCatalog("RADARR");
+  assert.equal("removedUpstream" in failedRun, false);
+  assert.ok(failedRun.errors.some((e) => e.startsWith("cf: ")));
+
+  // Aborted before it started: a partial pass is no evidence of removal — even
+  // when every listed file is already stored and so needs no download.
+  const controller = new AbortController();
+  controller.abort();
+  respond = router(ghRoutes([blob("docs/json/radarr/cf/x265.json", "sha-cf1b")], {}));
+  const abortedRun = await refreshCatalog("RADARR", undefined, { signal: controller.signal });
+  assert.equal(abortedRun.aborted, true);
+  assert.equal("removedUpstream" in abortedRun, false);
+
+  assert.ok(specRows.some((r) => r.id === gone.id));
+  assert.equal(findApp(gone2.id, "")!.enabled, true);
+  assert.deepEqual(specDeleteWheres, []);
+});
+
+test("an aborted signal stops the refresh at its next download batch, and runTrashSync does not stamp an aborted refresh", async () => {
+  const entries: Array<{ path: string; sha: string; type: string }> = [];
+  const files: Record<string, unknown> = {};
+  for (let i = 0; i < 20; i++) {
+    const path = `docs/json/radarr/cf/cf-${i}.json`;
+    entries.push(blob(path, `sha-${i}`));
+    files[path] = { trash_id: `cf-${i}`, name: `CF ${i}` };
+  }
+  const controller = new AbortController();
+  const routes = ghRoutes(entries, files);
+  respond = (call) => {
+    // The first raw download aborts the run, as the lock's work timeout would.
+    if (call.url.hostname === "raw.githubusercontent.com") controller.abort();
+    return router(routes)(call);
+  };
+
+  const result = await refreshCatalog("RADARR", undefined, { signal: controller.signal });
+  assert.equal(result.aborted, true);
+  const raw = fetchCalls.filter((c) => c.url.hostname === "raw.githubusercontent.com");
+  assert.equal(raw.length, 8, "only the batch already in flight is downloaded");
+  assert.deepEqual(result.customFormats, { fetched: 8, updated: 8, unchanged: 0 });
+
+  // The cron: an aborted refresh leaves the cadence gate open for the next run.
+  settings.set("trashGuidesEnabled", "true");
+  const syncController = new AbortController();
+  fetchCalls.length = 0;
+  respond = (call) => {
+    if (call.url.hostname === "raw.githubusercontent.com") syncController.abort();
+    return router(routes)(call);
+  };
+  const sync = await runTrashSync({ signal: syncController.signal });
+  assert.deepEqual(sync.refreshed.map((r) => r.service), ["RADARR"], "SONARR is never started");
+  assert.equal(settings.has("trashLastRefreshAt"), false);
 });
 
 // ── applyCustomFormats ──────────────────────────────────────────────────────
@@ -1079,6 +1262,49 @@ test("quality sizes merge into the remote definitions with last-writer-wins per 
   ]);
 });
 
+test("quality-size specs merge in name order whatever order the store returns them, and a fully overridden spec says so", async () => {
+  configureRadarr();
+  // Seeded in REVERSE name order: the merge must not follow row order.
+  const b = seedSpec({
+    service: "RADARR", kind: "QUALITY_SIZE", trashId: "qs-b",
+    payload: { trash_id: "qs-b", qualities: [{ quality: "Bluray-1080p", min: 55, max: 227, preferred: 194 }] },
+  });
+  const a = seedSpec({
+    service: "RADARR", kind: "QUALITY_SIZE", trashId: "qs-a",
+    payload: {
+      trash_id: "qs-a",
+      qualities: [
+        { quality: "Bluray-1080p", min: 10, max: 100, preferred: 50 },
+        { quality: "HDTV-720p", min: 1, max: 20 },
+      ],
+    },
+  });
+  // Sets only Bluray-1080p, which qs-b (later by name) sets again.
+  const zero = seedSpec({
+    service: "RADARR", kind: "QUALITY_SIZE", trashId: "qs-0",
+    payload: { trash_id: "qs-0", qualities: [{ quality: "Bluray-1080p", min: 1, max: 2 }] },
+  });
+  respond = router({
+    [`GET ${RADARR}/api/v3/qualitydefinition`]: () =>
+      json([
+        { id: 1, quality: { id: 10, name: "Bluray-1080p" }, title: "Bluray-1080p", weight: 1, minSize: 2, maxSize: 3 },
+        { id: 2, quality: { id: 11, name: "HDTV-720p" }, title: "HDTV-720p", weight: 2, minSize: 4, maxSize: 5 },
+      ]),
+    [`PUT ${RADARR}/api/v3/qualitydefinition/update`]: () => json([]),
+  });
+
+  const results = await applyQualitySizes("RADARR", [b.id, a.id, zero.id]);
+  const put = JSON.parse(fetchCalls.find((c) => c.method === "PUT")!.body!) as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    put.map((row) => [row.title, row.minSize, row.maxSize, row.preferredSize]),
+    [["Bluray-1080p", 55, 227, 194], ["HDTV-720p", 1, 20, undefined]],
+  );
+  assert.deepEqual(
+    results.map((r) => [r.trashId, r.ok, r.supersededBy]),
+    [["qs-0", true, ["qs-b"]], ["qs-a", true, undefined], ["qs-b", true, undefined]],
+  );
+});
+
 // ── applyQualityProfiles / buildProfileBody ─────────────────────────────────
 
 test("applyQualityProfiles builds the full body: schema carry, allowed items, group cutoff, scores, trash_id mapping, dep auto-apply", async () => {
@@ -1166,18 +1392,21 @@ test("applyQualityProfiles builds the full body: schema carry, allowed items, gr
   assert.equal(body.minUpgradeFormatScore, 5000);
   assert.equal(body.cutoff, 1001); // the WEB 1080p GROUP id, not a quality id
   assert.deepEqual(body.language, { id: 2, name: "Any" });
+  // Built from the TRaSH profile: its ranking (best first) reversed into the
+  // API's worst-first order, its groups' members, and every schema quality it
+  // doesn't name kept once, disallowed, at the low end.
   assert.deepEqual(body.items, [
+    { quality: { id: 5, name: "WEBDL-720p" }, allowed: false }, // in the schema's WEB 1080p group, not TRaSH's
+    { id: 1002, name: "Legacy Group", allowed: false, items: [{ quality: { id: 6, name: "SDTV" }, allowed: false }] },
     { quality: { id: 1, name: "DVD" }, allowed: false },
-    { quality: { id: 2, name: "Bluray-1080p" }, allowed: true },
     {
       id: 1001, name: "WEB 1080p", allowed: true,
       items: [
         { quality: { id: 3, name: "WEBDL-1080p" }, allowed: true },
         { quality: { id: 4, name: "WEBRip-1080p" }, allowed: true },
-        { quality: { id: 5, name: "WEBDL-720p" }, allowed: false }, // sub not named by the profile
       ],
     },
-    { id: 1002, name: "Legacy Group", allowed: false, items: [{ quality: { id: 6, name: "SDTV" }, allowed: false }] },
+    { quality: { id: 2, name: "Bluray-1080p" }, allowed: true },
   ]);
   assert.deepEqual(body.formatItems, [
     { format: 21, name: "DV", score: 1000 },       // score_set beats default (1500)
@@ -1221,6 +1450,209 @@ test("a failed remote-profile prefetch fails the profile batch with its own sent
   );
   assert.equal(fetchCalls.length, 1); // schema/language/cf reads never happen
   assert.ok(warns.some((w) => w.includes("[trash] failed to prefetch remote qualityprofile list")));
+});
+
+// A quality profile whose only referenced CF is applied, so no cascade runs:
+// these tests read the body the profile POSTs.
+function profileRoutes(opts: {
+  schemaItems: unknown[];
+  cfs?: unknown[];
+}): Record<string, (call: ScriptedCall) => Response> {
+  return {
+    [`GET ${RADARR}/api/v3/qualityprofile`]: () => json([]),
+    [`GET ${RADARR}/api/v3/qualityprofile/schema`]: () => json({ items: opts.schemaItems, formatItems: [] }),
+    [`GET ${RADARR}/api/v3/language`]: () => json([]),
+    [`GET ${RADARR}/api/v3/customformat`]: () => json(opts.cfs ?? []),
+    [`POST ${RADARR}/api/v3/qualityprofile`]: () => json({ id: 70 }),
+  };
+}
+function postedProfile(): Record<string, unknown> {
+  const post = fetchCalls.find((c) => callKey(c) === `POST ${RADARR}/api/v3/qualityprofile`)!;
+  return JSON.parse(post.body!) as Record<string, unknown>;
+}
+
+test("a stored CF remoteId is re-checked against the live list: the CF's score follows its name, never the stale id", async () => {
+  configureRadarr();
+  // Applied as id 21, but the arr was reset: id 21 is now an unrelated CF and
+  // "DV" lives at id 40.
+  const cfDv = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-dv", name: "DV",
+    payload: { trash_id: "cf-dv", name: "DV", trash_scores: { default: 1500 } },
+  });
+  seedApp(cfDv.id, "", { remoteId: 21 });
+  const qp = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-1", name: "P",
+    payload: { trash_id: "qp-1", name: "P", items: [], formatItems: { DV: "cf-dv" } },
+  });
+  respond = router(profileRoutes({
+    schemaItems: [],
+    cfs: [{ id: 21, name: "Unrelated" }, { id: 40, name: "DV" }],
+  }));
+
+  const results = await applyQualityProfiles("RADARR", [qp.id]);
+  assert.equal(results[0].ok, true);
+  assert.deepEqual(postedProfile().formatItems, [
+    { format: 21, name: "Unrelated", score: 0 },
+    { format: 40, name: "DV", score: 1500 },
+  ]);
+  // Found by name, so no cascade re-applied it.
+  assert.equal(fetchCalls.some((c) => callKey(c) === `POST ${RADARR}/api/v3/customformat`), false);
+});
+
+test("a stored CF remoteId the live list no longer has is treated as unapplied and cascades", async () => {
+  configureRadarr();
+  const cfDv = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-dv", name: "DV",
+    payload: { trash_id: "cf-dv", name: "DV", trash_scores: { default: 1500 } },
+  });
+  seedApp(cfDv.id, "", { remoteId: 21 });
+  const qp = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-1", name: "P",
+    payload: { trash_id: "qp-1", name: "P", items: [], formatItems: { DV: "cf-dv" } },
+  });
+  const cfs: Array<{ id: number; name: string }> = [];
+  respond = router({
+    ...profileRoutes({ schemaItems: [] }),
+    [`GET ${RADARR}/api/v3/customformat`]: () => json(cfs),
+    // The cascade PUTs the stored id, gets a 404, and recreates.
+    [`PUT ${RADARR}/api/v3/customformat/21`]: () => new Response("NotFound", { status: 404 }),
+    [`POST ${RADARR}/api/v3/customformat`]: () => {
+      cfs.push({ id: 41, name: "DV" });
+      return json({ id: 41 });
+    },
+  });
+
+  await applyQualityProfiles("RADARR", [qp.id]);
+  assert.deepEqual(postedProfile().formatItems, [{ format: 41, name: "DV", score: 1500 }]);
+  assert.equal(findApp(cfDv.id, "")!.remoteId, 41);
+});
+
+test("profile items follow TRaSH's grouping and ranking: a TRaSH-only group is built and can be the cutoff", async () => {
+  configureRadarr();
+  // TRaSH's anime-remux-1080p shape: "Remux 1080p" is a group the arr's schema
+  // doesn't have, and it is the cutoff; its "WEB 1080p" also takes HDTV-1080p.
+  const qp = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-anime", name: "Remux-1080p - Anime",
+    payload: {
+      trash_id: "qp-anime",
+      name: "Remux-1080p - Anime",
+      cutoff: "Remux 1080p",
+      items: [
+        { name: "Remux 1080p", allowed: true, items: ["Remux-1080p", "Bluray-1080p"] },
+        { name: "WEB 1080p", allowed: true, items: ["HDTV-1080p", "WEBRip-1080p", "WEBDL-1080p"] },
+        { name: "DVD", allowed: false },
+        { name: "Not A Quality", allowed: true }, // unknown to the arr: skipped
+        { name: "Unknown", allowed: false },
+      ],
+      formatItems: {},
+    },
+  });
+  // The arr's schema, worst first.
+  respond = router(profileRoutes({
+    schemaItems: [
+      { quality: { id: 0, name: "Unknown" }, items: [], allowed: false },
+      { quality: { id: 2, name: "DVD" }, items: [], allowed: false },
+      { quality: { id: 9, name: "HDTV-1080p" }, items: [], allowed: false },
+      {
+        id: 1003, name: "WEB 1080p", allowed: false,
+        items: [
+          { quality: { id: 3, name: "WEBDL-1080p" }, items: [], allowed: false },
+          { quality: { id: 15, name: "WEBRip-1080p" }, items: [], allowed: false },
+        ],
+      },
+      { quality: { id: 7, name: "Bluray-1080p" }, items: [], allowed: false },
+      { quality: { id: 30, name: "Remux-1080p" }, items: [], allowed: false },
+    ],
+  }));
+
+  await applyQualityProfiles("RADARR", [qp.id]);
+  const body = postedProfile();
+  assert.deepEqual(body.items, [
+    { quality: { id: 0, name: "Unknown" }, items: [], allowed: false },
+    { quality: { id: 2, name: "DVD" }, items: [], allowed: false },
+    {
+      id: 1003, name: "WEB 1080p", allowed: true,
+      items: [
+        { quality: { id: 9, name: "HDTV-1080p" }, items: [], allowed: true },
+        { quality: { id: 15, name: "WEBRip-1080p" }, items: [], allowed: true },
+        { quality: { id: 3, name: "WEBDL-1080p" }, items: [], allowed: true },
+      ],
+    },
+    {
+      id: 1004, name: "Remux 1080p", allowed: true, // fresh id above every schema group id
+      items: [
+        { quality: { id: 30, name: "Remux-1080p" }, items: [], allowed: true },
+        { quality: { id: 7, name: "Bluray-1080p" }, items: [], allowed: true },
+      ],
+    },
+  ]);
+  assert.equal(body.cutoff, 1004);
+});
+
+test("a quality TRaSH lists on its own is allowed even where the schema nests it in a group TRaSH doesn't name", async () => {
+  configureRadarr();
+  const qp = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-web", name: "WEB only",
+    payload: {
+      trash_id: "qp-web",
+      name: "WEB only",
+      cutoff: "WEBDL-1080p",
+      items: [{ name: "WEBDL-1080p", allowed: true }],
+      formatItems: {},
+    },
+  });
+  respond = router(profileRoutes({
+    schemaItems: [
+      {
+        id: 1001, name: "WEB 1080p", allowed: false,
+        items: [
+          { quality: { id: 3, name: "WEBDL-1080p" }, items: [], allowed: false },
+          { quality: { id: 15, name: "WEBRip-1080p" }, items: [], allowed: false },
+        ],
+      },
+    ],
+  }));
+
+  await applyQualityProfiles("RADARR", [qp.id]);
+  const body = postedProfile();
+  assert.deepEqual(body.items, [
+    { quality: { id: 15, name: "WEBRip-1080p" }, items: [], allowed: false },
+    { quality: { id: 3, name: "WEBDL-1080p" }, items: [], allowed: true },
+  ]);
+  assert.equal(body.cutoff, 3);
+});
+
+test("mapping remote CFs to scores is linear in what the arr sends (guardrail 5i)", async () => {
+  configureRadarr();
+  const qp = seedSpec({
+    service: "RADARR", kind: "QUALITY_PROFILE", trashId: "qp-1", name: "P",
+    payload: { trash_id: "qp-1", name: "P", items: [], formatItems: {} },
+  });
+  // Every remote CF carries its own trash_id field, so each becomes a mapping.
+  const N = 2000;
+  const cfs = Array.from({ length: N }, (_, i) => ({
+    id: i + 1, name: `CF ${i}`, specifications: [{ fields: [{ name: "trash_id", value: `t-${i}` }] }],
+  }));
+  respond = router(profileRoutes({ schemaItems: [], cfs }));
+
+  // Count every step taken through any Map iterator while the body is built.
+  const proto = Map.prototype as unknown as Record<PropertyKey, unknown>;
+  const original = proto.entries as (this: Map<unknown, unknown>) => Iterator<unknown>;
+  let steps = 0;
+  function counting(this: Map<unknown, unknown>) {
+    const it = original.call(this);
+    return { next() { steps++; return it.next(); }, [Symbol.iterator]() { return this; } };
+  }
+  proto.entries = counting;
+  proto[Symbol.iterator] = counting;
+  try {
+    await applyQualityProfiles("RADARR", [qp.id]);
+  } finally {
+    proto.entries = original;
+    proto[Symbol.iterator] = original;
+  }
+  assert.equal((postedProfile().formatItems as unknown[]).length, N);
+  assert.ok(steps < 20 * N, `expected O(N) map steps, saw ${steps} for ${N} CFs`);
 });
 
 // ── applyCustomFormatGroups ─────────────────────────────────────────────────
@@ -1399,6 +1831,41 @@ test("applySpecs runs kinds in dependency order and dedups member CFs already ca
   );
 });
 
+test("applySpecs contains a service that isn't configured: its specs fail without a row, and every other kind still applies", async () => {
+  configureRadarr(); // Sonarr deliberately not configured
+  const cf = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-r", name: "R",
+    payload: { trash_id: "cf-r", name: "R" },
+  });
+  const sonarrQp = seedSpec({
+    service: "SONARR", kind: "QUALITY_PROFILE", trashId: "qp-s", name: "Sonarr Profile",
+    payload: { trash_id: "qp-s", name: "Sonarr Profile" },
+  });
+  const naming = seedSpec({
+    service: "RADARR", kind: "NAMING", trashId: "default", name: "TRaSH Standard Naming",
+    payload: { file: { standard: "X" } },
+  });
+  respond = router({
+    [`GET ${RADARR}/api/v3/customformat`]: () => json([]),
+    [`POST ${RADARR}/api/v3/customformat`]: () => json({ id: 5 }),
+    [`GET ${RADARR}/api/v3/config/naming`]: () => json({ id: 1 }),
+    [`PUT ${RADARR}/api/v3/config/naming`]: () => json({}),
+  });
+
+  const results = await applySpecs([cf.id, sonarrQp.id, naming.id]);
+  assert.deepEqual(
+    results.map((r) => [r.trashId, r.kind, r.ok, r.error]),
+    [
+      ["cf-r", "CUSTOM_FORMAT", true, undefined],
+      ["qp-s", "QUALITY_PROFILE", false, "SONARR is not configured"],
+      ["default", "NAMING", true, undefined],
+    ],
+  );
+  assert.ok(findApp(cf.id, "")!.appliedAt instanceof Date);
+  assert.ok(findApp(naming.id, "")!.appliedAt instanceof Date, "naming, after the failing kind, still applied");
+  assert.equal(findApp(sonarrQp.id, ""), undefined, "no TrashApplication row for an instance that doesn't exist");
+});
+
 // ── runTrashSync ────────────────────────────────────────────────────────────
 
 test("runTrashSync is a no-op with the exact disabled sentinel when trashGuidesEnabled is not 'true'", async () => {
@@ -1553,6 +2020,11 @@ test("listSpecs and getSpecDetail map rows per variant with ISO dates, null appl
   const bare = seedSpec({ service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-b", name: "B" });
 
   const list = await listSpecs("RADARR"); // default variant "hd" → the "" instance rows
+  // The status list reads named columns, never the payload JSON it doesn't return.
+  const sel = specFindManySelects[0];
+  assert.ok(sel, "listSpecs must select its columns");
+  assert.equal("payload" in sel, false);
+  assert.equal("payload" in (list[0] as object), false);
   const a = list.find((s) => s.id === spec.id)!;
   assert.deepEqual(a.application, {
     id: defaultApp.id,

@@ -3,7 +3,7 @@ import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
-import { isBulkAction, isTaskName } from "@/lib/arr-system";
+import { isBulkAction, isTaskName, type ArrBulkAction } from "@/lib/arr-system";
 import { cancelCommand, loadTasks, runBulkAction, runTask } from "@/lib/arr-system-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
@@ -48,16 +48,19 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (target instanceof NextResponse) return target;
   const task = body.task;
   const action = body.action;
-  const isTask = task !== undefined && action === undefined && isTaskName(task);
-  const isAction = action !== undefined && task === undefined && isBulkAction(action);
-  if (!isTask && !isAction) return NextResponse.json({ error: t("apiAdmin.arr.taskBodyInvalid") }, { status: 400 });
+  // The guards narrow into `run` itself, so no cast stands between a guard and its call.
+  const run: { task: string } | { action: ArrBulkAction } | null =
+    action === undefined && isTaskName(task) ? { task }
+    : task === undefined && isBulkAction(action) ? { action }
+    : null;
+  if (run === null) return NextResponse.json({ error: t("apiAdmin.arr.taskBodyInvalid") }, { status: 400 });
   if (!checkRateLimit(`arr-tasks:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
     return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   try {
-    const result = isTask
-      ? await runTask(target.service, target.instance, task as string)
-      : await runBulkAction(target.service, target.instance, action as "searchMissing" | "searchCutoff");
+    const result = "task" in run
+      ? await runTask(target.service, target.instance, run.task)
+      : await runBulkAction(target.service, target.instance, run.action);
     // Audited both ways: the update check (Radarr ApplicationCheckUpdate,
     // Sonarr ApplicationUpdateCheck) installs an available update and restarts
     // the arr when run by hand, and a library-wide search hits every indexer.
@@ -66,12 +69,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       userName: session.user.name ?? session.user.email ?? null,
       action: "ARR_COMMAND",
       target: `${target.service}:${target.instance}`,
-      details: { service: target.service, instance: target.instance, ...(isTask ? { task } : { action }) },
+      details: { service: target.service, instance: target.instance, ...run },
       ...auditContext(req, session),
     });
     return NextResponse.json(result, { status: 202 });
   } catch (err) {
-    return arrFailure(err, target, t, isTask ? `task ${String(task)}` : `bulk ${String(action)}`);
+    return arrFailure(err, target, t, "task" in run ? `task ${run.task}` : `bulk ${run.action}`);
   }
 });
 

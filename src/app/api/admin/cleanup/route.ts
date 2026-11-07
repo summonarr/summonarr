@@ -13,6 +13,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 // clicks into one (library-cleanup.tsx), so a quick pass down the candidate
 // list costs one load, not one per click.
 const LOADS_PER_MIN = 30;
+const PROTECTED_LIST_MAX = 1000;
 
 // Library cleanup report (ADMIN). Judges every library title against the
 // configured rules and returns the ones any rule matched — candidates first,
@@ -31,16 +32,22 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   // so what the page offers is what a dry run would plan — from the cached
   // tvdb cross-reference only: a page load never waits on TMDB (CrossRefMode).
   const report = await computeCleanupReport(arr, new Date(), undefined, { resolveTargets: true, crossRef: "cached" });
-  const protectedTitles = await prisma.cleanupProtection.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 1000,
-    select: { tmdbId: true, mediaType: true, title: true, reason: true, createdAt: true },
-  });
+  // The most recent PROTECTED_LIST_MAX only; `protectedTotal` says how many
+  // there are, so the page can say the list is capped instead of under-counting.
+  const [protectedTitles, protectedTotal] = await Promise.all([
+    prisma.cleanupProtection.findMany({
+      orderBy: { createdAt: "desc" },
+      take: PROTECTED_LIST_MAX,
+      select: { tmdbId: true, mediaType: true, title: true, reason: true, createdAt: true },
+    }),
+    prisma.cleanupProtection.count(),
+  ]);
   const candidates = report.rows.filter((r) => r.candidate);
   return NextResponse.json({
     ...report,
     arrErrors: arr.errors,
     protected: protectedTitles.map((p) => ({ ...p, createdAt: p.createdAt.toISOString() })),
+    protectedTotal,
     totals: {
       candidates: candidates.length,
       held: report.rows.length - candidates.length,

@@ -1,3 +1,4 @@
+import { cache } from "react";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -31,6 +32,14 @@ export interface TrashPageContext {
   namedInstancesConfigured: boolean;
 }
 
+// The configured Radarr and Sonarr instances, read once per request: the layout
+// and the page both need them, and React's cache() shares one read between the
+// two within a render. Scoped to these pages on purpose — crons, routes and
+// write paths call getSyncableArrInstances themselves and must see it fresh.
+export const loadTrashInstances = cache(() =>
+  Promise.all([getSyncableArrInstances("radarr"), getSyncableArrInstances("sonarr")]),
+);
+
 // Shared auth + service/instance lookup for every TRaSH sub-page. The layout already checks for
 // ADMIN, but Next can render a page without re-running its layout (e.g. on a prefetch or a
 // client-side navigation), so each page re-checks here too (guardrail 29).
@@ -43,10 +52,7 @@ export async function loadTrashPageContext(
   const { service: rawService, variant: rawVariant } = await searchParams;
   const service: TrashService = rawService === "sonarr" ? "SONARR" : "RADARR";
 
-  const [radarrInstances, sonarrInstances] = await Promise.all([
-    getSyncableArrInstances("radarr"),
-    getSyncableArrInstances("sonarr"),
-  ]);
+  const [radarrInstances, sonarrInstances] = await loadTrashInstances();
   const serviceInstances = service === "RADARR" ? radarrInstances : sonarrInstances;
 
   // Accept the legacy "hd" spelling for the default instance; otherwise ?variant=

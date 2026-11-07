@@ -5,18 +5,21 @@
 type PlanKey = { tmdbId: number; mediaType: "MOVIE" | "TV" };
 
 // The execute body is built from the PLAN the admin confirmed, never from the
-// live selection (guardrail 14b): the route checks only the target COUNT, so a
-// selection changed after the dry run — or a title the dry run listed under
-// Skipped — would otherwise be deleted under a count that happens to match.
-// Only the keys go back; the route re-judges and re-resolves them itself.
+// live selection (guardrail 14b): a selection changed after the dry run — or a
+// title the dry run listed under Skipped — would otherwise be deleted under a
+// count that happens to match. Only the keys go back; the route re-judges and
+// re-resolves them itself, and refuses unless the count AND the fingerprint of
+// the exact target set (`targetsFingerprint`, echoed as `confirmFingerprint`)
+// still match — the count alone passes a same-sized different set.
 export function cleanupExecuteBody(
-  plan: { targetCount: number; items: ReadonlyArray<PlanKey> },
+  plan: { targetCount: number; targetsFingerprint?: string; items: ReadonlyArray<PlanKey> },
   blacklist: boolean,
-): { items: PlanKey[]; blacklist: boolean; confirmTargets: number } {
+): { items: PlanKey[]; blacklist: boolean; confirmTargets: number; confirmFingerprint?: string } {
   return {
     items: plan.items.map(({ tmdbId, mediaType }) => ({ tmdbId, mediaType })),
     blacklist,
     confirmTargets: plan.targetCount,
+    ...(typeof plan.targetsFingerprint === "string" ? { confirmFingerprint: plan.targetsFingerprint } : {}),
   };
 }
 
@@ -116,9 +119,10 @@ type ProtectEntry = { tmdbId: number; mediaType: string; title: string | null; r
 // The report as the server will answer it after a Protect (`on`) or Unprotect
 // of one title: its row gains or loses the "protected" exclusion (a row is a
 // candidate exactly when nothing excludes it — it is only listed because a rule
-// matched) and the protected list gains or loses the title. Display only; the
-// coalesced reload replaces it with the server's answer.
-export function applyLocalProtection<T extends { rows: ProtectRow[]; protected: ProtectEntry[] }>(
+// matched), the protected list gains or loses the title, and the protected
+// count (`protectedTotal`, when the report has one) moves with the list.
+// Display only; the coalesced reload replaces it with the server's answer.
+export function applyLocalProtection<T extends { rows: ProtectRow[]; protected: ProtectEntry[]; protectedTotal?: number }>(
   report: T,
   title: { tmdbId: number; mediaType: string; title: string | null },
   on: boolean,
@@ -133,5 +137,12 @@ export function applyLocalProtection<T extends { rows: ProtectRow[]; protected: 
   });
   const rest = report.protected.filter((p) => !same(p));
   const entry = { tmdbId: title.tmdbId, mediaType: title.mediaType, title: title.title, reason: null, createdAt } as T["protected"][number];
-  return { ...report, rows, protected: on ? [entry, ...rest] : rest };
+  const listed = rest.length !== report.protected.length;
+  const delta = on ? (listed ? 0 : 1) : listed ? -1 : 0;
+  return {
+    ...report,
+    rows,
+    protected: on ? [entry, ...rest] : rest,
+    ...(typeof report.protectedTotal === "number" ? { protectedTotal: Math.max(0, report.protectedTotal + delta) } : {}),
+  };
 }

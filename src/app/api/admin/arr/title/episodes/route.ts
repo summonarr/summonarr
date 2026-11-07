@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrTitleGate, parseIdArray, parseSeasonNumber, readWarnKey } from "@/lib/arr-admin-http";
@@ -7,8 +8,12 @@ import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 const MAX_EPISODES = 5_000;
+// The Seasons tab flips ONE episode per switch, so an admin working down a
+// season sends many in a row: generous, it only bounds a runaway client.
+const LIMIT_PER_MIN = 60;
 
 // Admin title manager, a series' episodes (ADMIN, Sonarr only).
 //   GET ?service=sonarr&instance&id&season → { episodes, now } of that season.
@@ -16,6 +21,7 @@ const MAX_EPISODES = 5_000;
 //       monitor or unmonitor episodes; every id must be one of the series'
 //       episodes (409 otherwise, nothing written). → { updated, title }: the
 //       series re-read, since its counts follow monitoring. Audited ARR_TITLE_EDIT.
+//       429 past LIMIT_PER_MIN per admin.
 // GET with `cached=1` → the last answer kept for this exact read, for display only
 // (src/lib/arr-snapshot.ts).
 export const GET = withAdmin(snapshotted(async (req) => {
@@ -47,6 +53,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   const episodeIds = parseIdArray(body.episodeIds, MAX_EPISODES);
   if (target.service !== "sonarr" || !episodeIds || typeof body.monitored !== "boolean") {
     return NextResponse.json({ error: t("apiAdmin.arr.episodesBodyInvalid") }, { status: 400 });
+  }
+  if (!checkRateLimit(`arr-title-episodes:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
   }
   const monitored = body.monitored;
   let result;

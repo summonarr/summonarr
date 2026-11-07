@@ -263,6 +263,12 @@ const FILE_NAME = new RegExp(`[^\\s"'<>/\\\\]+\\.(?:${MEDIA_EXT})\\b`, "gi");
 // the arr sends a status entry's title, the file, when it has no message.
 const BARE_FILE_NAME = new RegExp(`^[^:]*\\.(?:${MEDIA_EXT})$`, "i");
 const ELLIPSIS_RUN = /…(?:\s*…)+/g;
+// A private value this short is also a piece of ordinary words: a download
+// client named "SAB" turned "disabled" into "di…led". Inside a word (a letter on
+// BOTH sides) it is left alone; at a word's start or end ("SABnzbd") it still goes.
+const SHORT_PRIVATE_VALUE = 6;
+const LETTER = /\p{L}/u;
+const isLetter = (c: string | undefined): boolean => c !== undefined && LETTER.test(c);
 
 /**
  * Upstream free text a delegate may read: credentials masked (safeMessage), and
@@ -279,7 +285,12 @@ export function scrubMessage(raw: unknown, privateValues: ReadonlyArray<string |
     .map((v) => v.trim())
     .sort((a, b) => b.length - a.length);
   // Case-insensitive: a client may lower-case a download id (a torrent's info hash).
-  for (const v of known) s = s.replace(new RegExp(v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "…");
+  for (const v of known) {
+    const re = new RegExp(v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    s = v.length < SHORT_PRIVATE_VALUE
+      ? s.replace(re, (m: string, at: number, whole: string) => (isLetter(whole[at - 1]) && isLetter(whole[at + m.length]) ? m : "…"))
+      : s.replace(re, "…");
+  }
   s = s.replace(URL_TEXT, "…").replace(HOST_PORT, "…").replace(PATH, "$1…").replace(FILE_NAME, "…").replace(ELLIPSIS_RUN, "…").trim();
   if (s === "" || s === "…") return null;
   return s.slice(0, MAX_MESSAGE_LEN);

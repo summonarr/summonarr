@@ -17,6 +17,7 @@ import {
   isoOrNull,
   nonNegInt,
   posInt,
+  PROJECTION_SCAN_FACTOR,
   protocolOf,
   safeMessage,
   text,
@@ -35,7 +36,8 @@ const obj = (v: unknown): Raw | null => (v && typeof v === "object" && !Array.is
 // projection dedupes through a Set, keeps at most its cap, and READS at most
 // this many times its cap: a hostile or MITM'd arr padding a list with junk
 // or duplicates costs a bounded scan too, not only a bounded output.
-export const PROJECTION_SCAN_FACTOR = 10;
+// PROJECTION_SCAN_FACTOR is arr-parse's, shared with the queue and Missing projections.
+export { PROJECTION_SCAN_FACTOR };
 const scanOf = (raw: readonly unknown[], cap: number): readonly unknown[] => raw.slice(0, cap * PROJECTION_SCAN_FACTOR);
 
 // ── scheduled tasks ──────────────────────────────────────────────────────────
@@ -126,6 +128,11 @@ export interface ArrCommandRow {
 export const MAX_COMMANDS = 30;
 /** A runaway bound on queued + running commands, far past anything an instance queues. */
 export const MAX_ACTIVE_COMMANDS = 500;
+/**
+ * The most of the arr's command list read. Fixed — never derived from `limit`,
+ * which cancelCommand passes as Number.MAX_SAFE_INTEGER to see every active one.
+ */
+export const MAX_COMMANDS_READ = (MAX_ACTIVE_COMMANDS + MAX_COMMANDS) * PROJECTION_SCAN_FACTOR;
 
 const isActive = (c: ArrCommandRow) => c.status === "queued" || c.status === "started";
 
@@ -135,15 +142,18 @@ const isActive = (c: ArrCommandRow) => c.status === "queued" || c.status === "st
  * `limit`: a library-wide search started an hour ago sorts behind every
  * command finished since, and cutting it off the list would re-enable its
  * task's Run button while it still runs. The command BODY is never projected
- * (it can hold paths, ids and import details).
+ * (it can hold paths, ids and import details). At most MAX_COMMANDS_READ
+ * entries are read, each id once (5i).
  */
 export function projectCommands(raw: unknown, limit = MAX_COMMANDS): ArrCommandRow[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrCommandRow[] = [];
-  for (const x of raw) {
+  const seen = new Set<number>();
+  for (const x of raw.slice(0, MAX_COMMANDS_READ)) {
     const r = obj(x);
     const id = posInt(r?.id);
-    if (!r || id === null) continue;
+    if (!r || id === null || seen.has(id)) continue;
+    seen.add(id);
     const status = typeof r.status === "string" ? r.status.toLowerCase() : "";
     const trigger = typeof r.trigger === "string" ? r.trigger.toLowerCase() : "";
     // CommandResource: `name` is the command ("RssSync"), `commandName` its label ("Rss Sync").
@@ -254,14 +264,19 @@ export interface ArrDownloadClient {
   tags: number[];
 }
 
-/** /api/v3/indexer → the indexers, by priority then name. Never `fields`. */
+/** The most indexers, download clients or Test All results kept per instance — an instance has a handful. */
+export const MAX_PROVIDERS = 500;
+
+/** /api/v3/indexer → the indexers, by priority then name. Never `fields`. Bounded and deduped by id (5i). */
 export function projectIndexers(raw: unknown): ArrIndexer[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrIndexer[] = [];
-  for (const x of raw) {
+  const seen = new Set<number>();
+  for (const x of scanOf(raw, MAX_PROVIDERS)) {
     const r = obj(x);
     const id = posInt(r?.id);
-    if (!r || id === null) continue;
+    if (!r || id === null || seen.has(id)) continue;
+    seen.add(id);
     const name = text(r.name, 200);
     out.push({
       id,
@@ -277,18 +292,21 @@ export function projectIndexers(raw: unknown): ArrIndexer[] {
       tags: idsOf(r.tags, 100),
       managedByProwlarr: PROWLARR_SUFFIX.test(name),
     });
+    if (out.length >= MAX_PROVIDERS) break;
   }
   return out.sort((a, b) => (a.priority ?? 25) - (b.priority ?? 25) || a.name.localeCompare(b.name));
 }
 
-/** /api/v3/downloadclient → the download clients, by priority then name. Never `fields`. */
+/** /api/v3/downloadclient → the download clients, by priority then name. Never `fields`. Bounded and deduped by id (5i). */
 export function projectDownloadClients(raw: unknown): ArrDownloadClient[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrDownloadClient[] = [];
-  for (const x of raw) {
+  const seen = new Set<number>();
+  for (const x of scanOf(raw, MAX_PROVIDERS)) {
     const r = obj(x);
     const id = posInt(r?.id);
-    if (!r || id === null) continue;
+    if (!r || id === null || seen.has(id)) continue;
+    seen.add(id);
     out.push({
       id,
       name: text(r.name, 200) || `#${id}`,
@@ -300,6 +318,7 @@ export function projectDownloadClients(raw: unknown): ArrDownloadClient[] {
       removeFailedDownloads: typeof r.removeFailedDownloads === "boolean" ? r.removeFailedDownloads : null,
       tags: idsOf(r.tags, 100),
     });
+    if (out.length >= MAX_PROVIDERS) break;
   }
   return out.sort((a, b) => (a.priority ?? 1) - (b.priority ?? 1) || a.name.localeCompare(b.name));
 }
@@ -336,6 +355,26 @@ export function withProviderEnabled(raw: unknown, change: ProviderEnableChange):
   const r = obj(raw);
   if (!r) throw new Error("not a provider resource");
   return { ...r, ...change };
+}
+
+/**
+ * Whether the provider resource changed between two reads in anything but the
+ * switches `change` sets — an edit made in Radarr/Sonarr meanwhile, which a
+ * save of the first read would put back. Top-level keys only are dropped, and
+ * the rest compared as the arr serialized them (its key order is its own and
+ * stable between reads; a difference there reads as changed — refusing a save
+ * is the safe side). Server-side only: neither body leaves the server (5e).
+ */
+export function providerChangedBesides(before: unknown, after: unknown, change: ProviderEnableChange): boolean {
+  const a = obj(before);
+  const b = obj(after);
+  if (!a || !b) return true;
+  const strip = (r: Raw) => {
+    const rest: Raw = { ...r };
+    for (const k of Object.keys(change)) delete rest[k];
+    return JSON.stringify(rest);
+  };
+  return strip(a) !== strip(b);
 }
 
 /**
@@ -428,15 +467,22 @@ function warningFlag(r: Raw): boolean | null {
   return null;
 }
 
+/** The most validation failures of one provider read — an arr reports a few. */
+export const MAX_VALIDATION_FAILURES_READ = 100;
+
 /**
  * `unflagged` is what a failure with no warning flag counts as: "error" for a
  * /test or save 400 (there every warning is flagged — see warningFlag),
- * "unknown" for Test All, where a System.Text.Json arr flags nothing.
+ * "unknown" for Test All, where a System.Text.Json arr flags nothing. At most
+ * MAX_VALIDATION_FAILURES_READ are read; a longer list counts its unread rest
+ * as an error, so it is never "warnings only" — that verdict lets an accepted
+ * save skip the arr's test (forceSave), and an error could sit past the cut.
  */
 export function projectFailures(v: unknown, unflagged: "error" | "unknown" = "error"): ValidationFailures {
-  const list = Array.isArray(v) ? v : [];
+  const all = Array.isArray(v) ? v : [];
+  const list = all.length > MAX_VALIDATION_FAILURES_READ ? all.slice(0, MAX_VALIDATION_FAILURES_READ) : all;
   const messages: string[] = [];
-  let errors = 0;
+  let errors = list.length < all.length ? 1 : 0;
   let unknown = 0;
   for (const x of list) {
     const r = obj(x);
@@ -469,11 +515,14 @@ export function testResultOf(id: number, isValid: boolean, failures: ValidationF
 export function projectTestAll(raw: unknown): ProviderTestResult[] {
   if (!Array.isArray(raw)) return [];
   const out: ProviderTestResult[] = [];
-  for (const x of raw) {
+  const seen = new Set<number>();
+  for (const x of scanOf(raw, MAX_PROVIDERS)) {
     const r = obj(x);
     const id = posInt(r?.id);
-    if (!r || id === null) continue;
+    if (!r || id === null || seen.has(id)) continue;
+    seen.add(id);
     out.push(testResultOf(id, r.isValid === true, projectFailures(r.validationFailures, "unknown")));
+    if (out.length >= MAX_PROVIDERS) break;
   }
   return out;
 }

@@ -29,7 +29,12 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     if (schemaDiagnostic) {
       return NextResponse.json({ service, variant, specs: [], schemaDiagnostic });
     }
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ service, variant, specs: [], error: message }, { status: 500 });
+    // A non-schema failure's text can name the database host or a query: it
+    // goes to the log, and the browser gets a generic message.
+    console.error("[trash] catalog status read failed:", err);
+    return NextResponse.json(
+      { service, variant, specs: [], error: t("apiAdmin.trash.internalError") },
+      { status: 500 },
+    );
   }
 });

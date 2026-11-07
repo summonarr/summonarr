@@ -121,6 +121,8 @@
   "adminArr.add.searchHint": "Si no, espera a la sincronización RSS y a las búsquedas programadas de Radarr/Sonarr.",
   "adminArr.add.noRequest": "Esto añade el título directamente — no se crea ninguna solicitud ni se avisa a nadie.",
   "adminArr.add.submit": "Añadir a {name}",
+  "adminArr.add.noRootFolder": "{name} no tiene ninguna carpeta raíz accesible — corrige primero sus carpetas raíz.",
+  "adminArr.add.noQualityProfile": "{name} no tiene perfiles de calidad — crea uno allí primero.",
   "adminArr.availability.announced": "Anunciada",
   "adminArr.availability.inCinemas": "En cines",
   "adminArr.availability.released": "Estrenada",

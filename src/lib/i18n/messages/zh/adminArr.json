@@ -121,6 +121,8 @@
   "adminArr.add.searchHint": "否则它会等待 Radarr/Sonarr 自身的 RSS 同步和计划搜索。",
   "adminArr.add.noRequest": "这会直接添加此作品——不会创建请求，也不会通知任何人。",
   "adminArr.add.submit": "添加到 {name}",
+  "adminArr.add.noRootFolder": "{name} 没有可访问的根文件夹——请先在其中修复根文件夹。",
+  "adminArr.add.noQualityProfile": "{name} 没有质量配置——请先在其中添加一个。",
   "adminArr.availability.announced": "已公布",
   "adminArr.availability.inCinemas": "影院上映",
   "adminArr.availability.released": "已发行",

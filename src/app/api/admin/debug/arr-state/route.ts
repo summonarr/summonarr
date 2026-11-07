@@ -81,11 +81,11 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       }
     } else {
       // ONE Sonarr conversation per instance (lookup + the ?tvdbId= library
-      // read). isSeriesWantedInSonarr is `match && !complete` over the identical
-      // two fetches, so running it beside the completion check doubled the
-      // 30s-timeout round-trips on a route reached precisely when Sonarr is slow
-      // — and let a transient failure make `liveArrApi` and `liveCompletion`
-      // disagree about the same series in one response. Derive it instead.
+      // read). "Wanted" is `match && !complete` over those same two fetches, so
+      // reading it separately doubled the 30s-timeout round-trips on a route
+      // reached precisely when Sonarr is slow — and let a transient failure make
+      // `liveArrApi` and `liveCompletion` disagree about the same series in one
+      // response. Derive it from the completion result instead.
       try {
         const completion = await getSonarrSeriesCompletion(tmdbId, inst.slug);
         liveCompletion = completion ?? { result: null };

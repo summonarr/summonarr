@@ -880,10 +880,12 @@ const spec = {
         summary: "List issues",
         parameters: [
           { name: "limit", in: "query", schema: { type: "integer", default: 50, maximum: 100 } },
+          { name: "cursor", in: "query", required: false, schema: { type: "string" }, description: "Continue after a page: `<createdAt ISO>|<id>` of its last issue (or the page's `X-Next-Cursor`). Absent or malformed ⇒ the first page." },
         ],
         responses: {
           "200": {
-            description: "Issues for the caller (own issues, or all when MANAGE_ISSUES), newest first, each with a `user` ({ name, email } for MANAGE_ISSUES, { name } otherwise)",
+            description: "Issues for the caller (own issues, or all when MANAGE_ISSUES), newest first (createdAt, then id), each with a `user` ({ name, email } for MANAGE_ISSUES, { name } otherwise)",
+            headers: { "X-Next-Cursor": { description: "The `cursor` for the next page; sent only when the page is full", schema: { type: "string" } } },
             content: {
               "application/json": {
                 schema: { type: "array", items: { $ref: "#/components/schemas/Issue" } },
@@ -916,7 +918,7 @@ const spec = {
           },
         },
         responses: {
-          "201": { description: "Created issue (tvdbId is resolved server-side from tmdbId, never taken from the body)", content: { "application/json": { schema: { $ref: "#/components/schemas/Issue" } } } },
+          "201": { description: "Created issue (tvdbId is resolved server-side from tmdbId, never taken from the body). The caller's identical report still OPEN or IN_PROGRESS (same title, type, scope, season, episode and note) is answered instead, unchanged and without a second admin notification", content: { "application/json": { schema: { $ref: "#/components/schemas/Issue" } } } },
           "400": { description: "Validation error" },
           "403": { description: "feature.page.issues is disabled" },
           "422": { description: "Title could not be verified with TMDB, or is not in a library the caller can see" },
@@ -938,7 +940,7 @@ const spec = {
                 properties: {
                   status: { $ref: "#/components/schemas/IssueStatus" },
                   resolution: { type: "string", maxLength: 1000 },
-                  refetch: { type: "boolean", description: "Trigger a Radarr/Sonarr re-search for the issue media (scope's own search: movie MoviesSearch, EPISODE EpisodeSearch, SEASON SeasonSearch, FULL SeriesSearch). Takes precedence over status/resolution; 409 when the issue is RESOLVED." },
+                  refetch: { type: "boolean", description: "`true`: trigger a Radarr/Sonarr re-search for the issue media (scope's own search: movie MoviesSearch, EPISODE EpisodeSearch, SEASON SeasonSearch, FULL SeriesSearch). Takes precedence over status/resolution; 409 when the issue is RESOLVED. `false` (or null, or absent) is the status/resolution edit; any other value is 400." },
                   instance: { type: "string", description: "With `refetch`: the Radarr/Sonarr instance slug to search on ('' = default). An invalid slug is 400." },
                 },
               },
@@ -946,8 +948,8 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Updated issue. A `refetch` answers the issue plus `arrError` (string, or null when the search was queued); a failed search is still 200 with `arrError` set.", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/Issue" }, { type: "object", properties: { arrError: { type: "string", nullable: true } } }] } } } },
-          "400": { description: "Invalid status, resolution over 1000 chars or empty with no status, or (with refetch) an invalid instance slug" },
+          "200": { description: "Updated issue (unchanged, with nothing written or broadcast, when the body changes nothing). A `refetch` answers the issue plus `arrError` (string, or null when the search was queued); a failed search is still 200 with `arrError` set.", content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/Issue" }, { type: "object", properties: { arrError: { type: "string", nullable: true } } }] } } } },
+          "400": { description: "Invalid status, resolution over 1000 chars or empty with no status, a `refetch` that is not a boolean, or (with refetch) an invalid instance slug" },
           "403": { description: "Forbidden" },
           "404": { description: "Not found" },
           "409": { description: "`refetch` on a RESOLVED issue, or `{ error: \"status-conflict\" }` — the status changed concurrently" },
@@ -972,7 +974,7 @@ const spec = {
         summary: "List messages on an issue",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
-          "200": { description: "Messages oldest first, each with author { name, role } (+ email for MANAGE_ISSUES callers)" },
+          "200": { description: "The newest 500 messages, oldest first, each with author { name, role } (+ email for MANAGE_ISSUES callers)" },
           "403": { description: "Not the reporter and no MANAGE_ISSUES" },
           "404": { description: "No such issue" },
         },
@@ -3016,7 +3018,8 @@ const spec = {
                       },
                     },
                     arrErrors: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, error: { type: "string" }, kind: { type: "string", enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Why the listing failed — translate this, not the English `error`" } } } },
-                    protected: { type: "array", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { type: "string" }, title: { type: "string", nullable: true }, reason: { type: "string", nullable: true }, createdAt: { type: "string", format: "date-time" } } } },
+                    protected: { type: "array", description: "The 1000 most recently protected titles", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { type: "string" }, title: { type: "string", nullable: true }, reason: { type: "string", nullable: true }, createdAt: { type: "string", format: "date-time" } } } },
+                    protectedTotal: { type: "integer", description: "Every protected title — more than `protected` lists when that list is capped" },
                     totals: { type: "object", properties: { candidates: { type: "integer" }, held: { type: "integer" }, reclaimableBytes: { type: "number" } } },
                   },
                 },
@@ -3343,9 +3346,11 @@ const spec = {
         summary: "Delete cleanup candidates from Radarr/Sonarr — dry run, then confirmed execute (ADMIN)",
         description:
           "Default is a DRY RUN: re-judges exactly the given titles against the live rules and returns every " +
-          "Radarr/Sonarr entry each occupies (every instance) and `targetCount`. `?execute=true` with the same body " +
-          "plus `confirmTargets` equal to the live count deletes each target with `deleteFiles=true` and the " +
-          "import-list exclusion flag; any other count answers 409 with the fresh plan. A title that is no longer a " +
+          "Radarr/Sonarr entry each occupies (every instance), `targetCount` and `targetsFingerprint` (the exact target " +
+          "set). `?execute=true` with the same body plus `confirmTargets` equal to the live count — and, when sent, " +
+          "`confirmFingerprint` equal to the live fingerprint — deletes each target with `deleteFiles=true` and the " +
+          "import-list exclusion flag; any other count or fingerprint answers 409 with the fresh plan (a same-sized " +
+          "different set fails only the fingerprint). A title that is no longer a " +
           "candidate is skipped, never deleted. Before deleting, every AVAILABLE request for the title is stamped so " +
           "the sync never re-pushes it; `blacklist` (default true) also blacklists a fully removed title. Results are " +
           "per title (deleted / partial / failed) — a partial failure is not an error status.",
@@ -3366,6 +3371,7 @@ const spec = {
                   },
                   blacklist: { type: "boolean", default: true },
                   confirmTargets: { type: "integer", description: "Required with ?execute=true: the dry run's targetCount" },
+                  confirmFingerprint: { type: "string", description: "With ?execute=true: the dry run's targetsFingerprint. Optional, but when sent the execute is refused (409) unless the live target set is exactly the one the dry run planned" },
                 },
               },
             },
@@ -3374,7 +3380,7 @@ const spec = {
         responses: {
           "200": {
             description:
-              "Dry run: { dryRun: true, targetCount, reclaimableBytes, blacklist, items, skipped, hint }. Execute: { dryRun: false, " +
+              "Dry run: { dryRun: true, targetCount, targetsFingerprint, reclaimableBytes, blacklist, items, skipped, hint }. Execute: { dryRun: false, " +
               "deletedCount, partialCount, failedCount, results, skipped } — each results[] item is { tmdbId, mediaType, title, status: " +
               "deleted | partial | failed, deleted: [target label], failed: [{ target, service, instance, error, kind }], blacklisted, " +
               "uncertain?, bookkeepingError? }. `uncertain: true` when at least one target's delete had an unknown outcome (a timeout, " +
@@ -3398,14 +3404,14 @@ const spec = {
                 } } },
                 blacklisted: { type: "boolean" },
                 uncertain: { type: "boolean", enum: [true], description: "Present only when a target's delete had an unknown outcome (timeout, network, 502/504)" },
-                bookkeepingError: { type: "string", description: "Present only when the files went but a request stamp, vote clear or blacklist write failed — or, on a `status: \"failed\"` result with `uncertain: true`, when re-asserting the title's cleanup stamps failed — or, on a `status: \"failed\"` result with nothing deleted, when the pre-delete cleanup stamp could not be written (that title was not deleted) or the un-stamp after every delete was refused failed" },
+                bookkeepingError: { type: "string", description: "Present only when the files went but a request stamp, vote clear or blacklist write failed — or, on a `status: \"failed\"` result with `uncertain: true`, when re-asserting the title's cleanup stamps failed — or, on a `status: \"failed\"` result with nothing deleted, when the pre-delete cleanup stamp could not be written (that title was not deleted) or the un-stamp after every delete was refused failed. Several failures are joined with \"; \"" },
               } } },
             } } } },
           },
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Library cleanup is disabled" },
-          "409": { description: "confirmTargets missing or not equal to the live count (the fresh plan is returned)" },
+          "409": { description: "confirmTargets missing or not equal to the live count, or confirmFingerprint sent and not equal to the live target set (the fresh plan, with its targetCount and targetsFingerprint, is returned)" },
         },
       },
     },
@@ -3699,6 +3705,11 @@ const spec = {
                   properties: {
                     instances: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, slug: { type: "string" }, name: { type: "string" } } } },
                     errors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" }, kind: { type: "string", enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Why the read failed — translate this, not the English `error`" } } } },
+                    truncated: {
+                      type: "array",
+                      description: "Present only when an instance's queue was longer than the page cap: `read` records of `total` were read, so the rest are absent, not finished",
+                      items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, read: { type: "integer" }, total: { type: "integer" } } },
+                    },
                     items: {
                       type: "array",
                       items: {
@@ -3773,7 +3784,7 @@ const spec = {
                 required: ["service", "ids", "action"],
                 properties: {
                   service: { type: "string", enum: ["radarr", "sonarr"] },
-                  instance: { type: "string", description: "Instance slug; absent or empty = the default" },
+                  instance: { type: "string", nullable: true, description: "Instance slug; absent, null or empty = the default" },
                   ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 5000 },
                   action: { type: "string", enum: ["remove", "blocklist", "blocklistSearch"] },
                   method: { type: "string", enum: ["removeFromClient", "changeCategory", "ignore"], default: "removeFromClient" },
@@ -4276,7 +4287,7 @@ const spec = {
         } } } } },
         responses: {
           ...ARR_ERRORS,
-          "201": { description: "{ arrId, title }" },
+          "201": { description: "{ arrId, title } — `arrId` is null when the arr took the add but neither its answer nor a re-read named the new id" },
           "400": { description: "Invalid body (Radarr without `monitored`, Sonarr without `monitor`, a field the other service has), a profile/root folder/tag the instance doesn't have, or the arr's own refusal (masked)" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled, unknown instance, or the arr's lookup has no such title" },
@@ -4346,6 +4357,7 @@ const spec = {
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
           "409": { description: "An episode is not this series'" },
+          "429": { description: "More than 60 changes a minute by this admin (Retry-After set)" },
         },
       },
     },
@@ -4414,6 +4426,7 @@ const spec = {
           },
           "400": { description: "Invalid ids" },
           "403": { description: "Not ADMIN" },
+          "429": { description: "More than 30 deletes a minute by this admin (Retry-After set)" },
           "409": { description: "A file is not this title's" },
           "502": { description: "The arr failed — possibly part-way, with `deleted` the count already gone" },
         },
@@ -4439,7 +4452,7 @@ const spec = {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, id: { type: "integer", minimum: 1 },
           fileIds: { type: "array", minItems: 1, maxItems: 10000, items: { type: "integer", minimum: 1 } },
         } } } } },
-        responses: { ...ARR_ERRORS, "202": { description: "{ files, commandIds } — queued; commandIds is the arr's id for its RenameFiles command (GET /admin/arr/commands)" }, "400": { description: "Invalid body" }, "403": { description: "Not ADMIN" }, "409": { description: "A file no longer needs renaming" } },
+        responses: { ...ARR_ERRORS, "202": { description: "{ files, commandIds } — queued; commandIds is the arr's id for its RenameFiles command (GET /admin/arr/commands)" }, "400": { description: "Invalid body" }, "403": { description: "Not ADMIN" }, "409": { description: "A file no longer needs renaming" }, "429": { description: "More than 10 renames a minute by this admin (Retry-After set)" } },
       },
     },
 
@@ -4514,7 +4527,7 @@ const spec = {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, id: { type: "integer", minimum: 1 },
           release: { type: "string", pattern: "^[0-9a-f]{32}$" }, season: { type: "integer", minimum: 0 }, episodeId: { type: "integer", minimum: 1 },
         } } } } },
-        responses: { ...ARR_ERRORS, "200": { description: "{ ok: true } — grabbed" }, "400": { description: "Invalid body" }, "403": { description: "Not ADMIN" }, "409": { description: "The indexer or download client refused it (the arr's reason, masked), or a grab of this handle is already in progress (nothing was sent)" }, "410": { description: "Handle expired, from another search, or no longer in the arr's search cache" } },
+        responses: { ...ARR_ERRORS, "200": { description: "{ ok: true } — grabbed" }, "400": { description: "Invalid body" }, "403": { description: "Not ADMIN" }, "409": { description: "The indexer or download client refused it (the arr's reason, masked), or a grab of this handle is already in progress (nothing was sent)" }, "410": { description: "Handle expired, from another search, or no longer in the arr's search cache" }, "429": { description: "More than 20 grabs a minute by this admin (Retry-After set; the handle is not spent)" } },
       },
     },
 
@@ -4592,6 +4605,7 @@ const spec = {
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled, unknown instance, or the arr is older than the /blocklist API (Radarr v3, Sonarr v3 before Aug 2021) — upgrade it; never \"not found\"" },
           "409": { description: "An id is no longer on the blocklist" },
+          "429": { description: "More than 30 removals a minute by this admin (Retry-After set)" },
         },
       },
     },
@@ -4828,7 +4842,7 @@ const spec = {
           "400": { description: "Invalid body, the arr refused, or the indexer doesn't support that use" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled, unknown instance, or no such provider" },
-          "409": { description: "{ warningsOnly: true, messages } — the arr's test only warned" },
+          "409": { description: "{ warningsOnly: true, messages } — the arr's test only warned; or, with acceptWarnings, { error, changed: true } — the provider was edited in the arr while it was tested (nothing saved)" },
           "504": { description: "{ error, provider, timedOut: true } — the save timed out and the arr does not hold it; or { error } alone when the arr timed out anywhere else (reading the provider, re-testing it, or a save that only turns things off) — read the list again to see whether that save landed" },
         },
       },
@@ -5118,6 +5132,21 @@ const spec = {
       },
     },
     "/sync/plex": {
+      get: {
+        tags: ["Admin – Sync"],
+        summary: "Poll a background Plex resync (ADMIN)",
+        description: "The answer of a resync started with `async: true`, for the admin who started it. A CRON_SECRET caller has no jobs.",
+        security: [{ session: [] }],
+        parameters: [
+          { name: "job", in: "query", required: true, schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "The job id from the POST's 202" },
+        ],
+        responses: {
+          "200": { description: "The finished resync's own answer (any of the POST's statuses and bodies)" },
+          "202": { description: "Still running: { job, running: true }" },
+          "403": { description: "Not an admin session" },
+          "404": { description: "{ error } — the job is unknown: expired, another admin's, or dropped by a restart" },
+        },
+      },
       post: {
         tags: ["Admin – Sync"],
         summary: "Sync Plex library",
@@ -5128,9 +5157,11 @@ const spec = {
         requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: {
           full: { type: "boolean", description: "Only `true` selects the full replace; anything else is incremental" },
           instance: { type: "string", description: "Registered Plex instance slug; absent = the default server" },
+          async: { type: "boolean", description: "Admin session only: run as a background job — 202 { job } at once, poll GET ?job=. Default (and always for CRON_SECRET): synchronous" },
         } } } } },
         responses: {
           "200": { description: "{ scanned: { movies, tv }, checked, marked, full }; or { skipped: true, reason } with X-Cron-Skipped when a Plex resync is already running" },
+          "202": { description: "{ job } — `async: true` from an admin: the resync runs in the background" },
           "400": { description: "Malformed or unregistered `instance`, or Plex not configured" },
           "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
           "502": { description: "The Plex library could not be fetched" },
@@ -5139,6 +5170,21 @@ const spec = {
       },
     },
     "/sync/jellyfin": {
+      get: {
+        tags: ["Admin – Sync"],
+        summary: "Poll a background Jellyfin resync (ADMIN)",
+        description: "The answer of a resync started with `async: true`, for the admin who started it. A CRON_SECRET caller has no jobs.",
+        security: [{ session: [] }],
+        parameters: [
+          { name: "job", in: "query", required: true, schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "The job id from the POST's 202" },
+        ],
+        responses: {
+          "200": { description: "The finished resync's own answer (any of the POST's statuses and bodies)" },
+          "202": { description: "Still running: { job, running: true }" },
+          "403": { description: "Not an admin session" },
+          "404": { description: "{ error } — the job is unknown: expired, another admin's, or dropped by a restart" },
+        },
+      },
       post: {
         tags: ["Admin – Sync"],
         summary: "Sync Jellyfin library",
@@ -5148,9 +5194,11 @@ const spec = {
         requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: {
           full: { type: "boolean", description: "Only `true` selects the full replace; anything else is incremental" },
           instance: { type: "string", description: "Registered Jellyfin instance slug; absent = the default server" },
+          async: { type: "boolean", description: "Admin session only: run as a background job — 202 { job } at once, poll GET ?job=. Default (and always for CRON_SECRET): synchronous" },
         } } } } },
         responses: {
           "200": { description: "{ scanned: { movies, tv }, checked, marked, full }; or { skipped: true, reason } with X-Cron-Skipped when a Jellyfin resync is already running" },
+          "202": { description: "{ job } — `async: true` from an admin: the resync runs in the background" },
           "400": { description: "Malformed or unregistered `instance`, or Jellyfin not configured" },
           "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
           "502": { description: "The Jellyfin library could not be fetched" },
@@ -5637,12 +5685,29 @@ const spec = {
     },
 
     "/admin/library-warm": {
+      get: {
+        tags: ["Admin – Stats"],
+        summary: "Poll a background library warm (ADMIN)",
+        description: "The answer of a warm started with `async: true`, for the admin who started it.",
+        parameters: [
+          { name: "job", in: "query", required: true, schema: { type: "string", pattern: "^[0-9a-f]{32}$" }, description: "The job id from the POST's 202" },
+        ],
+        responses: {
+          "200": { description: "The finished warm's own answer (any of the POST's statuses and bodies)" },
+          "202": { description: "Still running: { job, running: true }" },
+          "404": { description: "{ error } — the job is unknown: expired, another admin's, or dropped by a restart" },
+        },
+      },
       post: {
         tags: ["Admin – Stats"],
         summary: "Pre-warm the library cache (ADMIN)",
-        description: "Admin session only (a bare CRON_SECRET bearer is rejected; the cron twin is POST /cron/warm-library). Takes the same advisory lock as that cron, and a 5-minute cooldown claimed inside the lock. Audited CACHE_WARM.",
+        description: "Admin session only (a bare CRON_SECRET bearer is rejected; the cron twin is POST /cron/warm-library). Takes the same advisory lock as that cron, and a 5-minute cooldown claimed inside the lock. Audited CACHE_WARM. No body is the synchronous run; `{ async: true }` answers 202 `{ job }` at once — poll GET `?job=`.",
+        requestBody: { required: false, content: { "application/json": { schema: { type: "object", properties: {
+          async: { type: "boolean", description: "Run as a background job: 202 { job }, poll GET ?job=. Default: synchronous" },
+        } } } } },
         responses: {
           "200": { description: "The prewarm result (counts and durations)" },
+          "202": { description: "{ job } — `async: true`: the warm runs in the background" },
           "409": { description: "{ ok: false, error, retryAfter: 30 } — a library warm is already running (Retry-After: 30)" },
           "429": { description: "{ error } — within 5 minutes of the last warm" },
         },
@@ -6322,7 +6387,7 @@ const spec = {
         summary: "Library items whose TMDB match looks wrong (ADMIN)",
         description: "Apply a fix with POST /admin/fix-match.",
         parameters: [{ name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"] }, description: "LOWERCASE here (unlike most endpoints); anything else lists both" }],
-        responses: { "200": { description: "{ badMatches: [...] }" }, "500": { description: "The scan failed" } },
+        responses: { "200": { description: "{ badMatches: [...], capped } — capped: a library past the 25,000-row cap was only partly compared" }, "500": { description: "The scan failed" } },
       },
     },
     "/discord/status": {

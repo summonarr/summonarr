@@ -1139,6 +1139,18 @@ test("pure: a grab is interactive when any grab of its download says releaseSour
   assert.equal(replace.isInteractiveGrab("sonarr", 21, null, grab), false);
 });
 
+test("pure: a download id longer than the projection keeps is still matched — the raw record is compared as the projection stored it", async () => {
+  const { DOWNLOAD_ID_MAX } = await import("../src/lib/arr-history.ts");
+  // A torrent client's id can be long (a magnet's info hash plus a tracker suffix).
+  const longId = "D".repeat(DOWNLOAD_ID_MAX + 50);
+  const record = { ...SERIES_HISTORY[3], downloadId: longId };
+  const [grab] = projectHistoryRecords("sonarr", "", [record]);
+  assert.equal(grab.downloadId?.length, DOWNLOAD_ID_MAX, "the projection truncates");
+  assert.equal(replace.isInteractiveGrab("sonarr", 21, [{ ...record, data: { releaseSource: "InteractiveSearch" } }], grab), true);
+  // A different download id still never matches.
+  assert.equal(replace.isInteractiveGrab("sonarr", 21, [{ ...record, downloadId: `X${longId}`, data: { releaseSource: "InteractiveSearch" } }], grab), false);
+});
+
 test("markFailed on a grab picked by hand while Redownload Failed from Interactive Search is OFF: blocklisted, and searched for here", async () => {
   const token = await mintSession();
   issueRow = { ...SEASON_ISSUE };

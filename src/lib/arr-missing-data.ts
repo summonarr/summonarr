@@ -3,9 +3,10 @@
 // judged by the pure rules in arr-missing.ts. Every call goes through
 // arrFetch (guardrail 5). Nothing is cached and nothing is written.
 import { arrErrorKind, arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
-import { commandIdsOf, postArrCommand } from "./arr-admin";
+import { ArrInstanceError, commandIdsOf, configuredArrCfg, postArrCommand } from "./arr-admin";
 import type { ArrErrorKind } from "./arr-error-kind";
 import { getSyncableArrInstances } from "./arr-instance-registry";
+import { pagedReadEnded } from "./arr-parse";
 import { settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
@@ -88,23 +89,18 @@ async function cachedPosterPaths(mediaType: "MOVIE" | "TV", tmdbIds: number[]): 
   return out;
 }
 
-// `read` fetches one instance's raw listing and judges it; the default is the
-// Missing mode's single library listing.
+// `read` fetches one instance's raw listing and judges it.
 async function loadReport<T extends { tmdbId: number | null; posterPath: string | null }>(
   service: MissingService,
-  judge: (rows: unknown[], instance: string) => T[],
-  read?: (cfg: ArrCfg, instance: string) => Promise<T[]>,
+  read: (cfg: ArrCfg, instance: string) => Promise<T[]>,
 ): Promise<MissingReport<T>> {
   const enabled = await isFeatureEnabled(`feature.integration.${service}`);
   const configured = enabled ? await getSyncableArrInstances(service) : [];
   const instances = configured.map((i) => ({ slug: i.slug, name: i.name }));
-  const path = service === "radarr" ? "/api/v3/movie" : "/api/v3/series";
   const settled = await settleLimit(instances, LISTING_CONCURRENCY, async (inst) => {
     const cfg = await getArrCfg(service, inst.slug);
     if (!cfg) throw new Error("not configured");
-    if (read) return read(cfg, inst.slug);
-    const rows = await arrFetch<unknown>(cfg, path);
-    return judge(Array.isArray(rows) ? rows : [], inst.slug);
+    return read(cfg, inst.slug);
   });
 
   const report: MissingReport<T> = { service, enabled, instances, errors: [], items: [] };
@@ -136,17 +132,25 @@ async function loadReport<T extends { tmdbId: number | null; posterPath: string 
   return report;
 }
 
+// The Missing mode's reader: the instance's one library listing, judged.
+function listAndJudge<T>(path: "/api/v3/movie" | "/api/v3/series", judge: (rows: unknown[], instance: string) => T[]) {
+  return async (cfg: ArrCfg, instance: string): Promise<T[]> => {
+    const rows = await arrFetch<unknown>(cfg, path);
+    return judge(Array.isArray(rows) ? rows : [], instance);
+  };
+}
+
 // Most recently released first: a title that should have arrived last week is
 // the likeliest to still be in flight, the oldest are the stuck ones at the end.
 export async function loadMissingMovies(now: Date): Promise<MissingReport<MissingMovie>> {
   const nowMs = now.getTime();
-  const report = await loadReport<MissingMovie>("radarr", (rows, instance) => missingMovieList(rows, instance, nowMs));
+  const report = await loadReport("radarr", listAndJudge("/api/v3/movie", (rows, instance) => missingMovieList(rows, instance, nowMs)));
   report.items.sort((a, b) => b.releasedAt.localeCompare(a.releasedAt) || a.title.localeCompare(b.title));
   return report;
 }
 
 export async function loadMissingSeries(): Promise<MissingReport<MissingSeries>> {
-  const report = await loadReport<MissingSeries>("sonarr", (rows, instance) => missingSeriesList(rows, instance));
+  const report = await loadReport("sonarr", listAndJudge("/api/v3/series", (rows, instance) => missingSeriesList(rows, instance)));
   report.items.sort((a, b) => (b.lastAired ?? "").localeCompare(a.lastAired ?? "") || a.title.localeCompare(b.title));
   return report;
 }
@@ -158,14 +162,17 @@ export const CUTOFF_PAGE_SIZE = 500;
 export const CUTOFF_MAX_PAGES = 40;
 
 // `truncated` when the ceiling — not the end of the list — stopped the read:
-// the arr reported more records than were read. Sonarr's listing is per
-// EPISODE, so a raised cutoff on a large library can reach it; the series
-// past it would otherwise vanish from the page with nothing saying so.
+// the arr reported more records than were read, or (reporting no total) its
+// last page read was still full. Sonarr's listing is per EPISODE, so a raised
+// cutoff on a large library can reach it; the series past it would otherwise
+// vanish from the page with nothing saying so. With no total from the arr,
+// `total` is the records read (a lower bound) — never 0, which once ended the
+// read after page 1 and called it complete.
 // Exported for its bounds pin (tests/arr-projection-bounds.test.mts).
 export async function readCutoffPages(cfg: ArrCfg, service: MissingService): Promise<{ records: unknown[]; total: number; truncated: boolean }> {
   const include = service === "sonarr" ? "&includeSeries=true&includeEpisodeFile=true" : "";
   const records: unknown[] = [];
-  let total = 0;
+  let total: number | null = null;
   let reachedEnd = false;
   for (let page = 1; page <= CUTOFF_MAX_PAGES; page++) {
     const res = await arrFetch<{ records?: unknown; totalRecords?: unknown }>(
@@ -176,13 +183,13 @@ export async function readCutoffPages(cfg: ArrCfg, service: MissingService): Pro
     // one by one: a spread push of a hostile page past ~125k records throws
     // RangeError, and an uncapped page would let one answer outgrow the page cap.
     for (const r of batch.slice(0, CUTOFF_PAGE_SIZE)) records.push(r);
-    total = typeof res?.totalRecords === "number" ? res.totalRecords : 0;
-    if (batch.length === 0 || page * CUTOFF_PAGE_SIZE >= total) {
+    total = typeof res?.totalRecords === "number" && Number.isFinite(res.totalRecords) ? res.totalRecords : null;
+    if (pagedReadEnded(page, CUTOFF_PAGE_SIZE, batch.length, res?.totalRecords)) {
       reachedEnd = true;
       break;
     }
   }
-  return { records, total, truncated: !reachedEnd && total > records.length };
+  return { records, total: total ?? records.length, truncated: !reachedEnd && (total === null || total > records.length) };
 }
 
 type CutoffTruncation = NonNullable<MissingReport<unknown>["truncated"]>;
@@ -208,7 +215,7 @@ function withTruncation<T>(report: MissingReport<T>, truncated: CutoffTruncation
 /** Radarr movies whose file is below the profile cutoff, monitored only, by title. */
 export async function loadCutoffMovies(): Promise<MissingReport<CutoffMovie>> {
   const truncated: CutoffTruncation = [];
-  const report = await loadReport<CutoffMovie>("radarr", () => [], async (cfg, instance) => {
+  const report = await loadReport<CutoffMovie>("radarr", async (cfg, instance) => {
     const [listing, profiles] = await Promise.all([readCutoffPages(cfg, "radarr"), readProfiles(cfg)]);
     const out: CutoffMovie[] = [];
     const seen = new Set<number>();
@@ -230,7 +237,7 @@ export async function loadCutoffMovies(): Promise<MissingReport<CutoffMovie>> {
 /** Sonarr series with monitored episodes below the profile cutoff, most episodes first. */
 export async function loadCutoffSeries(): Promise<MissingReport<CutoffSeries>> {
   const truncated: CutoffTruncation = [];
-  const report = await loadReport<CutoffSeries>("sonarr", () => [], async (cfg, instance) => {
+  const report = await loadReport<CutoffSeries>("sonarr", async (cfg, instance) => {
     const [listing, profiles] = await Promise.all([readCutoffPages(cfg, "sonarr"), readProfiles(cfg)]);
     const out = cutoffSeriesFromEpisodes(listing.records as SonarrCutoffRecord[], instance, profiles);
     if (listing.truncated) truncated.push({ instance, read: listing.records.length, total: listing.total });
@@ -246,13 +253,15 @@ export class NothingMissingError extends Error {}
 
 // The instance must be a CONFIGURED one — a slug is never turned into a
 // Setting-key read for an instance the registry doesn't list (a de-registered
-// instance's keys can outlive it).
-async function configuredCfg(service: MissingService, instance: string) {
-  const configured = await getSyncableArrInstances(service);
-  if (!configured.some((i) => i.slug === instance)) throw new MissingInstanceError(instance);
-  const cfg = await getArrCfg(service, instance);
-  if (!cfg) throw new MissingInstanceError(instance);
-  return cfg;
+// instance's keys can outlive it; configuredArrCfg), refused here as this
+// module's own error.
+async function configuredCfg(service: MissingService, instance: string): Promise<ArrCfg> {
+  try {
+    return await configuredArrCfg(service, instance);
+  } catch (err) {
+    if (err instanceof ArrInstanceError) throw new MissingInstanceError(instance);
+    throw err;
+  }
 }
 
 /** No series with that tvdb id is on the instance (deleted there, or never added). */

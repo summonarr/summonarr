@@ -49,23 +49,65 @@ export const PLEX_STALL_THRESHOLD_MS = 60_000;
 // 5s poller's route chunk, each with its own module instance. A plain Map gave
 // the SSE managers started at boot a ledger the poller never read, so a stop
 // they finalized left the poller free to re-create the ghost row.
+//
+// Each entry also carries the playhead the 5s POLLER last saw for the key (null
+// until it has seen one): a ghost's playhead is frozen, so a key whose playhead
+// moves again has resumed — see isFinalizedPlexGhost.
+type FinalizedEntry = { at: number; progressMs: number | null };
 const recentlyFinalizedPlexSessions = processSingleton(
-  "plex-events:recentlyFinalized",
-  () => new Map<string, number>(),
+  "plex-events:finalizedLedger",
+  () => new Map<string, FinalizedEntry>(),
 );
 const RECENTLY_FINALIZED_TTL_MS = 60 * 60 * 1000;
 
-export function markPlexSessionFinalized(id: string, nowMs: number = Date.now()): void {
-  recentlyFinalizedPlexSessions.set(id, nowMs);
+// `progressMs` is the playhead the poller observed when it finalized (its stall
+// path); writers that never saw one through /status/sessions leave it null.
+export function markPlexSessionFinalized(
+  id: string,
+  nowMs: number = Date.now(),
+  progressMs: number | null = null,
+): void {
+  recentlyFinalizedPlexSessions.set(id, { at: nowMs, progressMs });
 }
 
 export function isPlexSessionRecentlyFinalized(id: string): boolean {
   return recentlyFinalizedPlexSessions.has(id);
 }
 
+/**
+ * The poller's gate for a ledgered key Plex still lists: true while it still
+ * looks like the ghost of the finalized play, false once it has resumed.
+ *
+ * A ghost's playhead is frozen (guardrail 20), so the key stays suppressed while
+ * the reported viewOffset hasn't `moved` from where the poller last saw it. Once
+ * it has, the play resumed under the same sessionKey (a stall finalize of a
+ * stream that was only slow to report): the entry is released, so the poller
+ * starts a new row instead of losing the rest of the watch for the 1h TTL.
+ *
+ * A key ledgered without a poller observation (an SSE stop, an absence or
+ * bootstrap sweep) is only baselined on its first sighting: SSE's offset runs
+ * ahead of /status/sessions, so comparing a ghost's lagging snapshot against it
+ * would read as movement. `moved` is the poller's own movement rule.
+ */
+export function isFinalizedPlexGhost(
+  id: string,
+  viewOffset: number,
+  moved: (fromMs: number, toMs: number) => boolean,
+): boolean {
+  const entry = recentlyFinalizedPlexSessions.get(id);
+  if (!entry) return false;
+  if (entry.progressMs === null) {
+    entry.progressMs = viewOffset;
+    return true;
+  }
+  if (!moved(entry.progressMs, viewOffset)) return true;
+  recentlyFinalizedPlexSessions.delete(id);
+  return false;
+}
+
 export function pruneRecentlyFinalized(nowMs: number): void {
-  for (const [id, finalizedAt] of recentlyFinalizedPlexSessions) {
-    if (nowMs - finalizedAt > RECENTLY_FINALIZED_TTL_MS) {
+  for (const [id, entry] of recentlyFinalizedPlexSessions) {
+    if (nowMs - entry.at > RECENTLY_FINALIZED_TTL_MS) {
       recentlyFinalizedPlexSessions.delete(id);
     }
   }
@@ -187,6 +229,153 @@ const MAX_NOTIFICATIONS_PER_FRAME = 256;
 // keep the size-cap accumulator and any undici-side state fresh.
 const PERIODIC_RECYCLE_MS = 22 * 60 * 60 * 1000;
 
+// One SSE frame's event name and its data lines joined with "\n", or null when
+// it carries no data (a comment or keep-alive frame).
+function parseSseFrame(frame: string): { event: string; data: string } | null {
+  let event = "";
+  const dataParts: string[] = [];
+  for (const rawLine of frame.split("\n")) {
+    const line = rawLine.trimEnd();
+    if (!line || line.startsWith(":")) continue;
+    const colonIdx = line.indexOf(":");
+    const field = colonIdx === -1 ? line : line.slice(0, colonIdx);
+    // Per SSE spec, a single leading space after the colon is stripped.
+    let value = colonIdx === -1 ? "" : line.slice(colonIdx + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") event = value;
+    else if (field === "data") dataParts.push(value);
+  }
+  return dataParts.length === 0 ? null : { event, data: dataParts.join("\n") };
+}
+
+// A notification's viewOffset as a stored progressMs; null when it is missing,
+// non-finite or negative, and then no progressMs is written. The guardrail-20
+// movement check compares this exact value with the stored one.
+function toProgressMs(viewOffset: number | undefined): bigint | null {
+  return viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
+    ? BigInt(Math.floor(viewOffset))
+    : null;
+}
+
+// Debounce + dispatch for the scanner-triggered library re-sync, one per
+// manager. Plex emits a TimelineEntry per touched item; coalescing inside this
+// window keeps a full re-scan from N+1ing /api/sync. The trigger fires HTTP to
+// the local sync route with the cron bearer token — exactly the same path the
+// external cron uses, so observability + auth stay consistent.
+//
+// Three clocks bound the dispatch (see the constants for the why):
+//   debounce — fire TIMELINE_RESYNC_DEBOUNCE_MS after the LAST event;
+//   max wait — but no later than TIMELINE_RESYNC_MAX_WAIT_MS after the FIRST
+//              event of the burst, so a continuous stream cannot starve it;
+//   cooldown — and no sooner than TIMELINE_RESYNC_COOLDOWN_MS after the
+//              previous run this manager dispatched, so a long scan yields
+//              one trailing run per cooldown instead of one per lull.
+class LibraryResyncScheduler {
+  // Whether the owning manager is still running; checked on re-arm and on fire.
+  // Declared + assigned in the constructor body (erasable syntax only).
+  private readonly isRunning: () => boolean;
+  private readonly label: () => string;
+  private resyncTimer: ReturnType<typeof setTimeout> | null = null;
+  // Absolute latest fire time for the burst currently being coalesced.
+  private resyncDeadline = 0;
+  // When this manager last dispatched a trigger that actually RAN (0 = never).
+  private lastResyncFiredAt = 0;
+  // Consecutive "skipped" re-arms for the burst currently waiting on the
+  // orchestrator lock. Reset whenever a trigger actually runs.
+  //
+  // The re-arm below is rate-bounded (one probe per debounce window) but was not
+  // COUNT-bounded, so a long run was shadowed by a 30-second poll for its entire
+  // duration. Each probe is a loopback POST that reaches pg_try_advisory_lock,
+  // and withAdvisoryLock opens its own dedicated `new Client()` for that — so a
+  // 20-minute run cost ~40 Postgres connect/disconnect cycles to learn nothing,
+  // on a box already reporting "Unable to start a transaction in the given time".
+  // Past the cap the trigger simply waits for the ordinary cooldown, which loses
+  // nothing: the run currently holding the lock is itself a full library sync.
+  private resyncSkipStreak = 0;
+
+  constructor(isRunning: () => boolean, label: () => string) {
+    this.isRunning = isRunning;
+    this.label = label;
+  }
+
+  // Called by the manager's stop() (token/URL change, tracking off, de-registration).
+  cancel(): void {
+    if (this.resyncTimer) {
+      clearTimeout(this.resyncTimer);
+      this.resyncTimer = null;
+    }
+  }
+
+  requestLibraryResync(): void {
+    // A trigger that resolved "skipped" re-arms this AFTER an await, by which
+    // point stop() may have run (play-history disabled, instance de-registered
+    // or re-pointed) — stop() clears the timer, but it cannot reach a re-arm
+    // that happens later. Without this guard the re-arm resurrects a timer on a
+    // manager no longer in the map and fires an uncancellable full sync nobody
+    // requested; if the lock is still held it re-arms again, forever.
+    if (!this.isRunning()) return;
+    const now = Date.now();
+    // Past the cap, fall back to the plain cooldown floor rather than the
+    // debounce — stop polling, keep the pending resync.
+    const capped = this.resyncSkipStreak >= MAX_RESYNC_SKIP_RETRIES;
+    const notBefore = this.lastResyncFiredAt + TIMELINE_RESYNC_COOLDOWN_MS;
+    // Past the cap an already-armed timer IS the pending resync — keep it. The
+    // capped fireAt below is not clamped by resyncDeadline, so clearing and
+    // re-arming it on every timeline frame pushed it a full cooldown out per
+    // event, and a continuous scan starved it until the stream went quiet.
+    if (capped && this.resyncTimer) return;
+    if (this.resyncTimer) {
+      clearTimeout(this.resyncTimer);
+    } else {
+      this.resyncDeadline = Math.max(now + TIMELINE_RESYNC_MAX_WAIT_MS, notBefore);
+    }
+    const fireAt = capped
+      ? Math.max(now + TIMELINE_RESYNC_COOLDOWN_MS, notBefore)
+      : Math.min(Math.max(now + TIMELINE_RESYNC_DEBOUNCE_MS, notBefore), this.resyncDeadline);
+    this.resyncTimer = setTimeout(() => {
+      this.resyncTimer = null;
+      // Re-check liveness at fire time too: a stop() between arming and firing
+      // clears resyncTimer, but a timer armed and fired within one tick could
+      // still slip through — never dispatch a sync for a stopped manager.
+      if (!this.isRunning()) return;
+      const previousFiredAt = this.lastResyncFiredAt;
+      this.lastResyncFiredAt = Date.now();
+      void this.triggerLibrarySync(previousFiredAt);
+    }, Math.max(0, fireAt - now));
+  }
+
+  private async triggerLibrarySync(previousFiredAt: number): Promise<void> {
+    // Uses the single allowed internal loopback trigger (see src/lib/internal-trigger.ts
+    // and CLAUDE.md guardrail 5b), so the run goes through the same /api/sync path
+    // as the external cron: auth, advisory lock, orchestrator, audit recording.
+    try {
+      const result = await triggerFullSync();
+      // Only a trigger that RAN starts a cooldown. A "skipped" (advisory lock
+      // held by a cron/admin/previous run) or "failed" trigger did no work, so
+      // the stamp rolls back — otherwise a lock race would silently push the
+      // next change out by a whole cooldown.
+      if (result !== "ran") this.lastResyncFiredAt = previousFiredAt;
+      // Streak tracks CONSECUTIVE skips only: a trigger that ran means the lock
+      // was free, so the next burst starts from a clean slate.
+      this.resyncSkipStreak = result === "skipped" ? this.resyncSkipStreak + 1 : 0;
+      // "skipped" = the orchestrator's advisory lock was held (an in-flight
+      // cron/admin/previous-SSE run). Dropping the trigger there made the
+      // library change wait up to SYNC_INTERVAL (1h) — re-arm the debounce so
+      // it retries once the ~minutes-long run releases the lock. Bounded: each
+      // retry is one cheap loopback probe per debounce window, and stop()
+      // tears the timer down. "failed" is NOT re-armed (triggerFullSync
+      // already warned; a broken loopback would retry forever).
+      if (result === "skipped") {
+        this.requestLibraryResync();
+      }
+    } catch (err) {
+      // triggerFullSync already swallows and warns; this is defensive.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[plex-events] ${this.label()} timeline-triggered library sync failed: ${msg}`);
+    }
+  }
+}
+
 class PlexEventStreamManager {
   // Which Plex instance this manager serves ("" = the default server). One
   // manager per registry slug — see the `managers` map at the bottom.
@@ -198,7 +387,11 @@ class PlexEventStreamManager {
   private abortController: AbortController | null = null;
   private backoffMs = INITIAL_BACKOFF_MS;
   private running = false;
-  private loopPromise: Promise<void> | null = null;
+  // Set once this manager has left the map for good (tracking switched off, or
+  // its slug de-registered). A reconcile suspended on its settings read when
+  // that happened would otherwise resume and start a stream nothing can reach.
+  private disposed = false;
+  private readonly resync: LibraryResyncScheduler;
   // Coalesce concurrent reconcile() callers (boot + sync route + future paths)
   // so they can't both pass the "is anything changing?" check and end up each
   // calling stop() + start a new runLoop, leaving two SSE connections alive.
@@ -214,6 +407,7 @@ class PlexEventStreamManager {
 
   constructor(instance: MediaInstanceKey) {
     this.instance = instance;
+    this.resync = new LibraryResyncScheduler(() => this.running, () => this.label());
   }
 
   // Short per-instance tag for warn lines: "plex" for the default server
@@ -223,6 +417,7 @@ class PlexEventStreamManager {
   }
 
   async reconcile(): Promise<void> {
+    if (this.disposed) return;
     if (this.reconciling) {
       this.reconcilePending = true;
       return;
@@ -255,6 +450,9 @@ class PlexEventStreamManager {
         select: { key: true, value: true },
       }),
     ]);
+    // Disposed while that read was in flight: this manager is no longer in the
+    // map, so a stream started now could never be stopped.
+    if (this.disposed) return;
 
     const settingMap = new Map(settings.map((r) => [r.key, r.value]));
     const url = settingMap.get(urlKey)?.replace(/\/$/, "") ?? null;
@@ -276,7 +474,7 @@ class PlexEventStreamManager {
     this.currentToken = token;
     this.running = true;
     this.backoffMs = INITIAL_BACKOFF_MS;
-    this.loopPromise = this.runLoop().catch((err) => {
+    void this.runLoop().catch((err) => {
       console.warn(`[plex-events] ${this.label()} loop crashed:`, err);
       // Clear the state doReconcile checks so the next 5s reconcile restarts the
       // stream — otherwise `running` stays true and every future reconcile
@@ -289,23 +487,28 @@ class PlexEventStreamManager {
     });
   }
 
-  // Not private: also called by the map reconcile at the bottom when this
-  // manager's slug leaves the instance registry.
-  stop(): void {
+  private stop(): void {
     this.running = false;
     this.loopGeneration++;
     this.abortController?.abort();
     this.abortController = null;
     // Cancel any pending debounced resync so a stop() (token/URL change) doesn't
     // still fire a full sync after the stream is torn down.
-    if (this.resyncTimer) {
-      clearTimeout(this.resyncTimer);
-      this.resyncTimer = null;
-    }
+    this.resync.cancel();
     if (this.snapshotThrottleTimer) {
       clearTimeout(this.snapshotThrottleTimer);
       this.snapshotThrottleTimer = null;
     }
+    // A restarted stream starts fresh chains; ops already running finish on their own.
+    this.sessionQueues.clear();
+  }
+
+  // Stop for good: called when this manager leaves the map (the map reconcile
+  // when its slug leaves the registry, stopAllPlexEventStreams). Any reconcile
+  // still in flight then returns instead of starting a stream.
+  dispose(): void {
+    this.disposed = true;
+    this.stop();
   }
 
   private async runLoop(): Promise<void> {
@@ -550,27 +753,30 @@ class PlexEventStreamManager {
   }
 
   private handleFrame(frame: string): void {
-    let eventType = "";
-    const dataParts: string[] = [];
-    for (const rawLine of frame.split("\n")) {
-      const line = rawLine.trimEnd();
-      if (!line || line.startsWith(":")) continue;
-      const colonIdx = line.indexOf(":");
-      const field = colonIdx === -1 ? line : line.slice(0, colonIdx);
-      // Per SSE spec, a single leading space after the colon is stripped.
-      let value = colonIdx === -1 ? "" : line.slice(colonIdx + 1);
-      if (value.startsWith(" ")) value = value.slice(1);
-      if (field === "event") eventType = value;
-      else if (field === "data") dataParts.push(value);
+    const parsed = parseSseFrame(frame);
+    if (!parsed) return;
+    if (parsed.event === "playing") {
+      this.handlePlaying(parsed.data);
+    } else if (parsed.event === "timeline") {
+      this.handleTimeline(parsed.data);
     }
+  }
 
-    if (dataParts.length === 0) return;
-
-    if (eventType === "playing") {
-      this.handlePlaying(dataParts.join("\n"));
-    } else if (eventType === "timeline") {
-      this.handleTimeline(dataParts.join("\n"));
-    }
+  // Per-session op queue. Each SSE write is a read-then-write, and two
+  // notifications for one session fired unordered could commit out of order (a
+  // "paused" landing after the "playing" that followed it). Every op for an id
+  // runs after the previous one for that id has settled.
+  private sessionQueues = new Map<string, Promise<void>>();
+  private enqueueSessionOp(sessionKey: string, op: () => Promise<void>): void {
+    const id = activeSessionId("plex", this.instance, sessionKey);
+    const tail = (this.sessionQueues.get(id) ?? Promise.resolve()).then(op).catch((err) => {
+      // Both ops catch their own failures; this only guards the chain.
+      console.warn(`[plex-events] ${this.label()} session update failed for ${id}:`, err);
+    });
+    this.sessionQueues.set(id, tail);
+    void tail.then(() => {
+      if (this.sessionQueues.get(id) === tail) this.sessionQueues.delete(id);
+    });
   }
 
   private handlePlaying(payload: string): void {
@@ -592,19 +798,21 @@ class PlexEventStreamManager {
     ).slice(0, MAX_NOTIFICATIONS_PER_FRAME);
 
     for (const n of notifications) {
-      if (!n.sessionKey) continue;
-      if (n.state === "stopped") {
+      const sessionKey = n.sessionKey;
+      if (!sessionKey) continue;
+      const { state, viewOffset } = n;
+      if (state === "stopped") {
         // viewOffset is the playhead position at stop. Pass it through so the
         // PlayHistory row's progressMs reflects where the user actually left
         // off, not the last 5s-poll snapshot which can lag.
-        void this.finalizeStopped(n.sessionKey, n.viewOffset);
-      } else if (n.state === "playing" || n.state === "paused" || n.state === "buffering") {
+        this.enqueueSessionOp(sessionKey, () => this.finalizeStopped(sessionKey, viewOffset));
+      } else if (state === "playing" || state === "paused" || state === "buffering") {
         // Non-stop state transitions: update ActiveSession.state in near
         // realtime so the Now Playing card flips between PLAYING / PAUSED /
         // BUFFERING within ~1s instead of waiting up to 5s for the next poll.
         // The 5s poller is still authoritative for progressMs, playtimeMs
         // accumulation, and full metadata refresh.
-        void this.applyLiveStateUpdate(n.sessionKey, n.state, n.viewOffset);
+        this.enqueueSessionOp(sessionKey, () => this.applyLiveStateUpdate(sessionKey, state, viewOffset));
       }
     }
   }
@@ -640,7 +848,7 @@ class PlexEventStreamManager {
       }
     }
     if (materialChange) {
-      this.requestLibraryResync();
+      this.resync.requestLibraryResync();
     }
   }
 
@@ -670,105 +878,6 @@ class PlexEventStreamManager {
         console.warn("[plex-events] sessions snapshot emit failed:", err instanceof Error ? err.message : err),
       );
     }, SNAPSHOT_THROTTLE_MS - elapsed);
-  }
-
-  // Debounce + dispatch for the scanner-triggered library re-sync. Plex emits
-  // a TimelineEntry per touched item; coalescing inside this window keeps a
-  // full re-scan from N+1ing /api/sync. The trigger fires HTTP to the local
-  // sync route with the cron bearer token — exactly the same path the
-  // external cron uses, so observability + auth stay consistent.
-  //
-  // Three clocks bound the dispatch (see the constants for the why):
-  //   debounce — fire TIMELINE_RESYNC_DEBOUNCE_MS after the LAST event;
-  //   max wait — but no later than TIMELINE_RESYNC_MAX_WAIT_MS after the FIRST
-  //              event of the burst, so a continuous stream cannot starve it;
-  //   cooldown — and no sooner than TIMELINE_RESYNC_COOLDOWN_MS after the
-  //              previous run this manager dispatched, so a long scan yields
-  //              one trailing run per cooldown instead of one per lull.
-  private resyncTimer: ReturnType<typeof setTimeout> | null = null;
-  // Absolute latest fire time for the burst currently being coalesced.
-  private resyncDeadline = 0;
-  // When this manager last dispatched a trigger that actually RAN (0 = never).
-  private lastResyncFiredAt = 0;
-  // Consecutive "skipped" re-arms for the burst currently waiting on the
-  // orchestrator lock. Reset whenever a trigger actually runs.
-  //
-  // The re-arm below is rate-bounded (one probe per debounce window) but was not
-  // COUNT-bounded, so a long run was shadowed by a 30-second poll for its entire
-  // duration. Each probe is a loopback POST that reaches pg_try_advisory_lock,
-  // and withAdvisoryLock opens its own dedicated `new Client()` for that — so a
-  // 20-minute run cost ~40 Postgres connect/disconnect cycles to learn nothing,
-  // on a box already reporting "Unable to start a transaction in the given time".
-  // Past the cap the trigger simply waits for the ordinary cooldown, which loses
-  // nothing: the run currently holding the lock is itself a full library sync.
-  private resyncSkipStreak = 0;
-  private requestLibraryResync(): void {
-    // A trigger that resolved "skipped" re-arms this AFTER an await, by which
-    // point stop() may have run (play-history disabled, instance de-registered
-    // or re-pointed) — stop() clears the timer, but it cannot reach a re-arm
-    // that happens later. Without this guard the re-arm resurrects a timer on a
-    // manager no longer in the map and fires an uncancellable full sync nobody
-    // requested; if the lock is still held it re-arms again, forever.
-    if (!this.running) return;
-    const now = Date.now();
-    // Past the cap, fall back to the plain cooldown floor rather than the
-    // debounce — stop polling, keep the pending resync.
-    const capped = this.resyncSkipStreak >= MAX_RESYNC_SKIP_RETRIES;
-    const notBefore = this.lastResyncFiredAt + TIMELINE_RESYNC_COOLDOWN_MS;
-    // Past the cap an already-armed timer IS the pending resync — keep it. The
-    // capped fireAt below is not clamped by resyncDeadline, so clearing and
-    // re-arming it on every timeline frame pushed it a full cooldown out per
-    // event, and a continuous scan starved it until the stream went quiet.
-    if (capped && this.resyncTimer) return;
-    if (this.resyncTimer) {
-      clearTimeout(this.resyncTimer);
-    } else {
-      this.resyncDeadline = Math.max(now + TIMELINE_RESYNC_MAX_WAIT_MS, notBefore);
-    }
-    const fireAt = capped
-      ? Math.max(now + TIMELINE_RESYNC_COOLDOWN_MS, notBefore)
-      : Math.min(Math.max(now + TIMELINE_RESYNC_DEBOUNCE_MS, notBefore), this.resyncDeadline);
-    this.resyncTimer = setTimeout(() => {
-      this.resyncTimer = null;
-      // Re-check liveness at fire time too: a stop() between arming and firing
-      // clears resyncTimer, but a timer armed and fired within one tick could
-      // still slip through — never dispatch a sync for a stopped manager.
-      if (!this.running) return;
-      const previousFiredAt = this.lastResyncFiredAt;
-      this.lastResyncFiredAt = Date.now();
-      void this.triggerLibrarySync(previousFiredAt);
-    }, Math.max(0, fireAt - now));
-  }
-
-  private async triggerLibrarySync(previousFiredAt: number): Promise<void> {
-    // Uses the single allowed internal loopback trigger (see src/lib/internal-trigger.ts
-    // and CLAUDE.md guardrail 5b), so the run goes through the same /api/sync path
-    // as the external cron: auth, advisory lock, orchestrator, audit recording.
-    try {
-      const result = await triggerFullSync();
-      // Only a trigger that RAN starts a cooldown. A "skipped" (advisory lock
-      // held by a cron/admin/previous run) or "failed" trigger did no work, so
-      // the stamp rolls back — otherwise a lock race would silently push the
-      // next change out by a whole cooldown.
-      if (result !== "ran") this.lastResyncFiredAt = previousFiredAt;
-      // Streak tracks CONSECUTIVE skips only: a trigger that ran means the lock
-      // was free, so the next burst starts from a clean slate.
-      this.resyncSkipStreak = result === "skipped" ? this.resyncSkipStreak + 1 : 0;
-      // "skipped" = the orchestrator's advisory lock was held (an in-flight
-      // cron/admin/previous-SSE run). Dropping the trigger there made the
-      // library change wait up to SYNC_INTERVAL (1h) — re-arm the debounce so
-      // it retries once the ~minutes-long run releases the lock. Bounded: each
-      // retry is one cheap loopback probe per debounce window, and stop()
-      // tears the timer down. "failed" is NOT re-armed (triggerFullSync
-      // already warned; a broken loopback would retry forever).
-      if (result === "skipped") {
-        this.requestLibraryResync();
-      }
-    } catch (err) {
-      // triggerFullSync already swallows and warns; this is defensive.
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[plex-events] ${this.label()} timeline-triggered library sync failed: ${msg}`);
-    }
   }
 
   // Last reachability value this process persisted. Guards the upsert + SSE
@@ -850,18 +959,14 @@ class PlexEventStreamManager {
       // strict forward advance misses backward seeks and lets the anchor go
       // stale on an actively-scrubbed stream. A frozen ghost never emits SSE
       // events at all, so refreshing on movement here cannot keep one alive.
-      const playheadMoved =
-        viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
-          ? BigInt(Math.floor(viewOffset)) !== prior.progressMs
-          : false;
+      const progressMs = toProgressMs(viewOffset);
+      const playheadMoved = progressMs !== null && progressMs !== prior.progressMs;
 
       const result = await prisma.activeSession.updateMany({
         where: { id },
         data: {
           state,
-          ...(viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
-            ? { progressMs: BigInt(Math.floor(viewOffset)) }
-            : {}),
+          ...(progressMs !== null ? { progressMs } : {}),
           ...(transitionedToPlaying || playheadMoved ? { progressUpdatedAt: new Date() } : {}),
         },
       });
@@ -946,11 +1051,8 @@ class PlexEventStreamManager {
       if ((await this.stillReportedByPlex(sessionKey)) === "present") return;
 
       const now = new Date();
-      const finalized = applyFinalTick(existing, now, {
-        ...(viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
-          ? { progressMs: BigInt(Math.floor(viewOffset)) }
-          : {}),
-      });
+      const progressMs = toProgressMs(viewOffset);
+      const finalized = applyFinalTick(existing, now, progressMs !== null ? { progressMs } : {});
 
       await recordCompletedSession(finalized, { stoppedAt: now });
 
@@ -1018,7 +1120,7 @@ async function reconcileManagerMap(): Promise<void> {
       // connection Setting rows may well still exist — that's fine; registry
       // removal is the only map-level removal trigger, and nothing re-creates
       // the manager while the slug is unregistered.
-      mgr.stop();
+      mgr.dispose();
       managers.delete(slug);
     }
   }
@@ -1042,9 +1144,11 @@ async function reconcileManagerMap(): Promise<void> {
 // therefore kept receiving Plex timeline events and writing PlayHistory + ActiveSession
 // rows after an admin had explicitly disabled tracking. Idempotent: a no-op once empty,
 // and the next enabled poll re-creates the managers through the normal reconcile.
+// dispose(), not stop(): a manager's reconcile can be suspended on its settings
+// read right now, and must not resume into a stream once it is out of the map.
 export function stopAllPlexEventStreams(): void {
   for (const [slug, mgr] of managers) {
-    mgr.stop();
+    mgr.dispose();
     managers.delete(slug);
   }
 }

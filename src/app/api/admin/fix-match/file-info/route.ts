@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { arrErrorMessage, arrFetch } from "@/lib/arr";
 import { configuredArrCfg, enabledArrInstances } from "@/lib/arr-admin";
 import { cachedArrList, cachedTmdbTitle, normaliseLibraryPath, pathWithin } from "@/lib/fix-match-shared";
-import { getCache } from "@/lib/tmdb-cache";
+import { cachedArrNameIndex } from "@/lib/bad-matches";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { libraryPathFor } from "@/lib/library-path-view";
@@ -132,23 +132,22 @@ export const GET = withIssueAdmin(async (request, _ctx, session) => {
       const folderPath = normaliseLibraryPath(filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
-      // Cache-first: bad-matches already builds a folder-basename → tmdbId map
-      // for the whole arr library (arr:<service>:paths:name, 6h TTL, across
-      // every syncable instance). A fix-match dialog open used to always pull
-      // the ENTIRE library live; try the warm map's basename match first and
-      // only fetch on a miss. Read-only — never write the key from here.
+      // Cache-first: the library page and the bad-match list keep one
+      // Radarr/Sonarr folder map for the whole arr library (bad-matches.ts
+      // loadArrPathIndex, across every syncable instance). A fix-match dialog
+      // open used to always pull the ENTIRE library live; try that map's
+      // basename index first and only fetch on a miss. Read-only — nothing is
+      // built or written from here, and only a tmdbId comes back (a basename
+      // two titles share gives none, so the exact lookup below decides it).
       try {
         // A Jellyfin SERIES row's Path is the series folder itself (not a file
         // inside it), so for TV its own basename is the Sonarr folder name too.
         const names = [folderPath.split("/").pop(), ...(mediaType === "TV" ? [fullPath.split("/").pop()] : [])]
           .filter((n): n is string => !!n);
-        const cached = names.length > 0
-          ? await getCache<[string, number][]>(`arr:${service}:paths:name`)
-          : null;
-        if (cached?.length) {
-          const map = new Map(cached);
+        const byName = names.length > 0 ? await cachedArrNameIndex(mediaType) : null;
+        if (byName) {
           for (const n of names) {
-            const hit = map.get(n);
+            const hit = byName.get(n);
             if (hit != null) { arrTmdbId = hit; break; }
           }
         }

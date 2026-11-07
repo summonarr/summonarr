@@ -14,34 +14,48 @@ async function handle(request: NextRequest) {
 
   const report: Record<string, unknown> = { timestamp: new Date().toISOString() };
 
+  // The three probes the summary is derived from keep their own types, so an
+  // errored probe narrows to its `{ error }` shape and always reads as a failure.
+  type ProbeError = { error: string; schemaDiagnostic?: string | null };
+  const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+  let tables: { TrashSpec: boolean; TrashApplication: boolean } | ProbeError;
   try {
-    const tables = await prisma.$queryRaw<{ tablename: string }[]>`
+    const rows = await prisma.$queryRaw<{ tablename: string }[]>`
       SELECT tablename FROM pg_tables
       WHERE schemaname = 'public' AND tablename IN ('TrashSpec', 'TrashApplication')
       ORDER BY tablename
     `;
-    report.tables = {
-      TrashSpec: tables.some((t) => t.tablename === "TrashSpec"),
-      TrashApplication: tables.some((t) => t.tablename === "TrashApplication"),
+    tables = {
+      TrashSpec: rows.some((t) => t.tablename === "TrashSpec"),
+      TrashApplication: rows.some((t) => t.tablename === "TrashApplication"),
     };
   } catch (err) {
-    report.tables = { error: err instanceof Error ? err.message : String(err) };
+    tables = { error: errorText(err) };
   }
+  report.tables = tables;
 
+  let counts:
+    | {
+        specsByService: Array<{ service: string; kind: string; count: number }>;
+        totalSpecs: number;
+        totalApplications: number;
+      }
+    | ProbeError;
   try {
     const [specCountsRaw, appCount] = await Promise.all([
       prisma.trashSpec.groupBy({ by: ["service", "kind"], _count: { _all: true } }),
       prisma.trashApplication.count(),
     ]);
-    report.counts = {
+    counts = {
       specsByService: specCountsRaw.map((c) => ({ service: c.service, kind: c.kind, count: c._count._all })),
       totalSpecs: specCountsRaw.reduce((n, c) => n + c._count._all, 0),
       totalApplications: appCount,
     };
   } catch (err) {
-    const hint = describeSchemaError(err);
-    report.counts = { error: err instanceof Error ? err.message : String(err), schemaDiagnostic: hint };
+    counts = { error: errorText(err), schemaDiagnostic: describeSchemaError(err) };
   }
+  report.counts = counts;
 
   try {
     const sample = await prisma.trashSpec.findMany({
@@ -54,9 +68,12 @@ async function handle(request: NextRequest) {
     report.sampleSpecs = { error: err instanceof Error ? err.message : String(err) };
   }
 
+  let starterPack:
+    | { expected: number; resolved: number; missing: unknown[]; resolvedDetails: unknown[] }
+    | ProbeError;
   try {
     const starter = await resolveStarterPack();
-    report.starterPack = {
+    starterPack = {
       expected: STARTER_PACK.length,
       resolved: starter.filter((s) => s.spec).length,
       missing: starter.filter((s) => !s.spec).map((s) => ({
@@ -74,9 +91,9 @@ async function handle(request: NextRequest) {
       })),
     };
   } catch (err) {
-    const hint = describeSchemaError(err);
-    report.starterPack = { error: err instanceof Error ? err.message : String(err), schemaDiagnostic: hint };
+    starterPack = { error: errorText(err), schemaDiagnostic: describeSchemaError(err) };
   }
+  report.starterPack = starterPack;
 
   try {
     const audits = await prisma.auditLog.findMany({
@@ -131,9 +148,8 @@ async function handle(request: NextRequest) {
       select: { value: true },
     });
     report.lastRefreshTruncatedAt = truncRow?.value ?? null;
-  } catch (err) {
+  } catch {
     report.lastRefreshTruncatedAt = null;
-    void err;
   }
 
   // Error stats. failingByKind counts applied specs that currently have an
@@ -172,26 +188,18 @@ async function handle(request: NextRequest) {
     report.errorStats = { error: err instanceof Error ? err.message : String(err) };
   }
 
-  const schemaOk =
-    typeof report.tables === "object" &&
-    report.tables !== null &&
-    (report.tables as { TrashSpec?: boolean }).TrashSpec === true &&
-    (report.tables as { TrashApplication?: boolean }).TrashApplication === true;
-  const catalogPopulated =
-    typeof report.counts === "object" &&
-    report.counts !== null &&
-    ((report.counts as { totalSpecs?: number }).totalSpecs ?? 0) > 0;
+  const schemaOk = !("error" in tables) && tables.TrashSpec && tables.TrashApplication;
+  const catalogPopulated = !("error" in counts) && counts.totalSpecs > 0;
+  // An errored probe has neither count; comparing two undefineds used to call
+  // the starter pack resolvable when its probe had thrown.
+  const starterPackResolvable = !("error" in starterPack) && starterPack.resolved === starterPack.expected;
 
   return NextResponse.json({
     ok: schemaOk && catalogPopulated,
     summary: {
       schemaOk,
       catalogPopulated,
-      starterPackResolvable:
-        typeof report.starterPack === "object" &&
-        report.starterPack !== null &&
-        (report.starterPack as { resolved?: number }).resolved ===
-          (report.starterPack as { expected?: number }).expected,
+      starterPackResolvable,
     },
     report,
   });

@@ -11,7 +11,7 @@ import { ArrResponseError, arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } f
 import { enabledArrInstances } from "./arr-admin";
 import { projectHistoryRecords } from "./arr-history";
 import { foldQueueRecords } from "./arr-queue";
-import { readQueuePages } from "./arr-queue-data";
+import { readQueueListing } from "./arr-queue-data";
 import { projectDisks, projectRootFolders } from "./arr-system";
 import {
   ARR_WATCH_DISK_LOW_PERCENT_KEY,
@@ -50,9 +50,20 @@ export const ARR_WATCH_SUMMARY_KEY = "arrWatch:summary";
 
 // Polled reads: a dark instance is given up on well inside the run.
 const READ_TIMEOUT_MS = 20_000;
+// One instance's reads share this budget, well inside the run's (the cron's
+// 10 minutes). A slow but answering instance — 40 queue pages at up to 20 s
+// each — held the run past its lock, and an aborted run saves nothing (7c,
+// guardrail 41), so no instance's state was ever saved again. When the budget,
+// not the lock, ends an instance's reads, its unfinished parts fail like any
+// failed read: they keep their previous state and are reported, and the run
+// goes on to the next instance.
+export const INSTANCE_READ_BUDGET_MS = 2 * 60_000;
 // Failures since the cursor when the arr has no /history/since (it 404s): the
-// newest page, filtered to what the cursor has not seen.
+// newest pages, read back until one reaches the queried date, filtered to what
+// the cursor has not seen. Past FALLBACK_MAX_PAGES the older failures can't be
+// reached: the run says so instead of passing them by unannounced.
 const FALLBACK_PAGE_SIZE = 200;
+const FALLBACK_MAX_PAGES = 5;
 // /history/since is asked from this far BEFORE the cursor. Radarr/Sonarr v3
 // parse the date with DateTime.Parse, which turns a UTC "…Z" into the HOST's
 // local time; were that ever compared as UTC, an arr east of Greenwich would
@@ -93,21 +104,35 @@ export async function loadDiskLowPercent(): Promise<number> {
   return parseDiskLowPercent(row?.value);
 }
 
-async function readHistory(cfg: ArrCfg, inst: WatchInstance, sinceIso: string, signal?: AbortSignal): Promise<unknown> {
+/** The failures read; `truncated` when the fallback's page cap, not the queried date, ended the read. */
+interface HistoryRead { records: unknown; truncated: boolean }
+
+async function readHistory(cfg: ArrCfg, inst: WatchInstance, sinceIso: string, signal?: AbortSignal): Promise<HistoryRead> {
   const include = inst.service === "radarr" ? "includeMovie=true" : "includeSeries=true&includeEpisode=true";
   // DownloadFailed is 4 in both arrs' history enums (arr-history.ts EVENT_IDS).
   const opts = { quietErrors: true, timeoutMs: READ_TIMEOUT_MS, ...(signal ? { signal } : {}) };
   try {
-    return await arrFetch<unknown>(cfg, `/api/v3/history/since?date=${encodeURIComponent(sinceIso)}&eventType=4&${include}`, opts);
+    return { records: await arrFetch<unknown>(cfg, `/api/v3/history/since?date=${encodeURIComponent(sinceIso)}&eventType=4&${include}`, opts), truncated: false };
   } catch (err) {
     if (!(err instanceof ArrResponseError) || err.status !== 404) throw err;
-    const page = await arrFetch<{ records?: unknown } | null>(
+  }
+  const sinceMs = Date.parse(sinceIso);
+  const records: unknown[] = [];
+  for (let page = 1; page <= FALLBACK_MAX_PAGES; page++) {
+    const res = await arrFetch<{ records?: unknown } | null>(
       cfg,
-      `/api/v3/history?page=1&pageSize=${FALLBACK_PAGE_SIZE}&sortKey=date&sortDirection=descending&eventType=4&${include}`,
+      `/api/v3/history?page=${page}&pageSize=${FALLBACK_PAGE_SIZE}&sortKey=date&sortDirection=descending&eventType=4&${include}`,
       opts,
     );
-    return page && Array.isArray(page.records) ? page.records : [];
+    const batch = res && Array.isArray(res.records) ? res.records.slice(0, FALLBACK_PAGE_SIZE) : [];
+    for (const r of batch) records.push(r);
+    // Newest first: a short page is the end, and a page reaching back to the
+    // queried date holds everything the cursor has not seen.
+    const oldest = batch.length > 0 ? (batch[batch.length - 1] as { date?: unknown } | null)?.date : undefined;
+    const oldestMs = typeof oldest === "string" ? Date.parse(oldest) : Number.NaN;
+    if (batch.length < FALLBACK_PAGE_SIZE || !Number.isFinite(oldestMs) || oldestMs <= sinceMs) return { records, truncated: false };
   }
+  return { records, truncated: true };
 }
 
 interface InstanceOutcome {
@@ -118,12 +143,16 @@ interface InstanceOutcome {
   deferredAttention: number;
 }
 
+// The parts an instance's reads were still on when its budget ran out.
+const budgetMessage = (budgetMs: number) => `stopped by the instance's ${Math.round(budgetMs / 1000)}s read budget`;
+
 async function watchInstance(
   inst: WatchInstance,
   prev: InstanceWatchState | undefined,
   thresholdPercent: number,
   nowMs: number,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  budgetMs: number,
 ): Promise<InstanceOutcome> {
   const state: InstanceWatchState = { ...prev };
   const events: NotifyEvent[] = [];
@@ -131,17 +160,28 @@ async function watchInstance(
   const cfg = await getArrCfg(inst.service, inst.slug);
   // De-configured between the instance list and here: nothing was read, so every part keeps its state.
   if (!cfg) return { state, events, errors: PARTS.map((part) => ({ part, error: "not configured" })), deferred: 0, deferredAttention: 0 };
-  const opts = { quietErrors: true, timeoutMs: READ_TIMEOUT_MS, ...(signal ? { signal } : {}) };
   const { cursor, seeded } = effectiveCursor(prev?.history?.cursor ?? null, nowMs);
 
+  // The reads stop at the lock's signal OR this instance's budget, whichever
+  // fires first. A ref'd timer, cleared once the reads settle.
+  const budget = new AbortController();
+  const timer = setTimeout(() => budget.abort(new Error(budgetMessage(budgetMs))), budgetMs);
+  const readSignal = signal ? AbortSignal.any([signal, budget.signal]) : budget.signal;
+  const opts = { quietErrors: true, timeoutMs: READ_TIMEOUT_MS, signal: readSignal };
+  // A part that fails once the budget has run out failed BECAUSE of it; one
+  // that failed before keeps its own reason.
+  const inBudget = <T>(p: Promise<T>): Promise<T> =>
+    p.catch((err: unknown) => {
+      throw budget.signal.aborted ? new Error(budgetMessage(budgetMs)) : err;
+    });
   const [disk, history, queue] = await Promise.allSettled([
-    Promise.all([
+    inBudget(Promise.all([
       arrFetch<unknown>(cfg, "/api/v3/rootfolder", opts),
       arrFetch<unknown>(cfg, "/api/v3/diskspace", opts),
-    ]),
-    seeded ? Promise.resolve(null) : readHistory(cfg, inst, new Date(Date.parse(cursor.at) - HISTORY_QUERY_OVERLAP_MS).toISOString(), signal),
-    readQueuePages(inst.service, inst.slug, signal),
-  ]);
+    ])),
+    seeded ? Promise.resolve(null) : inBudget(readHistory(cfg, inst, new Date(Date.parse(cursor.at) - HISTORY_QUERY_OVERLAP_MS).toISOString(), readSignal)),
+    inBudget(readQueueListing(cfg, inst.service, readSignal)),
+  ]).finally(() => clearTimeout(timer));
 
   // Disks: state changes only — a disk missing from this read keeps its state for the grace period.
   if (disk.status === "fulfilled") {
@@ -164,7 +204,7 @@ async function watchInstance(
     // A seeded cursor read nothing (null projects to no records): it is stored as is.
     // nowMs bounds the cursor from the future: a record dated past Summonarr's clock (+1 h) waits, unconsumed.
     const picked = selectNewFailures(
-      projectHistoryRecords(inst.service, inst.slug, history.value),
+      projectHistoryRecords(inst.service, inst.slug, history.value?.records ?? null),
       cursor,
       prev?.history?.recent ?? [],
       MAX_FAILURES_PER_RUN,
@@ -176,6 +216,10 @@ async function watchInstance(
       failedAt.push(g.at);
     }
     deferred = picked.deferred;
+    // The failures older than the fallback's last page are passed by: said, not silent.
+    if (history.value?.truncated) {
+      errors.push({ part: "history", error: `no /history/since: only the newest ${FALLBACK_MAX_PAGES * FALLBACK_PAGE_SIZE} failures could be read, older ones since the last run were not announced` });
+    }
   } else {
     errors.push({ part: "history", error: arrErrorMessage(history.reason) });
   }
@@ -184,7 +228,11 @@ async function watchInstance(
 
   // Downloads that newly need attention — remembered for the grace period, at most a capped few per run.
   let deferredAttention = 0;
-  if (queue.status === "fulfilled") {
+  // A walk the signal stopped is partial: folding it would read every download
+  // past it as gone. Only the budget gets here (a lock abort discards the run).
+  if (queue.status === "fulfilled" && queue.value.stopped) {
+    errors.push({ part: "queue", error: budgetMessage(budgetMs) });
+  } else if (queue.status === "fulfilled") {
     // readAt alone is not memory (it never exists without the keys): no keys ⇒ a silent seed.
     const memory = prev?.attention !== undefined || prev?.attentionSeen !== undefined
       ? { keys: prev.attention, seen: prev.attentionSeen, readAt: prev.attentionReadAt }
@@ -192,7 +240,7 @@ async function watchInstance(
     // The read gap follows the configured cadence — a daily monitor's regular
     // 24 h gap is observed time, not an outage.
     const diff = diffAttention(
-      foldQueueRecords(inst.service, inst.slug, queue.value),
+      foldQueueRecords(inst.service, inst.slug, queue.value.records),
       memory,
       nowMs,
       MAX_ATTENTION_PER_RUN,
@@ -218,11 +266,14 @@ async function watchInstance(
  * every instance boundary and once more before anything is written: a run the
  * lock gave up on stores NOTHING and sends nothing, because by then the lock is
  * released and the next run may already be reading the same state. Its work is
- * simply redone by that run.
+ * simply redone by that run. So that one slow instance can't make every run
+ * end that way, each instance's reads stop at `instanceBudgetMs`
+ * (INSTANCE_READ_BUDGET_MS): what they hadn't finished keeps its state.
  */
-export async function runArrWatch(opts: { signal?: AbortSignal; now?: number } = {}): Promise<ArrWatchResult> {
+export async function runArrWatch(opts: { signal?: AbortSignal; now?: number; instanceBudgetMs?: number } = {}): Promise<ArrWatchResult> {
   const { signal } = opts;
   const nowMs = opts.now ?? Date.now();
+  const budgetMs = opts.instanceBudgetMs ?? INSTANCE_READ_BUDGET_MS;
   const [instances, thresholdPercent, stored] = await Promise.all([
     enabledArrInstances(),
     loadDiskLowPercent(),
@@ -253,7 +304,7 @@ export async function runArrWatch(opts: { signal?: AbortSignal; now?: number } =
     }
     const inst: WatchInstance = { service: instances[i].service, slug: instances[i].slug, name: instances[i].name };
     const key = instanceStateKey(inst.service, inst.slug);
-    const outcome = await watchInstance(inst, prev.instances[key], thresholdPercent, nowMs, signal);
+    const outcome = await watchInstance(inst, prev.instances[key], thresholdPercent, nowMs, signal, budgetMs);
     next.instances[key] = outcome.state;
     events.push(...outcome.events);
     result.deferredFailures += outcome.deferred;

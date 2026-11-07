@@ -21,6 +21,10 @@
 //      OR an account's provider subject on an unpinned row — so a Plex friend
 //      whose row's FK is still null is imported, and a pinned row is not.
 //  10. A NAMED server removed mid-run writes no rows and no read point.
+//  11. The read point is a compare-and-swap: a concurrent import that counted
+//      the same window first wins, and this one writes nothing (never twice).
+//  12. A row first stored under the "TMDB #id" placeholder takes the library's
+//      name once the library has one.
 //
 // Harness: in-memory prisma stubs, a staged-commit $transaction, a scripted
 // globalThis.fetch (RFC1918 IP literals for the servers; plex.tv behind a DNS
@@ -181,12 +185,23 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: unknown) => {
         return { count: args.data.length };
       },
     },
+    // The read point's compare-and-swap: update where it is still the one the
+    // run read, else (never read) insert unless a row exists.
     serverWatchCursor: {
-      upsert: async (args: { where: { mediaServerUserId: string }; create: Cursor; update: Partial<Cursor> }) => {
+      updateMany: async (args: { where: { mediaServerUserId: string; readTo: Date | null }; data: Partial<Cursor> }) => {
         const c = stagedCursors.find((x) => x.mediaServerUserId === args.where.mediaServerUserId);
-        if (c) Object.assign(c, args.update);
-        else stagedCursors.push({ ...args.create });
-        return {};
+        if (!c || (c.readTo?.getTime() ?? null) !== (args.where.readTo?.getTime() ?? null)) return { count: 0 };
+        Object.assign(c, args.data);
+        return { count: 1 };
+      },
+      createMany: async (args: { data: Cursor[]; skipDuplicates?: boolean }) => {
+        let count = 0;
+        for (const d of args.data) {
+          if (stagedCursors.some((x) => x.mediaServerUserId === d.mediaServerUserId)) continue;
+          stagedCursors.push({ ...d });
+          count++;
+        }
+        return { count };
       },
     },
   };
@@ -329,7 +344,7 @@ test("mergeServerWatchedRows: plays add, the later date wins, favorites set only
   ];
   const oneDayAgo = ago(1); // read the clock once: two ago(1) calls can straddle a millisecond tick
   const deltas = new Map([["1:MOVIE", { tmdbId: 1, mediaType: "MOVIE" as const, plays: 1, lastWatchedAt: oneDayAgo }]]);
-  const name = () => "named";
+  const name = () => null;
   // Favorites not read this run: every stored flag stands.
   const kept = pure.mergeServerWatchedRows(existing, deltas, null, name);
   assert.deepEqual(kept.map((r) => [r.tmdbId, r.plays, r.favorite]), [[1, 3, true], [2, 0, true]]);
@@ -341,6 +356,25 @@ test("mergeServerWatchedRows: plays add, the later date wins, favorites set only
   assert.equal(pure.nextReadTo(point, [ago(5), null])!.getTime(), point.getTime(), "a read point never moves backwards");
   assert.ok(pure.sameServerWatchedRows(kept, kept.map((r) => ({ ...r }))));
   assert.ok(!pure.sameServerWatchedRows(kept, read));
+  assert.equal(read.find((r) => r.tmdbId === 3)!.title, "TMDB #3", "a title the library can't name gets the placeholder");
+});
+
+test("mergeServerWatchedRows: a touched row stored under the placeholder takes the library's name; an unnamed title keeps what is stored", () => {
+  const existing = [
+    { tmdbId: 1, mediaType: "MOVIE" as const, title: "TMDB #1", plays: 1, lastWatchedAt: ago(9), favorite: false },
+    { tmdbId: 2, mediaType: "MOVIE" as const, title: "Two", plays: 1, lastWatchedAt: ago(8), favorite: false },
+  ];
+  const at = ago(1);
+  const deltas = new Map([
+    ["1:MOVIE", { tmdbId: 1, mediaType: "MOVIE" as const, plays: 1, lastWatchedAt: at }],
+    ["2:MOVIE", { tmdbId: 2, mediaType: "MOVIE" as const, plays: 1, lastWatchedAt: at }],
+  ]);
+  const names = (t: { tmdbId: number }) => (t.tmdbId === 1 ? "One" : null);
+  const merged = pure.mergeServerWatchedRows(existing, deltas, null, names);
+  assert.deepEqual(merged.map((r) => [r.tmdbId, r.title, r.plays]).sort(), [[1, "One", 2], [2, "Two", 2]]);
+  // A title-only change is a change, so it gets written.
+  const renamed = existing.map((r) => (r.tmdbId === 1 ? { ...r, title: "One" } : r));
+  assert.ok(!pure.sameServerWatchedRows(existing, renamed));
 });
 
 test("parseJellyfinFavorite: movies and series only; a row the server says is NOT a favorite is dropped", () => {
@@ -577,4 +611,52 @@ test("a named server removed while its history is read writes no rows and no rea
   assert.equal(cursorOf("msu-remote"), null, "no read point a later server under this slug would inherit");
   assert.equal(result.identities, 0);
   assert.equal(result.failedIdentities, 0, "a removal is not a failure");
+});
+
+// ═══ the read point is a compare-and-swap ═══════════════════════════════════
+
+test("a concurrent import that counted the same window first wins: this one writes nothing for that identity, and the others still import", async () => {
+  plexSetup();
+  await importServerWatchHistory();
+  assert.deepEqual(rowsOf("msu-owner"), [[100, "MOVIE", 2, false]]);
+  // A new play by the owner. While this run walks the history, ANOTHER run
+  // (the lock lost mid-run) commits the owner's identity first: +1 play and
+  // the newer read point.
+  const newPlay = ago(1);
+  plexHistory = [...plexHistory, plexRec({ type: "movie", ratingKey: "100", viewedAt: secs(newPlay), accountID: 1 })];
+  const newest = new Date(secs(newPlay) * 1000);
+  respond = (url) => {
+    if (url.pathname === "/status/sessions/history/all") {
+      rows = rows.map((r) => (r.mediaServerUserId === "msu-owner" ? { ...r, plays: 3, lastWatchedAt: newest } : r));
+      cursors = cursors.map((c) => (c.mediaServerUserId === "msu-owner" ? { ...c, readTo: newest } : c));
+    }
+    return serve(url);
+  };
+  const result = await importServerWatchHistory();
+  assert.deepEqual(rowsOf("msu-owner"), [[100, "MOVIE", 3, false]], "the play is counted once, not twice");
+  assert.equal(cursorOf("msu-owner")!.getTime(), newest.getTime(), "the read point is not moved back");
+  assert.equal(cursorOf("msu-friend")!.getTime(), newest.getTime(), "the friend's read point still moved with the walk");
+  assert.equal(result.identities, 1, "only the friend was written by this run");
+  assert.equal(result.failedIdentities, 0, "a lost race is not a failure");
+  assert.ok(warns.some((w) => w.includes("msu-owner") && w.includes("read point moved")));
+});
+
+test("a row first stored under the placeholder is renamed once the library names the title", async () => {
+  plexSetup();
+  plexLib[0].title = null;
+  await importServerWatchHistory();
+  assert.equal(rows.find((r) => r.mediaServerUserId === "msu-owner" && r.tmdbId === 100)!.title, "TMDB #100");
+  plexLib[0].title = "Movie 100";
+  plexHistory = [...plexHistory, plexRec({ type: "movie", ratingKey: "100", viewedAt: secs(ago(1)), accountID: 1 })];
+  await importServerWatchHistory();
+  const row = rows.find((r) => r.mediaServerUserId === "msu-owner" && r.tmdbId === 100)!;
+  assert.equal(row.title, "Movie 100");
+  assert.equal(row.plays, 3);
+  // A library row that loses its name never renames a stored one to the placeholder.
+  plexLib[0].title = null;
+  plexHistory = [...plexHistory, plexRec({ type: "movie", ratingKey: "100", viewedAt: secs(ago(0.5)), accountID: 1 })];
+  await importServerWatchHistory();
+  const again = rows.find((r) => r.mediaServerUserId === "msu-owner" && r.tmdbId === 100)!;
+  assert.equal(again.plays, 4);
+  assert.equal(again.title, "Movie 100");
 });

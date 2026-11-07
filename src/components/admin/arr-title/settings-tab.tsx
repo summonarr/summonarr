@@ -17,14 +17,25 @@
 // ones turned on and off (TagDelta), never a whole list, so a tag added on the
 // arr since the snapshot survives that rebase.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, Check, Loader2 } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { queueFormatters } from "@/components/admin/queue-format";
-import type { ArrTitle, Choice, RootFolderChoice } from "@/lib/arr-title";
+import {
+  MINIMUM_AVAILABILITIES,
+  MONITOR_NEW_ITEMS,
+  SERIES_TYPES,
+  type ArrTitle,
+  type Choice,
+  type MinimumAvailability,
+  type MonitorNewItems,
+  type RootFolderChoice,
+  type SeriesType,
+  type TitleEdit,
+} from "@/lib/arr-title";
 import { arrApi, type TitleRef } from "./shared";
 import { applyTagDelta, NO_TAG_DELTA, tagDeltaChange, toggleTagDelta, type TagDelta } from "./snapshot-rules";
 
@@ -39,21 +50,24 @@ type Draft = {
   monitorNewItems: string | null;
 };
 type Edits = Partial<Omit<Draft, "tags">> & { tags?: TagDelta };
+// The PATCH's fields, as the server's own edit type: a misspelt key or a value
+// outside the arr's vocabulary fails to compile instead of being ignored there.
+type TitleChanges = Omit<TitleEdit, "moveFiles" | "seasons">;
 
-const AVAILABILITY = ["announced", "inCinemas", "released"] as const;
-const SERIES_TYPES = ["standard", "daily", "anime"] as const;
-const MONITOR_NEW = ["all", "none"] as const;
-const AVAILABILITY_LABEL: Record<string, string> = {
+const oneOf = <T extends string>(list: readonly T[], v: string | null): v is T => v !== null && (list as readonly string[]).includes(v);
+
+// Literal maps — never a built key (the i18n dead-key check can't see one).
+const AVAILABILITY_LABEL: Record<MinimumAvailability, string> = {
   announced: "adminArr.availability.announced",
   inCinemas: "adminArr.availability.inCinemas",
   released: "adminArr.availability.released",
 };
-const SERIES_TYPE_LABEL: Record<string, string> = {
+const SERIES_TYPE_LABEL: Record<SeriesType, string> = {
   standard: "adminArr.seriesType.standard",
   daily: "adminArr.seriesType.daily",
   anime: "adminArr.seriesType.anime",
 };
-const MONITOR_NEW_LABEL: Record<string, string> = {
+const MONITOR_NEW_LABEL: Record<MonitorNewItems, string> = {
   all: "adminArr.monitorNew.all",
   none: "adminArr.monitorNew.none",
 };
@@ -126,23 +140,38 @@ export function SettingsTab({
   const [saved, setSaved] = useState<"plain" | "moving" | null>(null);
   // A root-folder change waits here for the admin's explicit choice about the files.
   const [confirmMove, setConfirmMove] = useState(false);
+  // The move confirm is an alertdialog: focus moves to its first choice when
+  // it opens (Save, which had it, is disabled meanwhile), and back to Save
+  // when Cancel closes it.
+  const saveRef = useRef<HTMLButtonElement>(null);
+  const moveChoiceRef = useRef<HTMLButtonElement>(null);
+  const refocusSave = useRef(false);
+  useEffect(() => {
+    if (confirmMove) moveChoiceRef.current?.focus();
+    else if (refocusSave.current) {
+      refocusSave.current = false;
+      saveRef.current?.focus();
+    }
+  }, [confirmMove]);
   const isMovie = titleRef.service === "radarr";
   const service = isMovie ? "Radarr" : "Sonarr";
 
   // What changed, as the PATCH body's fields.
   const changes = (() => {
-    const c: Record<string, unknown> = {};
+    const c: TitleChanges = {};
     if (draft.monitored !== base.monitored) c.monitored = draft.monitored;
     if (draft.qualityProfileId !== base.qualityProfileId && draft.qualityProfileId !== null) c.qualityProfileId = draft.qualityProfileId;
     if (draft.rootFolderPath !== base.rootFolderPath && draft.rootFolderPath !== null) c.rootFolderPath = draft.rootFolderPath;
     const tagsChange = tagDeltaChange(base.tags, tagDelta);
     if (tagsChange) c.tags = tagsChange;
+    // A value outside the arr's vocabulary (one it reported, kept selectable)
+    // is never sent: the server would refuse the whole edit.
     if (isMovie) {
-      if (draft.minimumAvailability !== base.minimumAvailability && draft.minimumAvailability !== null) c.minimumAvailability = draft.minimumAvailability;
+      if (draft.minimumAvailability !== base.minimumAvailability && oneOf(MINIMUM_AVAILABILITIES, draft.minimumAvailability)) c.minimumAvailability = draft.minimumAvailability;
     } else {
-      if (draft.seriesType !== base.seriesType && draft.seriesType !== null) c.seriesType = draft.seriesType;
+      if (draft.seriesType !== base.seriesType && oneOf(SERIES_TYPES, draft.seriesType)) c.seriesType = draft.seriesType;
       if (draft.seasonFolder !== base.seasonFolder && draft.seasonFolder !== null) c.seasonFolder = draft.seasonFolder;
-      if (draft.monitorNewItems !== base.monitorNewItems && draft.monitorNewItems !== null) c.monitorNewItems = draft.monitorNewItems;
+      if (draft.monitorNewItems !== base.monitorNewItems && oneOf(MONITOR_NEW_ITEMS, draft.monitorNewItems)) c.monitorNewItems = draft.monitorNewItems;
     }
     return c;
   })();
@@ -222,7 +251,10 @@ export function SettingsTab({
           className="sm:max-w-sm"
           disabled={qualityProfiles === null}
         >
-          {(draft.qualityProfileId === null || qualityProfiles === null) && <option value={draft.qualityProfileId === null ? "" : String(draft.qualityProfileId)}>—</option>}
+          {/* The current profile stays selectable when the list lacks it — or the first one would show selected and could never be picked. */}
+          {(draft.qualityProfileId === null || !(qualityProfiles ?? []).some((p) => p.id === draft.qualityProfileId)) && (
+            <option value={draft.qualityProfileId === null ? "" : String(draft.qualityProfileId)}>{draft.qualityProfileId === null ? "—" : `#${draft.qualityProfileId}`}</option>
+          )}
           {(qualityProfiles ?? []).map((p) => <option key={p.id} value={String(p.id)}>{p.name}</option>)}
         </StyledSelect>
         {qualityProfiles === null && unavailable}
@@ -237,10 +269,11 @@ export function SettingsTab({
             aria-label={t("adminArr.settings.minimumAvailability")}
             className="sm:max-w-sm"
           >
-            {draft.minimumAvailability !== null && !(AVAILABILITY as readonly string[]).includes(draft.minimumAvailability) && (
+            {draft.minimumAvailability === null && <option value="">—</option>}
+            {draft.minimumAvailability !== null && !oneOf(MINIMUM_AVAILABILITIES, draft.minimumAvailability) && (
               <option value={draft.minimumAvailability}>{draft.minimumAvailability}</option>
             )}
-            {AVAILABILITY.map((a) => <option key={a} value={a}>{t(AVAILABILITY_LABEL[a])}</option>)}
+            {MINIMUM_AVAILABILITIES.map((a) => <option key={a} value={a}>{t(AVAILABILITY_LABEL[a])}</option>)}
           </StyledSelect>
         </Field>
       ) : (
@@ -271,7 +304,7 @@ export function SettingsTab({
                 aria-label={t("adminArr.settings.monitorNewItems")}
                 className="sm:max-w-sm"
               >
-                {MONITOR_NEW.map((m) => <option key={m} value={m}>{t(MONITOR_NEW_LABEL[m])}</option>)}
+                {MONITOR_NEW_ITEMS.map((m) => <option key={m} value={m}>{t(MONITOR_NEW_LABEL[m])}</option>)}
               </StyledSelect>
             </Field>
           )}
@@ -356,7 +389,7 @@ export function SettingsTab({
             )}
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
-            <button type="button" onClick={() => void save(true)} disabled={saving} className="ds-hover-tint rounded-md px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-2)" }}>
+            <button ref={moveChoiceRef} type="button" onClick={() => void save(true)} disabled={saving} className="ds-hover-tint rounded-md px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-2)" }}>
               <span className="block text-zinc-100">{t("adminArr.settings.moveFiles")}</span>
               <span className="block text-xs text-zinc-500">{t("adminArr.settings.moveFilesOn")}</span>
             </button>
@@ -366,7 +399,17 @@ export function SettingsTab({
             </button>
           </div>
           <div>
-            <Button variant="ghost" size="sm" onClick={() => setConfirmMove(false)} disabled={saving}>{t("adminArr.common.cancel")}</Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                refocusSave.current = true;
+                setConfirmMove(false);
+              }}
+              disabled={saving}
+            >
+              {t("adminArr.common.cancel")}
+            </Button>
           </div>
         </div>
       )}
@@ -385,7 +428,7 @@ export function SettingsTab({
         <Button variant="ghost" size="sm" onClick={() => { setEdits({}); setConfirmMove(false); setError(""); }} disabled={!dirty || saving}>
           {t("adminArr.settings.reset")}
         </Button>
-        <Button size="sm" onClick={() => void save()} disabled={!dirty || saving || confirmMove || baseIsSnapshot}>
+        <Button ref={saveRef} size="sm" onClick={() => void save()} disabled={!dirty || saving || confirmMove || baseIsSnapshot}>
           {saving && <Loader2 className="animate-spin" />}
           {t("adminArr.settings.save")}
         </Button>

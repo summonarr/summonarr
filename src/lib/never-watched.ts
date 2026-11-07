@@ -342,7 +342,9 @@ export function upstreamHealth(status: NwUpstreamStatus | null, now: Date): NwUp
   // A truncated read is never "ok": it would let the snapshot's missing oldest
   // records read as "no plays" (14d — a partial snapshot is never zero plays).
   if (status.truncated === true) return "incomplete";
-  if (now.getTime() - new Date(status.fetchedAt).getTime() > UPSTREAM_MAX_AGE_MS) return "stale";
+  // An unreadable date can't prove the check is recent: stale, never "ok".
+  const fetched = parseStampDate(status.fetchedAt);
+  if (!fetched || now.getTime() - fetched.getTime() > UPSTREAM_MAX_AGE_MS) return "stale";
   return "ok";
 }
 
@@ -383,11 +385,19 @@ export function upstreamChipKey(u: { health: NwUpstreamHealth; samples: number }
 // Each tracking switch → the Setting that records when it was last turned ON.
 // A play while a switch was off was never recorded, so recording can only be
 // trusted from the moment it came back on (NwCoverage.since).
-export const TRACKING_STAMP_KEYS: Readonly<Record<string, string>> = {
+// Keyed by name (`as const`), so a misspelt or renamed property is a compile
+// error rather than an `undefined` stamp that silently widens the window (14d).
+export const TRACKING_STAMP_KEYS = {
   playHistoryEnabled: "playHistoryTrackedSince",
   playHistoryPlexEnabled: "playHistoryPlexTrackedSince",
   playHistoryJellyfinEnabled: "playHistoryJellyfinTrackedSince",
-};
+} as const satisfies Record<string, string>;
+
+// The stamp Setting for an arbitrary written key; own properties only, so a key
+// like "constructor" is never mistaken for a tracking switch.
+function trackingStampKeyFor(key: string): string | undefined {
+  return Object.hasOwn(TRACKING_STAMP_KEYS, key) ? TRACKING_STAMP_KEYS[key as keyof typeof TRACKING_STAMP_KEYS] : undefined;
+}
 
 // The stamps a settings write must record: every tracking switch going from
 // anything-but-"true" to "true".
@@ -398,7 +408,7 @@ export function trackingStampsFor(
 ): Array<[string, string]> {
   const out: Array<[string, string]> = [];
   for (const [key, value] of writes) {
-    const stamp = TRACKING_STAMP_KEYS[key];
+    const stamp = trackingStampKeyFor(key);
     if (!stamp || value !== "true" || before.get(key) === "true") continue;
     out.push([stamp, now.toISOString()]);
   }

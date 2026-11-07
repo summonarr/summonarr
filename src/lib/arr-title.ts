@@ -148,6 +148,9 @@ export function projectTitle(service: ArrService, instance: string, raw: unknown
   const regular = seasons.filter((s) => s.seasonNumber > 0);
   const sum = (pick: (s: TitleSeason) => number) => regular.reduce((n, s) => n + pick(s), 0);
   const episodeFileCount = service === "sonarr" ? (regular.length > 0 ? sum((s) => s.episodeFileCount) : nonNegInt(stats?.episodeFileCount) ?? 0) : 0;
+  // "Has a file" is ANY episode file, specials included: only the counts are
+  // regular-season (14a), and availability reads sonarrSeriesCompletion, not this.
+  const anyEpisodeFile = seasons.length > 0 ? seasons.some((s) => s.episodeFileCount > 0) : (nonNegInt(stats?.episodeFileCount) ?? 0) > 0;
   const latest = (pick: (s: TitleSeason) => string | null, cmp: (a: string, b: string) => boolean) => {
     let best: string | null = null;
     for (const s of regular) {
@@ -173,7 +176,7 @@ export function projectTitle(service: ArrService, instance: string, raw: unknown
     tags: idsOf(r.tags, 200),
     sizeOnDisk: bytes(r.sizeOnDisk ?? stats?.sizeOnDisk),
     added: isoOrNull(r.added),
-    hasFile: service === "radarr" ? bool(r.hasFile) : episodeFileCount > 0,
+    hasFile: service === "radarr" ? bool(r.hasFile) : anyEpisodeFile,
     minimumAvailability: service === "radarr" ? textOrNull(r.minimumAvailability, 40) : null,
     inCinemas: service === "radarr" ? isoOrNull(r.inCinemas) : null,
     physicalRelease: service === "radarr" ? isoOrNull(r.physicalRelease) : null,
@@ -361,6 +364,23 @@ export function checkTitleEdit(edit: TitleEdit, catalog: TitleEditCatalog): void
   if (edit.seasons?.some((s) => !catalog.seasonNumbers.has(s.seasonNumber))) throw new TitleEditError("season");
 }
 
+/** A folder path without its trailing separators, stripped in one scan (never a regex — guardrail 5i). */
+function bareFolder(p: string | null | undefined): string {
+  const s = p ?? "";
+  let end = s.length;
+  while (end > 0 && (s[end - 1] === "/" || s[end - 1] === "\\")) end--;
+  return s.slice(0, end);
+}
+
+/**
+ * Whether an edit moves the title to another root folder. "/tv" and "/tv/"
+ * name one folder: a trailing separator must not queue a pointless move — nor
+ * be audited as one. editorBody and the edit's audited fields both ask this.
+ */
+export function rootFolderMoving(edit: Pick<TitleEdit, "rootFolderPath">, current: Pick<ArrTitle, "rootFolderPath">): boolean {
+  return edit.rootFolderPath !== undefined && bareFolder(edit.rootFolderPath) !== bareFolder(current.rootFolderPath);
+}
+
 /**
  * The body for Radarr's PUT /api/v3/movie/editor or Sonarr's PUT
  * /api/v3/series/editor for one title, or null when the edit changes nothing
@@ -386,9 +406,7 @@ export function editorBody(service: ArrService, arrId: number, edit: TitleEdit, 
     set("seasonFolder", edit.seasonFolder);
     set("monitorNewItems", edit.monitorNewItems);
   }
-  // "/tv" and "/tv/" name one folder: a trailing separator must not queue a pointless move.
-  const bare = (p: string | null | undefined) => (p ?? "").replace(/[\\/]+$/, "");
-  const moving = edit.rootFolderPath !== undefined && edit.rootFolderPath !== current.rootFolderPath && bare(edit.rootFolderPath) !== bare(current.rootFolderPath);
+  const moving = rootFolderMoving(edit, current);
   if (moving) set("rootFolderPath", edit.rootFolderPath);
   body.moveFiles = moving && edit.moveFiles === true;
   if (edit.tags !== undefined) {

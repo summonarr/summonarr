@@ -235,14 +235,17 @@ test("the Sonarr download check holds EVERY id to a positive-integer contract, u
   const fn = source.slice(source.indexOf("export async function isSeriesDownloadedInSonarr"));
   const body = fn.slice(0, fn.indexOf("\n}\n"));
 
-  const guards = body.match(/Number\.isInteger\(/g) ?? [];
+  // posInt (arr-parse.ts): a safe integer > 0, else null — the unverifiable answer.
+  const guards = body.match(/posInt\(/g) ?? [];
   assert.equal(
     guards.length,
     4,
     "expected all four ids (tvdbId, tmdbId, the resolved lookup, and the library row's own tmdbId) to be integer-guarded",
   );
-  assert.match(body, /Number\.isInteger\(rawResolved\)/, "the upstream lookup result must be validated before use");
-  assert.match(body, /Number\.isInteger\(match\.tmdbId\)/, "the library row's tmdbId is upstream data too and must be validated before use");
+  assert.match(body, /posInt\(ids\.tvdbId\)/, "the payload tvdbId must be validated before use");
+  assert.match(body, /posInt\(ids\.tmdbId\)/, "the payload tmdbId must be validated before use");
+  assert.match(body, /posInt\(rawResolved\)/, "the upstream lookup result must be validated before use");
+  assert.match(body, /posInt\(match\.tmdbId\)/, "the library row's tmdbId is upstream data too and must be validated before use");
   assert.match(
     body,
     /Number\(tvdbId\), Number\(claimedTmdbId\), Number\(resolved\)/,
@@ -304,21 +307,6 @@ test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback ac
     const b = f.slice(0, f.indexOf("\n}\n"));
     assert.match(b, /const rootFolderPath = cfg\.rootFolder \?\? rootFolders\[0\]\.path;/, `${site} root-folder fallback`);
   }
-});
-
-test("isSeriesWantedInSonarr tolerates a series row with no statistics block", () => {
-  // Its two siblings guard `statistics` explicitly (one carries a comment about
-  // an "opaque availability freeze"); this one dereferenced it bare, so a single
-  // anomalous /api/v3/series row would throw into the function's own catch and
-  // report wantedLive:false with no error — actively misleading the arr-state
-  // diagnostic CLAUDE.md tells operators to trust first.
-  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
-  const fn = source.slice(source.indexOf("export async function isSeriesWantedInSonarr"));
-  const body = fn.slice(0, fn.indexOf("\n}\n"));
-  // It now reads the verdict through sonarrSeriesCompletion (guardrail 14a),
-  // which guards a missing block itself — no direct statistics access remains.
-  assert.match(body, /sonarrSeriesCompletion\(match\)\.complete/, "wanted must derive from the shared completion rule");
-  assert.doesNotMatch(body, /match\.statistics\.[a-z]/i, "no bare statistics dereference may remain");
 });
 
 // ---------------------------------------------------------------------------

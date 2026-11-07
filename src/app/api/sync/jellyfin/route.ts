@@ -17,6 +17,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
 import { withAdvisoryLock, JELLYFIN_RESYNC_LOCK_ID } from "@/lib/advisory-lock";
+import { libraryJobResponse, startLibraryJob, wantsBackgroundRun } from "@/lib/library-sync-jobs";
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
 const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -34,15 +35,34 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
+  // Read here, before the run: the background flag is decided by it.
+  const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
+  if (rawBody instanceof NextResponse) return rawBody;
+
   // Single-flight: a second resync (two admin clicks, a cron call) skips instead
   // of walking the whole Jellyfin library again beside the first. Table writes were
   // already serialized by their transaction locks; this bounds the upstream load.
-  return withCronRunRecording("jellyfin-sync", () => withAdvisoryLock(
+  const run = () => withCronRunRecording("jellyfin-sync", () => withAdvisoryLock(
     JELLYFIN_RESYNC_LOCK_ID,
-    (signal: AbortSignal) => syncJellyfin(request, actor, signal),
+    (signal: AbortSignal) => syncJellyfin(request, rawBody, actor, signal),
     // X-Cron-Skipped keeps a busy answer out of the ledger (no run happened).
     () => cronSkippedResponse("jellyfin sync already running"),
   ));
+  // An admin's { async: true } runs in the background — see the Plex twin.
+  if (actor.trigger === "admin" && wantsBackgroundRun(rawBody)) {
+    return startLibraryJob(actor.userId, `jellyfin\u0000${JSON.stringify([rawBody.instance ?? null, rawBody.full === true])}`, run);
+  }
+  return run();
+}
+
+// The background resync's answer, for the admin who started it.
+export async function GET(request: NextRequest) {
+  const t = translatorForRequest(request);
+  const actor = await getCronActor(request);
+  if (!actor || actor.trigger !== "admin") {
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
+  }
+  return libraryJobResponse(actor.userId, request.nextUrl.searchParams.get("job") ?? "", t);
 }
 
 // A resync that lost its lock stops at a phase boundary (guardrail 41) — see
@@ -67,10 +87,8 @@ function windDownResponse(t: Translator): Response {
 // `source: "jellyfin"` unscoped and repopulated from this server alone, and even
 // the recentOnly path's tmdbId-scoped delete removes another server's episodes
 // for a show both of them hold.
-async function syncJellyfin(request: NextRequest, actor: CronActor, signal: AbortSignal): Promise<Response> {
+async function syncJellyfin(request: NextRequest, rawBody: Record<string, unknown>, actor: CronActor, signal: AbortSignal): Promise<Response> {
   const t = translatorForRequest(request);
-  const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
-  if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
   // Which server to resync. Absent ⇒ the default, so existing callers are

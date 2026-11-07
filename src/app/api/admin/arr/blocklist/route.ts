@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, type ArrTarget, readWarnKey } from "@/lib/arr-admin-http";
@@ -8,6 +9,7 @@ import { auditContext, logAudit } from "@/lib/audit";
 import { forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Admin → Download History → Blocklist (ADMIN): releases Radarr/Sonarr will
 // never grab again, one instance at a time.
@@ -19,7 +21,8 @@ import type { Translator } from "@/lib/i18n/translate";
 //       first so a removal from the page in view costs one read. Audited
 //       ARR_BLOCKLIST_CHANGE after the arr accepted it, with each release's
 //       name and title (the ids point at nothing afterwards). Clearing the
-//       whole list is POST /api/admin/arr/blocklist/clear.
+//       whole list is POST /api/admin/arr/blocklist/clear. 429 past
+//       REMOVE_LIMIT_PER_MIN per admin.
 // An arr older than the /blocklist API (Radarr v3, Sonarr v3 before Aug 2021)
 // answers 404 — named as such, never as "that item is gone".
 
@@ -28,6 +31,10 @@ const TOO_OLD_KEYS = {
   radarr: "apiAdmin.arr.blocklistTooOld.radarr",
   sonarr: "apiAdmin.arr.blocklistTooOld.sonarr",
 } as const;
+
+// Removals per admin per minute. The page removes one row (or a ticked set)
+// per click, so this bounds a runaway client, not an admin working the list.
+const REMOVE_LIMIT_PER_MIN = 30;
 
 // The audit names at most this many releases; `removed` still lists every id.
 const MAX_AUDITED_RELEASES = 100;
@@ -68,6 +75,9 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   const hinted = q.has("page") || q.has("pageSize");
   const viewed = hinted ? parsePaging(q.get("page"), q.get("pageSize")) : null;
   if (hinted && !viewed) return NextResponse.json({ error: t("apiAdmin.arr.pagingInvalid") }, { status: 400 });
+  if (!checkRateLimit(`arr-blocklist-remove:${session.user.id}`, REMOVE_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   let removed;
   try {
     removed = await removeFromBlocklist(target.service, target.instance, ids, viewed);

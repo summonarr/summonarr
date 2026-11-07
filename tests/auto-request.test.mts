@@ -1026,8 +1026,32 @@ test("server path: an abort between friends stops before the next friend's watch
     if (url.hostname === "community.plex.tv" && String((body as { query: string }).query).includes("userV2")) ctl.abort();
     return res;
   };
+  // The last complete run's verdicts. An aborted run read one friend at most:
+  // writing its partial map would erase everyone else's "ok".
+  const prior = JSON.stringify({ updatedAt: "2026-01-01T00:00:00.000Z", users: { "someone-else": "ok", other: "private" }, unmatchedFriends: 3 });
+  settings.set("plexWatchlistServerStatus", prior);
   await inScope(() => plexWatchlist.syncPlexWatchlists({ signal: ctl.signal }));
   assert.equal(graphqlWatchlistReads().length, 1);
+  assert.equal(settings.get("plexWatchlistServerStatus"), prior, "the stored snapshot is left as it was");
+  assert.equal(opsOf("setting.upsert").length, 0, "no status write after the abort (guardrail 41)");
+});
+
+test("server path: an unbridged friend listed by two instances with different owner tokens is ONE friend", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  configurePlex("remote", "admin-2");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({
+    "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }], unbridged: ["uuid-ghost"] },
+    "admin-2": { friends: [], unbridged: ["UUID-GHOST"] },
+  });
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.server?.instances, 2);
+  assert.equal(r.server?.friends, 2, "501 and the ghost — not the ghost twice");
+  assert.equal(r.server?.unmatchedFriends, 1);
+  assert.equal(serverStatus().unmatchedFriends, 1);
 });
 
 // ─── the metadata lookup cache + lookup-failure accounting ───────────────────

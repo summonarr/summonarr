@@ -437,6 +437,9 @@ function AuditLogFilters({
 function ExportButton({ filters }: { filters: AuditFilters }) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const wasOpen = useRef(false);
 
   // Escape dismisses the menu wherever focus is — the backdrop only answers to
   // a click, which left keyboard users with no way to close it.
@@ -449,6 +452,29 @@ function ExportButton({ filters }: { filters: AuditFilters }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [open]);
 
+  // A menu takes focus on its first item when it opens, and gives it back to
+  // the button that opened it when it closes (Escape, a choice, the backdrop).
+  useEffect(() => {
+    if (open) {
+      wasOpen.current = true;
+      itemRefs.current[0]?.focus();
+    } else if (wasOpen.current) {
+      wasOpen.current = false;
+      triggerRef.current?.focus();
+    }
+  }, [open]);
+
+  // Up and Down move between the items, wrapping at either end.
+  function onMenuKey(e: { key: string; preventDefault(): void }) {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    const items = itemRefs.current.filter((x): x is HTMLButtonElement => x !== null);
+    if (items.length === 0) return;
+    const at = items.findIndex((x) => x === document.activeElement);
+    const next = e.key === "ArrowDown" ? (at + 1) % items.length : (at <= 0 ? items.length : at) - 1;
+    items[next].focus();
+  }
+
   function exportAs(format: "csv" | "json") {
     const params = filtersToParams(filters);
     params.set("format", format);
@@ -459,6 +485,7 @@ function ExportButton({ filters }: { filters: AuditFilters }) {
   return (
     <div className="relative">
       <button
+        ref={triggerRef}
         onClick={() => setOpen(!open)}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -469,11 +496,11 @@ function ExportButton({ filters }: { filters: AuditFilters }) {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div role="menu" className="absolute right-0 top-full mt-1 z-20 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg overflow-hidden">
-            <button role="menuitem" onClick={() => exportAs("csv")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
+          <div role="menu" onKeyDown={onMenuKey} className="absolute right-0 top-full mt-1 z-20 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg overflow-hidden">
+            <button ref={(el) => { itemRefs.current[0] = el; }} role="menuitem" onClick={() => exportAs("csv")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
               {t("adminManage.audit.exportCsv")}
             </button>
-            <button role="menuitem" onClick={() => exportAs("json")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
+            <button ref={(el) => { itemRefs.current[1] = el; }} role="menuitem" onClick={() => exportAs("json")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
               {t("adminManage.audit.exportJson")}
             </button>
           </div>

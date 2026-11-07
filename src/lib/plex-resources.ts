@@ -1,6 +1,9 @@
-// Pure parsing + ordering of plex.tv's /api/v2/resources answer, so the admin
-// can pick a server instead of typing its address. The answer also carries a
-// per-server access token — it is deliberately NEVER copied into the result.
+// Parsing + ordering of plex.tv's /api/v2/resources answer, so the admin can
+// pick a server instead of typing its address, and the ordered probe the pick
+// runs over a server's addresses. The answer also carries a per-server access
+// token — it is deliberately NEVER copied into the result.
+
+import { mapLimit } from "./concurrency";
 
 export interface PlexServerConnection {
   uri: string;
@@ -77,4 +80,33 @@ export function parsePlexResources(body: unknown): PlexAccountServer[] {
 /** What to try for a pick: with fallback off ONLY the most preferred address; on, every address in order. */
 export function connectionsToTry(server: PlexAccountServer, fallback: boolean): PlexServerConnection[] {
   return fallback ? server.connections : server.connections.slice(0, 1);
+}
+
+/**
+ * The index of the first item, in the given (preference) order, that `probe`
+ * accepts; -1 when none does. Up to `concurrency` probes run at once
+ * (mapLimit, guardrail 31), but the answer is always the earliest-RANKED
+ * match, never merely the first to reply: it resolves once every item ranked
+ * above the match has answered no, and no probe starts after that. `probe`
+ * must not throw.
+ */
+export async function firstMatchInOrder<T>(
+  items: readonly T[],
+  probe: (item: T) => Promise<boolean>,
+  concurrency: number,
+): Promise<number> {
+  const settle: Array<(matched: boolean) => void> = [];
+  const results = items.map(() => new Promise<boolean>((resolve) => { settle.push(resolve); }));
+  let decided = false;
+  void mapLimit(items, concurrency, async (item, i) => {
+    if (decided) return;
+    settle[i](await probe(item));
+  });
+  for (let i = 0; i < results.length; i++) {
+    if (await results[i]) {
+      decided = true;
+      return i;
+    }
+  }
+  return -1;
 }

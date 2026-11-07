@@ -8,12 +8,12 @@
 // verdict, and the URL handed to Radarr/Sonarr is built here.
 import { randomBytes } from "node:crypto";
 import { ArrResponseError, arrErrorKind, arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { ArrInstanceError, configuredArrCfg, enabledArrInstances } from "./arr-admin";
 import type { ArrErrorKind } from "./arr-error-kind";
 import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "./arr-instances";
-import { getSyncableArrInstances } from "./arr-instance-registry";
 import { settleLimit } from "./concurrency";
-import { isFeatureEnabled } from "./features";
 import { prisma } from "./prisma";
+import { isPrismaErrorCode } from "./prisma-errors";
 import {
   arrValidationMessage,
   buildWebhookResource,
@@ -25,6 +25,7 @@ import {
   type ArrHealthService,
   type NotificationResource,
   type WebhookState,
+  webhookSetupTarget,
 } from "./arr-health";
 
 export const HEALTH_SERVICES: readonly ArrHealthService[] = ["radarr", "sonarr"];
@@ -61,15 +62,6 @@ export async function effectiveWebhookSecret(service: ArrHealthService, slug: st
   const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
   const get = (k: string) => rows.find((r) => r.key === k)?.value || "";
   return get(ownKey) || (slug === DEFAULT_ARR_INSTANCE ? get("webhookSecret") : "");
-}
-
-async function enabledInstances(): Promise<Array<{ service: ArrHealthService; slug: string; name: string }>> {
-  const out: Array<{ service: ArrHealthService; slug: string; name: string }> = [];
-  for (const service of HEALTH_SERVICES) {
-    if (!(await isFeatureEnabled(`feature.integration.${service}`))) continue;
-    for (const inst of await getSyncableArrInstances(service)) out.push({ service, slug: inst.slug, name: inst.name });
-  }
-  return out;
 }
 
 async function readInstanceHealth(inst: { service: ArrHealthService; slug: string; name: string }): Promise<ArrInstanceHealth> {
@@ -111,7 +103,7 @@ async function readInstanceHealth(inst: { service: ArrHealthService; slug: strin
 
 /** Every configured Radarr/Sonarr instance's version, health checks and webhook verdict. */
 export async function loadArrHealth(): Promise<ArrHealthReport> {
-  const instances = await enabledInstances();
+  const instances = await enabledArrInstances();
   const settled = await settleLimit(instances, HEALTH_CONCURRENCY, readInstanceHealth);
   return {
     instances: settled.map((s, i) =>
@@ -142,12 +134,14 @@ export interface WebhookSetupResult {
   secretGenerated: boolean;
 }
 
+// A configured instance only (guardrail 32 — configuredArrCfg), refused as this module's own error.
 async function configuredCfg(service: ArrHealthService, slug: string): Promise<ArrCfg> {
-  const configured = await getSyncableArrInstances(service);
-  if (!configured.some((i) => i.slug === slug)) throw new WebhookInstanceError(slug);
-  const cfg = await getArrCfg(service, slug);
-  if (!cfg) throw new WebhookInstanceError(slug);
-  return cfg;
+  try {
+    return await configuredArrCfg(service, slug);
+  } catch (err) {
+    if (err instanceof ArrInstanceError) throw new WebhookInstanceError(slug);
+    throw err;
+  }
 }
 
 async function saveOrRefuse<T>(fn: () => Promise<T>): Promise<T> {
@@ -168,9 +162,11 @@ async function saveOrRefuse<T>(fn: () => Promise<T>): Promise<T> {
  *   • An instance with no secret gets one generated and stored (the Prisma
  *     extension encrypts it — guardrail 7a); the old copy-paste URL had nothing
  *     to authenticate with anyway.
- *   • An existing entry pointing at /api/webhooks/<service> is UPDATED in place
+ *   • This deployment's existing entry (webhookSetupTarget: our token, else our
+ *     address, else the only Summonarr entry there is) is UPDATED in place
  *     (its URL and Summonarr's events), never duplicated; an entry that is
- *     already correct is left alone.
+ *     already correct is left alone. Entries of another Summonarr sharing the
+ *     arr are not touched — a new entry is created beside them.
  */
 export async function setupArrWebhook(
   service: ArrHealthService,
@@ -196,10 +192,26 @@ export async function setupArrWebhook(
       secret = await effectiveWebhookSecret(service, slug);
       if (!secret) {
         // The row exists but is blank (a cleared secret): nothing authenticates
-        // with it, so there is no token to strand by overwriting it.
-        await prisma.setting.upsert({ where: { key }, create: { key, value: candidate }, update: { value: candidate } });
-        secret = candidate;
-        secretGenerated = true;
+        // with it, so there is no token to strand by filling it. Filled only
+        // WHILE blank — two setups racing here would otherwise each write their
+        // own candidate and push it to the arr, and the arr would keep a token
+        // the database no longer holds. The loser (P2025: no blank row left)
+        // uses the winner's. `update` runs the encryption extension (7a).
+        try {
+          await prisma.setting.update({ where: { key, value: "" }, data: { value: candidate } });
+          secret = candidate;
+          secretGenerated = true;
+        } catch (err) {
+          if (!isPrismaErrorCode(err, "P2025")) throw err;
+          secret = await effectiveWebhookSecret(service, slug);
+          if (!secret) {
+            // Not blank, yet it reads as nothing: a value that no longer
+            // decrypts. Nothing can authenticate with it either.
+            await prisma.setting.upsert({ where: { key }, create: { key, value: candidate }, update: { value: candidate } });
+            secret = candidate;
+            secretGenerated = true;
+          }
+        }
       }
     }
     if (secretGenerated) opts.onSecretGenerated?.();
@@ -207,8 +219,11 @@ export async function setupArrWebhook(
   const url = buildWebhookUrl(base, service, secret);
   const list = await arrFetch<unknown>(cfg, "/api/v3/notification");
   const verdict = evaluateWebhook(list, service, secret);
-  const existing = verdict.id !== null && Array.isArray(list)
-    ? (list as NotificationResource[]).find((n) => n && n.id === verdict.id) ?? null
+  // Only an entry that is THIS deployment's is rewritten — another Summonarr
+  // sharing the arr keeps its own (webhookSetupTarget).
+  const targetId = webhookSetupTarget(list, service, secret, url);
+  const existing = targetId !== null && Array.isArray(list)
+    ? (list as NotificationResource[]).find((n) => n && n.id === targetId) ?? null
     : null;
 
   if (existing) {
@@ -216,10 +231,10 @@ export async function setupArrWebhook(
     const currentUrl = Array.isArray(existing.fields)
       ? (existing.fields as Array<{ name?: unknown; value?: unknown }>).find((f) => f?.name === "url")?.value
       : undefined;
-    if (verdict.state === "ok" && currentUrl === url) return { outcome: "unchanged", secretGenerated };
+    if (verdict.state === "ok" && verdict.id === targetId && currentUrl === url) return { outcome: "unchanged", secretGenerated };
     const body = buildWebhookResource(existing, service, url, { isNew: false });
     if (!body) throw new WebhookSchemaError();
-    await saveOrRefuse(() => arrFetch<unknown>(cfg, `/api/v3/notification/${verdict.id}`, { method: "PUT", body: JSON.stringify(body) }));
+    await saveOrRefuse(() => arrFetch<unknown>(cfg, `/api/v3/notification/${targetId}`, { method: "PUT", body: JSON.stringify(body) }));
     return { outcome: "updated", secretGenerated };
   }
 

@@ -1,8 +1,9 @@
 // An issue's "Replace file" — the pure half. Which of a title's files an issue
 // is about (its scope), which GRAB produced each of them (so the release can be
-// blocklisted), and what to search for once they are deleted. Zero I/O and no
-// runtime imports, so the issue panel imports its types directly; the data
-// half is the route, /api/issues/[id]/files, over arr-title-data.ts.
+// blocklisted), and what to search for once they are deleted. Zero I/O, and its
+// one runtime import is arr-history's pure download-id projection, so the issue
+// panel imports its types directly; the data half is the route,
+// /api/issues/[id]/files, over arr-title-data.ts.
 //
 // Why the delete at all: while a file is on disk, Radarr/Sonarr only take an
 // UPGRADE of it. A corrupt file already at the profile's cutoff is never
@@ -17,7 +18,7 @@
 // on, a manual delete UNMONITORS what it deleted. A SeasonSearch, the Missing
 // plan and the arr's own redownload after a Mark failed all search monitored
 // items only — so without it the replacement is searched for by nothing.
-import type { ArrHistoryEvent } from "./arr-history";
+import { projectDownloadId, type ArrHistoryEvent } from "./arr-history";
 import type { ArrService, TitleEpisode, TitleFile } from "./arr-title";
 
 export interface EpisodeRef { seasonNumber: number; episodeNumber: number }
@@ -344,9 +345,13 @@ export interface MonitorState { id: number; monitored: boolean }
  */
 export function unmonitoredByDelete(before: readonly MonitorState[], after: readonly MonitorState[]): number[] {
   const now = new Map(after.map((s) => [s.id, s.monitored]));
+  const seen = new Set<number>();
   const out: number[] = [];
   for (const s of before) {
-    if (s.monitored && now.get(s.id) === false && !out.includes(s.id)) out.push(s.id);
+    if (s.monitored && now.get(s.id) === false && !seen.has(s.id)) {
+      seen.add(s.id);
+      out.push(s.id);
+    }
   }
   return out;
 }
@@ -356,10 +361,22 @@ export function unmonitoredByDelete(before: readonly MonitorState[], after: read
  * at most once; a pair the list doesn't hold is skipped).
  */
 export function episodesFor<T extends EpisodeRef>(refs: readonly EpisodeRef[], list: readonly T[]): T[] {
+  // Indexed once (the first entry per S/E, as a scan would find it), never
+  // searched per ref (guardrail 5i: Sonarr's list is uncapped).
+  const byKey = new Map<string, T>();
+  for (const e of list) {
+    const key = episodeKey(e);
+    if (!byKey.has(key)) byKey.set(key, e);
+  }
+  const seen = new Set<string>();
   const out: T[] = [];
   for (const r of refs) {
-    const hit = list.find((e) => sameEpisode(e, r));
-    if (hit && !out.includes(hit)) out.push(hit);
+    const key = episodeKey(r);
+    const hit = byKey.get(key);
+    if (hit && !seen.has(key)) {
+      seen.add(key);
+      out.push(hit);
+    }
   }
   return out;
 }
@@ -430,9 +447,15 @@ export type ReplaceSearch =
 
 /** The distinct episodes a set of files held, in S/E order. */
 export function episodesOf(files: readonly TitleFile[]): EpisodeRef[] {
+  const seen = new Set<string>();
   const out: EpisodeRef[] = [];
   for (const f of files) {
-    for (const e of f.episodes) if (!out.some((x) => sameEpisode(x, e))) out.push({ seasonNumber: e.seasonNumber, episodeNumber: e.episodeNumber });
+    for (const e of f.episodes) {
+      const key = episodeKey(e);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ seasonNumber: e.seasonNumber, episodeNumber: e.episodeNumber });
+    }
   }
   return out.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
 }
@@ -576,9 +599,9 @@ export function isInteractiveGrab(service: ArrService, arrId: number, rawHistory
     const r = x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>) : null;
     if (!r || !isGrabRecord(r.eventType)) return false;
     if (typeof r[mediaKey] === "number" && r[mediaKey] !== arrId) return false;
-    // The projection keeps a download id's first 200 characters (arr-history.ts).
+    // Compared as the projection stored it (truncated — arr-history.ts).
     const same = grab.downloadId !== null
-      ? typeof r.downloadId === "string" && r.downloadId.slice(0, 200) === grab.downloadId
+      ? projectDownloadId(r.downloadId) === grab.downloadId
       : r.id === grab.id;
     return same && (releaseSourceOf(r) ?? "").toLowerCase() === "interactivesearch";
   });

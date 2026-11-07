@@ -6,12 +6,16 @@ import { Card } from "@/components/ui/card";
 import { AlertTriangle, XCircle } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
+// `title` names the action that failed (Apply, Sync Now, the library load);
+// it defaults to the catalog refresh this banner was first written for.
 export function RefreshErrorBanner({
   error,
   onDismiss,
+  title,
 }: {
   error: { errors: string[]; schemaDiagnostic?: string };
   onDismiss: () => void;
+  title?: string;
 }) {
   const t = useT();
   return (
@@ -19,7 +23,7 @@ export function RefreshErrorBanner({
       <div className="flex items-start gap-3">
         <XCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
-          <p className="font-medium text-red-400">{t("trash.banner.refreshFailed")}</p>
+          <p className="font-medium text-red-400">{title ?? t("trash.banner.refreshFailed")}</p>
           {error.schemaDiagnostic && (
             <div className="mt-2 p-2.5 bg-amber-500/10 border border-amber-500/30 rounded text-amber-400 text-xs">
               <div className="flex items-start gap-2">

@@ -70,13 +70,19 @@ const STATUS_KEYS: Record<string, string> = {
   unknown: "adminArr.system.command.unknown",
 };
 
+// The watcher schedules its next read only once a read settles, and counts
+// reads, not time: a read that never settles (a stuck proxy, a half-open
+// connection) would freeze the line on "running". Aborted, it is one failed
+// read. Well above the route's own worst case (its arr reads time out at 10 s).
+const READ_TIMEOUT_MS = 90_000;
+
 // A failure the server didn't word itself carries no text: the line says the
 // generic "couldn't read its status" in the viewer's language.
 async function readChunk(target: CommandTarget, ids: readonly number[]): Promise<WatchRead> {
   const fallback = "";
   try {
     const q = new URLSearchParams({ service: target.service, instance: target.instance, ids: ids.join(",") });
-    const res = await fetch(withBasePath(`/api/admin/arr/commands?${q.toString()}`), { cache: "no-store" });
+    const res = await fetch(withBasePath(`/api/admin/arr/commands?${q.toString()}`), { cache: "no-store", signal: AbortSignal.timeout(READ_TIMEOUT_MS) });
     const data = (await res.json().catch(() => null)) as unknown;
     if (res.status === 429) return { kind: "rateLimited" };
     if (!res.ok) {

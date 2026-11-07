@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { SafeFetchError, safeFetchAdminConfigured } from "@/lib/safe-fetch";
+import { jellyfinAdminHeaders } from "@/lib/jellyfin";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Raw Jellyfin user shape — every field optional so no user is dropped while parsing.
@@ -19,19 +20,6 @@ interface RawJellyfinUser {
     IsHidden?: boolean;
     EnableContentDownloading?: boolean;
   } | null;
-}
-
-// Jellyfin's GET /Users needs admin ("elevated") rights. From 10.9 on, the
-// X-MediaBrowser-Token header alone is not enough; the full
-// `Authorization: MediaBrowser ...` header is required. These headers mirror
-// the real /Users fetch so the diagnosis sees what the user sync sees.
-function jellyfinHeaders(apiKey: string): Record<string, string> {
-  return {
-    "Authorization": `MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0", Token="${apiKey}"`,
-    "X-MediaBrowser-Token": apiKey,
-    "Content-Type": "application/json",
-    "User-Agent": "Summonarr/1.0 (Node.js)",
-  };
 }
 
 type SkipReason = "missing-id" | "empty-name" | "missing-name" | "no-policy";
@@ -63,8 +51,11 @@ export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, _se
   let rawBody: unknown = null;
   let fetchError: string | null = null;
   try {
+    // Jellyfin's GET /Users needs admin ("elevated") rights. The real user
+    // sync's own headers (jellyfin.ts), so the diagnosis sees what it sees and
+    // can't drift from it when the client identity changes.
     const res = await safeFetchAdminConfigured(`${base}/Users`, {
-      headers: jellyfinHeaders(apiKey),
+      headers: jellyfinAdminHeaders(apiKey),
       timeoutMs: 30_000,
     });
     httpStatus = res.status;

@@ -87,6 +87,44 @@ test("past the whole map's bound, the oldest live handles go and the newest stay
   _resetReleaseHandlesForTests();
 });
 
+test("a claimed handle survives its owner's next search past their share: a refused grab can still hand it back", () => {
+  _resetReleaseHandlesForTests();
+  const now = 4_000_000;
+  const [first] = issueReleaseHandles("s", batch(1, "first"), { owner: "A", now });
+  assert.equal(typeof claimReleaseHandle("s", first.guid, now), "object", "the grab is in flight");
+  // A new search fills A's whole share while that grab waits on the arr.
+  const next = issueReleaseHandles("s", batch(MAX_RELEASE_HANDLES_PER_OWNER, "next"), { owner: "A", now });
+  releaseReleaseHandle(first.guid);
+  assert.equal(typeof claimReleaseHandle("s", first.guid, now), "object", "handed back, and claimable again");
+  // The unclaimed handle beside it was the one to go: the share overshoots by the claim alone.
+  assert.ok(redeemReleaseHandle("s", next[0].guid, now));
+  _resetReleaseHandlesForTests();
+});
+
+test("past the whole map's bound, eviction skips claimed handles and still ends when only claims are left", () => {
+  _resetReleaseHandlesForTests();
+  const now = 5_000_000;
+  const owners = MAX_RELEASE_HANDLES / MAX_RELEASE_HANDLES_PER_OWNER;
+  const first = issueReleaseHandles("s", batch(MAX_RELEASE_HANDLES_PER_OWNER, "o0"), { owner: "o0", now });
+  for (let i = 1; i < owners; i++) issueReleaseHandles("s", batch(MAX_RELEASE_HANDLES_PER_OWNER, `o${i}`), { owner: `o${i}`, now });
+  // The oldest handle's grab is in flight when the map is full.
+  assert.equal(typeof claimReleaseHandle("s", first[0].guid, now), "object");
+  issueReleaseHandles("s", batch(1, "x"), { owner: "X", now });
+  releaseReleaseHandle(first[0].guid);
+  assert.equal(typeof claimReleaseHandle("s", first[0].guid, now), "object", "the claimed oldest was skipped");
+  assert.equal(redeemReleaseHandle("s", first[1].guid, now), null, "the oldest unclaimed went instead");
+
+  // Every handle claimed: nothing may go, and the walk still ends.
+  _resetReleaseHandlesForTests();
+  const all: Array<{ guid: string }> = [];
+  for (let i = 0; i < owners; i++) for (const h of issueReleaseHandles("s", batch(MAX_RELEASE_HANDLES_PER_OWNER, `c${i}`), { owner: `c${i}`, now })) all.push(h);
+  for (const h of all) claimReleaseHandle("s", h.guid, now);
+  const [late] = issueReleaseHandles("s", batch(1, "late"), { owner: "L", now });
+  assert.ok(redeemReleaseHandle("s", late.guid, now), "the newcomer still goes in");
+  assert.ok(all.every((h) => redeemReleaseHandle("s", h.guid, now) !== null), "no claim was evicted");
+  _resetReleaseHandlesForTests();
+});
+
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
 test("a search job answers its owner only, joins a running one, and is swept once its answer expires", async () => {

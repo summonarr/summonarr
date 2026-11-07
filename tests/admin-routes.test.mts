@@ -394,6 +394,7 @@ const { DELETE: trashDelete } = await import("../src/app/api/admin/trash-guides/
 const { POST: plexTerminate } = await import("../src/app/api/admin/play-history/terminate-session/route.ts");
 const { POST: jellyfinTerminate } = await import("../src/app/api/admin/play-history/terminate-jellyfin-session/route.ts");
 const { POST: dbImport } = await import("../src/app/api/admin/backup/db-import/route.ts");
+const { GET: plexServersGet, POST: plexServersPost } = await import("../src/app/api/admin/plex/servers/route.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 type Ctx = { params: Promise<{ id: string }> };
@@ -1750,6 +1751,26 @@ test("i18n (Jellyfin terminate, unconfigured): Spanish error, same status, still
   assert.equal(fetchCalls.length, 0);
   await flush();
   assert.equal(auditAttempts.length, 0);
+});
+
+test("i18n (Plex server picker): its errors follow the requester's language, same status, no upstream call", async () => {
+  const admin = await mintSession("ADMIN");
+  const pick = (extra: Record<string, string>) => plexServersPost(
+    req("http://localhost:3000/api/admin/plex/servers", { method: "POST", headers: { ...admin.header, "content-type": "application/json", ...extra }, body: JSON.stringify({ fallback: true }) }),
+    undefined,
+  );
+  const en = await pick({});
+  assert.equal(en.status, 400);
+  assert.deepEqual(await en.json(), { error: "machineId is required" });
+  const es = await pick({ "accept-language": "es" });
+  assert.equal(es.status, 400);
+  assert.deepEqual(await es.json(), { error: "machineId es obligatorio" });
+
+  // No Plex account connected (no admin token): the listing says so in Spanish too.
+  const list = await plexServersGet(req("http://localhost:3000/api/admin/plex/servers", { method: "GET", headers: { ...admin.header, "accept-language": "es" } }), undefined);
+  assert.equal(list.status, 400);
+  assert.deepEqual(await list.json(), { error: "Conecta primero tu cuenta de Plex" });
+  assert.equal(fetchCalls.length, 0);
 });
 
 test("i18n (role-change validation): a templated message keeps its dynamic part in Spanish", async () => {

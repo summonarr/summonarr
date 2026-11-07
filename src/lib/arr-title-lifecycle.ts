@@ -36,11 +36,9 @@ import {
   type ArrCfg,
 } from "./arr";
 import { configuredArrCfg, type ArrService } from "./arr-admin";
-import { findTitle } from "./arr-title-data";
+import { TitleNotFoundError, findTitle, readCatalog, readRaw, resourcePath } from "./arr-title-data";
 import {
   checkTitleEdit,
-  projectChoices,
-  projectRootFolderChoices,
   projectTitle,
   type ArrTitle,
   type Choice,
@@ -48,7 +46,6 @@ import {
 } from "./arr-title";
 import type { TitleAdd } from "./arr-title-add";
 
-const resourcePath = (service: ArrService, arrId: number) => `/api/v3/${service === "radarr" ? "movie" : "series"}/${arrId}`;
 const mediaTypeOf = (service: ArrService) => (service === "radarr" ? "MOVIE" : "TV") as "MOVIE" | "TV";
 
 /** The title is on the instance already (an add) — `arrId` names it for the manager. */
@@ -72,11 +69,9 @@ export class RequestsActiveError extends Error {
 
 async function readTitle(cfg: ArrCfg, service: ArrService, instance: string, arrId: number): Promise<ArrTitle | null> {
   try {
-    const raw = await arrFetch<unknown>(cfg, resourcePath(service, arrId));
-    const title = projectTitle(service, instance, raw);
-    return title && title.arrId === arrId ? title : null;
+    return projectTitle(service, instance, await readRaw(cfg, service, arrId));
   } catch (err) {
-    if (err instanceof ArrResponseError && err.status === 404) return null;
+    if (err instanceof TitleNotFoundError) return null;
     throw err;
   }
 }
@@ -290,11 +285,9 @@ async function lookupSeries(cfg: ArrCfg, tmdbId: number): Promise<LookupSeries |
 
 export async function loadAddChoices(service: ArrService, instance: string, tmdbId: number): Promise<AddChoices> {
   const cfg = await configuredArrCfg(service, instance);
-  const [found, profiles, folders, tags, defaults, looked] = await Promise.all([
+  const [found, catalog, defaults, looked] = await Promise.all([
     findTitle(service, instance, tmdbId),
-    arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
-    arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
-    arrFetch<unknown>(cfg, "/api/v3/tag"),
+    readCatalog(cfg),
     getArrAddDefaults(service, instance),
     service === "radarr" ? lookupMovie(cfg, tmdbId) : lookupSeries(cfg, tmdbId),
   ]);
@@ -303,9 +296,7 @@ export async function loadAddChoices(service: ArrService, instance: string, tmdb
     preview: looked && typeof looked.title === "string"
       ? { tmdbId, title: looked.title.slice(0, 300), year: typeof looked.year === "number" && looked.year > 0 ? looked.year : null }
       : null,
-    qualityProfiles: projectChoices(profiles),
-    rootFolders: projectRootFolderChoices(folders),
-    tags: projectChoices(tags, "label"),
+    ...catalog,
     defaults: {
       qualityProfileId: defaults?.qualityProfileId ?? null,
       rootFolderPath: defaults?.rootFolder ?? null,
@@ -370,9 +361,10 @@ async function seriesIdByTvdb(cfg: ArrCfg, tvdbId: number): Promise<number | nul
  * never withdrawn, and the retry only hits "already there" (409). So the title
  * is re-read (`reread`: Radarr by tmdbId, Sonarr by the tvdbId it was sent —
  * seriesIdByTvdb), and found there it is treated as added. A created resource
- * with no id is resolved the same way rather than recorded as 0.
+ * with no id is resolved the same way; still not found, the add happened with
+ * no id to name it (null), never a made-up 0.
  */
-async function postAdd(cfg: ArrCfg, service: ArrService, body: string, reread: () => Promise<number | null>): Promise<number> {
+async function postAdd(cfg: ArrCfg, service: ArrService, body: string, reread: () => Promise<number | null>): Promise<number | null> {
   let created: { id?: unknown } | null;
   try {
     created = await arrFetch<{ id?: unknown }>(cfg, service === "radarr" ? "/api/v3/movie" : "/api/v3/series", { method: "POST", body });
@@ -383,30 +375,26 @@ async function postAdd(cfg: ArrCfg, service: ArrService, body: string, reread: (
     return arrId;
   }
   if (typeof created?.id === "number" && created.id > 0) return created.id;
-  return (await reread()) ?? 0;
+  return reread();
 }
 
 /**
  * Add a title with the admin's choices. The profile, root folder and tags must
  * be the instance's own (TitleEditError otherwise — nothing is written); a
  * title it already has is TitleExistsError; one its lookup can't find is
- * TitleLookupError. Answers the new arr id.
+ * TitleLookupError. Answers the new arr id — null when the arr took the add
+ * but neither its answer nor a re-read named one.
  */
-export async function addTitle(service: ArrService, instance: string, add: TitleAdd): Promise<{ arrId: number; title: string }> {
+export async function addTitle(service: ArrService, instance: string, add: TitleAdd): Promise<{ arrId: number | null; title: string }> {
   const cfg = await configuredArrCfg(service, instance);
-  const [found, profiles, folders, tags] = await Promise.all([
-    findTitle(service, instance, add.tmdbId),
-    arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
-    arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
-    arrFetch<unknown>(cfg, "/api/v3/tag"),
-  ]);
+  const [found, catalog] = await Promise.all([findTitle(service, instance, add.tmdbId), readCatalog(cfg)]);
   if (found) throw new TitleExistsError(found.arrId);
   checkTitleEdit(
     { qualityProfileId: add.qualityProfileId, rootFolderPath: add.rootFolderPath, tags: add.tags },
     {
-      profileIds: new Set(projectChoices(profiles).map((p) => p.id)),
-      rootFolders: new Set(projectRootFolderChoices(folders).map((f) => f.path)),
-      tagIds: new Set(projectChoices(tags, "label").map((t) => t.id)),
+      profileIds: new Set(catalog.qualityProfiles.map((p) => p.id)),
+      rootFolders: new Set(catalog.rootFolders.map((f) => f.path)),
+      tagIds: new Set(catalog.tags.map((t) => t.id)),
       seasonNumbers: new Set(),
     },
   );

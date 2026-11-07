@@ -54,7 +54,6 @@ export interface ApplyResult {
   recreated?: boolean;
 }
 
-export type LoadState = "idle" | "loading" | "ready" | "error";
 export type ActionState = "idle" | "running" | "ok" | "error";
 
 export interface StarterPackItem {

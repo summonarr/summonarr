@@ -156,9 +156,11 @@ export function arrServiceReadable(errors: ArrLibraryIndex["errors"], mediaType:
 // loader before the requests are read, so their sizes, season sizes and
 // "eligible" are the dry run's. A private byKey-only lookup was a second
 // definition: every Sonarr v3 show read "not in Radarr/Sonarr" here while the
-// dry run planned its delete.
-const needsTargets = (w: LibraryWatchTitle) =>
-  w.verdict.state !== "watched" || (w.seasons ?? []).some((s) => s.state !== "watched");
+// dry run planned its delete. `shapesRow` is that one predicate — the targets
+// and the still-airing pass below both read it, so they can't drift apart.
+const shapesRow =(state: NwState, seasons: ReadonlyArray<{ state: NwState }> | undefined) =>
+  state !== "watched" || (seasons ?? []).some((s) => s.state !== "watched");
+const needsTargets = (w: LibraryWatchTitle) => shapesRow(w.verdict.state, w.seasons);
 
 // `opts.shared` (the /admin/stats storage section, which computes the cleanup
 // report from the same load — SharedWatchFacts) supplies the Radarr/Sonarr index
@@ -188,10 +190,7 @@ export async function computeNeverWatchedReport(
   // series, then TMDB's cached status — fillAiring, the dry run's own pass) —
   // only for the rows that show it: never-watched shows (the airing exclusion)
   // and watched shows with never-watched seasons (the latest season's chip).
-  const needAiring = titles.filter((t) =>
-    t.mediaType === "TV" && t.airing === null &&
-    (t.watch.state !== "watched" || (t.seasons ?? []).some((s) => s.state !== "watched")),
-  );
+  const needAiring = titles.filter((t) => t.mediaType === "TV" && t.airing === null && shapesRow(t.watch.state, t.seasons));
   if (needAiring.length > 0) await fillAiring(needAiring, arr, "cached");
 
   const titleRows: NwTitleRow[] = [];
@@ -260,25 +259,28 @@ export async function computeNeverWatchedReport(
     titles: titleRows,
     seasons: seasonRows,
     totals,
-    coverage: ctx.coverage.map((c) => ({
-      server: c.server,
-      source: c.source,
-      tracked: c.tracked,
-      since: iso(c.since),
-      holds: c.holds,
-      upstream: {
-        health: c.upstreamHealth,
-        fetchedAt: c.upstream?.fetchedAt ?? null,
-        attemptedAt: c.upstream?.attemptedAt ?? null,
-        entries: c.upstream?.entries ?? 0,
-        matched: c.upstream?.matched ?? 0,
-        samples: c.upstream?.samples ?? 0,
-        agreed: c.upstream?.agreed ?? 0,
-        error: c.upstream?.error ?? null,
-        errorCode: upstreamErrorCode(c.upstream?.error)?.code ?? null,
-        httpStatus: upstreamErrorCode(c.upstream?.error)?.httpStatus ?? null,
-      },
-    })),
+    coverage: ctx.coverage.map((c) => {
+      const code = upstreamErrorCode(c.upstream?.error);
+      return {
+        server: c.server,
+        source: c.source,
+        tracked: c.tracked,
+        since: iso(c.since),
+        holds: c.holds,
+        upstream: {
+          health: c.upstreamHealth,
+          fetchedAt: c.upstream?.fetchedAt ?? null,
+          attemptedAt: c.upstream?.attemptedAt ?? null,
+          entries: c.upstream?.entries ?? 0,
+          matched: c.upstream?.matched ?? 0,
+          samples: c.upstream?.samples ?? 0,
+          agreed: c.upstream?.agreed ?? 0,
+          error: c.upstream?.error ?? null,
+          errorCode: code?.code ?? null,
+          httpStatus: code?.httpStatus ?? null,
+        },
+      };
+    }),
     trackingOn: ctx.playHistoryTracked,
     historyStart: iso(ctx.historyStart),
     unplacedPlays: ctx.unplacedPlays,
@@ -358,6 +360,15 @@ export function invalidateNeverWatchedReport(): void {
   reportCache.value = null;
 }
 
+// The cached report (same generation) was built from a later listing, or the
+// same listing with later facts, than `value`.
+function olderThanCached(value: NeverWatchedReport, c: { value: NeverWatchedReport | null; generation: number }): boolean {
+  const cached = c.value;
+  if (!cached || c.generation !== currentActivityGeneration()) return false;
+  const listed = Date.parse(value.sizesAsOf ?? value.computedAt) - Date.parse(cached.sizesAsOf ?? cached.computedAt);
+  return listed < 0 || (listed === 0 && Date.parse(value.computedAt) < Date.parse(cached.computedAt));
+}
+
 // `opts.shared` hands a miss the caller's shared facts load (SharedWatchFacts —
 // the /admin/stats storage section) instead of a load of its own; a hit never
 // touches it. The store check below sees only what changed AFTER this call read
@@ -379,8 +390,11 @@ export async function getNeverWatchedReport(opts: { fresh?: boolean; shared?: Sh
   return coalesce(`never-watched:report:${generation}:${version}:${opts.fresh ? "fresh" : ""}`, async () => {
     const value = await computeNeverWatchedReport({ freshArr: opts.fresh, shared: opts.shared });
     // A report computed across an invalidation or a new play is already stale —
-    // never store it over a newer state (the guardrail-19b shape).
-    if (c.version === version && currentActivityGeneration() === generation) {
+    // never store it over a newer state (the guardrail-19b shape). Nor over a
+    // report built from a NEWER Radarr/Sonarr listing: a plain and a ?fresh=1
+    // computation run under different keys, and a plain one that started first
+    // and finished last would replace the report the admin just refreshed.
+    if (c.version === version && currentActivityGeneration() === generation && !olderThanCached(value, c)) {
       c.value = value;
       c.at = Date.now();
       c.generation = generation;

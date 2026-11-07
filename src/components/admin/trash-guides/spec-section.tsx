@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useDelayed } from "@/hooks/use-delayed";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -119,7 +119,11 @@ export function SpecSection({
   const [filter, setFilter] = useState<"all" | "managed" | "unmanaged" | "errored">("all");
   const [search, setSearch] = useState("");
   const [confirmingForget, setConfirmingForget] = useState<string | null>(null);
+  // Cancel on the forget confirmation unmounts the focused button; the Forget
+  // trigger it swaps back to takes the focus (the application id it belongs to).
+  const forgetFocusRef = useRef<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
+  const detailIdPrefix = useId();
 
   const specsHere = useMemo(
     () => specs.filter((s) => s.service === service && s.kind === kind),
@@ -200,6 +204,8 @@ export function SpecSection({
   async function applySelected() {
     const ids = visibleSelected.map((s) => s.id);
     if (ids.length === 0) return;
+    // A previous Apply's pending reset must not fire into this one.
+    later.cancel();
     setApplyState("running");
     setApplyLog([]);
     setApplyError(null);
@@ -236,7 +242,9 @@ export function SpecSection({
     // Clear a success message after 3s; an error stays until dismissed or the
     // next Apply (the sibling cards' RefreshErrorBanner rule) — a 409/429
     // reason that vanished after 3s left no trace of why nothing happened.
-    later(() => setApplyState((s) => (s === "error" ? s : "idle")), 3000);
+    // Only "ok" is cleared: a reset that also cleared "running" re-enabled
+    // Apply in the middle of the next run.
+    later(() => setApplyState((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   async function toggleManagement(appId: string, enabled: boolean) {
@@ -365,6 +373,7 @@ export function SpecSection({
                   <th className="py-2 px-6 w-8">
                     <input
                       type="checkbox"
+                      aria-label={t("trash.spec.selectAllAria")}
                       checked={allSelected}
                       ref={(el) => { if (el) el.indeterminate = someSelected; }}
                       onChange={() => (allSelected ? clearSelection() : selectAllFiltered())}
@@ -383,12 +392,14 @@ export function SpecSection({
                 {filtered.map((spec) => {
                   const isOpen = expanded.has(spec.id);
                   const detail = details.get(spec.id);
+                  const detailId = `${detailIdPrefix}-detail-${spec.id}`;
                   return (
                     <Fragment key={spec.id}>
                       <tr className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
                         <td className="py-2.5 px-6">
                           <input
                             type="checkbox"
+                            aria-label={t("trash.spec.selectAria", { name: spec.name })}
                             checked={selected.has(spec.id)}
                             onChange={() => toggle(spec.id)}
                             disabled={disabled}
@@ -397,9 +408,12 @@ export function SpecSection({
                         </td>
                         <td className="py-2.5 pr-2">
                           <button
+                            type="button"
                             onClick={() => toggleRow(spec)}
                             className="text-zinc-500 hover:text-zinc-100"
                             aria-label={isOpen ? t("trash.spec.collapse") : t("trash.spec.expand")}
+                            aria-expanded={isOpen}
+                            aria-controls={isOpen ? detailId : undefined}
                           >
                             {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                           </button>
@@ -455,7 +469,10 @@ export function SpecSection({
                                 <button
                                   type="button"
                                   aria-label={t("trash.spec.cancelForgetAria")}
-                                  onClick={() => setConfirmingForget(null)}
+                                  onClick={() => {
+                                    forgetFocusRef.current = spec.application!.id;
+                                    setConfirmingForget(null);
+                                  }}
                                   className="text-xs px-2 py-1.5 -my-1.5 text-zinc-400 hover:text-zinc-100"
                                 >
                                   {t("trash.spec.cancel")}
@@ -475,6 +492,12 @@ export function SpecSection({
                                 </button>
                                 <button
                                   type="button"
+                                  ref={(el) => {
+                                    if (el && forgetFocusRef.current === spec.application!.id) {
+                                      forgetFocusRef.current = null;
+                                      el.focus();
+                                    }
+                                  }}
                                   onClick={() => setConfirmingForget(spec.application!.id)}
                                   className="text-xs py-1.5 px-2 -my-1.5 text-zinc-500 hover:text-red-400"
                                 >
@@ -488,7 +511,7 @@ export function SpecSection({
                         </td>
                       </tr>
                       {isOpen && (
-                        <tr className="bg-zinc-950/50 border-b border-zinc-800/50">
+                        <tr id={detailId} className="bg-zinc-950/50 border-b border-zinc-800/50">
                           <td colSpan={6} className="px-10 py-4">
                             <SpecDetailView detail={detail ?? null} kind={kind} />
                           </td>

@@ -4,7 +4,8 @@ import { arrSettingKey, isRadarrMinimumAvailability, type ArrInstanceKey, type R
 import { SafeFetchError, safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import type { ArrErrorKind } from "./arr-error-kind";
 import type { Translator } from "./i18n/translate";
-import { int, namesOf } from "./arr-parse";
+import { int, namesOf, posInt } from "./arr-parse";
+import { mapLimit } from "./concurrency";
 import { sanitizeForLog } from "./sanitize";
 import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
 import { tmdbAuth } from "./tmdb-auth";
@@ -14,7 +15,13 @@ import { seriesReleaseScopeSearchable } from "./release-scope";
 const QUALITY_PROFILE_TTL_MS = 10 * 60 * 1000;
 const QUEUE_STATE_TTL_MS = 15 * 1000;
 const qualityProfileCache = new Map<string, { ids: Set<number> | null; expiresAt: number }>();
-const queueCache = new Map<string, { tmdbIds: Set<number>; tvdbIds: Set<number>; unmapped: boolean; expiresAt: number }>();
+// One cache per service, keyed `radarr::<url>` / `sonarr::<url>`, plus the read
+// in flight for each key: concurrent misses (the download checks, the library
+// scan, the sync backstop) share one paged walk of the queue.
+const radarrQueueCache = new Map<string, { tmdbIds: Set<number>; expiresAt: number }>();
+const sonarrQueueCache = new Map<string, { state: SonarrQueueState; expiresAt: number }>();
+const radarrQueueInFlight = new Map<string, Promise<Set<number> | null>>();
+const sonarrQueueInFlight = new Map<string, Promise<SonarrQueueState | null>>();
 
 // Resolved mappings are stable for a year; unresolved ones re-try daily in case TMDB eventually adds the show
 const TVDB_TO_TMDB_TTL_RESOLVED   = 365 * 24 * 60 * 60;
@@ -61,15 +68,21 @@ export async function resolveTvdbToTmdb(
     reqRows.filter((r) => r.tvdbId != null).map((r) => [r.tvdbId!, r.tmdbId])
   );
   const stillUnknown: number[] = [];
+  const fromReqHits: Array<[tvdbId: number, tmdbId: number]> = [];
   for (const tvdbId of uncached) {
     const tmdbId = fromReq.get(tvdbId);
     if (tmdbId !== undefined) {
       result.set(tvdbId, tmdbId);
-      await setCache(`tvdb-to-tmdb:${tvdbId}`, { tmdbId }, TVDB_TO_TMDB_TTL_RESOLVED);
+      fromReqHits.push([tvdbId, tmdbId]);
     } else {
       stillUnknown.push(tvdbId);
     }
   }
+  // Batched like the read above: a cold cache on a big library is one write per
+  // series, so they run a few at a time rather than one round-trip after another.
+  await mapLimit(fromReqHits, 8, ([tvdbId, tmdbId]) =>
+    setCache(`tvdb-to-tmdb:${tvdbId}`, { tmdbId } satisfies TvdbToTmdbCache, TVDB_TO_TMDB_TTL_RESOLVED),
+  );
   if (stillUnknown.length === 0) return { map: result, hadErrors };
 
   const auth = tmdbAuth();
@@ -565,14 +578,23 @@ export function arrErrorMessage(err: unknown): string {
 
 /**
  * arrErrorMessage for a caller who may be a non-ADMIN delegate (MANAGE_REQUESTS,
- * MANAGE_ISSUES). An ArrResponseError's text is already a generic status phrase;
- * any other error is named by its KIND only. A SafeFetchError's message carries
- * the arr's internal URL, host, IP and port ("fetch failed for
+ * MANAGE_ISSUES), in the caller's language. An ArrResponseError gets
+ * arrErrorMessage's status phrase, translated (English is byte-identical) and
+ * never its body; any other error is named by its KIND only. A SafeFetchError's
+ * message carries the arr's internal URL, host, IP and port ("fetch failed for
  * http://10.0.0.5:7878/api/v3/command: … ECONNREFUSED 10.0.0.5:7878"), which no
  * delegate-facing arr surface shows (guardrail 5g). Log arrErrorMessage beside it.
  */
 export function arrErrorMessageForClient(err: unknown, t: Translator): string {
-  if (err instanceof ArrResponseError) return arrErrorMessage(err);
+  if (err instanceof ArrResponseError) {
+    const status = err.status;
+    if (status === 401 || status === 403) return t("apiUser.common.arrStatusAuth", { status });
+    if (status === 404) return t("apiUser.common.arrStatusNotFound", { status });
+    if (status === 502) return t("apiUser.common.arrStatusBadGateway");
+    if (status === 504) return t("apiUser.common.arrStatusGatewayTimeout");
+    if (status >= 500) return t("apiUser.common.arrStatusServer", { status });
+    return t("apiUser.common.arrStatusOther", { status });
+  }
   switch (arrErrorKind(err)) {
     case "timeout":
       return t("apiUser.common.arrTimeout");
@@ -720,18 +742,43 @@ export interface ArrRelease {
 // quality/download, so any tagging failure is logged and the add proceeds
 // UNTAGGED — it must NEVER fail the add.
 
+// Concurrent adds for one requester (a batch approve runs several at once) share
+// ONE find-or-create per instance and label. Each used to read the tag list,
+// miss the new label, and POST it: the arr then held duplicate tags or refused
+// the later POSTs, and those titles were added untagged.
+const tagEnsureInFlight = new Map<string, Promise<number | null>>();
+
 // Find-or-create a tag by label; returns its id, or null on ANY failure so the
 // caller proceeds untagged rather than failing the add.
-async function ensureArrTag(cfg: ArrCfgFull, label: string): Promise<number | null> {
+function ensureArrTag(cfg: ArrCfgFull, label: string): Promise<number | null> {
+  return singleFlight(tagEnsureInFlight, `${cfg.url}\u0000${label.toLowerCase()}`, () => findOrCreateArrTag(cfg, label));
+}
+
+async function findOrCreateArrTag(cfg: ArrCfgFull, label: string): Promise<number | null> {
+  const wanted = label.toLowerCase();
+  const find = (tags: unknown): number | null => {
+    if (!Array.isArray(tags)) return null;
+    for (const t of tags as Array<{ id?: unknown; label?: unknown } | null>) {
+      if (typeof t?.label === "string" && t.label.toLowerCase() === wanted && typeof t.id === "number") return t.id;
+    }
+    return null;
+  };
   try {
-    const tags = await arrFetch<{ id: number; label: string }[]>(cfg, "/api/v3/tag");
-    const existing = tags.find((t) => t.label.toLowerCase() === label.toLowerCase());
-    if (existing) return existing.id;
-    const created = await arrFetch<{ id: number }>(cfg, "/api/v3/tag", {
-      method: "POST",
-      body: JSON.stringify({ label }),
-    });
-    return typeof created?.id === "number" ? created.id : null;
+    const existing = find(await arrFetch<unknown>(cfg, "/api/v3/tag"));
+    if (existing !== null) return existing;
+    try {
+      const created = await arrFetch<{ id?: unknown } | null>(cfg, "/api/v3/tag", {
+        method: "POST",
+        body: JSON.stringify({ label }),
+      });
+      return typeof created?.id === "number" ? created.id : null;
+    } catch (postErr) {
+      // Someone else (another process, the arr's own UI) may have created it
+      // since the read, or this POST landed and only its answer was lost.
+      const again = find(await arrFetch<unknown>(cfg, "/api/v3/tag").catch(() => null));
+      if (again !== null) return again;
+      throw postErr;
+    }
   } catch (err) {
     console.warn("[arr] requester-tag ensure failed (proceeding untagged):", sanitizeForLog(err instanceof Error ? err.message : String(err)));
     return null;
@@ -865,30 +912,37 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
   };
 
   if (progress) progress.sent = true;
+  // A path collision retries with Radarr's own `{tmdb-<id>}` folder token.
+  await postWithCollisionRetry(postMovie, `{tmdb-${movie.tmdbId}}`, async () => {
+    console.warn("[arr] movie already in Radarr — re-checking its monitored state", { tmdbId });
+    await remediateExistingMovie();
+  });
+}
+
+/**
+ * The add's POST, shared by Radarr and Sonarr. "Already added" runs the caller's
+ * duplicate remediation. A *different* title (another tmdb/tvdb id) occupying the
+ * `Title (Year)` folder this one would use is retried ONCE at an id-tagged path
+ * (`<path> {tmdb-<id>}` / `{tvdb-<id>}`), so two genuinely distinct same-title
+ * items coexist instead of the request hard-failing. That path can only collide
+ * if this very title is already there — a real duplicate, which surfaces as
+ * "already added". Anything else is rethrown.
+ */
+async function postWithCollisionRetry(
+  post: (pathOverride?: string) => Promise<unknown>,
+  idFolderToken: string,
+  onDuplicate: () => Promise<void>,
+): Promise<void> {
   try {
-    await postMovie();
+    await post();
   } catch (err) {
-    if (isDuplicate(err)) {
-      console.warn("[arr] movie already in Radarr — re-checking its monitored state", { tmdbId });
-      await remediateExistingMovie();
-      return;
-    }
-    // A *different* movie (different tmdbId) already occupies the `Title (Year)`
-    // folder this title would use. Retry once with a tmdbId-tagged path —
-    // mirrors Radarr's own `{tmdb-<id>}` folder token — so two genuinely
-    // distinct same-title films can coexist instead of the request hard-failing.
+    if (isDuplicate(err)) return onDuplicate();
     const collidedPath = pathCollisionTarget(err);
     if (!collidedPath) throw err;
     try {
-      await postMovie(`${collidedPath} {tmdb-${movie.tmdbId}}`);
+      await post(`${collidedPath} ${idFolderToken}`);
     } catch (retryErr) {
-      // The id-tagged path can only collide if this exact tmdbId is already in
-      // Radarr — a real duplicate, which surfaces as "already added".
-      if (isDuplicate(retryErr)) {
-        console.warn("[arr] movie already in Radarr — re-checking its monitored state", { tmdbId });
-        await remediateExistingMovie();
-        return;
-      }
+      if (isDuplicate(retryErr)) return onDuplicate();
       throw retryErr;
     }
   }
@@ -1119,43 +1173,17 @@ export async function getSeriesFirstAired(tmdbId: number, variant: ArrVariant = 
   } catch { return null; }
 }
 
+// Live "is this movie wanted" for the arr-state diagnostic. false = unconfigured
+// or Radarr holds it with a file (or not at all). A Radarr request failure
+// THROWS, like getSonarrSeriesCompletion, so the route reports it instead of a
+// confident false during an outage.
 export async function isMovieWantedInRadarr(tmdbId: number, variant: ArrVariant = ""): Promise<boolean> {
   const cfg = await getCfg("radarr", variant);
   if (!cfg) return false;
-  try {
-    const movies = await arrFetch<{ tmdbId: number; hasFile: boolean }[]>(
-      cfg, `/api/v3/movie?tmdbId=${tmdbId}`
-    );
-    return movies.some((m) => m.tmdbId === tmdbId && !m.hasFile);
-  } catch {
-    return false;
-  }
-}
-
-export async function isSeriesWantedInSonarr(tmdbId: number, variant: ArrVariant = ""): Promise<boolean> {
-  const cfg = await getCfg("sonarr", variant);
-  if (!cfg) return false;
-  try {
-    const series = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
-    if (!series) return false;
-    const { tvdbId } = series;
-    // Interpolated into the query — hold the never-schema-checked lookup value
-    // to the same positive-integer contract isSeriesDownloadedInSonarr applies.
-    if (!Number.isInteger(tvdbId) || tvdbId <= 0) return false;
-    const library = await arrFetch<({ tvdbId: number } & SonarrSeriesStatsRow)[]>(
-      cfg, `/api/v3/series?tvdbId=${tvdbId}`
-    );
-    const match = library.find((s) => s.tvdbId === tvdbId);
-    // "Wanted" is "not COMPLETE" (guardrail 14a) — the same sonarrSeriesCompletion
-    // verdict the sync writer stores a SonarrWantedItem row from. The old
-    // `episodeFileCount === 0` test read a partly downloaded series (5 of 24
-    // aired episodes) as not wanted, so the arr-state diagnostic's `wantedLive`
-    // contradicted the wanted row holding the request APPROVED. The helper also
-    // tolerates a row with no `statistics` block (missing stats read as wanted).
-    return !!match && !sonarrSeriesCompletion(match).complete;
-  } catch {
-    return false;
-  }
+  const movies = await arrFetch<{ tmdbId: number; hasFile: boolean }[]>(
+    cfg, `/api/v3/movie?tmdbId=${tmdbId}`
+  );
+  return movies.some((m) => m.tmdbId === tmdbId && !m.hasFile);
 }
 
 // Authoritative "is this movie actually downloaded" check, used by the Radarr
@@ -1231,10 +1259,8 @@ export async function isSeriesDownloadedInSonarr(
   const cfg = await getArrCfg("sonarr", variant);
   if (!cfg) return null;
   try {
-    const payloadTvdbId =
-      Number.isInteger(ids.tvdbId) && (ids.tvdbId as number) > 0 ? (ids.tvdbId as number) : null;
-    const claimedTmdbId =
-      Number.isInteger(ids.tmdbId) && (ids.tmdbId as number) > 0 ? (ids.tmdbId as number) : null;
+    const payloadTvdbId = posInt(ids.tvdbId);
+    const claimedTmdbId = posInt(ids.tmdbId);
     // Sonarr-sourced only. This resolution decides whether a payload is FORGED, and
     // TMDB's TVDB cross-reference is third-party, user-edited data: one wrong edit
     // would have Sonarr's genuine events refused as ids-disagree. Nothing is lost
@@ -1248,7 +1274,7 @@ export async function isSeriesDownloadedInSonarr(
       // the library rows would silently never match — reporting "not downloaded" for a
       // series Sonarr actually has, rather than the honest `null` for unverifiable.
       const rawResolved = looked ? looked.tvdbId : null;
-      return Number.isInteger(rawResolved) && (rawResolved as number) > 0 ? (rawResolved as number) : null;
+      return posInt(rawResolved);
     };
     // No tvdbId in the payload: the lookup is the only way to find the library row.
     const tvdbId = payloadTvdbId ?? (claimedTmdbId !== null ? await lookupTvdbId(claimedTmdbId) : null);
@@ -1262,8 +1288,7 @@ export async function isSeriesDownloadedInSonarr(
     );
     const match = library.find((s) => s.tvdbId === tvdbId);
     if (!match) return { downloaded: false, reason: "absent" };
-    const libraryTmdbId =
-      Number.isInteger(match.tmdbId) && (match.tmdbId as number) > 0 ? (match.tmdbId as number) : null;
+    const libraryTmdbId = posInt(match.tmdbId);
 
     if (payloadTvdbId !== null && claimedTmdbId !== null) {
       // The payload's two ids must name the SAME series. This is the forgery shape the
@@ -1323,14 +1348,14 @@ export async function getSonarrSeriesCompletion(
   const cfg = await getArrCfg("sonarr", variant);
   if (!cfg) return null;
   const looked = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
-  const tvdbId = looked?.tvdbId;
-  if (!Number.isInteger(tvdbId) || (tvdbId as number) <= 0) return null;
+  const tvdbId = posInt(looked?.tvdbId);
+  if (tvdbId === null) return null;
   const library = await arrFetch<({ tvdbId: number } & SonarrSeriesStatsRow)[]>(
     cfg, `/api/v3/series?tvdbId=${tvdbId}`,
   );
   const match = library.find((s) => s.tvdbId === tvdbId);
   if (!match) return null;
-  return { tvdbId: tvdbId as number, ...sonarrSeriesCompletion(match) };
+  return { tvdbId, ...sonarrSeriesCompletion(match) };
 }
 
 export async function searchMovieInRadarr(tmdbId: number, variant: ArrVariant = ""): Promise<void> {
@@ -1338,7 +1363,7 @@ export async function searchMovieInRadarr(tmdbId: number, variant: ArrVariant = 
   if (!cfg) throw new Error("Radarr is not configured");
   const movies = await arrFetch<{ id: number; tmdbId: number }[]>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`);
   const movie = movies.find((m) => m.tmdbId === tmdbId);
-  if (!movie) throw new Error("Movie not found in Radarr library");
+  if (!movie) throw new ArrItemNotFoundError("Movie not found in Radarr library");
   await arrFetch<unknown>(cfg, "/api/v3/command", {
     method: "POST",
     body: JSON.stringify({ name: "MoviesSearch", movieIds: [movie.id] }),
@@ -1389,15 +1414,31 @@ export async function grabMovieRelease(tmdbId: number, guid: string, indexerId: 
   await postReleaseGrab(cfg, { guid, indexerId, movieId: movie.id });
 }
 
+// A cache miss joins the read already in flight for its key, else starts one
+// and forgets it once it settles (the cache then answers until it expires).
+function singleFlight<T>(inFlight: Map<string, Promise<T>>, key: string, read: () => Promise<T>): Promise<T> {
+  const pending = inFlight.get(key);
+  if (pending) return pending;
+  const run = read().finally(() => {
+    if (inFlight.get(key) === run) inFlight.delete(key);
+  });
+  inFlight.set(key, run);
+  return run;
+}
+
 // Returns null when the queue could not be read AND no stale cache exists, so
 // callers don't mistake a fetch failure for an empty queue (which would yield
 // false "not downloading" → spurious notifies / premature scans). A successful
 // read (even empty) returns a Set.
 async function getRadarrQueueSet(cfg: ArrCfg): Promise<Set<number> | null> {
-  const now = Date.now();
   const cacheKey = `radarr::${cfg.url}`;
-  const cached = queueCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) return cached.tmdbIds;
+  const cached = radarrQueueCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.tmdbIds;
+  return singleFlight(radarrQueueInFlight, cacheKey, () => readRadarrQueue(cfg, cacheKey));
+}
+
+async function readRadarrQueue(cfg: ArrCfg, cacheKey: string): Promise<Set<number> | null> {
+  const now = Date.now();
   try {
     // The queue endpoint is paged: read every page (250 items each) until
     // totalRecords is covered, capped at 40 pages (10k items) as a safety limit.
@@ -1413,12 +1454,13 @@ async function getRadarrQueueSet(cfg: ArrCfg): Promise<Set<number> | null> {
       }
       if (queue.records.length === 0 || page * 250 >= queue.totalRecords) break;
     }
-    queueCache.set(cacheKey, { tmdbIds, tvdbIds: new Set(), unmapped: false, expiresAt: now + QUEUE_STATE_TTL_MS });
+    radarrQueueCache.set(cacheKey, { tmdbIds, expiresAt: now + QUEUE_STATE_TTL_MS });
     return tmdbIds;
   } catch (err) {
-    if (cached) {
+    const stale = radarrQueueCache.get(cacheKey);
+    if (stale) {
       console.warn("[arr] getRadarrQueueSet failed, serving stale queue data:", err instanceof Error ? err.message : err);
-      return cached.tmdbIds;
+      return stale.tmdbIds;
     }
     console.error("[arr] getRadarrQueueSet failed, no cache:", err instanceof Error ? err.message : err);
     return null;
@@ -1433,12 +1475,16 @@ type SonarrQueueState = { tvdbIds: Set<number>; tmdbIds: Set<number>; unmapped: 
 
 // Null = unknown (fetch failed, no stale cache) vs a state = read succeeded. See getRadarrQueueSet.
 async function getSonarrQueueState(cfg: ArrCfg): Promise<SonarrQueueState | null> {
-  const now = Date.now();
   const cacheKey = `sonarr::${cfg.url}`;
-  const cached = queueCache.get(cacheKey);
-  if (cached && cached.expiresAt > now) return cached;
+  const cached = sonarrQueueCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.state;
+  return singleFlight(sonarrQueueInFlight, cacheKey, () => readSonarrQueue(cfg, cacheKey));
+}
+
+async function readSonarrQueue(cfg: ArrCfg, cacheKey: string): Promise<SonarrQueueState | null> {
+  const now = Date.now();
   try {
-    // Paged endpoint — see getRadarrQueueSet.
+    // Paged endpoint — see readRadarrQueue.
     const tvdbIds = new Set<number>();
     const tmdbIds = new Set<number>();
     let unmapped = false;
@@ -1456,13 +1502,14 @@ async function getSonarrQueueState(cfg: ArrCfg): Promise<SonarrQueueState | null
       }
       if (queue.records.length === 0 || page * 250 >= queue.totalRecords) break;
     }
-    const state = { tmdbIds, tvdbIds, unmapped };
-    queueCache.set(cacheKey, { ...state, expiresAt: now + QUEUE_STATE_TTL_MS });
+    const state: SonarrQueueState = { tmdbIds, tvdbIds, unmapped };
+    sonarrQueueCache.set(cacheKey, { state, expiresAt: now + QUEUE_STATE_TTL_MS });
     return state;
   } catch (err) {
-    if (cached) {
+    const stale = sonarrQueueCache.get(cacheKey);
+    if (stale) {
       console.warn("[arr] getSonarrQueueState failed, serving stale queue data:", err instanceof Error ? err.message : err);
-      return cached;
+      return stale.state;
     }
     console.error("[arr] getSonarrQueueState failed, no cache:", err instanceof Error ? err.message : err);
     return null;
@@ -1518,12 +1565,12 @@ export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVa
     // here, and a confident false fires a spurious "download pending" notify
     // for a series Sonarr may be actively downloading.
     if (!series) return null;
-    const { tvdbId } = series;
     // Hold the never-schema-checked lookup value to the same positive-integer
-    // contract as isSeriesWantedInSonarr/isSeriesDownloadedInSonarr: a
-    // malformed tvdbId would make queueSet.has() a confident false ("not in
-    // queue") where the contract reserves null for "couldn't determine".
-    if (!Number.isInteger(tvdbId) || tvdbId <= 0) return null;
+    // contract as isSeriesDownloadedInSonarr: a malformed tvdbId would make
+    // queueSet.has() a confident false ("not in queue") where the contract
+    // reserves null for "couldn't determine".
+    const tvdbId = posInt(series.tvdbId);
+    if (tvdbId === null) return null;
     return queue.tvdbIds.has(tvdbId);
   } catch { return null; }
 }
@@ -1776,70 +1823,53 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
   };
 
   if (progress) progress.sent = true;
-  try {
-    await postSeries();
-  } catch (err) {
-    if (isDuplicate(err)) {
-      console.warn("[arr] series already in Sonarr — re-checking its monitored state", { tmdbId });
-      await remediateExistingSeries();
-    } else {
-      // A *different* series (different tvdbId) already occupies the folder this
-      // title would use. Retry once with a tvdbId-tagged path — mirrors Sonarr's
-      // own `{tvdb-<id>}` folder token — so distinct same-title shows coexist.
-      const collidedPath = pathCollisionTarget(err);
-      if (!collidedPath) throw err;
-      try {
-        await postSeries(`${collidedPath} {tvdb-${series.tvdbId}}`);
-      } catch (retryErr) {
-        if (isDuplicate(retryErr)) {
-          console.warn("[arr] series already in Sonarr — re-checking its monitored state", { tmdbId });
-          await remediateExistingSeries();
-        } else {
-          throw retryErr;
-        }
-      }
-    }
-  }
+  // A path collision retries with Sonarr's own `{tvdb-<id>}` folder token.
+  await postWithCollisionRetry(postSeries, `{tvdb-${series.tvdbId}}`, async () => {
+    console.warn("[arr] series already in Sonarr — re-checking its monitored state", { tmdbId });
+    await remediateExistingSeries();
+  });
 
   return series.tvdbId;
 }
 
-export async function searchSeriesInSonarr(tvdbId: number, variant: ArrVariant = ""): Promise<void> {
+// The series' id on the instance, for a search command. ArrItemNotFoundError
+// when the instance doesn't hold it (never pushed, or removed there) — the
+// same "not in library" signal the release, grab and season helpers give.
+async function sonarrSeriesForSearch(tvdbId: number, variant: ArrVariant): Promise<{ cfg: ArrCfgFull; seriesId: number }> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
   const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
-  if (!series) throw new Error("Series not found in Sonarr library");
+  if (!series) throw new ArrItemNotFoundError("Series not found in Sonarr library");
+  return { cfg, seriesId: series.id };
+}
+
+export async function searchSeriesInSonarr(tvdbId: number, variant: ArrVariant = ""): Promise<void> {
+  const { cfg, seriesId } = await sonarrSeriesForSearch(tvdbId, variant);
   await arrFetch<unknown>(cfg, "/api/v3/command", {
     method: "POST",
-    body: JSON.stringify({ name: "SeriesSearch", seriesId: series.id }),
+    body: JSON.stringify({ name: "SeriesSearch", seriesId }),
   });
 }
 
 export async function searchSeasonInSonarr(tvdbId: number, seasonNumber: number, variant: ArrVariant = ""): Promise<void> {
-  const cfg = await getCfg("sonarr", variant);
-  if (!cfg) throw new Error("Sonarr is not configured");
-  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
-  const series = library.find((s) => s.tvdbId === tvdbId);
-  if (!series) throw new Error("Series not found in Sonarr library");
+  const { cfg, seriesId } = await sonarrSeriesForSearch(tvdbId, variant);
   await arrFetch<unknown>(cfg, "/api/v3/command", {
     method: "POST",
-    body: JSON.stringify({ name: "SeasonSearch", seriesId: series.id, seasonNumber }),
+    body: JSON.stringify({ name: "SeasonSearch", seriesId, seasonNumber }),
   });
 }
 
 export async function searchEpisodeInSonarr(tvdbId: number, seasonNumber: number, episodeNumber: number, variant: ArrVariant = ""): Promise<void> {
-  const cfg = await getCfg("sonarr", variant);
-  if (!cfg) throw new Error("Sonarr is not configured");
-  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
-  const series = library.find((s) => s.tvdbId === tvdbId);
-  if (!series) throw new Error("Series not found in Sonarr library");
+  const { cfg, seriesId } = await sonarrSeriesForSearch(tvdbId, variant);
   const episodes = await arrFetch<{ id: number; seasonNumber: number; episodeNumber: number }[]>(
-    cfg, `/api/v3/episode?seriesId=${series.id}`
+    cfg, `/api/v3/episode?seriesId=${seriesId}`
   );
   const episode = episodes.find(
     (e) => e.seasonNumber === seasonNumber && e.episodeNumber === episodeNumber
   );
+  // A plain Error, not ArrItemNotFoundError: the SERIES is there, and callers
+  // read that class as "not in Radarr/Sonarr — re-push".
   if (!episode) throw new Error(`Episode S${seasonNumber}E${episodeNumber} not found in Sonarr`);
   await arrFetch<unknown>(cfg, "/api/v3/command", {
     method: "POST",
@@ -1851,11 +1881,19 @@ export async function resolveTvdbIdFromTmdbId(tmdbId: number, variant: ArrVarian
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) return null;
   try {
-    const library = await arrFetch<{ tvdbId: number; tmdbId?: number }[]>(cfg, "/api/v3/series");
-    const libMatch = library.find((s) => s.tmdbId === tmdbId);
-    if (libMatch) return libMatch.tvdbId;
     // This value is PERSISTED onto Issue.tvdbId and never re-resolved, so an
     // unverified pick here misroutes every later search/grab for that issue.
+    // TMDB's TVDB cross-reference (cached) only names a candidate: Sonarr's own
+    // library row must carry it AND name this tmdbId (the cross-reference is
+    // user-edited; a v3 row names no tmdbId and falls through to the verified
+    // lookup). A filtered read, never the whole library — every TV issue a user
+    // files runs this.
+    const candidate = await resolveTmdbToTvdb(tmdbId);
+    if (candidate !== null) {
+      const rows = await arrFetch<Array<{ tvdbId?: unknown; tmdbId?: unknown } | null>>(cfg, `/api/v3/series?tvdbId=${candidate}`);
+      const row = Array.isArray(rows) ? rows.find((s) => s?.tvdbId === candidate) : undefined;
+      if (row && row.tmdbId === tmdbId) return candidate;
+    }
     const series = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
     return series?.tvdbId ?? null;
   } catch {

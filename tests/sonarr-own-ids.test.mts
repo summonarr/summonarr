@@ -277,6 +277,31 @@ test("queue: tmdbIds are collected across every page", async () => {
   assert.equal(calls.filter((u) => u.pathname === "/api/v3/queue").length, 2);
 });
 
+test("queue: concurrent checks on a cold cache share ONE paged read of the queue", async () => {
+  // The download checks run four at a time and the sync backstop fans out too;
+  // each miss used to page the whole queue on its own.
+  queuePages = [
+    { records: [{ series: { tvdbId: 1, tmdbId: 2 } }], totalRecords: 300 },
+    { records: [{ series: { tvdbId: 777, tmdbId: 888 } }], totalRecords: 300 },
+  ];
+  const [a, b, c] = await Promise.all([
+    isSeriesDownloadingInSonarr(888),
+    isSeriesDownloadingInSonarr(2),
+    countSonarrQueue(),
+  ]);
+  assert.deepEqual([a, b, c], [true, true, 2]);
+  const pages = calls.filter((u) => u.pathname === "/api/v3/queue").map((u) => u.searchParams.get("page"));
+  assert.deepEqual(pages, ["1", "2"], "one walk of the queue, shared by all three");
+
+  // A failed read is shared too, and still reads as unknown for every caller.
+  instance += 1;
+  settings.set("sonarrUrl", `http://10.0.7.${instance}:8989`);
+  calls.length = 0;
+  queueStatus = 500;
+  assert.deepEqual(await Promise.all([isSeriesDownloadingInSonarr(888), countSonarrQueue()]), [null, null]);
+  assert.equal(calls.filter((u) => u.pathname === "/api/v3/queue").length, 1);
+});
+
 test("queue: countSonarrQueue still counts distinct queued series, mapped or not", async () => {
   queuePages = [queueOf({ tvdbId: 1, tmdbId: 2 }, { tvdbId: 1, tmdbId: 2 }, { tvdbId: 777 }, null)];
   assert.equal(await countSonarrQueue(), 2);

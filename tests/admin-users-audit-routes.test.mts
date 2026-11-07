@@ -907,6 +907,22 @@ test("export: writes its audit row BEFORE the stream opens", async () => {
   await readAll(res);
 });
 
+test("export: its paper-trail row goes through the shared row builder — a control character in the user agent is stripped", async () => {
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" })];
+  const req = new NextRequest("http://localhost:3000/api/admin/audit-log/export", {
+    method: "GET",
+    headers: { cookie: `${COOKIE}=${t}`, "user-agent": "curl/8\x1b[2J\x9bforged" },
+  });
+  const res = await inScope(() => auditExport.GET(req, undefined));
+  const row = (opsOf("auditLog.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(row.action, "AUDIT_LOG_EXPORT");
+  assert.equal(row.userAgent, "curl/8[2Jforged");
+  assert.equal(JSON.parse(row.details as string).status, "started");
+  await readAll(res);
+  assert.ok(opsOf("auditLog.update").some((o) => (o.args as { where: { id: string } }).where.id === auditRows.find((r) => r.action === "AUDIT_LOG_EXPORT")?.id), "the same row is finalized");
+});
+
 test("export: finalizes the audit row with the row count and completed status", async () => {
   const t = await mintSession();
   auditRows = [audit({ id: "a1" }), audit({ id: "a2" })];

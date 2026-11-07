@@ -15,8 +15,9 @@ const SETTING_KEYS = [
   "trashSyncQualityProfiles",
   "trashSyncNaming",
   "trashSyncQualitySizes",
-  // Stamped by refreshTrashCatalog on every catalog refresh (src/lib/trash.ts);
-  // read here so the card can show "Last refreshed … ago".
+  // Stamped by runTrashSync (src/lib/trash.ts) when its hourly gate refreshes
+  // the catalog; read here so the card can show "Last refreshed … ago". The
+  // card re-reads this page after Sync Now or Refresh Catalog.
   "trashLastRefreshAt",
 ] as const;
 

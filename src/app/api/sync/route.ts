@@ -743,13 +743,19 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
             const movieLegacy = new Map<string, PlexLegacyGuidRef>();
             const tvLegacy = new Map<string, PlexLegacyGuidRef>();
             const [movieIds, tvIds] = await Promise.all([
-              getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections, undefined, movieLegacy),
+              getPlexTmdbIds(serverUrl, token, "MOVIE", { selectedKeys: selectedPlexKeys, sections, legacyOut: movieLegacy }),
               // skipShowFilePaths: the episode walk below always follows on
               // this path and captures the same file paths from the type=4
               // listing — the per-show allLeaves probe (one HTTP request per
               // show, every run) is redundant here. The paths are patched onto
               // the rows post-write.
-              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy, true),
+              getPlexTmdbIds(serverUrl, token, "TV", {
+                selectedKeys: selectedPlexKeys,
+                sections,
+                ratingKeyToTmdbOut: ratingKeyToTmdb,
+                legacyOut: tvLegacy,
+                skipShowFilePaths: true,
+              }),
             ]);
             // Resolve + merge legacy-agent items (self-catching, never throws):
             // a resolution failure degrades those items to their previous

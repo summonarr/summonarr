@@ -248,6 +248,17 @@ test("item 2: the local patch protects / unprotects one row and the protected li
   assert.equal(applyLocalProtection(on, { tmdbId: 1, mediaType: "MOVIE", title: "A" }, true, "y").protected.length, 1, "no duplicate entry");
 });
 
+test("a local Protect / Unprotect moves the protected count with the list, and leaves a report without one alone", () => {
+  const entry = (tmdbId: number) => ({ tmdbId, mediaType: "MOVIE", title: null, reason: null, createdAt: "x" });
+  const report = { rows: [] as Array<{ tmdbId: number; mediaType: string; excludedBy: string[]; candidate: boolean }>, protected: [entry(7)], protectedTotal: 5 };
+  const on = applyLocalProtection(report, { tmdbId: 1, mediaType: "MOVIE", title: "A" }, true, "x");
+  assert.equal(on.protectedTotal, 6);
+  assert.equal(applyLocalProtection(on, { tmdbId: 1, mediaType: "MOVIE", title: "A" }, true, "y").protectedTotal, 6, "protecting a listed title again counts once");
+  assert.equal(applyLocalProtection(on, { tmdbId: 1, mediaType: "MOVIE", title: "A" }, false, "y").protectedTotal, 5);
+  assert.equal(applyLocalProtection(report, { tmdbId: 9, mediaType: "MOVIE", title: null }, false, "y").protectedTotal, 5, "an unlisted title leaves the count as it was");
+  assert.equal("protectedTotal" in applyLocalProtection({ rows: report.rows, protected: [] }, { tmdbId: 1, mediaType: "MOVIE", title: "A" }, true, "x"), false);
+});
+
 test("item 2: the page's Protect patches the report and schedules ONE coalesced reload instead of awaiting a load per click", () => {
   const src = readFileSync(new URL("../src/components/admin/library-cleanup.tsx", import.meta.url), "utf8");
   const start = src.indexOf("async function setProtected(");

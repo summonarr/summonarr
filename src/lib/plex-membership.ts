@@ -4,6 +4,7 @@ import { normalizeEmail } from "@/lib/email-normalize";
 import { getMediaInstances, type MediaInstanceConfig } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
 import { plexSettingKey, mediaInstanceLabel, type MediaInstanceKey } from "@/lib/media-instances";
+import { processSingleton } from "@/lib/process-singleton";
 
 // Per-replica cache of the Plex servers' shared-user allowlist, used to lock out
 // users who have been un-shared from every server without waiting for their
@@ -75,12 +76,19 @@ type SlugState = {
   lastOutcome: AttemptOutcome | null;
 };
 
-const slugStates = new Map<MediaInstanceKey, SlugState>();
+// Process-wide (guardrail 27a): this module is reached from the proxy, page
+// renders and API routes, each a separate server chunk. Per-chunk state meant a
+// plex.tv fetch, a TTL and a backoff PER CHUNK, and windows where one chunk
+// enforced a membership another had not fetched yet.
+const slugStates = processSingleton("plex-membership:slugStates", () => new Map<MediaInstanceKey, SlugState>());
 
 // Memoized composition of the last returned union, keyed on the contributing
 // (slug, fetchedAt) pairs — so repeat calls inside a stable window hand back
 // the SAME object (the pre-multi-server zero-allocation hot path).
-let composed: { key: string; members: PlexServerMembers } | null = null;
+const composed = processSingleton(
+  "plex-membership:composed",
+  () => ({ value: null as { key: string; members: PlexServerMembers } | null }),
+);
 
 async function fetchSlugAllowlist(slug: MediaInstanceKey): Promise<{ outcome: AttemptOutcome; entry?: CacheEntry }> {
   const [{ url, token }, adminEmailRow] = await Promise.all([
@@ -233,7 +241,7 @@ export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null
   if (parts.length === 0) return null; // zero configured instances
   // Slugs are lowercase-alnum (registry-validated), so ":"/"|" are unambiguous.
   const key = parts.map((p) => `${p.slug}:${p.fetchedAt}`).join("|");
-  if (composed && composed.key === key) return composed.members;
+  if (composed.value && composed.value.key === key) return composed.value.members;
   const members: PlexServerMembers =
     parts.length === 1
       ? { ids: parts[0].ids, emails: parts[0].emails } // single instance: hand back the cached Sets themselves, as before
@@ -241,7 +249,7 @@ export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null
           ids: new Set(parts.flatMap((p) => [...p.ids])),
           emails: new Set(parts.flatMap((p) => [...p.emails])),
         };
-  composed = { key, members };
+  composed.value = { key, members };
   return members;
 }
 
@@ -263,4 +271,18 @@ export async function getCachedPlexMembersByInstance(): Promise<Map<MediaInstanc
     if (state.cache) out.set(slug, { ids: state.cache.ids, emails: state.cache.emails });
   }
   return out;
+}
+
+/**
+ * The admin token of `slug` changed (Connect Plex): its cached members were
+ * read with the old token. The set is marked expired rather than dropped, so
+ * the last-known membership keeps being enforced (served stale) while the next
+ * call refetches with the new token at once — no 30-minute TTL wait, and no
+ * fail-open window.
+ */
+export function expirePlexMembershipCache(slug: MediaInstanceKey): void {
+  const state = slugStates.get(slug);
+  if (!state) return;
+  if (state.cache) state.cache = { ...state.cache, fetchedAt: 0 };
+  state.lastAttemptAt = 0;
 }

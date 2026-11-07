@@ -14,7 +14,7 @@
 // out; the live answer replaces it. Setup always goes to the server, which
 // re-reads the instance.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -65,6 +65,9 @@ const LEVEL_TONE: Record<ArrHealthCheck["level"], ChipTone> = { error: "declined
 // The panel's one read. The live load and its snapshot must name the SAME url,
 // or the server's snapshot key misses.
 const healthUrl = () => withBasePath("/api/admin/arr-health");
+// A read that never settles (a stuck proxy, a half-open connection) would hold
+// the spinner forever; the server's own arr reads give up well before this.
+const LOAD_TIMEOUT_MS = 90_000;
 
 async function readJson<T>(res: Response): Promise<T | null> {
   return (await res.json().catch(() => null)) as T | null;
@@ -85,12 +88,18 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
     setBase((cur) => cur || data.webhookBase || "");
   });
 
+  // Loads overlap (the re-read after a webhook setup, a Refresh, the first
+  // load): only the newest one writes, so an older answer can't put back the
+  // report the setup just changed, nor clear `loading` while the newest is out.
+  const seq = useRef(0);
   const load = useCallback(async () => {
+    const id = ++seq.current;
     setLoading(true);
     setLoadError("");
     try {
-      const res = await fetch(healthUrl());
+      const res = await fetch(healthUrl(), { signal: AbortSignal.timeout(LOAD_TIMEOUT_MS) });
       const data = await readJson<HealthReport & { error?: string }>(res);
+      if (id !== seq.current) return;
       if (!res.ok || !data) {
         setLoadError(data?.error ?? t("adminManage.arrHealth.loadError"));
         return;
@@ -99,9 +108,9 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
       setBase((cur) => cur || data.webhookBase || "");
       markLive();
     } catch {
-      setLoadError(t("adminManage.arrHealth.loadError"));
+      if (id === seq.current) setLoadError(t("adminManage.arrHealth.loadError"));
     } finally {
-      setLoading(false);
+      if (id === seq.current) setLoading(false);
     }
   }, [t, markLive]);
 

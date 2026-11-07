@@ -283,6 +283,10 @@ beforeEach(async () => {
   settings.set("feature.admin.neverWatched", "true");
   // watch-sync short-circuits before its lock while its feature (default OFF) is off.
   settings.set("feature.admin.watchSync", "true");
+  // trash-sync too (TRaSH Guides is OFF by default). A fresh last-refresh stamp
+  // keeps its run off GitHub: it only walks the (empty) application list.
+  settings.set("trashGuidesEnabled", "true");
+  settings.set("trashLastRefreshAt", new Date().toISOString());
   // arr-watch short-circuits before its lock unless a Radarr/Sonarr instance is
   // configured. An RFC1918 literal: admin-configured SSRF mode, no DNS; every
   // read answers the stub's 503.
@@ -448,12 +452,38 @@ test("trash-sync: TRaSH Guides OFF (the default) is a 200 skip — no 500, no au
   // runTrashSync answers a disabled feature with errors:["trashGuidesEnabled is
   // off"]; turned into a 500 that made the DAILY job a 300s retry loop on every
   // stock deployment (288 failed runs + 288 SETTINGS_CHANGE audit rows a day).
+  settings.delete("trashGuidesEnabled");
+  invalidateFeatureFlagCache();
   const route = ROUTES.find((r) => r.name === "trash-sync")!;
   const res = await route.POST(authed(route));
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { skipped: true, reason: "TRaSH Guides disabled" });
   assert.equal(res.headers.get("x-cron-degraded"), null);
   assert.equal(opsOf("auditLog.create").length, 0, "a disabled feature is not a settings change");
+  // No run happened: it is decided before the lock (no pg connection) and kept
+  // out of the run history (guardrail 7b).
+  assert.equal(res.headers.get("x-cron-skipped"), "1");
+  assert.equal(ops.filter(isBookkeeping).length, 0, "a disabled run must not be recorded");
+  assert.deepEqual(pgLockCalls, []);
+});
+
+test("trash-diagnostic: a starter-pack probe that throws reads as NOT resolvable", async () => {
+  // Its errored report has neither count, and comparing two undefineds used to
+  // call it resolvable.
+  const route = ROUTES.find((r) => r.name === "trash-diagnostic")!;
+  shadowPrismaModel(prisma, "trashSpec", {
+    ...counter("trashSpec"),
+    findMany: async () => { throw new Error("trashSpec read exploded (unit test)"); },
+  });
+  try {
+    const res = await route.POST(authed(route));
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.match(body.report.starterPack.error, /exploded/);
+    assert.equal(body.summary.starterPackResolvable, false);
+  } finally {
+    shadowPrismaModel(prisma, "trashSpec", counter("trashSpec"));
+  }
 });
 
 for (const route of LOCKING) {

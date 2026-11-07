@@ -40,8 +40,10 @@ export interface IssueInput {
 export type CreateIssueResult =
   | {
       ok: true;
+      // The new issue — or the reporter's identical one still open, unchanged.
       issue: Issue;
-      // The admin fan-out (outbound agents, email, push, Discord). Never throws.
+      // The admin fan-out (outbound agents, email, push, Discord); a no-op for
+      // an issue that was already open. Never throws.
       notify: () => Promise<void>;
     }
   | { ok: false; status: 400 | 422; error: string };
@@ -93,11 +95,6 @@ export async function createIssue(
   const verified = await resolveMediaMeta(tmdbId, mt);
   if (!verified) return refuse(422, t("apiUser.common.tmdbUnverified"));
 
-  // Resolve tvdbId server-side from the verified tmdbId for TV. May be null if
-  // resolution fails — the admin grab/search paths resolve on demand and fall back
-  // gracefully, so a null here is safe (never a client-chosen id).
-  const resolvedTvdbId = mt === "TV" ? await resolveTvdbIdFromTmdbId(tmdbId) : null;
-
   // Issues presuppose the title is in the library — every type (bad video, wrong
   // audio, missing subs, wrong match) is about media you HAVE. Gate on a Plex or
   // Jellyfin library hit so the API can't be scripted into issue records for titles
@@ -120,17 +117,44 @@ export async function createIssue(
   ]);
   if (!plexHit && !jellyfinHit) return refuse(422, t("apiUser.issues.notInLibrary"));
 
-  // Best effort (never throws): what the reporter's last play of this title looked like.
-  const playbackContext = await loadPlaybackContext(
-    session.user.id,
-    { tmdbId, mediaType: mt },
-    {
+  const storedSeason = resolvedScope !== "FULL" ? ((seasonNumber as number | undefined) ?? null) : null;
+  const storedEpisode = resolvedScope === "EPISODE" ? ((episodeNumber as number | undefined) ?? null) : null;
+
+  // The same report still open from this reporter (a double submit, a client or
+  // Discord retry) answers with that issue: no second row, no second admin
+  // fan-out. The note is part of "the same": a re-report carrying a different
+  // note is new information and is filed, never dropped. Best effort — two
+  // identical filings racing can both pass this read.
+  const duplicate = await prisma.issue.findFirst({
+    where: {
+      reportedBy: session.user.id,
+      tmdbId,
+      mediaType: mt,
+      issueType: issueType as IssueTypeValue,
       scope: resolvedScope,
-      seasonNumber: resolvedScope !== "FULL" ? ((seasonNumber as number | undefined) ?? null) : null,
-      episodeNumber: resolvedScope === "EPISODE" ? ((episodeNumber as number | undefined) ?? null) : null,
+      seasonNumber: storedSeason,
+      episodeNumber: storedEpisode,
+      note: sanitizedNote ?? null,
+      status: { in: ["OPEN", "IN_PROGRESS"] },
     },
-    new Date(),
-  );
+    orderBy: { createdAt: "desc" },
+  });
+  if (duplicate) return { ok: true, issue: duplicate, notify: async () => {} };
+
+  // Past the library gate only, so a refused report costs no Sonarr lookup.
+  // tvdbId is resolved server-side from the verified tmdbId for TV — never a
+  // client-chosen id. May be null if resolution fails: the admin grab/search
+  // paths resolve on demand and fall back gracefully. The playback context is
+  // best effort (never throws): what the reporter's last play looked like.
+  const [resolvedTvdbId, playbackContext] = await Promise.all([
+    mt === "TV" ? resolveTvdbIdFromTmdbId(tmdbId) : Promise.resolve(null),
+    loadPlaybackContext(
+      session.user.id,
+      { tmdbId, mediaType: mt },
+      { scope: resolvedScope, seasonNumber: storedSeason, episodeNumber: storedEpisode },
+      new Date(),
+    ),
+  ]);
 
   const issue = await prisma.issue.create({
     data: {
@@ -142,8 +166,8 @@ export async function createIssue(
       posterPath: verified.posterPath,
       issueType: issueType as IssueTypeValue,
       scope: resolvedScope,
-      seasonNumber: resolvedScope !== "FULL" ? ((seasonNumber as number | undefined) ?? null) : null,
-      episodeNumber: resolvedScope === "EPISODE" ? ((episodeNumber as number | undefined) ?? null) : null,
+      seasonNumber: storedSeason,
+      episodeNumber: storedEpisode,
       note: sanitizedNote ?? null,
       ...(playbackContext ? { playbackContext } : {}),
     },

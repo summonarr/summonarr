@@ -201,5 +201,15 @@
   "trash.starter.defaultInstanceNote": "Gilt für die Standard-Radarr/Sonarr-Instanz. Für eine benannte Instanz die Instanzauswahl in den Tabs Custom Formats, Qualitätsprofile oder Benennung & Größen verwenden.",
   "trash.sync.lastRefreshed": "Zuletzt aktualisiert {ago}",
   "trash.sync.neverRefreshed": "Katalog noch nicht aktualisiert",
-  "trash.spec.hiddenSelected": "{count} durch Filter ausgeblendet"
+  "trash.spec.hiddenSelected": "{count} durch Filter ausgeblendet",
+  "trash.applyLog.noReason": "keine Fehlerdetails erhalten",
+  "trash.token.remove": "Entfernen",
+  "trash.token.removed": "Entfernt",
+  "trash.spec.selectAria": "{name} auswählen",
+  "trash.spec.selectAllAria": "Alle sichtbaren Specs auswählen",
+  "trash.banner.applyFailed": "Anwenden fehlgeschlagen",
+  "trash.banner.loadFailed": "Profilbibliothek konnte nicht geladen werden",
+  "trash.banner.syncFailed": "Bei „Jetzt synchronisieren“ sind Fehler aufgetreten",
+  "trash.banner.stoppedEarly": "vor dem Ende abgebrochen – bitte erneut ausführen",
+  "trash.sync.disabledOnServer": "Die TRaSH-Synchronisierung ist auf dem Server ausgeschaltet – es wurde nichts ausgeführt"
 }

@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
-import { PLEX_CLIENT_ID } from "@/lib/plex";
+import { PLEX_CLIENT_ID, parseTmdbGuid } from "@/lib/plex";
 import { isFeatureEnabled } from "@/lib/features";
 import { mapLimit } from "@/lib/concurrency";
 import { Permission, AUTO_REQUEST_MASK, effectivePermissions } from "@/lib/permissions";
@@ -166,16 +166,14 @@ function plexHeaders(token: string): Record<string, string> {
 
 // The TMDB id out of a Plex Guid list: [{ id: "imdb://tt0133093" },
 // { id: "tmdb://603" }, { id: "tvdb://169" }]. Only a positive integer after
-// "tmdb://" counts; anything else (no tmdb entry, junk, 0) is null. Pure.
+// "tmdb://" counts (parseTmdbGuid, the one tmdb guid rule); anything else (no
+// tmdb entry, junk, 0) is null. Pure.
 export function tmdbIdFromPlexGuids(guids: unknown): number | null {
   if (!Array.isArray(guids)) return null;
   for (const g of guids) {
     const id = g && typeof g === "object" ? (g as { id?: unknown }).id : undefined;
-    if (typeof id !== "string") continue;
-    const m = /^tmdb:\/\/(\d{1,10})$/.exec(id.trim());
-    if (!m) continue;
-    const n = Number(m[1]);
-    if (Number.isSafeInteger(n) && n > 0) return n;
+    const n = parseTmdbGuid(typeof id === "string" ? id.trim() : id);
+    if (n !== null) return n;
   }
   return null;
 }
@@ -524,6 +522,57 @@ const adminTokenWarnKey = (slug: string) => `plex-watchlist:admin-token:${slug}`
 // A friend (or the owner, graphId null) reached through one instance's owner token.
 type ServerTarget = { graphId: string | null; token: string; slug: string };
 
+// Every configured instance's owner and friends, unioned and deduped by numeric
+// account id (guardrail 35 — findUnique-only config reads, skip-if-unconfigured).
+// A friend with no bridgeable id is counted once however many instances list
+// them (`unbridged`, keyed by their GraphQL id).
+async function collectServerTargets(
+  server: PlexWatchlistServerResult,
+  rejectToken: (token: string, slug: string) => void,
+  signal: AbortSignal | undefined,
+): Promise<{ targets: Map<string, ServerTarget>; friendIds: Set<string>; unbridged: Set<string> }> {
+  const targets = new Map<string, ServerTarget>();
+  const friendIds = new Set<string>();
+  const unbridged = new Set<string>();
+  const seenTokens = new Set<string>();
+  for (const inst of await getMediaInstances("plex")) {
+    if (signal?.aborted) break;
+    const cfg = await getPlexConfig(inst.slug);
+    const token = cfg.token?.trim();
+    if (!token || !cfg.url?.trim()) continue;
+    if (seenTokens.has(token)) continue;
+    seenTokens.add(token);
+    server.instances++;
+    try {
+      const friends = await fetchPlexFriends(token, signal);
+      const uuidToId = await fetchFriendUuidMap(token, signal);
+      const ownerId = await fetchOwnerAccountId(token, signal);
+      forgetWarnOnChange(adminTokenWarnKey(inst.slug));
+      // The owner: the admin token IS their account token — read directly.
+      if (ownerId && !targets.has(ownerId)) targets.set(ownerId, { graphId: null, token, slug: inst.slug });
+      for (const f of friends) {
+        const accountId = friendAccountId(f.graphId, uuidToId);
+        if (!accountId) {
+          unbridged.add(f.graphId.trim().toLowerCase());
+          continue;
+        }
+        friendIds.add(accountId);
+        if (!targets.has(accountId)) targets.set(accountId, { graphId: f.graphId, token, slug: inst.slug });
+      }
+    } catch (err) {
+      // An abort mid-request ends the listing; it is not an instance failure.
+      if (signal?.aborted) break;
+      if (err instanceof AdminTokenRejectedError) {
+        rejectToken(token, inst.slug);
+        continue;
+      }
+      server.instanceErrors++;
+      console.error(`[plex-watchlist] could not list Plex friends for ${mediaInstanceLabel("plex", inst.slug)}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+    }
+  }
+  return { targets, friendIds, unbridged };
+}
+
 async function syncServerPath(
   tokenUserIds: ReadonlySet<string>,
   result: PlexWatchlistSyncResult,
@@ -546,50 +595,12 @@ async function syncServerPath(
     );
   };
 
-  // Union every configured instance's friends, deduped by numeric account id
-  // (guardrail 35 — findUnique-only config reads, skip-if-unconfigured).
-  const targets = new Map<string, ServerTarget>();
-  const friendIds = new Set<string>();
-  let unbridged = 0;
-  const seenTokens = new Set<string>();
-  for (const inst of await getMediaInstances("plex")) {
-    if (signal?.aborted) break;
-    const cfg = await getPlexConfig(inst.slug);
-    const token = cfg.token?.trim();
-    if (!token || !cfg.url?.trim()) continue;
-    if (seenTokens.has(token)) continue;
-    seenTokens.add(token);
-    server.instances++;
-    try {
-      const friends = await fetchPlexFriends(token, signal);
-      const uuidToId = await fetchFriendUuidMap(token, signal);
-      const ownerId = await fetchOwnerAccountId(token, signal);
-      forgetWarnOnChange(adminTokenWarnKey(inst.slug));
-      // The owner: the admin token IS their account token — read directly.
-      if (ownerId && !targets.has(ownerId)) targets.set(ownerId, { graphId: null, token, slug: inst.slug });
-      for (const f of friends) {
-        const accountId = friendAccountId(f.graphId, uuidToId);
-        if (!accountId) {
-          unbridged++;
-          continue;
-        }
-        friendIds.add(accountId);
-        if (!targets.has(accountId)) targets.set(accountId, { graphId: f.graphId, token, slug: inst.slug });
-      }
-    } catch (err) {
-      if (err instanceof AdminTokenRejectedError) {
-        rejectToken(token, inst.slug);
-        continue;
-      }
-      server.instanceErrors++;
-      console.error(`[plex-watchlist] could not list Plex friends for ${mediaInstanceLabel("plex", inst.slug)}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
-    }
-  }
-  server.friends = friendIds.size + unbridged;
+  const { targets, friendIds, unbridged } = await collectServerTargets(server, rejectToken, signal);
+  server.friends = friendIds.size + unbridged.size;
 
   const resolved = targets.size > 0 && !signal?.aborted ? await resolvePlexAccountUsers([...targets.keys()]) : new Map<string, string>();
   server.matched = resolved.size;
-  server.unmatchedFriends = unbridged + [...friendIds].filter((id) => !resolved.has(id)).length;
+  server.unmatchedFriends = unbridged.size + [...friendIds].filter((id) => !resolved.has(id)).length;
 
   // userId → the first target that resolved to them.
   const targetByUser = new Map<string, ServerTarget>();
@@ -653,6 +664,7 @@ async function syncServerPath(
         await fileWatchlistTitles(user, items, result, signal);
         statuses[user.id] = "ok";
       } catch (err) {
+        if (signal?.aborted) break; // an abort mid-request is not this user's failure
         statuses[user.id] = "error";
         // The ADMIN token was rejected mid-run (GraphQL or a metadata lookup):
         // stop using this instance. NEVER the user-token 401 branch — no Account
@@ -666,6 +678,10 @@ async function syncServerPath(
       }
     }
   }
+
+  // An aborted run read only some users: its map would erase everyone else's
+  // last verdict (and could land after a newer run's). Keep the stored one.
+  if (signal?.aborted) return server;
 
   // Best-effort, swallowed: an observability write must never fail the run.
   const status: PlexWatchlistServerStatus = { updatedAt: new Date().toISOString(), users: statuses, unmatchedFriends: server.unmatchedFriends };

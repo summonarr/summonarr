@@ -162,20 +162,28 @@ function useReport<T>(path: string, fallback: string, poll: number | null) {
     if (data && typeof data === "object" && !Array.isArray(data)) setReport(data);
   });
   const { markLive } = snap;
+  // Background polls that failed in a row. One is a blip beside a report that
+  // is still on screen — the next tick usually answers — so only the second
+  // in a row is shown; a manual load's failure always is.
+  const pollFailures = useRef(0);
   const load = useCallback(async (kind: LoadKind = "manual"): Promise<boolean> => {
     const id = gate.begin(kind);
     if (id === null) return false;
-    setLoading(true);
+    // A poll refreshes quietly: nothing spins every tick, and Reload stays
+    // enabled (a manual load supersedes the poll — createLoadGate).
+    if (kind !== "poll") setLoading(true);
     const res = await callUrl<Report<T>>(url, undefined, fallbackRef.current);
     if (!gate.settle(id)) return false;
     setLoading(false);
     if ("data" in res) {
+      pollFailures.current = 0;
       // This read's answer replaces whatever is shown, a snapshot included.
       markLive();
       setReport(res.data);
       setError("");
       return true;
     }
+    if (kind === "poll" && ++pollFailures.current < 2) return false;
     setError(res.error);
     return false;
   }, [url, gate, markLive]);
@@ -247,10 +255,15 @@ const COMMAND_LABEL: Record<CommandStatus, string> = {
   unknown: "adminArr.system.command.unknown",
 };
 
+// The Recent commands list shows this many until "Show all".
+const RECENT_COMMANDS_SHOWN = 8;
+
 function TasksTab() {
   const t = useT();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
+  // How long a task or command took: seconds under a minute, else the duration.
+  const took = (seconds: number) => (seconds < 60 ? t("adminArr.system.seconds", { count: Math.round(seconds) }) : fmt.duration(seconds));
   const { report, loading, error, load, staleAt } = useReport<{ tasks: ArrTask[]; commands: ArrCommandRow[] }>("/api/admin/arr/tasks", t("adminArr.system.loadFailed"), TASKS_POLL_MS);
   // Per instance card: the action in flight there. A dark instance holds its
   // POST for the whole arr timeout; that must not lock every other card.
@@ -309,7 +322,7 @@ function TasksTab() {
         const name = labelOf(report, r.service, r.instance);
         const msg = messages[card];
         const msgWatch = msg?.watchKey ? watches[msg.watchKey] : undefined;
-        const commands = showAll.has(card) ? r.commands : r.commands.slice(0, 8);
+        const commands = showAll.has(card) ? r.commands : r.commands.slice(0, RECENT_COMMANDS_SHOWN);
         const bulk = (action: "searchMissing" | "searchCutoff") => {
           const key = `${card}:${action}`;
           const label = action === "searchMissing" ? t("adminArr.system.searchAllMissing") : t("adminArr.system.searchAllCutoff");
@@ -373,7 +386,7 @@ function TasksTab() {
                             {fmt.dateTime(task.lastExecution)}
                             <div className="text-zinc-500 sm:hidden">{t("adminArr.system.nextRunShort", { date: fmt.dateTime(task.nextExecution) })}</div>
                           </td>
-                          <td className="hidden px-2 py-1.5 text-xs text-zinc-400 sm:table-cell">{task.lastDurationSeconds !== null ? (task.lastDurationSeconds < 60 ? t("adminArr.system.seconds", { count: Math.round(task.lastDurationSeconds) }) : fmt.duration(task.lastDurationSeconds)) : "—"}</td>
+                          <td className="hidden px-2 py-1.5 text-xs text-zinc-400 sm:table-cell">{task.lastDurationSeconds !== null ? took(task.lastDurationSeconds) : "—"}</td>
                           <td className="hidden px-2 py-1.5 text-xs text-zinc-400 sm:table-cell">{fmt.dateTime(task.nextExecution)}</td>
                           <td className="px-2 py-1.5 text-right">
                             <Button
@@ -419,7 +432,7 @@ function TasksTab() {
                       <Chip tone={COMMAND_TONE[c.status]}>{t(COMMAND_LABEL[c.status])}</Chip>
                       <span className="text-zinc-200">{c.name}</span>
                       <span className="text-zinc-500">{fmt.dateTime(c.started ?? c.queued)}</span>
-                      {c.durationSeconds !== null && c.status !== "queued" && <span className="text-zinc-500">{c.durationSeconds < 60 ? t("adminArr.system.seconds", { count: Math.round(c.durationSeconds) }) : fmt.duration(c.durationSeconds)}</span>}
+                      {c.durationSeconds !== null && c.status !== "queued" && <span className="text-zinc-500">{took(c.durationSeconds)}</span>}
                       {c.trigger === "scheduled" && <span className="text-zinc-500">{t("adminArr.system.scheduled")}</span>}
                       {c.message && <span className="min-w-0 truncate text-zinc-500" title={c.message}>{c.message}</span>}
                       {c.status === "queued" && (
@@ -431,7 +444,7 @@ function TasksTab() {
                   ))}
                 </ul>
               )}
-              {r.commands.length > 8 && (
+              {r.commands.length > RECENT_COMMANDS_SHOWN && (
                 <button
                   type="button"
                   aria-expanded={showAll.has(card)}
@@ -632,6 +645,24 @@ function ProvidersTab() {
     );
   }
 
+  // The head of a card's indexer or download-client section: its last Test All
+  // (summary, or the refusal for the whole kind) and the Test All button.
+  function sectionHeader(service: Service, instance: string, kind: ProviderKind, heading: string, rows: number) {
+    const card = `${service}:${instance}`;
+    const cardBusy = busy[card];
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-zinc-500">{heading}</h3>
+        <span className="flex-1" />
+        {summary(`${card}:${kind}`)}
+        {result(`${card}:${kind}:all`, service)}
+        <Button variant="outline" size="xs" disabled={cardBusy !== undefined || rows === 0} onClick={() => void test(service, instance, kind, null)}>
+          {cardBusy === `test:${card}:${kind}:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
+        </Button>
+      </div>
+    );
+  }
+
   // What stands between a switch and the arr: a Prowlarr confirm, or warnings to accept.
   function pending(service: Service, instance: string, kind: ProviderKind, provider: ArrIndexer | ArrDownloadClient) {
     const k = keyOf(service, instance, kind, provider.id);
@@ -697,15 +728,7 @@ function ProvidersTab() {
         return (
           <Card key={card} title={labelOf(report, r.service, r.instance)}>
             <div className="grid gap-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-zinc-500">{t("adminArr.system.indexers")}</h3>
-                <span className="flex-1" />
-                {summary(`${card}:indexer`)}
-                {result(`${card}:indexer:all`, r.service)}
-                <Button variant="outline" size="xs" disabled={cardBusy !== undefined || r.indexers.length === 0} onClick={() => void test(r.service, r.instance, "indexer", null)}>
-                  {cardBusy === `test:${card}:indexer:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
-                </Button>
-              </div>
+              {sectionHeader(r.service, r.instance, "indexer", t("adminArr.system.indexers"), r.indexers.length)}
               {r.indexers.length === 0 ? (
                 <p className="m-0 text-xs text-zinc-500">{t("adminArr.system.noIndexers")}</p>
               ) : (
@@ -763,15 +786,7 @@ function ProvidersTab() {
             </div>
 
             <div className="grid gap-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="m-0 text-xs font-semibold uppercase tracking-wide text-zinc-500">{t("adminArr.system.downloadClients")}</h3>
-                <span className="flex-1" />
-                {summary(`${card}:downloadClient`)}
-                {result(`${card}:downloadClient:all`, r.service)}
-                <Button variant="outline" size="xs" disabled={cardBusy !== undefined || r.downloadClients.length === 0} onClick={() => void test(r.service, r.instance, "downloadClient", null)}>
-                  {cardBusy === `test:${card}:downloadClient:all` && <Loader2 className="animate-spin" />} {t("adminArr.system.testAll")}
-                </Button>
-              </div>
+              {sectionHeader(r.service, r.instance, "downloadClient", t("adminArr.system.downloadClients"), r.downloadClients.length)}
               {r.downloadClients.length === 0 ? (
                 <p className="m-0 text-xs text-zinc-500">{t("adminArr.system.noClients")}</p>
               ) : (

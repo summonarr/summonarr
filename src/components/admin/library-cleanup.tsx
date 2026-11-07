@@ -20,7 +20,7 @@ import { Switch } from "@/components/ui/switch";
 import { EmptyState, SectionHeader, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
 import { arrFailureText } from "@/lib/cleanup-error-text";
-import { ArrowDown, ArrowUp, ArrowUpDown, FileX, Loader2, Shield, ShieldOff, Trash2 } from "@/components/icons";
+import { ArrowDown, ArrowUp, ArrowUpDown, FileX, Loader2, RefreshCw, Shield, ShieldOff, Trash2 } from "@/components/icons";
 import {
   CleanupPlanPanel,
   CleanupResultPanel,
@@ -36,6 +36,8 @@ import {
   CLEANUP_MAX_ITEMS,
   CLEANUP_NUMERIC_BOUNDS,
   CLEANUP_RULE_LABELS,
+  cleanupDraftInBounds,
+  cleanupNumberInBounds,
   cleanupSelectAllOn,
   toggleAllCleanupSelection,
   toggleCleanupSelection,
@@ -104,8 +106,17 @@ type Report = {
   libraryTitles: number;
   arrErrors: Array<{ service: string; instance: string; error: string; kind?: string }>;
   protected: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV"; title: string | null; reason: string | null; createdAt: string }>;
+  // Every protection; `protected` holds only the most recent ones. Absent from an older server.
+  protectedTotal?: number;
   totals: { candidates: number; held: number; reclaimableBytes: number };
 };
+
+// Rows the table renders at once. Each row is a poster, dates, chips and
+// buttons, and a broad rule can match thousands of titles; every tick, busy
+// change or filter keystroke re-rendered all of them. The cap is the selection
+// cap (one delete's worth). Select-all, the selection and the counts still read
+// the whole filtered, sorted view — only the rows drawn are capped.
+const RENDER_CAP = CLEANUP_MAX_ITEMS;
 
 const panel: React.CSSProperties = {
   padding: 16,
@@ -129,7 +140,10 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
   const formatBytes = useCallback((n: number | null) => formatBytesIn(n, locale), [locale]);
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  // Two error slots: a load clears only its own, so a background reload (the
+  // one a Protect schedules seconds later) never wipes an action's failure.
+  const [loadError, setLoadError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [draft, setDraft] = useState<CleanupSettings | null>(null);
   const [savingRules, setSavingRules] = useState(false);
   // Every filter and the sort, in one object that round-trips through the URL.
@@ -144,9 +158,8 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
   // landing last would put back a title's pre-protect state).
   const loadSeq = useRef(0);
   // The settings the draft was taken from — what "unsaved edits" are judged
-  // against — and whether a rules save asked the next answer to reset the draft.
+  // against. A rules save moves it to the saved draft at once (saveRules).
   const draftBase = useRef<CleanupSettings | null>(null);
-  const resetDraftNext = useRef(false);
   // The one reload a burst of Protect / Unprotect clicks shares.
   const [protectReload] = useState(() => createCoalescedReload());
 
@@ -154,38 +167,34 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
     const seq = ++loadSeq.current;
     // Any load answers for the clicks a pending coalesced reload was waiting on.
     protectReload.cancel();
-    if (opts?.resetDraft) resetDraftNext.current = true;
     setLoading(true);
-    setError("");
+    setLoadError("");
     try {
       const res = await fetch(withBasePath("/api/admin/cleanup"));
       if (seq !== loadSeq.current) return;
       if (!res.ok) {
         const msg = await readError(res, t("adminManage.cleanup.error.load"));
-        if (seq === loadSeq.current) setError(msg);
+        if (seq === loadSeq.current) setLoadError(msg);
         return;
       }
       const data = (await res.json()) as Report;
       if (seq !== loadSeq.current) return;
       setReport(data);
       // A reload keeps the admin's unsaved rule edits; only their own save
-      // (or an unedited draft) takes the fresh settings.
+      // (or an unedited draft) takes the fresh settings. The reset belongs to
+      // THIS load: superseded, it dies with it rather than staying armed to
+      // discard edits made since.
       const base = draftBase.current;
-      const reset = resetDraftNext.current;
+      const reset = opts?.resetDraft === true;
       draftBase.current = data.settings;
       setDraft((d) => nextCleanupDraft(d, base, data.settings, reset));
       // Drop selections that are no longer deletable candidates.
       const live = new Set(data.rows.filter((r) => r.candidate).map(keyOf));
       setSelected((prev) => new Set([...prev].filter((k) => live.has(k))));
     } catch {
-      if (seq === loadSeq.current) setError(t("adminManage.cleanup.error.loadNetwork"));
+      if (seq === loadSeq.current) setLoadError(t("adminManage.cleanup.error.loadNetwork"));
     } finally {
-      if (seq === loadSeq.current) {
-        setLoading(false);
-        // A failed reload consumes a save's reset too, rather than leaving it
-        // armed to discard edits the admin makes afterwards.
-        resetDraftNext.current = false;
-      }
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [t, protectReload]);
 
@@ -251,7 +260,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
   async function saveRules() {
     if (!draft) return;
     setSavingRules(true);
-    setError("");
+    setActionError("");
     try {
       const res = await fetch(withBasePath("/api/admin/cleanup/settings"), {
         method: "PATCH",
@@ -259,13 +268,17 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
         body: JSON.stringify(draft),
       });
       if (!res.ok) {
-        setError(await readError(res, t("adminManage.cleanup.error.save")));
+        setActionError(await readError(res, t("adminManage.cleanup.error.save")));
         return;
       }
+      // Saved: these ARE the settings now. Installed before the reload, so Save
+      // reads clean even when a Protect supersedes that reload's answer.
+      draftBase.current = draft;
+      setReport((r) => (r ? { ...r, settings: draft } : r));
       del.clearPlan();
       await load({ resetDraft: true });
     } catch {
-      setError(t("adminManage.cleanup.error.saveNetwork"));
+      setActionError(t("adminManage.cleanup.error.saveNetwork"));
     } finally {
       setSavingRules(false);
     }
@@ -274,7 +287,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
   async function setProtected(row: { tmdbId: number; mediaType: "MOVIE" | "TV"; title: string | null }, on: boolean) {
     const k = keyOf(row);
     setBusyKeys((prev) => new Set(prev).add(k));
-    setError("");
+    setActionError("");
     try {
       const res = on
         ? await fetch(withBasePath("/api/admin/cleanup/protect"), {
@@ -284,7 +297,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
           })
         : await fetch(withBasePath(`/api/admin/cleanup/protect?tmdbId=${row.tmdbId}&mediaType=${row.mediaType}`), { method: "DELETE" });
       if (!res.ok) {
-        setError(await readError(res, on ? t("adminManage.cleanup.error.protect") : t("adminManage.cleanup.error.unprotect")));
+        setActionError(await readError(res, on ? t("adminManage.cleanup.error.protect") : t("adminManage.cleanup.error.unprotect")));
         return;
       }
       del.clearPlan();
@@ -302,7 +315,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
       }
       protectReload.schedule(() => void load());
     } catch {
-      setError(t("adminManage.cleanup.error.network"));
+      setActionError(t("adminManage.cleanup.error.network"));
     } finally {
       // Only this row's entry: another row's request may still be running.
       setBusyKeys((prev) => {
@@ -321,7 +334,17 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
     );
   }
   if (!report || !draft) {
-    return <p style={{ color: "var(--ds-danger)", fontSize: 13 }}>{error || t("adminManage.cleanup.error.load")}</p>;
+    // Nothing else on the page can reload it — the coalesced reload only arms
+    // after a Protect, which needs the table.
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <p role="alert" style={{ color: "var(--ds-danger)", fontSize: 13, margin: 0 }}>{loadError || t("adminManage.cleanup.error.load")}</p>
+        <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
+          {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+          {t("adminManage.common.retry")}
+        </Button>
+      </div>
+    );
   }
 
   const anyRuleOn = report.settings.unwatchedEnabled || report.settings.neverWatchedEnabled || report.settings.votesEnabled;
@@ -330,6 +353,27 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
   const setBool = (field: "unwatchedEnabled" | "neverWatchedEnabled" | "votesEnabled" | "excludeAiring" | "requireUpstreamCheck", v: boolean) =>
     setDraft((d) => (d ? { ...d, [field]: v } : d));
   const dirty = JSON.stringify(draft) !== JSON.stringify(report.settings);
+  // The server refuses a value outside its bounds (never repairs it), so Save
+  // stays off and the field is marked rather than offering a doomed request.
+  const draftValid = cleanupDraftInBounds(draft);
+  // One rule number input: bounds from CLEANUP_NUMERIC_BOUNDS, the write path's own.
+  const numInput = (field: keyof typeof CLEANUP_NUMERIC_BOUNDS, aria: string) => {
+    const bad = !cleanupNumberInBounds(field, draft[field]);
+    return (
+      <input
+        type="number"
+        style={bad ? { ...inputStyle, borderColor: "var(--ds-danger)" } : inputStyle}
+        min={CLEANUP_NUMERIC_BOUNDS[field].min}
+        max={CLEANUP_NUMERIC_BOUNDS[field].max}
+        value={draft[field]}
+        onChange={(e) => setNum(field, e.target.value)}
+        aria-label={aria}
+        aria-invalid={bad || undefined}
+      />
+    );
+  };
+  const shown = visible.slice(0, RENDER_CAP);
+  const protectedTotal = Math.max(report.protectedTotal ?? 0, report.protected.length);
   // A clickable column header; shares its state with the Sort select.
   const sortHead = (k: CleanupSortKey, label: string, align?: "right") => {
     const active = vs.sort === k;
@@ -383,35 +427,38 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
             : t("adminManage.cleanup.rulesHelp")}
         </p>
         <div className="flex flex-col gap-2" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
-          <label className="flex flex-wrap items-center gap-2">
+          {/* A div, not a label: each row holds two controls (the switch and
+              the number), and a label may name only one. Both carry their own
+              aria-label. */}
+          <div className="flex flex-wrap items-center gap-2">
             <Switch checked={draft.unwatchedEnabled} onCheckedChange={(v) => setBool("unwatchedEnabled", v)} aria-label={t("adminManage.cleanup.rule.unwatchedAria")} />
             {t("adminManage.cleanup.rule.unwatchedBefore")}
-            <input type="number" style={inputStyle} min={1} max={3650} value={draft.unwatchedDays} onChange={(e) => setNum("unwatchedDays", e.target.value)} aria-label={t("adminManage.cleanup.rule.unwatchedDaysAria")} />
+            {numInput("unwatchedDays", t("adminManage.cleanup.rule.unwatchedDaysAria"))}
             {t("adminManage.cleanup.days")}
-          </label>
-          <label className="flex flex-wrap items-center gap-2">
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
             <Switch checked={draft.neverWatchedEnabled} onCheckedChange={(v) => setBool("neverWatchedEnabled", v)} aria-label={t("adminManage.cleanup.rule.neverWatchedAria")} />
             {t("adminManage.cleanup.rule.neverWatchedBefore")}
-            <input type="number" style={inputStyle} min={1} max={3650} value={draft.neverWatchedDays} onChange={(e) => setNum("neverWatchedDays", e.target.value)} aria-label={t("adminManage.cleanup.rule.neverWatchedDaysAria")} />
+            {numInput("neverWatchedDays", t("adminManage.cleanup.rule.neverWatchedDaysAria"))}
             {t("adminManage.cleanup.days")}
-          </label>
-          <label className="flex flex-wrap items-center gap-2">
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
             <Switch checked={draft.votesEnabled} onCheckedChange={(v) => setBool("votesEnabled", v)} aria-label={t("adminManage.cleanup.rule.votesAria")} />
             {t("adminManage.cleanup.rule.votesBefore")}
-            <input type="number" style={inputStyle} min={1} max={1000} value={draft.votesMin} onChange={(e) => setNum("votesMin", e.target.value)} aria-label={t("adminManage.cleanup.rule.votesMinAria")} />
+            {numInput("votesMin", t("adminManage.cleanup.rule.votesMinAria"))}
             {t("adminManage.cleanup.rule.votesAfter")}
-          </label>
+          </div>
         </div>
         <h3 style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)", margin: "4px 0 0" }}>{t("adminManage.cleanup.alwaysExcluded")}</h3>
         <div className="flex flex-col gap-2" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
           <label className="flex flex-wrap items-center gap-2">
             {t("adminManage.cleanup.excl.minAgeBefore")}
-            <input type="number" style={inputStyle} min={0} max={3650} value={draft.minAgeDays} onChange={(e) => setNum("minAgeDays", e.target.value)} aria-label={t("adminManage.cleanup.excl.minAgeAria")} />
+            {numInput("minAgeDays", t("adminManage.cleanup.excl.minAgeAria"))}
             {t("adminManage.cleanup.excl.minAgeAfter")}
           </label>
           <label className="flex flex-wrap items-center gap-2">
             {t("adminManage.cleanup.excl.recentBefore")}
-            <input type="number" style={inputStyle} min={0} max={3650} value={draft.recentRequestDays} onChange={(e) => setNum("recentRequestDays", e.target.value)} aria-label={t("adminManage.cleanup.excl.recentAria")} />
+            {numInput("recentRequestDays", t("adminManage.cleanup.excl.recentAria"))}
             {t("adminManage.cleanup.excl.recentAfter")}
           </label>
           <label className="flex flex-wrap items-center gap-2">
@@ -426,11 +473,14 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
             {t("adminManage.cleanup.excl.alsoHeld")}
           </p>
         </div>
-        <div>
-          <Button size="sm" onClick={saveRules} disabled={!dirty || savingRules}>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" onClick={saveRules} disabled={!dirty || !draftValid || savingRules}>
             {savingRules ? <Loader2 className="animate-spin" /> : null}
             {t("adminManage.cleanup.saveRules")}
           </Button>
+          {!draftValid && (
+            <span role="status" style={{ fontSize: 12, color: "var(--ds-danger)" }}>{t("adminManage.cleanup.rulesOutOfRange")}</span>
+          )}
         </div>
       </section>
 
@@ -530,7 +580,9 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
         </div>
       </div>
 
-      {(error || del.error) && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error || del.error}</p>}
+      {[loadError, actionError, del.error].filter((m) => m !== "").map((m, i) => (
+        <p key={i} role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{m}</p>
+      ))}
       {selectionFull && (
         <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminManage.cleanup.selectionFull", { max: CLEANUP_MAX_ITEMS })}</p>
       )}
@@ -572,7 +624,7 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
               </tr>
             </thead>
             <tbody>
-              {visible.map((r) => {
+              {shown.map((r) => {
                 const k = keyOf(r);
                 const deletable = r.candidate && r.arr.length > 0;
                 const isProtected = r.excludedBy.includes("protected");
@@ -644,13 +696,23 @@ export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initia
           </table>
         </div>
       )}
+      {visible.length > shown.length && (
+        <p role="status" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
+          {t("adminManage.cleanup.renderCap", { cap: shown.length, total: visible.length })}
+        </p>
+      )}
 
       {/* ── protected titles ───────────────────────────────────────── */}
       {report.protected.length > 0 && (
         <section className="flex flex-col gap-2" style={panel} aria-labelledby="cleanup-protected">
           <div id="cleanup-protected" className="-mb-3">
-            <SectionHeader title={t("adminManage.cleanup.protectedCount", { count: report.protected.length })} />
+            <SectionHeader title={t("adminManage.cleanup.protectedCount", { count: protectedTotal })} />
           </div>
+          {protectedTotal > report.protected.length && (
+            <p role="status" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
+              {t("adminManage.cleanup.protectedCapped", { cap: report.protected.length, total: protectedTotal })}
+            </p>
+          )}
           {report.protected.map((p) => (
             <div key={keyOf(p)} className="flex items-center justify-between" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
               <span>

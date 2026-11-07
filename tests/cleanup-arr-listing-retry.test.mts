@@ -24,15 +24,16 @@ console.error = () => {};
 
 const SONARR = "http://10.0.0.7:8989";
 let seriesCalls = 0;
-// Per call (0-based): how long Sonarr's gateway takes, and what it answers.
-let script: (n: number) => { delayMs: number; status: number } = () => ({ delayMs: 0, status: 200 });
+// Per call (0-based): how long Sonarr's gateway takes, and what it answers
+// (a 200's JSON body defaults to an empty listing).
+let script: (n: number) => { delayMs: number; status: number; body?: unknown } = () => ({ delayMs: 0, status: 200 });
 
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   if (url.origin === SONARR && url.pathname === "/api/v3/series") {
-    const { delayMs, status } = script(seriesCalls++);
+    const { delayMs, status, body } = script(seriesCalls++);
     if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
-    return status === 200 ? Response.json([]) : new Response("gateway", { status });
+    return status === 200 ? Response.json(body === undefined ? [] : body) : new Response("gateway", { status });
   }
   throw new Error(`unexpected fetch ${url}`);
 }) as unknown as typeof fetch;
@@ -42,9 +43,13 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 
 const settings = new Map<string, string>();
+// The instance's connection vanishes between the registry's "configured" read
+// and the listing's own config read (getArrCfg also asks for its root folder).
+let configVanishes = false;
 shadowPrismaModel(prisma, "setting", {
   findMany: async (args?: { where?: { key?: { in?: string[] } } }) => {
     const keys = args?.where?.key?.in;
+    if (configVanishes && keys?.some((k) => k.endsWith("RootFolder"))) return [];
     return [...settings.entries()].filter(([k]) => !keys || keys.includes(k)).map(([key, value]) => ({ key, value }));
   },
   findUnique: async (args: { where: { key: string } }) => {
@@ -53,11 +58,13 @@ shadowPrismaModel(prisma, "setting", {
   },
 });
 
-const { loadArrLibraryIndex, _setArrListingRetryDelayForTests, _setArrListingRetryFastFailForTests } = await import("../src/lib/library-cleanup-arr.ts");
+const { failedArrInstances, loadArrLibraryIndex, _setArrListingRetryDelayForTests, _setArrListingRetryFastFailForTests } = await import("../src/lib/library-cleanup-arr.ts");
 _setArrListingRetryDelayForTests(0);
 
 beforeEach(() => {
   seriesCalls = 0;
+  configVanishes = false;
+  script = () => ({ delayMs: 0, status: 200 });
   settings.clear();
   settings.set("sonarrUrl", SONARR);
   settings.set("sonarrApiKey", "sonarr-key");
@@ -91,6 +98,32 @@ test("the production bound retries a quick failure", async () => {
   const index = await loadArrLibraryIndex();
   assert.equal(seriesCalls, 2);
   assert.deepEqual(index.errors, []);
+});
+
+// A listing the code can't read as one is a FAILED instance, never a healthy
+// one holding nothing: the delete route refuses a service while any instance
+// failed (failedArrInstances), so it can't half-delete a title it didn't see.
+for (const [label, body] of [["an object", {}], ["null", null], ["a string", "maintenance"]] as const) {
+  test(`a 200 whose body is ${label}, not a listing, is reported as a failed instance`, async () => {
+    script = () => ({ delayMs: 0, status: 200, body });
+    const index = await loadArrLibraryIndex();
+    assert.deepEqual(index.errors.map((e) => [e.service, e.instance, e.error]), [["sonarr", "", "unexpected listing body"]]);
+    assert.deepEqual(failedArrInstances(index, "TV"), ["default"]);
+  });
+}
+
+test("an instance whose config is gone by the time it is listed is reported as failed, not as empty", async () => {
+  configVanishes = true;
+  const index = await loadArrLibraryIndex();
+  assert.equal(seriesCalls, 0, "nothing to call");
+  assert.deepEqual(index.errors.map((e) => [e.service, e.instance, e.error]), [["sonarr", "", "instance not configured"]]);
+  assert.deepEqual(failedArrInstances(index, "TV"), ["default"]);
+});
+
+test("an empty listing is still a healthy empty instance", async () => {
+  const index = await loadArrLibraryIndex();
+  assert.deepEqual(index.errors, []);
+  assert.deepEqual(failedArrInstances(index, "TV"), []);
 });
 
 test("worst case with a retry stays under a 60 s proxy: fast-fail bound + pause + one 30 s timeout", () => {

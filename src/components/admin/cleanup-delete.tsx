@@ -8,10 +8,9 @@
 // steps drifting apart.
 //
 // What the admin confirmed is what is sent: the execute carries the PLAN's own
-// titles (`cleanupExecuteBody`), never the live selection, and a dry-run (or a
-// 409's fresh plan) answering for a selection that has since changed is dropped
-// — the route checks only the target COUNT, so a same-sized different set would
-// otherwise pass.
+// titles and its target-set fingerprint (`cleanupExecuteBody`), never the live
+// selection, and a dry-run (or a 409's fresh plan) answering for a selection
+// that has since changed is dropped — the plan on screen is the one confirmed.
 //
 // An execute the browser got no answer to from the ROUTE — a proxy's 502/504
 // after ~60 s while the deletes run on, a dropped connection — is outcome
@@ -19,7 +18,7 @@
 // so "Delete N now" can't start a second run over titles the first may already
 // have removed (cleanupExecuteFailure).
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { arrTitleDiffers, cleanupExecuteBody } from "@/lib/cleanup-delete-plan";
 import { arrFailureText } from "@/lib/cleanup-error-text";
@@ -34,6 +33,9 @@ export type CleanupItem = { tmdbId: number; mediaType: "MOVIE" | "TV" };
 
 export type CleanupPlan = {
   targetCount: number;
+  // The exact target set (the route's cleanupTargetsFingerprint), echoed by the
+  // execute so a same-sized different set is refused. Absent from an older server.
+  targetsFingerprint?: string;
   reclaimableBytes: number;
   items: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV"; title: string; targets: Array<{ service: string; instance: string; title: string; sizeOnDisk: number }> }>;
   skipped: Array<{ tmdbId: number; mediaType: string; title: string | null; reason: string }>;
@@ -83,7 +85,17 @@ export function useCleanupDelete(opts: {
   onDeleted: () => Promise<void> | void;
 }) {
   const t = useT();
-  const { items, onDeleted } = opts;
+  // Both callers pass fresh closures every render. Read through refs (updated
+  // after each commit, never during render) behind stable wrappers, so the
+  // callbacks below keep their identity instead of being rebuilt every render.
+  const itemsRef = useRef(opts.items);
+  const onDeletedRef = useRef(opts.onDeleted);
+  useEffect(() => {
+    itemsRef.current = opts.items;
+    onDeletedRef.current = opts.onDeleted;
+  });
+  const items = useCallback(() => itemsRef.current(), []);
+  const onDeleted = useCallback(() => onDeletedRef.current(), []);
   const [plan, setPlan] = useState<CleanupPlan | null>(null);
   const [planning, setPlanning] = useState(false);
   const [executing, setExecuting] = useState(false);
@@ -163,7 +175,7 @@ export function useCleanupDelete(opts: {
         // answers for the old selection.
         if (fresh?.items && gen === planGen.current) {
           const reclaimableBytes = fresh.items.reduce((n, it) => n + it.targets.reduce((m, tg) => m + tg.sizeOnDisk, 0), 0);
-          setPlan({ targetCount: fresh.targetCount, reclaimableBytes, items: fresh.items, skipped: fresh.skipped ?? [] });
+          setPlan({ targetCount: fresh.targetCount, targetsFingerprint: fresh.targetsFingerprint, reclaimableBytes, items: fresh.items, skipped: fresh.skipped ?? [] });
         }
         return;
       }

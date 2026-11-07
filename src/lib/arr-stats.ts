@@ -1,5 +1,8 @@
 import { arrFetch, getArrCfg, ArrResponseError } from "./arr";
 import { getSyncableArrInstances } from "./arr-instance-registry";
+import { PROJECTION_SCAN_FACTOR } from "./arr-parse";
+import { MAX_DISK_ENTRIES } from "./arr-system";
+import { isFeatureEnabled } from "./features";
 
 interface DiskSpaceEntry {
   path: string;
@@ -32,6 +35,30 @@ export interface ArrDiskSpace {
 // null, which means "not configured".
 const FAILED = Symbol("diskspace-failed");
 
+/**
+ * /api/v3/diskspace as the arr answered it, kept to exactly the four fields
+ * native clients decode (guardrail 25 — a well-formed entry passes through
+ * unchanged, in the arr's order). Anything else — not an array, a null or
+ * junk element, a missing path or a non-finite size — is skipped rather than
+ * failing the whole storage card, and the list is linear and bounded
+ * (guardrail 5i): at most MAX_DISK_ENTRIES kept, PROJECTION_SCAN_FACTOR times
+ * that read.
+ */
+export function diskSpaceEntries(raw: unknown): DiskSpaceEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: DiskSpaceEntry[] = [];
+  const scan = Math.min(raw.length, MAX_DISK_ENTRIES * PROJECTION_SCAN_FACTOR);
+  for (let i = 0; i < scan && out.length < MAX_DISK_ENTRIES; i++) {
+    const e = raw[i] as Record<string, unknown> | null;
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    const { path, label, freeSpace, totalSpace } = e;
+    if (typeof path !== "string" || path === "") continue;
+    if (typeof freeSpace !== "number" || !Number.isFinite(freeSpace) || typeof totalSpace !== "number" || !Number.isFinite(totalSpace)) continue;
+    out.push({ path, label: typeof label === "string" ? label : "", freeSpace, totalSpace });
+  }
+  return out;
+}
+
 async function fetchDiskSpace(
   service: "radarr" | "sonarr",
   slug: string,
@@ -42,7 +69,7 @@ async function fetchDiskSpace(
   try {
     // Route through arrFetch (guardrail 5): 50 MB response cap, 30s timeout,
     // injects X-Api-Key, throws ArrResponseError on non-2xx.
-    return await arrFetch<DiskSpaceEntry[]>(cfg, "/api/v3/diskspace");
+    return diskSpaceEntries(await arrFetch<unknown>(cfg, "/api/v3/diskspace"));
   } catch (err) {
     // arrFetch already logs a non-2xx (ArrResponseError); only a transport
     // failure needs attributing here. Either way the instance is reported as
@@ -55,9 +82,16 @@ async function fetchDiskSpace(
 }
 
 export async function getArrDiskSpace(): Promise<ArrDiskSpace> {
+  // A service whose integration is switched off is not called at all — as on
+  // every other admin arr page (enabledArrInstances): `radarr`/`sonarr` null,
+  // nothing for it in `extra` or `unreachable`.
+  const [radarrOn, sonarrOn] = await Promise.all([
+    isFeatureEnabled("feature.integration.radarr"),
+    isFeatureEnabled("feature.integration.sonarr"),
+  ]);
   const [radarrInstances, sonarrInstances] = await Promise.all([
-    getSyncableArrInstances("radarr"),
-    getSyncableArrInstances("sonarr"),
+    radarrOn ? getSyncableArrInstances("radarr") : [],
+    sonarrOn ? getSyncableArrInstances("sonarr") : [],
   ]);
 
   const [radarrRaw, sonarrRaw] = await Promise.all([

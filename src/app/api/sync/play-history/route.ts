@@ -14,7 +14,9 @@ import {
   emitActiveSessionsSnapshot,
   reanchorActiveSessionsOnBoot,
   SESSION_ABSENCE_GRACE_MS,
+  STALE_FINALIZE_CONCURRENCY,
 } from "@/lib/play-history";
+import type { ActiveSession } from "@/generated/prisma";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } from "@/lib/plex";
 import { indexPlexRowsByKey } from "@/lib/plex-dedupe";
 import { getJellyfinSessions } from "@/lib/jellyfin";
@@ -29,7 +31,7 @@ import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import {
   PLEX_STALL_THRESHOLD_MS,
   clearFinalizedNotInCurrentSnapshot,
-  isPlexSessionRecentlyFinalized,
+  isFinalizedPlexGhost,
   markPlexSessionFinalized,
   pruneRecentlyFinalized,
   reconcilePlexEventStream,
@@ -75,29 +77,117 @@ const pendingDlnaSessions = new Set<string>();
 // clamps — SSE is the authoritative real-time source and always writes raw.
 const PROGRESS_JITTER_TOLERANCE_MS = 10_000;
 
-// The admin Plex user id (used only to flag MediaServerUser.isServerAdmin) effectively
-// never changes for a given token, yet the poller runs every 5s. Memoize it per-token
-// with a long TTL so a healthy poll doesn't hit plex.tv ~17k×/day. A Map (not a single
-// slot): with N configured Plex instances the per-tick calls alternate tokens, and a
-// one-slot cache would miss on every call and hammer plex.tv. Stale entries are pruned
-// opportunistically on each call — a handful of instances, no LRU needed. Best-effort:
-// a failed lookup returns null and is not cached, so the next poll retries.
+// A small backward step the poller clamps out (see PROGRESS_JITTER_TOLERANCE_MS).
+function isJitterBackstep(fromMs: number, toMs: number): boolean {
+  return toMs < fromMs && fromMs - toMs <= PROGRESS_JITTER_TOLERANCE_MS;
+}
+// Guardrail 20: the playhead MOVED, forward or backward — not a strict advance.
+// A clamped jitter backstep is not movement: it is never written, so it could
+// never converge and would keep the stall anchor fresh forever.
+function playheadMovedFrom(fromMs: number, toMs: number): boolean {
+  return toMs !== fromMs && !isJitterBackstep(fromMs, toMs);
+}
+
+// The admin Plex user id (rewrites the owner's local "1" and flags
+// MediaServerUser.isServerAdmin) effectively never changes for a given token, yet the
+// poller runs every 5s. Memoize it per-token with a long TTL so a healthy poll doesn't
+// hit plex.tv ~17k×/day. A Map (not a single slot): with N configured Plex instances
+// the per-tick calls alternate tokens, and a one-slot cache would miss on every call
+// and hammer plex.tv.
+// Stale-on-error: past the TTL the id is refreshed, but a failed refresh keeps serving
+// the last id learned. Returning null instead filed every owner play that started and
+// ended inside a plex.tv outage under the phantom "1" identity, which the subject
+// resolver can never link to the owner (guardrail 34). A failure is held for
+// PLEX_ADMIN_ID_RETRY_MS so a hung plex.tv doesn't add its 15s timeout to every tick.
+// A token no longer polled (rotated away) is forgotten after PLEX_ADMIN_ID_FORGET_MS.
 const PLEX_ADMIN_ID_TTL_MS = 60 * 60 * 1000;
-const plexAdminIdCache = new Map<string, { id: string; expiresAt: number }>();
+const PLEX_ADMIN_ID_RETRY_MS = 60 * 1000;
+const PLEX_ADMIN_ID_FORGET_MS = 24 * 60 * 60 * 1000;
+const plexAdminIdCache = new Map<string, { id: string | null; refreshAt: number; usedAt: number }>();
 async function getCachedPlexAdminId(token: string): Promise<string | null> {
   const now = Date.now();
   for (const [cachedToken, entry] of plexAdminIdCache) {
-    if (entry.expiresAt <= now) plexAdminIdCache.delete(cachedToken);
+    if (now - entry.usedAt > PLEX_ADMIN_ID_FORGET_MS) plexAdminIdCache.delete(cachedToken);
   }
   const hit = plexAdminIdCache.get(token);
-  if (hit) return hit.id;
-  const id = await getPlexUser(token)
+  if (hit) {
+    hit.usedAt = now;
+    if (hit.refreshAt > now) return hit.id;
+  }
+  const fetched = await getPlexUser(token)
     .then((u) => u.id)
     .catch(() => null);
-  if (id != null) {
-    plexAdminIdCache.set(token, { id, expiresAt: now + PLEX_ADMIN_ID_TTL_MS });
-  }
+  const id = fetched ?? hit?.id ?? null;
+  plexAdminIdCache.set(token, {
+    id,
+    refreshAt: now + (fetched != null ? PLEX_ADMIN_ID_TTL_MS : PLEX_ADMIN_ID_RETRY_MS),
+    usedAt: now,
+  });
   return id;
+}
+
+// One session's failed write (a title too long for its column, a transient DB
+// error) must not reject the whole instance tick: every other session's result
+// would be lost and the absence sweep after the writes would never run, so ended
+// sessions stayed "playing". The failure is warned and the session skipped; the
+// next tick retries it. `write` is called synchronously in item order, so a write
+// whose synchronous prefix claims shared state (Jellyfin's single-use fallback row)
+// keeps that order.
+function writeEachSession<T, R>(
+  items: readonly T[],
+  idOf: (item: T) => string,
+  write: (item: T) => Promise<R>,
+): Promise<Array<R | "skipped">> {
+  return Promise.all(
+    items.map(async (item): Promise<R | "skipped"> => {
+      try {
+        return await write(item);
+      } catch (err) {
+        console.warn(`[play-history] session write failed for ${idOf(item)}:`, err);
+        return "skipped";
+      }
+    }),
+  );
+}
+
+// Posters for every distinct (tmdbId, mediaType) a tick resolved, keyed
+// "<tmdbId>:<mediaType>". Best-effort: a failed read just leaves them null.
+async function lookupSessionPosters(
+  resolved: ReadonlyArray<{ tmdbId: number | null; mediaType: string | null }>,
+): Promise<Map<string, string | null>> {
+  const posterPairs = Array.from(
+    new Map(
+      resolved
+        .filter((r): r is typeof r & { tmdbId: number; mediaType: string } => r.tmdbId != null && !!r.mediaType)
+        .map((r) => [`${r.tmdbId}:${r.mediaType}`, { tmdbId: r.tmdbId, mediaType: r.mediaType as "MOVIE" | "TV" }]),
+    ).values(),
+  );
+  const posterRows = posterPairs.length > 0
+    ? await prisma.tmdbMediaCore.findMany({
+        where: { OR: posterPairs.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType })) },
+        select: { tmdbId: true, mediaType: true, posterPath: true },
+      }).catch(() => [])
+    : [];
+  return new Map(posterRows.map((r) => [`${r.tmdbId}:${r.mediaType}`, r.posterPath]));
+}
+
+// Rows this instance's server no longer reports and hasn't for the absence grace
+// (SESSION_ABSENCE_GRACE_MS). A failed boot re-anchor leaves every lastSeenAt
+// stale by the whole downtime, making the grace trivially true for sessions that
+// are still playing: then nothing is selected, and the next tick retries
+// (guardrail 21).
+function selectStaleSessions(
+  rows: readonly ActiveSession[],
+  seenSessionKeys: ReadonlySet<string>,
+  reanchored: boolean,
+  nowMs: number,
+): ActiveSession[] {
+  if (!reanchored) return [];
+  return rows.filter(
+    (session) =>
+      !seenSessionKeys.has(session.sessionKey)
+      && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
+  );
 }
 
 // resolveMediaServerUser runs a full advisory-lock transaction (~5 round trips
@@ -161,9 +251,12 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   // Filter sessions with required identifiers up front so prefetch sets are accurate.
   // Skip sessions Plex is still reporting after we've already finalized them via
   // SSE stop, stall detection, or the stale loop — they'd otherwise be re-created
-  // on every poll.
+  // on every poll. Only while the playhead stays put, though: a ghost's is frozen,
+  // and one that moves again is the play resuming under the same key, which gets
+  // a new row (isFinalizedPlexGhost releases the ledger entry).
   const valid = sessions.filter(
-    (s) => s.sessionKey && s.accountId && !isPlexSessionRecentlyFinalized(activeSessionId("plex", instance, s.sessionKey)),
+    (s) => s.sessionKey && s.accountId
+      && !isFinalizedPlexGhost(activeSessionId("plex", instance, s.sessionKey), s.viewOffset, playheadMovedFrom),
   );
   // Even when `valid` is empty we keep going: the cleanup sweep below still has
   // to finalize stale rows.
@@ -264,20 +357,7 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   );
 
   // Bulk prefetch posters for every distinct (tmdbId, mediaType) pair we resolved.
-  const posterPairs = Array.from(
-    new Map(
-      resolved
-        .filter((r): r is typeof r & { tmdbId: number; mediaType: string } => r.tmdbId != null && !!r.mediaType)
-        .map((r) => [`${r.tmdbId}:${r.mediaType}`, { tmdbId: r.tmdbId, mediaType: r.mediaType as "MOVIE" | "TV" }]),
-    ).values(),
-  );
-  const posterRows = posterPairs.length > 0
-    ? await prisma.tmdbMediaCore.findMany({
-        where: { OR: posterPairs.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType })) },
-        select: { tmdbId: true, mediaType: true, posterPath: true },
-      }).catch(() => [])
-    : [];
-  const posterMap = new Map(posterRows.map((r) => [`${r.tmdbId}:${r.mediaType}`, r.posterPath]));
+  const posterMap = await lookupSessionPosters(resolved);
 
   // Drop DLNA gate entries THIS instance's Plex is no longer reporting — the
   // phantom is gone and the slot shouldn't keep a future *real* session
@@ -292,9 +372,11 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
     if (!seenInThisPoll.has(pending)) pendingDlnaSessions.delete(pending);
   }
 
-  // Run per-session writes in parallel.
-  const writeResults = await Promise.all(
-    resolved.map(async ({ s, sessionId, msUserId, tmdbId, mediaType }): Promise<"started" | "updated" | "ended" | "skipped"> => {
+  // Run per-session writes in parallel; one failing is skipped, not fatal.
+  const writeResults = await writeEachSession(
+    resolved,
+    (r) => r.sessionId,
+    async ({ s, sessionId, msUserId, tmdbId, mediaType }): Promise<"started" | "updated" | "ended" | "skipped"> => {
       const progressPercent = s.duration > 0 ? (s.viewOffset / s.duration) * 100 : 0;
       const posterPath = tmdbId != null && mediaType ? posterMap.get(`${tmdbId}:${mediaType}`) ?? null : null;
 
@@ -314,6 +396,10 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
             );
           } catch (err) {
             console.warn(`[play-history] ratingKey-change finalize failed for ${sessionId}:`, err);
+            // The old row survives under this same id, so the create below would be
+            // a no-op counted as "started", and the new item's markers would land on
+            // the old row. The next tick sees the item change again and retries.
+            return "skipped";
           }
           // Fall through to create branch below. existing is now finalized
           // and its ActiveSession row deleted by recordCompletedSession.
@@ -336,10 +422,8 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
           // movement refreshes progressUpdatedAt on every tick forever and the
           // 60s stall detector can never fire. A genuine seek-back (> tolerance)
           // IS written through, so it still counts as movement.
-          const isJitterBackstep =
-            s.viewOffset < priorProgressMs
-            && priorProgressMs - s.viewOffset <= PROGRESS_JITTER_TOLERANCE_MS;
-          const playheadMoved = s.viewOffset !== priorProgressMs && !isJitterBackstep;
+          const jitterBackstep = isJitterBackstep(priorProgressMs, s.viewOffset);
+          const playheadMoved = playheadMovedFrom(priorProgressMs, s.viewOffset);
           // True resume from a non-playing state. Without this branch, a
           // pause longer than PLEX_STALL_THRESHOLD_MS (60s) ends with
           // progressUpdatedAt stuck at the moment the user paused. The first
@@ -370,8 +454,9 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
               );
               // Ledger AFTER the write (guardrail 27): a failed record must not ledger-lock
               // the sessionKey for an hour with no history row — let the next poll
-              // re-observe the stall and retry the finalize.
-              markPlexSessionFinalized(sessionId, nowMs);
+              // re-observe the stall and retry the finalize. The frozen playhead is the
+              // ghost's baseline: a later tick that sees it move starts a new row.
+              markPlexSessionFinalized(sessionId, nowMs, s.viewOffset);
               return "ended";
             } catch (err) {
               console.warn(`[play-history] stall-finalize failed for ${sessionId}:`, err);
@@ -385,10 +470,10 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
           const increment = computePlaytimeIncrement(existing, now);
           // Clamp out stale-snapshot backward jitter (see PROGRESS_JITTER_
           // TOLERANCE_MS): keep the fresher stored value on a small backward
-          // step, write through a genuine seek-back. isJitterBackstep is
+          // step, write through a genuine seek-back. jitterBackstep is
           // computed above so liveness is measured against the value actually
           // written.
-          const nextProgressMs = isJitterBackstep ? priorProgressMs : s.viewOffset;
+          const nextProgressMs = jitterBackstep ? priorProgressMs : s.viewOffset;
           const nextProgressPercent = s.duration > 0 ? (nextProgressMs / s.duration) * 100 : 0;
           // CAS on (id, lastSeenAt): if SSE or another path deleted/updated the
           // row between our prefetch and this write, updateMany returns 0 and we
@@ -545,7 +630,7 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
       }
 
       return "started";
-    }),
+    },
   );
 
   const started = writeResults.filter((r) => r === "started").length;
@@ -566,44 +651,36 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   // PlayHistory row and ledger-lock the sessionKey. Real stops linger up to
   // 60s as "Now Playing" before finalize, but the SSE feed catches them in
   // real-time as long as it's connected; this is the fallback when SSE is down.
-  // A failed boot re-anchor leaves every lastSeenAt stale by the whole downtime,
-  // making this grace trivially true for sessions that are still playing. Skip
-  // rather than finalize on anchors known to be wrong; the next tick retries.
-  const stale = !reanchored
-    ? []
-    : activePlexSessions.filter(
-        (session) =>
-          !seenSessionKeys.has(session.sessionKey)
-          && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
-      );
-  const finalized = await Promise.all(
-    stale.map((session) => {
-      // skipSSE: caller (syncPlayHistory POST) emits a single batched
-      // activity:history-updated after the full sync run completes, so we
-      // don't trigger N refetches per cron tick.
-      // No final tick and no stoppedAt: the session has been ABSENT for >= the
-      // grace, so the interval since lastSeenAt is not playtime, and the stop
-      // happened right after lastSeenAt, not at `now` (the defaults —
-      // lastSeenAt as stoppedAt, increment 0 — are cleanupStaleSessions' rule).
-      // applyFinalTick(session, now) credited ~60s of phantom watch time to every
-      // session that ended without an SSE stop.
-      return recordCompletedSession(session, { skipSSE: true })
-        .then(() => {
-          // Ledger AFTER the write commits (guardrail 27): gate re-create against a racey
-          // Plex reappearance only once the PlayHistory row exists, so a failed
-          // write doesn't ledger-lock the sessionKey with no row for an hour.
-          markPlexSessionFinalized(session.id, nowMs);
-          return true;
-        })
-        .catch((err) => {
-          // Mirrors the Jellyfin sweep and the stall path: a failed finalize is
-          // retried next tick, but the operator needs a line to correlate a late
-          // finalize with (guardrail 7 permits warn-on-failure).
-          console.warn(`[play-history] Failed to finalize plex session ${session.id}:`, err);
-          return false;
-        });
-    }),
-  );
+  // Nothing is selected when the boot re-anchor failed (guardrail 21).
+  const stale = selectStaleSessions(activePlexSessions, seenSessionKeys, reanchored, nowMs);
+  // Bounded (guardrail 31): a media-server outage ages every active session into
+  // one sweep, and each finalize is several queries on the max:5 pool.
+  const finalized = await mapLimit(stale, STALE_FINALIZE_CONCURRENCY, (session) => {
+    // skipSSE: caller (syncPlayHistory POST) emits a single batched
+    // activity:history-updated after the full sync run completes, so we
+    // don't trigger N refetches per cron tick.
+    // No final tick and no stoppedAt: the session has been ABSENT for >= the
+    // grace, so the interval since lastSeenAt is not playtime, and the stop
+    // happened right after lastSeenAt, not at `now` (the defaults —
+    // lastSeenAt as stoppedAt, increment 0 — are cleanupStaleSessions' rule).
+    // applyFinalTick(session, now) credited ~60s of phantom watch time to every
+    // session that ended without an SSE stop.
+    return recordCompletedSession(session, { skipSSE: true })
+      .then(() => {
+        // Ledger AFTER the write commits (guardrail 27): gate re-create against a racey
+        // Plex reappearance only once the PlayHistory row exists, so a failed
+        // write doesn't ledger-lock the sessionKey with no row for an hour.
+        markPlexSessionFinalized(session.id, nowMs);
+        return true;
+      })
+      .catch((err) => {
+        // Mirrors the Jellyfin sweep and the stall path: a failed finalize is
+        // retried next tick, but the operator needs a line to correlate a late
+        // finalize with (guardrail 7 permits warn-on-failure).
+        console.warn(`[play-history] Failed to finalize plex session ${session.id}:`, err);
+        return false;
+      });
+  });
   const ended = finalized.filter(Boolean).length + stallEnded;
 
   return { started, updated, ended };
@@ -763,23 +840,13 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
     }),
   );
 
-  const posterPairs = Array.from(
-    new Map(
-      resolved
-        .filter((r): r is typeof r & { tmdbId: number; mediaType: string } => r.tmdbId != null && !!r.mediaType)
-        .map((r) => [`${r.tmdbId}:${r.mediaType}`, { tmdbId: r.tmdbId, mediaType: r.mediaType as "MOVIE" | "TV" }]),
-    ).values(),
-  );
-  const posterRows = posterPairs.length > 0
-    ? await prisma.tmdbMediaCore.findMany({
-        where: { OR: posterPairs.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType })) },
-        select: { tmdbId: true, mediaType: true, posterPath: true },
-      }).catch(() => [])
-    : [];
-  const posterMap = new Map(posterRows.map((r) => [`${r.tmdbId}:${r.mediaType}`, r.posterPath]));
+  const posterMap = await lookupSessionPosters(resolved);
 
-  const writeResults = await Promise.all(
-    resolved.map(async ({ s, msUserId, tmdbId, mediaType }): Promise<"started" | "updated"> => {
+  // One failing write is skipped, not fatal (see writeEachSession).
+  const writeResults = await writeEachSession(
+    resolved,
+    (r) => activeSessionId("jellyfin", instance, r.s.playSessionId),
+    async ({ s, msUserId, tmdbId, mediaType }): Promise<"started" | "updated" | "skipped"> => {
       const sessionId = activeSessionId("jellyfin", instance, s.playSessionId);
       const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? activeSessionId("jellyfin", instance, s.sessionId) : null;
       const positionMs = Math.floor(s.positionTicks / 10_000);
@@ -825,6 +892,10 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
             await recordCompletedSession(applyFinalTick(existing, now), { skipSSE: true, stoppedAt: now });
           } catch (err) {
             console.warn(`[play-history] itemId-change finalize failed for ${sessionId}:`, err);
+            // The old row survives, so a create here either no-ops onto it (same id)
+            // or opens a second row beside it. The next tick sees the item change
+            // again and retries the finalize.
+            return "skipped";
           }
           // Fall through to the create branch below — existing is now finalized.
         } else {
@@ -915,7 +986,7 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
         skipDuplicates: true,
       });
       return "started";
-    }),
+    },
   );
 
   const started = writeResults.filter((r) => r === "started").length;
@@ -932,24 +1003,17 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
   // actually stopping. Real stops are detected within ~60s as the trade-off.
   const nowMs = now.getTime();
   // See the Plex branch: a failed re-anchor makes the grace meaningless.
-  const stale = !reanchored
-    ? []
-    : activeJfSessions.filter(
-        (session) =>
-          !seenSessionKeys.has(session.sessionKey)
-          && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
-      );
-  const finalized = await Promise.all(
-    stale.map((session) =>
-      // skipSSE: see Plex branch above; one batched SSE per cron run.
-      // See the Plex sweep: absent past the grace ⇒ no final tick, stoppedAt = lastSeenAt.
-      recordCompletedSession(session, { skipSSE: true })
-        .then(() => true)
-        .catch((err) => {
-          console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);
-          return false;
-        }),
-    ),
+  const stale = selectStaleSessions(activeJfSessions, seenSessionKeys, reanchored, nowMs);
+  // Bounded like the Plex sweep (guardrail 31).
+  const finalized = await mapLimit(stale, STALE_FINALIZE_CONCURRENCY, (session) =>
+    // skipSSE: see Plex branch above; one batched SSE per cron run.
+    // See the Plex sweep: absent past the grace ⇒ no final tick, stoppedAt = lastSeenAt.
+    recordCompletedSession(session, { skipSSE: true })
+      .then(() => true)
+      .catch((err) => {
+        console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);
+        return false;
+      }),
   );
   const ended = finalized.filter(Boolean).length;
 
@@ -1106,7 +1170,20 @@ async function syncPlayHistory(request: NextRequest) {
       emitSSE({ type: "activity:history-updated" });
     }
 
-    await emitActiveSessionsSnapshot();
+    // The sessions are written by now. A failing housekeeping step below degrades
+    // the run (its `post-sync:<step>` key reaches X-Cron-Degraded) instead of
+    // 500ing it and dropping every source's result; the next tick runs it again.
+    const postSync = async (step: string, run: () => Promise<void>): Promise<void> => {
+      try {
+        await run();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[play-history] post-sync ${step} failed:`, msg);
+        results[`post-sync:${step}`] = { error: msg };
+      }
+    };
+
+    await postSync("snapshot", () => emitActiveSessionsSnapshot());
     // Never throws: an alert failure must not fail the poll.
     await evaluateConcurrentStreams(tickStartedAt);
 
@@ -1114,25 +1191,29 @@ async function syncPlayHistory(request: NextRequest) {
     // the two per-source absence sweeps, which skip when the boot re-anchor
     // failed — hold this third finalize path to the same gate, or a failed
     // re-anchor after a >30min outage finalizes still-playing sessions.
-    if (reanchored) await cleanupStaleSessions(30);
+    if (reanchored) await postSync("cleanup", () => cleanupStaleSessions(30));
 
-    const now = Date.now();
+    await postSync("retention", async () => {
+      const now = Date.now();
 
-    // Atomic CAS: only the first caller within a 1-hour window performs the retention purge.
-    // Regex-guard the CAST: a non-numeric value (e.g. left over from a manual edit) would otherwise
-    // crash the route. Treat a non-numeric value as expired so the next run overwrites it.
-    const retentionClaimed = await prisma.$executeRaw`
-      INSERT INTO "Setting" (key, value, "updatedAt")
-      VALUES ('lastRetentionCheckAt', ${String(now)}, NOW())
-      ON CONFLICT (key) DO UPDATE
-        SET value = EXCLUDED.value, "updatedAt" = NOW()
-      WHERE "Setting".value !~ '^[0-9]+$'
-         OR CAST("Setting".value AS BIGINT) + ${3600_000}::bigint <= ${now}::bigint
-    `;
-    if (retentionClaimed > 0) {
-      const purged = await purgeOldHistory();
-      if (purged > 0) results.purged = purged;
-    }
+      // Atomic CAS: only the first caller within a 1-hour window performs the retention purge.
+      // Regex-guard the CAST: a non-numeric value (e.g. left over from a manual edit) would otherwise
+      // crash the route. Treat a non-numeric value as expired so the next run overwrites it.
+      const retentionClaimed = await prisma.$executeRaw`
+        INSERT INTO "Setting" (key, value, "updatedAt")
+        VALUES ('lastRetentionCheckAt', ${String(now)}, NOW())
+        ON CONFLICT (key) DO UPDATE
+          SET value = EXCLUDED.value, "updatedAt" = NOW()
+        WHERE "Setting".value !~ '^[0-9]+$'
+           OR CAST("Setting".value AS BIGINT) + ${3600_000}::bigint <= ${now}::bigint
+      `;
+      // A failed purge keeps the claim: releasing it would retry a failing delete
+      // every 5s instead of once an hour.
+      if (retentionClaimed > 0) {
+        const purged = await purgeOldHistory();
+        if (purged > 0) results.purged = purged;
+      }
+    });
   } catch (err) {
     console.error("[sync-play-history]", err);
     return NextResponse.json({ error: "Sync failed" }, { status: 500 });
@@ -1142,7 +1223,7 @@ async function syncPlayHistory(request: NextRequest) {
   // so a failed source shows up on the admin System tab. Status stays 200 — this route runs every 5s from the
   // entrypoint poller, and a non-2xx during a media-server outage would spam the
   // docker logs with a failure line per tick. Checked generically over `results`'
-  // keys (plex, plex:<slug>, jellyfin, jellyfin:<slug>, …) — `results.purged` (a bare number,
+  // keys (plex, plex:<slug>, jellyfin, jellyfin:<slug>, post-sync:<step>, …) — `results.purged` (a bare number,
   // set above on the retention-purge path) safely fails the object/error checks
   // below and is never mistaken for a degraded source.
   const degraded = Object.entries(results)

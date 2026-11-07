@@ -37,6 +37,7 @@ import {
   projectRenames,
   projectRootFolderChoices,
   projectTitle,
+  rootFolderMoving,
   withSeasonMonitoring,
   type ArrTitle,
   type Choice,
@@ -68,9 +69,11 @@ export class AlreadyFailedError extends Error {}
  */
 export class MarkInProgressError extends AlreadyFailedError {}
 
-const resourcePath = (service: ArrService, arrId: number) => `/api/v3/${service === "radarr" ? "movie" : "series"}/${arrId}`;
+/** One movie's or series' resource path (Radarr /movie/{id}, Sonarr /series/{id}). */
+export const resourcePath = (service: ArrService, arrId: number) => `/api/v3/${service === "radarr" ? "movie" : "series"}/${arrId}`;
 
-async function readRaw(cfg: ArrCfg, service: ArrService, arrId: number): Promise<Record<string, unknown>> {
+/** The title's own resource, read fresh — TitleNotFoundError when the instance doesn't hold it. */
+export async function readRaw(cfg: ArrCfg, service: ArrService, arrId: number): Promise<Record<string, unknown>> {
   try {
     const raw = await arrFetch<unknown>(cfg, resourcePath(service, arrId));
     if (!raw || typeof raw !== "object" || Array.isArray(raw) || (raw as { id?: unknown }).id !== arrId) throw new TitleNotFoundError();
@@ -100,11 +103,26 @@ async function readEpisodes(cfg: ArrCfg, seriesId: number, seasonNumber?: number
   return seasonNumber === undefined ? episodes : episodes.filter((e) => e.seasonNumber === seasonNumber);
 }
 
-// Up to this many ids are checked one GET /api/v3/episode/{id} each; more read
+// Up to this many ids are checked one GET /api/v3/episode/{id} each, read
+// together (a fixed handful, so no limit is needed — guardrail 31); more read
 // the series' whole episode list once. A long anime or daily show has
 // thousands of episodes, and a single monitor switch or Search used to pull all
 // of them.
 const FEW_EPISODES = 10;
+
+/** One episode by id, only when it is one of `seriesId`'s (NotOnTitleError otherwise). */
+async function ownEpisode(cfg: ArrCfg, seriesId: number, id: number): Promise<TitleEpisode> {
+  let raw: unknown;
+  try {
+    raw = await arrFetch<unknown>(cfg, `/api/v3/episode/${id}`);
+  } catch (err) {
+    if (err instanceof ArrResponseError && err.status === 404) throw new NotOnTitleError("episode");
+    throw err;
+  }
+  const [ep] = projectEpisodes([raw]);
+  if (!ep || ep.id !== id || (raw as { seriesId?: unknown }).seriesId !== seriesId) throw new NotOnTitleError("episode");
+  return ep;
+}
 
 /**
  * The series' own episodes for `ids`, read fresh from Sonarr (guardrail 5e) —
@@ -113,18 +131,13 @@ const FEW_EPISODES = 10;
 async function episodesOfSeries(cfg: ArrCfg, seriesId: number, ids: readonly number[]): Promise<Map<number, TitleEpisode>> {
   if (ids.length === 0) throw new NotOnTitleError("episode");
   if (ids.length <= FEW_EPISODES) {
+    // Settled in full, then judged in id order: the same failure the one-by-one
+    // reads answered with.
+    const reads = await Promise.allSettled(ids.map((id) => ownEpisode(cfg, seriesId, id)));
     const out = new Map<number, TitleEpisode>();
-    for (const id of ids) {
-      let raw: unknown;
-      try {
-        raw = await arrFetch<unknown>(cfg, `/api/v3/episode/${id}`);
-      } catch (err) {
-        if (err instanceof ArrResponseError && err.status === 404) throw new NotOnTitleError("episode");
-        throw err;
-      }
-      const [ep] = projectEpisodes([raw]);
-      if (!ep || ep.id !== id || (raw as { seriesId?: unknown }).seriesId !== seriesId) throw new NotOnTitleError("episode");
-      out.set(id, ep);
+    for (const [i, r] of reads.entries()) {
+      if (r.status === "rejected") throw r.reason;
+      out.set(ids[i], r.value);
     }
     return out;
   }
@@ -195,18 +208,34 @@ export interface TitleState {
   tags: Choice[] | null;
 }
 
+/** The instance's own choices: quality profiles, root folders and tags, projected (guardrail 5i). */
+export interface TitleCatalog {
+  qualityProfiles: Choice[];
+  rootFolders: RootFolderChoice[];
+  tags: Choice[];
+}
+
 /**
- * The three lists, each on its own: /api/v3/rootfolder computes free space and
- * scans every root's directory, so a dead mount makes it slow or failing — and
- * one 5xx must not lock the admin out of the Seasons, Files and History tabs,
- * which need none of them.
+ * The instance's three choice lists. Strict (an edit's or an add's check):
+ * any list that fails fails the read. `tolerant` (opening the manager): each
+ * list on its own, null when it failed — /api/v3/rootfolder computes free
+ * space and scans every root's directory, so a dead mount makes it slow or
+ * failing, and one 5xx must not lock the admin out of the Seasons, Files and
+ * History tabs, which need none of them.
  */
-async function readCatalogTolerant(cfg: ArrCfg): Promise<Omit<TitleState, "title">> {
-  const [profiles, folders, tags] = await Promise.allSettled([
+export function readCatalog(cfg: ArrCfg, opts: { tolerant: true }): Promise<Omit<TitleState, "title">>;
+export function readCatalog(cfg: ArrCfg, opts?: { tolerant?: false }): Promise<TitleCatalog>;
+export async function readCatalog(cfg: ArrCfg, opts: { tolerant?: boolean } = {}): Promise<TitleCatalog | Omit<TitleState, "title">> {
+  const reads = [
     arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
     arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
     arrFetch<unknown>(cfg, "/api/v3/tag"),
-  ]);
+  ] as const;
+  if (!opts.tolerant) {
+    const [profiles, folders, tags] = await Promise.all(reads);
+    return { qualityProfiles: projectChoices(profiles), rootFolders: projectRootFolderChoices(folders), tags: projectChoices(tags, "label") };
+  }
+  const [profiles, folders, tags] = await Promise.allSettled(reads);
   return {
     qualityProfiles: profiles.status === "fulfilled" ? projectChoices(profiles.value) : null,
     rootFolders: folders.status === "fulfilled" ? projectRootFolderChoices(folders.value) : null,
@@ -214,24 +243,11 @@ async function readCatalogTolerant(cfg: ArrCfg): Promise<Omit<TitleState, "title
   };
 }
 
-async function readCatalog(cfg: ArrCfg) {
-  const [profiles, folders, tags] = await Promise.all([
-    arrFetch<unknown>(cfg, "/api/v3/qualityprofile"),
-    arrFetch<unknown>(cfg, "/api/v3/rootfolder"),
-    arrFetch<unknown>(cfg, "/api/v3/tag"),
-  ]);
-  return {
-    qualityProfiles: projectChoices(profiles),
-    rootFolders: projectRootFolderChoices(folders),
-    tags: projectChoices(tags, "label"),
-  };
-}
-
 export async function loadTitle(service: ArrService, instance: string, arrId: number, known: Record<string, unknown> | null = null): Promise<TitleState> {
   const cfg = await configuredArrCfg(service, instance);
   const [raw, catalog] = await Promise.all([
     known && known.id === arrId ? Promise.resolve(known) : readRaw(cfg, service, arrId),
-    readCatalogTolerant(cfg),
+    readCatalog(cfg, { tolerant: true }),
   ]);
   const title = projectTitle(service, instance, raw, (catalog.rootFolders ?? []).map((f) => f.path));
   if (!title) throw new TitleNotFoundError();
@@ -302,8 +318,9 @@ async function editTitleNow(
     tagIds: new Set(catalog?.tags.map((t) => t.id) ?? []),
     seasonNumbers: new Set(current.seasons.map((s) => s.seasonNumber)),
   });
-  // What actually changes: a root folder equal to the current one is not sent.
-  const fields = editedFields(edit).filter((f) => f !== "rootFolderPath" || edit.rootFolderPath !== current.rootFolderPath);
+  // What actually changes: a root folder that is the current one (trailing
+  // separators aside) is not sent, so it is not audited either.
+  const fields = editedFields(edit).filter((f) => f !== "rootFolderPath" || rootFolderMoving(edit, current));
   const body = editorBody(service, arrId, edit, current);
   if (body) {
     await arrFetch<unknown>(cfg, `/api/v3/${service === "radarr" ? "movie" : "series"}/editor`, { method: "PUT", body: JSON.stringify(body) });

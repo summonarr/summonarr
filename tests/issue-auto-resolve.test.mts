@@ -81,6 +81,10 @@ test("a landed replacement resolves the issue, audits it as system, tells the re
   const note = ops.find((o) => o.op === "notification.create")!.args!.data;
   assert.equal(note.userId, "reporter-1");
   assert.equal(note.type, "ISSUE_RESOLVED");
+  // The row an admin's resolve with no note stores (tests/issues-routes.test.mts):
+  // one writer, announceIssueResolved, for both.
+  assert.equal(note.body, "Your reported issue was resolved.");
+  assert.deepEqual(note.data, { v: 1, resolution: null });
 });
 
 test("feature switched off ⇒ nothing is written", async () => {

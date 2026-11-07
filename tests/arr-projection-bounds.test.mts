@@ -569,6 +569,35 @@ test("a history past MAX_REPLACE_HISTORY is not read at all: every file is searc
   assert.equal(R.replaceableFiles("sonarr", { kind: "series" }, season.files, [imported, grab])[0].grab?.event.id, 1);
 });
 
+test("Replace file's episode lists dedupe through a Set and index Sonarr's list once: episodesOf, episodesFor and unmonitoredByDelete search no list", () => {
+  const n = 5_000;
+  const ep = (i: number) => ({ seasonNumber: 1 + (i % 3), episodeNumber: i + 1 });
+  // Every episode named twice: a file and its duplicate.
+  const files = Array.from({ length: 2 * n }, (_, i) => ({ episodes: [ep(i % n)] })) as unknown as Parameters<typeof R.episodesOf>[0];
+  let refs: ReturnType<typeof R.episodesOf> = [];
+  assert.equal(searchVisits(() => { refs = R.episodesOf(files); }), 0, "episodesOf searched a list");
+  assert.equal(refs.length, n, "each episode once");
+  assert.ok(refs.every((r, i) => i === 0 || refs[i - 1].seasonNumber < r.seasonNumber || (refs[i - 1].seasonNumber === r.seasonNumber && refs[i - 1].episodeNumber < r.episodeNumber)), "in S/E order");
+
+  // Sonarr's list, with one S/E listed twice: the first entry is the one kept, as a scan found it.
+  const raw = Array.from({ length: n }, (_, i) => ({ id: i + 1, ...ep(i) }));
+  raw.push({ id: 999_999, ...ep(0) });
+  const list = counted(raw);
+  let hits: Array<{ id: number }> = [];
+  assert.equal(searchVisits(() => { hits = R.episodesFor([...refs, ...refs], list.list); }), 0, "episodesFor searched a list");
+  assert.ok(list.reads() <= raw.length, `read ${list.reads()} entries of ${raw.length}`);
+  assert.equal(hits.length, n, "each S/E once");
+  assert.ok(!hits.some((h) => h.id === 999_999), "the first listing of an S/E wins");
+  assert.deepEqual(R.episodesFor([ep(2), ep(0), ep(2)], raw).map((h) => h.id), [3, 1], "the refs' order, each once");
+
+  const before = Array.from({ length: n }, (_, i) => ({ id: i + 1, monitored: true }));
+  const after = before.map((b) => ({ ...b, monitored: false }));
+  let flipped: number[] = [];
+  assert.equal(searchVisits(() => { flipped = R.unmonitoredByDelete([...before, ...before], after); }), 0, "unmonitoredByDelete searched a list");
+  assert.equal(flipped.length, n, "each id once");
+  assert.deepEqual(R.unmonitoredByDelete([{ id: 2, monitored: true }, { id: 1, monitored: true }, { id: 2, monitored: true }, { id: 3, monitored: false }], [{ id: 1, monitored: false }, { id: 2, monitored: false }, { id: 3, monitored: false }]), [2, 1], "first-seen order; only monitored → unmonitored");
+});
+
 // ── the Why? status's failure fold ───────────────────────────────────────────
 
 test("countFailedDownloads folds a download's records through a Map: no scan of the counted list", () => {
@@ -674,6 +703,52 @@ test("readQueuePages keeps at most PAGE_SIZE of each 200k-record page, and at mo
   const records = await queueData.readQueuePages("radarr", "");
   assertPagedRead(records, queueData.PAGE_SIZE, queueData.MAX_PAGES);
   assert.equal(served.length, queueData.MAX_PAGES, "the page ceiling, not the list's end, stopped the read");
+});
+
+test("readQueueListing says when the page ceiling, not the list's end, stopped it — what was read of how many", async () => {
+  answers.clear();
+  answers.set(`${RADARR}/api/v3/queue`, hostilePage);
+  served = [];
+  const listing = await queueData.readQueueListing({ url: RADARR, apiKey: "radarr-key" }, "radarr");
+  assert.deepEqual([listing.records.length, listing.total, listing.truncated, listing.stopped, listing.pages], [queueData.MAX_PAGES * queueData.PAGE_SIZE, HOSTILE_PAGE, true, false, queueData.MAX_PAGES]);
+});
+
+// A PagingResource with no totalRecords (a non-conforming arr): full pages
+// are read on until a short one, never "a total of 0 — done after page 1".
+function untotalledPages(pages: number, pageSize: number) {
+  return (url: URL) => {
+    const page = Number(url.searchParams.get("page"));
+    served.push({ path: url.pathname, page, pageSize: Number(url.searchParams.get("pageSize")) });
+    const n = page < pages ? pageSize : page === pages ? Math.floor(pageSize / 2) : 0;
+    return { page, records: Array.from({ length: n }, (_, i) => page * 1_000_000 + i) };
+  };
+}
+
+test("the paged readers read on through pages with no totalRecords: a short page ends it, the ceiling truncates it", async () => {
+  answers.clear();
+  answers.set(`${RADARR}/api/v3/wanted/cutoff`, untotalledPages(3, missingData.CUTOFF_PAGE_SIZE));
+  served = [];
+  const short = await missingData.readCutoffPages({ url: RADARR, apiKey: "radarr-key" }, "radarr");
+  assert.deepEqual([served.length, short.records.length, short.truncated], [3, 2 * missingData.CUTOFF_PAGE_SIZE + missingData.CUTOFF_PAGE_SIZE / 2, false]);
+  assert.equal(short.total, short.records.length, "no total from the arr: the records read stand in for it");
+
+  answers.set(`${RADARR}/api/v3/wanted/cutoff`, untotalledPages(10_000, missingData.CUTOFF_PAGE_SIZE));
+  served = [];
+  const capped = await missingData.readCutoffPages({ url: RADARR, apiKey: "radarr-key" }, "radarr");
+  assert.deepEqual([served.length, capped.truncated, capped.total], [missingData.CUTOFF_MAX_PAGES, true, missingData.CUTOFF_MAX_PAGES * missingData.CUTOFF_PAGE_SIZE]);
+
+  answers.set(`${RADARR}/api/v3/queue`, untotalledPages(2, queueData.PAGE_SIZE));
+  served = [];
+  const queue = await queueData.readQueueListing({ url: RADARR, apiKey: "radarr-key" }, "radarr");
+  assert.deepEqual([served.length, queue.records.length, queue.truncated], [2, queueData.PAGE_SIZE + queueData.PAGE_SIZE / 2, false]);
+  answers.set(`${RADARR}/api/v3/queue`, untotalledPages(10_000, queueData.PAGE_SIZE));
+  served = [];
+  assert.equal((await queueData.readQueueListing({ url: RADARR, apiKey: "radarr-key" }, "radarr")).truncated, true);
+
+  answers.set(`${SONARR}/api/v3/queue`, untotalledPages(2, calendarData.QUEUE_PAGE_SIZE));
+  served = [];
+  assert.equal((await calendarData.readQueue({ url: SONARR, apiKey: "sonarr-key" })).length, calendarData.QUEUE_PAGE_SIZE + calendarData.QUEUE_PAGE_SIZE / 2);
+  assert.equal(served.length, 2);
 });
 
 test("the calendar's queue read keeps at most QUEUE_PAGE_SIZE of each 200k-record page, and at most MAX_QUEUE_PAGES × QUEUE_PAGE_SIZE in all", async () => {

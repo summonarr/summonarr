@@ -243,6 +243,9 @@ export function RequestArrStatusPanel({ requestId, mediaType, arrInstance, arrIn
   }
 
   const actionButton = "h-6 px-2 text-[11px] border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1";
+  // Each derived list once per render, not once per use in the markup below.
+  const detailLines: string[] = status ? details(status) : [];
+  const actions: readonly NextAction[] = status ? actionsFor(status) : [];
 
   return (
     <div
@@ -335,9 +338,9 @@ export function RequestArrStatusPanel({ requestId, mediaType, arrInstance, arrIn
               </p>
             )}
 
-            {details(status).length > 0 && (
+            {detailLines.length > 0 && (
               <ul className="mt-1.5 space-y-0.5 text-[11px] text-zinc-400">
-                {details(status).map((line) => <li key={line}>{line}</li>)}
+                {detailLines.map((line) => <li key={line}>{line}</li>)}
               </ul>
             )}
 
@@ -353,19 +356,19 @@ export function RequestArrStatusPanel({ requestId, mediaType, arrInstance, arrIn
               </p>
             )}
 
-            {actionsFor(status).length > 0 && (
+            {actions.length > 0 && (
               <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
-                {actionsFor(status).includes("search") && (
+                {actions.includes("search") && (
                   <Button size="sm" variant="outline" onClick={() => thenRecheck(onSearch)} disabled={busy || stale} className={actionButton}>
                     <Search className="w-3 h-3" />{t("adminQueue.actions.search")}
                   </Button>
                 )}
-                {actionsFor(status).includes("pick") && (
+                {actions.includes("pick") && (
                   <Button size="sm" variant="outline" onClick={onPickRelease} disabled={busy || stale} className={actionButton}>
                     <Download className="w-3 h-3" />{t("adminQueue.actions.pickRelease")}
                   </Button>
                 )}
-                {actionsFor(status).includes("repush") && (
+                {actions.includes("repush") && (
                   <Button size="sm" variant="outline" onClick={() => thenRecheck(onRepush)} disabled={busy || stale} className={actionButton}>
                     <RotateCcw className="w-3 h-3" />{t("adminQueue.actions.repush")}
                   </Button>

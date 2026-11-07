@@ -494,11 +494,15 @@ test("page: the cap counts every ticked row of the tab — on another page, hidd
   const src = missingPage();
   assert.match(
     src,
-    /const selectedHidden = \(\(report\?\.items \?\? \[\]\) as ReadonlyArray<BulkRow>\)\.filter\(\(r\) => !listedKeys\.has\(selKey\(r\)\) && selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/,
+    /const selectedHidden = useMemo\(\s*\(\) => \(\(report\?\.items \?\? \[\]\) as ReadonlyArray<BulkRow>\)\.filter\(\(r\) => !listedKeys\.has\(selKey\(r\)\) && selected\.has\(selKey\(r\)\) && isOpen\(r\)\),\s*\[report, listedKeys, selected, selKey, isOpen\],\s*\);/,
     "the ticks a filter hides come from the UNFILTERED listing",
   );
-  assert.match(src, /const listedKeys = new Set\(currentRows\.map\(selKey\)\);/, "listed = every page of the filtered list");
-  assert.match(src, /const selectedListed = currentRows\.filter\(\(r\) => selected\.has\(selKey\(r\)\) && isOpen\(r\)\);/, "ticks on other pages count");
+  assert.match(src, /const listedKeys = useMemo\(\(\) => new Set\(currentRows\.map\(selKey\)\), \[currentRows, selKey\]\);/, "listed = every page of the filtered list");
+  assert.match(src, /const selectedListed = useMemo\(\(\) => currentRows\.filter\(\(r\) => selected\.has\(selKey\(r\)\) && isOpen\(r\)\), \[currentRows, selected, selKey, isOpen\]\);/, "ticks on other pages count");
+  // Memoized, so every input of the open rule must be a dependency: a stale
+  // isOpen would count a row searched since as still selectable.
+  assert.match(src, /const isOpen = useCallback\(\(r: BulkRow\) => \{[\s\S]*?\}, \[selKey, searches, bulkPending\]\);/);
+  assert.match(src, /const selKey = useCallback\(\(r: \{ instance: string; arrId: number \}\) => `\$\{current\}\|\$\{rowKey\(r\)\}`, \[current\]\);/);
   assert.match(src, /const selectedHere = \[\.\.\.selectedListed, \.\.\.selectedHidden\];/);
   assert.match(src, /const atCap = selectedHere\.length >= BULK_SEARCH_MAX;/, "the cap counts them all");
   assert.match(src, /else if \(!atCap\) next\.add\(k\);/, "a tick past the cap is refused");

@@ -81,6 +81,8 @@ interface QueueReport {
   instances: Array<{ service: Service; slug: string; name: string }>;
   errors: Array<{ service: Service; instance: string; error: string; kind?: ArrErrorKind }>;
   items: QueueItem[];
+  // Instances whose queue ran past the server's page ceiling.
+  truncated?: Array<{ service: Service; instance: string; read: number; total: number }>;
 }
 
 const POLL_MS = 20_000;
@@ -154,6 +156,54 @@ const td: React.CSSProperties = { padding: "8px 10px", verticalAlign: "top" };
 
 const NO_LINK_FILTERS: QueueLinkFilters = { q: "", title: null };
 
+// The optional columns this viewer hid, remembered in this browser. Read after
+// mount so the first render matches the server's (defaults); storage can throw
+// (blocked site data, some private windows) — then the defaults simply stay.
+function useHiddenColumns() {
+  const [hidden, setHidden] = useState<ReadonlySet<ColumnId>>(DEFAULT_HIDDEN);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(HIDDEN_COLUMNS_KEY);
+      const ids: unknown = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(ids)) setHidden(new Set(ids.filter(isColumnId)));
+    } catch {}
+  }, []);
+  function saveHidden(next: ReadonlySet<ColumnId>) {
+    setHidden(next);
+    try {
+      localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...next]));
+    } catch {}
+  }
+  function toggleColumn(id: ColumnId, on: boolean) {
+    const next = new Set(hidden);
+    if (on) next.delete(id);
+    else next.add(id);
+    saveHidden(next);
+  }
+  return { hidden, saveHidden, toggleColumn };
+}
+
+// Why each instance failed, in the viewer's language — never the raw upstream
+// text, which stays in the server log (guardrail 5e).
+function ArrErrorList({
+  errors,
+  label,
+}: {
+  errors: ReadonlyArray<{ service: Service; instance: string; kind?: unknown }>;
+  label: (service: Service, slug: string) => string;
+}) {
+  const t = useT();
+  return (
+    <ul className="m-0 p-0" style={{ listStyle: "none", fontSize: 12, marginTop: 2 }}>
+      {errors.map((e) => (
+        <li key={`${e.service}:${e.instance}`}>
+          {t(ARR_ERROR_KIND_KEYS[isArrErrorKind(e.kind) ? e.kind : "other"], { name: label(e.service, e.instance) })}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function DownloadQueue({
   configured,
   initialFilters = NO_LINK_FILTERS,
@@ -195,15 +245,22 @@ export function DownloadQueue({
     }
   }
   const [live, setLive] = useState(true);
-  const [removing, setRemoving] = useState<QueueItem | null>(null);
+  // The row whose Remove dialog is open, and the action it was opened on.
+  const [removing, setRemoving] = useState<{ row: QueueItem; action: QueueRemoveAction } | null>(null);
   const [importing, setImporting] = useState<QueueItem | null>(null);
-  const [removeAction, setRemoveAction] = useState<QueueRemoveAction>("blocklistSearch");
-  const [removeMethod, setRemoveMethod] = useState<QueueRemoveMethod>("removeFromClient");
-  // Grab now / Re-check: which row (or "recheck") is in flight.
-  const [acting, setActing] = useState<string | null>(null);
-  const [removeBusy, setRemoveBusy] = useState(false);
-  const [removeError, setRemoveError] = useState("");
+  // Grab now / Re-check in flight: each row's key, and "recheck". A Set, so
+  // one finishing never re-enables another that is still running.
+  const [acting, setActing] = useState<ReadonlySet<string>>(() => new Set());
+  const startActing = (key: string) => setActing((s) => new Set(s).add(key));
+  const stopActing = (key: string) => setActing((s) => {
+    const next = new Set(s);
+    next.delete(key);
+    return next;
+  });
   const [notice, setNotice] = useState("");
+  // A Grab now / Re-check failure: its own line, which only those two clear —
+  // the next poll's successful load clears `error`, and took this with it.
+  const [actionError, setActionError] = useState("");
   // Instances that refused the last Re-check (the route answers 202 even when
   // every one did), and whether that was all of them.
   const [recheckFailed, setRecheckFailed] = useState<{ all: boolean; failed: RecheckError[] } | null>(null);
@@ -217,7 +274,7 @@ export function DownloadQueue({
   // full timeout), so it is never re-read per dialog open — not even after a
   // failure, which leaves the cautious wording for the session.
   const versionsRequested = useRef(false);
-  const [hidden, setHidden] = useState<ReadonlySet<ColumnId>>(DEFAULT_HIDDEN);
+  const { hidden, saveHidden, toggleColumn } = useHiddenColumns();
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   // The table scrolls sideways inside its frame; an expanded row's details are
   // sized to the frame's VISIBLE width and stick to its left edge, so a phone
@@ -269,29 +326,21 @@ export function DownloadQueue({
     if (configured) void load();
   }, [configured, load]);
 
-  // Read after mount so the first render matches the server's (defaults).
-  // Storage can throw (blocked site data, some private windows) — then the
-  // defaults simply stay.
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HIDDEN_COLUMNS_KEY);
-      const ids: unknown = raw ? JSON.parse(raw) : null;
-      if (Array.isArray(ids)) setHidden(new Set(ids.filter(isColumnId)));
-    } catch {}
+  // The re-read after an action (the arr acts in the background, so it waits a
+  // moment): ONE pending timer — a newer action's replaces it — cleared when
+  // the page goes away. Still a manual load (it supersedes one in flight).
+  const reloadTimer = useRef<number | null>(null);
+  const reloadSoon = useCallback((ms: number) => {
+    if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
+    reloadTimer.current = window.setTimeout(() => {
+      reloadTimer.current = null;
+      void load();
+    }, ms);
+  }, [load]);
+  useEffect(() => () => {
+    if (reloadTimer.current !== null) window.clearTimeout(reloadTimer.current);
   }, []);
 
-  function saveHidden(next: ReadonlySet<ColumnId>) {
-    setHidden(next);
-    try {
-      localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...next]));
-    } catch {}
-  }
-  function toggleColumn(id: ColumnId, on: boolean) {
-    const next = new Set(hidden);
-    if (on) next.delete(id);
-    else next.add(id);
-    saveHidden(next);
-  }
   function toggleExpanded(key: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -345,15 +394,14 @@ export function DownloadQueue({
 
   function openRemove(row: QueueItem, action: QueueRemoveAction) {
     if (row.service === "sonarr") void loadVersions();
-    setRemoving(row);
-    setRemoveAction(action);
-    setRemoveMethod("removeFromClient");
-    setRemoveError("");
+    setRemoving({ row, action });
   }
 
   async function grabNow(row: QueueItem) {
-    setActing(rowKey(row));
+    const key = rowKey(row);
+    startActing(key);
     setNotice("");
+    setActionError("");
     try {
       const res = await fetch(withBasePath("/api/admin/queue/grab"), {
         method: "POST",
@@ -361,37 +409,38 @@ export function DownloadQueue({
         body: JSON.stringify({ service: row.service, instance: row.instance, ids: row.ids }),
       });
       if (!res.ok) {
-        setError(await readError(res, t("adminManage.queue.grab.failed")));
+        setActionError(await readError(res, t("adminManage.queue.grab.failed")));
         return;
       }
       setNotice(t("adminManage.queue.grab.done", { title: row.mediaTitle || row.title }));
-      window.setTimeout(() => void load(), 2_000);
+      reloadSoon(2_000);
     } catch {
-      setError(t("adminManage.queue.grab.failed"));
+      setActionError(t("adminManage.queue.grab.failed"));
     } finally {
-      setActing(null);
+      stopActing(key);
     }
   }
 
   async function recheck() {
-    setActing("recheck");
+    startActing("recheck");
     setNotice("");
+    setActionError("");
     setRecheckFailed(null);
     try {
       const res = await fetch(withBasePath("/api/admin/queue/recheck"), { method: "POST" });
       const data = (await res.json().catch(() => null)) as { instances?: number; errors?: unknown[]; error?: string } | null;
       if (!res.ok) {
-        setError(data?.error ?? t("adminManage.queue.recheck.failed"));
+        setActionError(data?.error ?? t("adminManage.queue.recheck.failed"));
         return;
       }
       const outcome = recheckOutcome(data);
       if (outcome.failed.length > 0) setRecheckFailed({ all: outcome.allFailed, failed: outcome.failed });
       if (!outcome.allFailed) setNotice(t("adminManage.queue.recheck.done", { count: outcome.asked }));
-      window.setTimeout(() => void load(), 5_000);
+      reloadSoon(5_000);
     } catch {
-      setError(t("adminManage.queue.recheck.failed"));
+      setActionError(t("adminManage.queue.recheck.failed"));
     } finally {
-      setActing(null);
+      stopActing("recheck");
     }
   }
 
@@ -399,48 +448,29 @@ export function DownloadQueue({
     setImporting(null);
     setNotice(t("adminManage.queue.import.done", { title: row.mediaTitle || row.title, count: files }));
     // The arr imports in the background; give it a moment before re-reading.
-    window.setTimeout(() => void load(), 3_000);
+    reloadSoon(3_000);
   }
 
-  async function confirmRemove() {
-    if (!removing) return;
-    setRemoveBusy(true);
-    setRemoveError("");
-    try {
-      const res = await fetch(withBasePath("/api/admin/queue/remove"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          service: removing.service,
-          instance: removing.instance,
-          ids: removalIds(removing),
-          action: removeAction,
-          method: removing.pending ? "removeFromClient" : removeMethod,
-        }),
-      });
-      if (!res.ok) {
-        setRemoveError(await readError(res, t("adminManage.queue.remove.failed")));
-        return;
-      }
-      const gone = rowKey(removing);
-      setReport((r) => (r ? { ...r, items: r.items.filter((i) => rowKey(i) !== gone) } : r));
-      setNotice(
-        removeAction === "blocklistSearch"
-          ? t("adminManage.queue.remove.doneSearch", { title: removing.mediaTitle || removing.title })
-          : t("adminManage.queue.remove.done", { title: removing.mediaTitle || removing.title }),
-      );
-      setRemoving(null);
-    } catch {
-      setRemoveError(t("adminManage.queue.remove.failed"));
-    } finally {
-      setRemoveBusy(false);
-    }
+  // The arr accepted the removal: the row goes at once (the next poll agrees).
+  function removed(row: QueueItem, action: QueueRemoveAction) {
+    const gone = rowKey(row);
+    setReport((r) => (r ? { ...r, items: r.items.filter((i) => rowKey(i) !== gone) } : r));
+    setNotice(
+      action === "blocklistSearch"
+        ? t("adminManage.queue.remove.doneSearch", { title: row.mediaTitle || row.title })
+        : t("adminManage.queue.remove.done", { title: row.mediaTitle || row.title }),
+    );
+    setRemoving(null);
   }
 
   const items = report?.items;
   const instanceName = useCallback(
     (service: Service, slug: string) => report?.instances.find((i) => i.service === service && i.slug === slug)?.name ?? slug,
     [report],
+  );
+  const instanceLabel = useCallback(
+    (service: Service, slug: string) => arrInstanceLabel(service, instanceName(service, slug), slug),
+    [instanceName],
   );
   const multiInstance = (report?.instances.length ?? 0) > 1;
   const shownColumns = COLUMNS.filter((c) => !hidden.has(c.id) && (c.id !== "instance" || multiInstance));
@@ -649,17 +679,18 @@ export function DownloadQueue({
         {report.errors.length > 0 && (
           <div role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13 }}>
             <p className="m-0">
-              {t("adminManage.queue.arrErrors", {
-                list: report.errors.map((e) => arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance)).join(", "),
-              })}
+              {t("adminManage.queue.arrErrors", { list: report.errors.map((e) => instanceLabel(e.service, e.instance)).join(", ") })}
             </p>
-            {/* Why, per instance, in the viewer's language — the raw upstream detail stays in the server log. */}
-            <ul className="m-0 p-0" style={{ listStyle: "none", fontSize: 12, marginTop: 2 }}>
-              {report.errors.map((e) => (
+            <ArrErrorList errors={report.errors} label={instanceLabel} />
+          </div>
+        )}
+        {/* A queue past the server's page ceiling is listed in part — said, never shown as whole. */}
+        {report.truncated && report.truncated.length > 0 && (
+          <div role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13 }}>
+            <ul className="m-0 p-0" style={{ listStyle: "none" }}>
+              {report.truncated.map((e) => (
                 <li key={`${e.service}:${e.instance}`}>
-                  {t(ARR_ERROR_KIND_KEYS[isArrErrorKind(e.kind) ? e.kind : "other"], {
-                    name: arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance),
-                  })}
+                  {t("adminManage.queue.truncated", { name: instanceLabel(e.service, e.instance), read: e.read, total: e.total })}
                 </li>
               ))}
             </ul>
@@ -679,20 +710,9 @@ export function DownloadQueue({
             <p className="m-0">
               {recheckFailed.all
                 ? t("adminManage.queue.recheck.allFailed")
-                : t("adminManage.queue.recheck.someFailed", {
-                    list: recheckFailed.failed.map((e) => arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance)).join(", "),
-                  })}
+                : t("adminManage.queue.recheck.someFailed", { list: recheckFailed.failed.map((e) => instanceLabel(e.service, e.instance)).join(", ") })}
             </p>
-            {/* Why, per instance, in the viewer's language — never the raw upstream text (guardrail 5e). */}
-            <ul className="m-0 p-0" style={{ listStyle: "none", fontSize: 12, marginTop: 2 }}>
-              {recheckFailed.failed.map((e) => (
-                <li key={`${e.service}:${e.instance}`}>
-                  {t(ARR_ERROR_KIND_KEYS[isArrErrorKind(e.kind) ? e.kind : "other"], {
-                    name: arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance),
-                  })}
-                </li>
-              ))}
-            </ul>
+            <ArrErrorList errors={recheckFailed.failed} label={instanceLabel} />
           </div>
         )}
 
@@ -889,10 +909,10 @@ export function DownloadQueue({
                                 size="xs"
                                 variant="outline"
                                 onClick={() => void grabNow(r)}
-                                disabled={acting === rowKey(r)}
+                                disabled={acting.has(key)}
                                 aria-label={t("adminManage.queue.action.grabAria", { title: r.mediaTitle || r.title })}
                               >
-                                {acting === rowKey(r) ? <Loader2 className="animate-spin" /> : <Download />}
+                                {acting.has(key) ? <Loader2 className="animate-spin" /> : <Download />}
                                 {t("adminManage.queue.action.grab")}
                               </Button>
                             )}
@@ -964,6 +984,130 @@ export function DownloadQueue({
     ...(services.has("radarr") ? [{ value: "radarr" as const, label: SERVICE_LABEL.radarr, count: count("radarr") }] : []),
   ];
 
+  return (
+    <div className="flex flex-col gap-6">
+      {configured && (
+        <section
+          aria-label={t("adminManage.arrHealth.title")}
+          style={{ padding: 14, border: "1px solid var(--ds-border)", borderRadius: 10, background: "var(--ds-bg-1)" }}
+        >
+          <ArrHealthPanel variant="full" />
+        </section>
+      )}
+
+      <div className="flex flex-col gap-2">
+        <FilterBar<Filter>
+          segments={segments}
+          active={filter}
+          onChange={setFilter}
+          right={
+            configured ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void recheck()}
+                  disabled={acting.has("recheck")}
+                  title={t("adminManage.queue.recheck.hint")}
+                >
+                  {acting.has("recheck") ? <Loader2 className="animate-spin" /> : <RefreshCcw />}
+                  {t("adminManage.queue.recheck.button")}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
+                  {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                  {t("adminManage.queue.refresh")}
+                </Button>
+              </div>
+            ) : null
+          }
+        />
+        <ArrSnapshotNote at={snapshotAt} refreshing={loading} />
+        {report && error && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error}</p>}
+        {actionError && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{actionError}</p>}
+        {body}
+      </div>
+
+      <RemoveQueueDialog target={removing} arrVersions={arrVersions} onClose={() => setRemoving(null)} onRemoved={removed} />
+
+      <QueueImportDialog row={importing} onClose={() => setImporting(null)} onImported={imported} />
+
+      {managing && (
+        <ArrTitleManager
+          open
+          onOpenChange={(o) => { if (!o) setManaging(null); }}
+          service={managing.service}
+          instance={managing.instance}
+          target={{ arrId: managing.arrId }}
+          instanceLabel={managing.label}
+          initialTab={manageTabFor("queue", managing.service)}
+          onRemoved={() => void load()}
+        />
+      )}
+    </div>
+  );
+}
+
+// Admin → Download Queue → Remove: both halves of the arr's own "Remove from
+// queue" dialog — the blocklist choice and the removal method. It opens on the
+// action the admin clicked; they can still change it here.
+function RemoveQueueDialog({
+  target,
+  arrVersions,
+  onClose,
+  onRemoved,
+}: {
+  target: { row: QueueItem; action: QueueRemoveAction } | null;
+  /** Each instance's version (`service:slug`), from the health report. */
+  arrVersions: Record<string, string | null>;
+  onClose: () => void;
+  onRemoved: (row: QueueItem, action: QueueRemoveAction) => void;
+}) {
+  const t = useT();
+  const removing = target?.row ?? null;
+  const [removeAction, setRemoveAction] = useState<QueueRemoveAction>(target?.action ?? "blocklistSearch");
+  const [removeMethod, setRemoveMethod] = useState<QueueRemoveMethod>("removeFromClient");
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+  // Each open starts on the action clicked, the default method and no error
+  // (adjust-state-during-render; keying the Dialog would cut its close animation).
+  const [opened, setOpened] = useState(target);
+  if (opened !== target) {
+    setOpened(target);
+    if (target) {
+      setRemoveAction(target.action);
+      setRemoveMethod("removeFromClient");
+      setRemoveError("");
+    }
+  }
+
+  async function confirmRemove() {
+    if (!removing) return;
+    setRemoveBusy(true);
+    setRemoveError("");
+    try {
+      const res = await fetch(withBasePath("/api/admin/queue/remove"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          service: removing.service,
+          instance: removing.instance,
+          ids: removalIds(removing),
+          action: removeAction,
+          method: removing.pending ? "removeFromClient" : removeMethod,
+        }),
+      });
+      if (!res.ok) {
+        setRemoveError(await readError(res, t("adminManage.queue.remove.failed")));
+        return;
+      }
+      onRemoved(removing, removeAction);
+    } catch {
+      setRemoveError(t("adminManage.queue.remove.failed"));
+    } finally {
+      setRemoveBusy(false);
+    }
+  }
+
   // Both halves of the arr's own "Remove from queue" dialog.
   const redownload = removing ? blocklistRedownload(removing.service, arrVersions[`${removing.service}:${removing.instance}`]) : "skipped";
   const REMOVE_OPTIONS: Array<{ value: QueueRemoveAction; label: string; help: string }> = [
@@ -993,83 +1137,63 @@ export function DownloadQueue({
   });
 
   return (
-    <div className="flex flex-col gap-6">
-      {configured && (
-        <section
-          aria-label={t("adminManage.arrHealth.title")}
-          style={{ padding: 14, border: "1px solid var(--ds-border)", borderRadius: 10, background: "var(--ds-bg-1)" }}
-        >
-          <ArrHealthPanel variant="full" />
-        </section>
-      )}
-
-      <div className="flex flex-col gap-2">
-        <FilterBar<Filter>
-          segments={segments}
-          active={filter}
-          onChange={setFilter}
-          right={
-            configured ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void recheck()}
-                  disabled={acting === "recheck"}
-                  title={t("adminManage.queue.recheck.hint")}
-                >
-                  {acting === "recheck" ? <Loader2 className="animate-spin" /> : <RefreshCcw />}
-                  {t("adminManage.queue.recheck.button")}
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
-                  {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                  {t("adminManage.queue.refresh")}
-                </Button>
+    <Dialog open={target !== null} onOpenChange={(o) => { if (!o && !removeBusy) onClose(); }}>
+      <DialogPortal>
+        <DialogBackdrop />
+        <DialogPopup className="max-w-lg">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700">
+            <DialogTitle className="text-base font-semibold text-zinc-100">
+              {removeAction === "remove" ? t("adminManage.queue.remove.title") : t("adminManage.queue.remove.titleBlocklist")}
+            </DialogTitle>
+            <DialogClose
+              disabled={removeBusy}
+              aria-label={t("adminQueue.common.close")}
+              title={t("adminQueue.common.close")}
+              className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </DialogClose>
+          </div>
+          {removing && (
+            <div className="flex flex-col gap-4 px-6 py-4">
+              <div>
+                <p className="m-0 text-sm font-medium text-zinc-100">
+                  {removing.mediaTitle || removing.title}
+                  {removing.episodes.length > 0 && <span className="ds-mono text-zinc-400"> · {episodeSummary(removing.episodes)}</span>}
+                </p>
+                <p className="m-0 ds-mono text-zinc-500" style={{ fontSize: 11, overflowWrap: "anywhere" }}>{removing.title}</p>
               </div>
-            ) : null
-          }
-        />
-        <ArrSnapshotNote at={snapshotAt} refreshing={loading} />
-        {report && error && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error}</p>}
-        {body}
-      </div>
-
-      <Dialog open={removing !== null} onOpenChange={(o) => { if (!o && !removeBusy) setRemoving(null); }}>
-        <DialogPortal>
-          <DialogBackdrop />
-          <DialogPopup className="max-w-lg">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700">
-              <DialogTitle className="text-base font-semibold text-zinc-100">
-                {removeAction === "remove" ? t("adminManage.queue.remove.title") : t("adminManage.queue.remove.titleBlocklist")}
-              </DialogTitle>
-              <DialogClose
-                disabled={removeBusy}
-                aria-label={t("adminQueue.common.close")}
-                title={t("adminQueue.common.close")}
-                className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </DialogClose>
-            </div>
-            {removing && (
-              <div className="flex flex-col gap-4 px-6 py-4">
-                <div>
-                  <p className="m-0 text-sm font-medium text-zinc-100">
-                    {removing.mediaTitle || removing.title}
-                    {removing.episodes.length > 0 && <span className="ds-mono text-zinc-400"> · {episodeSummary(removing.episodes)}</span>}
-                  </p>
-                  <p className="m-0 ds-mono text-zinc-500" style={{ fontSize: 11, overflowWrap: "anywhere" }}>{removing.title}</p>
-                </div>
+              <fieldset className="flex flex-col gap-2 m-0 p-0 border-0">
+                <legend className="text-xs font-medium text-zinc-400 mb-1">{t("adminManage.queue.remove.blocklistLegend")}</legend>
+                {REMOVE_OPTIONS.map((o) => (
+                  <label key={o.value} className="flex items-start gap-2.5 rounded-md" style={radioBox(removeAction === o.value)}>
+                    <input
+                      type="radio"
+                      name="queue-remove-action"
+                      value={o.value}
+                      checked={removeAction === o.value}
+                      onChange={() => setRemoveAction(o.value)}
+                      style={{ marginTop: 3 }}
+                    />
+                    <span className="flex flex-col">
+                      <span className="text-sm text-zinc-100">{o.label}</span>
+                      <span className="text-xs text-zinc-500">{o.help}</span>
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+              {/* A held release is in no download client — there is no removal method to pick. */}
+              {!removing.pending && (
                 <fieldset className="flex flex-col gap-2 m-0 p-0 border-0">
-                  <legend className="text-xs font-medium text-zinc-400 mb-1">{t("adminManage.queue.remove.blocklistLegend")}</legend>
-                  {REMOVE_OPTIONS.map((o) => (
-                    <label key={o.value} className="flex items-start gap-2.5 rounded-md" style={radioBox(removeAction === o.value)}>
+                  <legend className="text-xs font-medium text-zinc-400 mb-1">{t("adminManage.queue.remove.methodLegend")}</legend>
+                  {METHOD_OPTIONS.map((o) => (
+                    <label key={o.value} className="flex items-start gap-2.5 rounded-md" style={radioBox(removeMethod === o.value)}>
                       <input
                         type="radio"
-                        name="queue-remove-action"
+                        name="queue-remove-method"
                         value={o.value}
-                        checked={removeAction === o.value}
-                        onChange={() => setRemoveAction(o.value)}
+                        checked={removeMethod === o.value}
+                        onChange={() => setRemoveMethod(o.value)}
                         style={{ marginTop: 3 }}
                       />
                       <span className="flex flex-col">
@@ -1079,71 +1203,34 @@ export function DownloadQueue({
                     </label>
                   ))}
                 </fieldset>
-                {/* A held release is in no download client — there is no removal method to pick. */}
-                {!removing.pending && (
-                  <fieldset className="flex flex-col gap-2 m-0 p-0 border-0">
-                    <legend className="text-xs font-medium text-zinc-400 mb-1">{t("adminManage.queue.remove.methodLegend")}</legend>
-                    {METHOD_OPTIONS.map((o) => (
-                      <label key={o.value} className="flex items-start gap-2.5 rounded-md" style={radioBox(removeMethod === o.value)}>
-                        <input
-                          type="radio"
-                          name="queue-remove-method"
-                          value={o.value}
-                          checked={removeMethod === o.value}
-                          onChange={() => setRemoveMethod(o.value)}
-                          style={{ marginTop: 3 }}
-                        />
-                        <span className="flex flex-col">
-                          <span className="text-sm text-zinc-100">{o.label}</span>
-                          <span className="text-xs text-zinc-500">{o.help}</span>
-                        </span>
-                      </label>
-                    ))}
-                  </fieldset>
-                )}
-                {removeError && (
-                  <p role="alert" className="m-0 text-xs flex items-center gap-1" style={{ color: "var(--ds-danger)" }}>
-                    <AlertTriangle style={{ width: 12, height: 12 }} aria-hidden /> {removeError}
-                  </p>
-                )}
-              </div>
-            )}
-            <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-700 bg-zinc-900">
-              <button type="button" onClick={() => setRemoving(null)} disabled={removeBusy} className="rounded px-2 py-1 text-sm text-zinc-500 hover:text-zinc-300">
-                {t("shared.common.cancel")}
-              </button>
-              <Button
-                size="sm"
-                onClick={() => void confirmRemove()}
-                disabled={removeBusy}
-                className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
-              >
-                {removeBusy ? <Loader2 className="animate-spin" /> : removeAction === "remove" ? <Trash2 /> : removeAction === "blocklist" ? <Ban /> : <RotateCcw />}
-                {removeAction === "blocklistSearch"
-                  ? t("adminManage.queue.remove.confirmBlocklistSearch")
-                  : removeAction === "blocklist"
-                    ? t("adminManage.queue.remove.confirmBlocklist")
-                    : t("adminManage.queue.remove.confirm")}
-              </Button>
+              )}
+              {removeError && (
+                <p role="alert" className="m-0 text-xs flex items-center gap-1" style={{ color: "var(--ds-danger)" }}>
+                  <AlertTriangle style={{ width: 12, height: 12 }} aria-hidden /> {removeError}
+                </p>
+              )}
             </div>
-          </DialogPopup>
-        </DialogPortal>
-      </Dialog>
-
-      <QueueImportDialog row={importing} onClose={() => setImporting(null)} onImported={imported} />
-
-      {managing && (
-        <ArrTitleManager
-          open
-          onOpenChange={(o) => { if (!o) setManaging(null); }}
-          service={managing.service}
-          instance={managing.instance}
-          target={{ arrId: managing.arrId }}
-          instanceLabel={managing.label}
-          initialTab={manageTabFor("queue", managing.service)}
-          onRemoved={() => void load()}
-        />
-      )}
-    </div>
+          )}
+          <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-700 bg-zinc-900">
+            <button type="button" onClick={onClose} disabled={removeBusy} className="rounded px-2 py-1 text-sm text-zinc-500 hover:text-zinc-300">
+              {t("shared.common.cancel")}
+            </button>
+            <Button
+              size="sm"
+              onClick={() => void confirmRemove()}
+              disabled={removeBusy}
+              className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
+            >
+              {removeBusy ? <Loader2 className="animate-spin" /> : removeAction === "remove" ? <Trash2 /> : removeAction === "blocklist" ? <Ban /> : <RotateCcw />}
+              {removeAction === "blocklistSearch"
+                ? t("adminManage.queue.remove.confirmBlocklistSearch")
+                : removeAction === "blocklist"
+                  ? t("adminManage.queue.remove.confirmBlocklist")
+                  : t("adminManage.queue.remove.confirm")}
+            </Button>
+          </div>
+        </DialogPopup>
+      </DialogPortal>
+    </Dialog>
   );
 }

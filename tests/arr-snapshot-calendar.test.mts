@@ -38,7 +38,8 @@ test("one builder for the calendar read: the live fetch and the snapshot read us
     /function calendarReadUrl\(from: number, withUnmonitored: boolean\): string \{\s*const q = new URLSearchParams\(\{ start: new Date\(from\)\.toISOString\(\), end: new Date\(addDays\(from, CALENDAR_DAYS\)\)\.toISOString\(\) \}\);\s*if \(withUnmonitored\) q\.set\("unmonitored", "1"\);\s*return withBasePath\(`\/api\/admin\/arr\/calendar\?\$\{q\.toString\(\)\}`\);\s*\}/,
   );
   // Live: the load's own window.
-  assert.match(callbackBody("load"), /await fetch\(calendarReadUrl\(from, withUnmonitored\)\);/);
+  // (with a timeout, so a read that never settles can't hold the spinner forever)
+  assert.match(callbackBody("load"), /await fetch\(calendarReadUrl\(from, withUnmonitored\), \{ signal: AbortSignal\.timeout\(LOAD_TIMEOUT_MS\) \}\);/);
   assert.equal([...SRC.matchAll(/\bfetch\(calendarReadUrl\(/g)].length, 1);
   // Snapshot: the current window — the same (start, unmonitored) the load effect passes — or null with nothing to read.
   assert.match(

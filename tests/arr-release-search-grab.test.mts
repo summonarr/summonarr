@@ -296,6 +296,20 @@ test("C025: a raw guid (or a handle from another issue / instance) is 410 — no
   assert.equal(casCalls, 0);
 });
 
+test("a raw guid of any shape — even one no indexer would mint (a space, quotes, 600 characters) — is the same 410, with no CAS and no arr call", async () => {
+  issueRow = movieIssue();
+  scriptMovieGrab(() => json({}));
+  const token = await mintSession();
+  for (const guid of ["release guid 123", "a\"b'c<d>", "x".repeat(600)]) {
+    calls = [];
+    const res = await call(issueReleases.POST, token, "/issues/issue-1/releases", "issue-1", { method: "POST", body: { guid, indexerId: 3 } });
+    assert.equal(res.status, 410, guid.slice(0, 40));
+    assert.deepEqual(calls, [], "nothing reached the arr");
+  }
+  assert.equal(casCalls, 0, "a non-handle never reaches the CAS");
+  assert.equal(issueRow!.status, "OPEN");
+});
+
 test("C025: two grabs racing with one handle send the release ONCE — the second is 409 while the first is inside the arr call", { timeout: 5_000 }, async () => {
   issueRow = movieIssue();
   let open!: () => void;

@@ -5,7 +5,9 @@
 //
 //   1. A SUCCESSFUL fetch replaces exactly that server's rows: one transaction, a
 //      deleteMany scoped to (source, serverInstance), then the rows (guardrails
-//      4/13/35). Other servers' rows are untouched.
+//      4/13/35), then the snapshot's status — the rows and the status that
+//      vouches for them commit together or not at all. Other servers' rows are
+//      untouched.
 //   2. A FAILED server keeps its previous rows (a partial or empty snapshot would
 //      drop evidence) and records ok:false with the previous fetchedAt and counts
 //      preserved; the error is short and carries no URL or token.
@@ -247,7 +249,7 @@ beforeEach(() => {
 
 // ── 1: success ───────────────────────────────────────────────────────────────
 
-test("plex success: ONE transaction — a deleteMany scoped to (plex, '') then the rows; movie → own key at -1, episode → show key + season", async () => {
+test("plex success: ONE transaction — a deleteMany scoped to (plex, ''), the rows, then the status; movie → own key at -1, episode → show key + season", async () => {
   configurePlex();
   evidence = [oldRow("plex", ""), oldRow("plex", "remote"), oldRow("jellyfin", "")];
   respond = (url) => {
@@ -260,7 +262,7 @@ test("plex success: ONE transaction — a deleteMany scoped to (plex, '') then t
 
   assert.equal(txLog.length, 1, "one transaction per server");
   assert.deepEqual((txLog[0].opts as { timeout?: number }).timeout, BATCH_TX_TIMEOUT);
-  assert.deepEqual(txLog[0].ops, [`deleteMany ${JSON.stringify({ source: "plex", serverInstance: "" })}`, "createMany 4"]);
+  assert.deepEqual(txLog[0].ops, [`deleteMany ${JSON.stringify({ source: "plex", serverInstance: "" })}`, "createMany 4", "upsert upstreamWatch:status:plex:"]);
 
   const mine = evidence.filter((e) => e.source === "plex" && e.serverInstance === "");
   const byKey = new Map(mine.map((e) => [`${e.itemKey}/${e.seasonNumber}`, e]));
@@ -420,22 +422,34 @@ test("a named server whose read FAILS while it is removed records no failure sta
   assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined);
 });
 
-test("a removal landing between the evidence replace and the status write leaves no status either (R2-nw#4)", async () => {
+test("the evidence and its status are ONE transaction under ONE registry lock: a removal committing just before it leaves neither", async () => {
   configurePlex("remote", PLEX_REMOTE);
   settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
-  let locks = 0;
-  onRegistryLock = () => {
-    // The 2nd lock is the status write's: the removal committed just before it
-    // (and deleted the evidence the replace had written).
-    if (++locks === 2) removeRemote();
-  };
   respond = (url) => {
     if (url.origin === PLEX_REMOTE) return plexPage([{ type: "movie", ratingKey: "999", viewedAt: secs(ago(2)) }]);
     throw new Error(`unexpected ${url}`);
   };
   await refreshUpstreamWatch();
-  assert.equal(locks, 2);
-  assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined, "the status write re-checked the registry under its lock");
+  assert.equal(txLog.length, 1);
+  assert.deepEqual(txLog[0].ops, [
+    "lock plexInstances",
+    `deleteMany ${JSON.stringify({ source: "plex", serverInstance: "remote" })}`,
+    "createMany 1",
+    "upsert upstreamWatch:status:plex:remote",
+  ]);
+
+  // The removal commits as the refresh takes the lock: nothing at all is written.
+  evidence = [];
+  settings.delete("upstreamWatch:status:plex:remote");
+  txLog = [];
+  let locks = 0;
+  onRegistryLock = () => {
+    if (++locks === 1) removeRemote();
+  };
+  await refreshUpstreamWatch();
+  assert.equal(locks, 1);
+  assert.deepEqual(evidence.filter((e) => e.serverInstance === "remote"), []);
+  assert.equal(settings.get("upstreamWatch:status:plex:remote"), undefined, "no status for the removed slug");
 });
 
 test("a named server still registered is refreshed exactly as before, status included (R2-nw#4)", async () => {
@@ -664,14 +678,23 @@ test("fewer than half of Summonarr's own completed plays found upstream reads as
   assert.equal(warns.filter((w) => w.includes("fewer than half")).length, 1);
 });
 
-test("a failed status write never throws out of the job — the snapshot is still written", async () => {
+test("a failed status write rolls the evidence replace back: the previous rows AND status stay together, the server reads failed, and nothing throws", async () => {
   configurePlex();
+  evidence = [oldRow("plex", "")];
+  const prev = JSON.stringify({
+    fetchedAt: "2025-02-01T00:00:00.000Z", attemptedAt: "2025-02-01T00:00:00.000Z", ok: true, entries: 7, matched: 6, samples: 4, agreed: 4, error: null,
+  });
+  settings.set("upstreamWatch:status:plex:", prev);
   settingUpsertFails = true;
+  // A truncated read: the new rows must never be vouched for by the old "ok",
+  // complete status.
   respond = () => plexPage(plexHistory());
-  const result = await refreshUpstreamWatch();
-  assert.equal(result.servers[0].ok, true);
-  assert.equal(evidence.length, 4);
-  assert.ok(warns.some((w) => w.includes("could not record the refresh status")));
+  const result = await refreshUpstreamWatch({ plexMaxItems: 2 });
+  assert.deepEqual(evidence, [oldRow("plex", "")], "the previous rows are kept");
+  assert.equal(settings.get("upstreamWatch:status:plex:"), prev, "and so is the status that describes them");
+  assert.equal(result.servers[0].ok, false);
+  assert.equal(result.servers[0].health, "failed");
+  assert.ok(warns.some((w) => w.includes("could not record the refresh status")), "the failure status write failed too, and said so");
 });
 
 // ── an empty answer from a server Summonarr saw completed plays on ───────────

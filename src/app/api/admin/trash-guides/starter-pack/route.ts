@@ -7,16 +7,9 @@ import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { isFeatureEnabled } from "@/lib/features";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-import type { Translator } from "@/lib/i18n/translate";
+import { lockBusyResponse } from "@/lib/lock-http";
 
-function busyResponse(t: Translator) {
-  return NextResponse.json(
-    { ok: false, error: t("apiAdmin.trash.alreadyRunning"), retryAfter: 30 },
-    { status: 409, headers: { "Retry-After": "30" } },
-  );
-}
-
-export const GET = withAdmin(async (_req, _ctx, _session) => {
+export const GET = withAdmin(async (req, _ctx, _session) => {
   try {
     const items = await resolveStarterPack();
     return NextResponse.json({ items });
@@ -28,8 +21,13 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
       const emptyItems = STARTER_PACK.map((item) => ({ item, spec: null, application: null }));
       return NextResponse.json({ items: emptyItems, schemaDiagnostic });
     }
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ items: [], error: message }, { status: 500 });
+    // A non-schema failure's text can name the database host or a query: it
+    // goes to the log, and the browser gets a generic message.
+    console.error("[trash] starter pack read failed:", err);
+    return NextResponse.json(
+      { items: [], error: translatorForRequest(req)("apiAdmin.trash.internalError") },
+      { status: 500 },
+    );
   }
 });
 
@@ -87,13 +85,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         });
       } catch (err) {
         const schemaDiagnostic = describeSchemaError(err);
-        const message = err instanceof Error ? err.message : String(err);
-        return NextResponse.json(
-          { ok: false, error: message, ...(schemaDiagnostic ? { schemaDiagnostic } : {}) },
-          { status: schemaDiagnostic ? 409 : 500 },
-        );
+        if (schemaDiagnostic) {
+          const message = err instanceof Error ? err.message : String(err);
+          return NextResponse.json({ ok: false, error: message, schemaDiagnostic }, { status: 409 });
+        }
+        console.error("[trash] starter pack apply failed:", err);
+        return NextResponse.json({ ok: false, error: t("apiAdmin.trash.internalError") }, { status: 500 });
       }
     },
-    () => busyResponse(t),
+    () => lockBusyResponse(t("apiAdmin.trash.alreadyRunning")),
   );
 });

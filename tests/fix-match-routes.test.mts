@@ -2607,6 +2607,27 @@ test("file-info: a title only a NAMED Radarr instance manages still resolves (gu
   assert.ok(!settingReads.includes("radarrUrl") && !settingReads.includes("radarrApiKey"), "the default keys are not read raw");
 });
 
+test("file-info answers from the shared Radarr folder map when it is warm, and never from a folder name two titles share", async () => {
+  const a = await admin();
+  configureUhdRadarr();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/4k/Right Film (2010)/right.mkv", plexRatingKey: "1001" });
+  respond = (url) => {
+    if (url.origin !== RADARR_UHD || url.pathname !== "/api/v3/movie") throw new Error(`unexpected ${url}`);
+    return okJson([{ tmdbId: 222, path: "/media/4k/Right Film (2010)" }]);
+  };
+  // The map (bad-matches.ts loadArrPathIndex) holds Radarr's folder paths; its
+  // basename index answers. 333 is what only the map says.
+  tmdbCacheRows.set("arr:radarr:paths", JSON.stringify([["/radarr/movies/Right Film (2010)", 333]]));
+  const fromMap = await (await fileInfo(req(fileInfoUrl({ tmdbId: "111", mediaType: "MOVIE" }), { headers: a.header }), undefined)).json() as { arrTmdbId: number | null };
+  assert.equal(fromMap.arrTmdbId, 333);
+
+  // Two titles under that folder name: the map gives no answer and the exact
+  // path lookup decides.
+  tmdbCacheRows.set("arr:radarr:paths", JSON.stringify([["/a/Right Film (2010)", 333], ["/b/Right Film (2010)", 444]]));
+  const exact = await (await fileInfo(req(fileInfoUrl({ tmdbId: "111", mediaType: "MOVIE" }), { headers: a.header }), undefined)).json() as { arrTmdbId: number | null };
+  assert.equal(exact.arrTmdbId, 222);
+});
+
 test("file-info: with the Radarr integration switched off, Radarr is never called", async () => {
   const a = await admin();
   configureUhdRadarr();

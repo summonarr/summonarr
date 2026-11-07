@@ -152,35 +152,53 @@ export function nextReadTo(current: Date | null, plays: Iterable<Date | null>): 
   return out;
 }
 
+// The stored name of a title the library cache has no name for (yet).
+export function placeholderTitle(tmdbId: number): string {
+  return `TMDB #${tmdbId}`;
+}
+
 // One identity's stored rows after a read: deltas ADD plays and keep the later
 // date. `favorites` is the full favorite set read this run (null = not read,
 // so every stored flag stands); a favorite with no plays is kept as a 0-play
 // row, and a row with neither plays nor a favorite is dropped. Newest first,
 // capped at MAX_SERVER_WATCHED_TITLES (favorites outrank undated rows).
+//
+// `titleOf` is the library cache's name for a title, null when it has none. A
+// row this read touches (a play or a favorite) takes the cache's current name,
+// so one first stored under the placeholder, or an outdated name, is corrected.
 export function mergeServerWatchedRows(
   existing: readonly WatchedTitleRow[],
   deltas: ReadonlyMap<string, PlayDelta>,
   favorites: ReadonlySet<string> | null,
-  titleOf: (t: WatchTitle) => string,
+  titleOf: (t: WatchTitle) => string | null,
 ): WatchedTitleRow[] {
   const byKey = new Map<string, WatchedTitleRow>();
   for (const r of existing) byKey.set(watchTitleKey(r.tmdbId, r.mediaType), { ...r });
+  const rename = (r: WatchedTitleRow) => {
+    const known = titleOf(r);
+    if (known !== null && known !== r.title) r.title = known;
+  };
+  const nameOf = (t: WatchTitle) => titleOf(t) ?? placeholderTitle(t.tmdbId);
   for (const [k, d] of deltas) {
     const prior = byKey.get(k);
     if (prior) {
       prior.plays += d.plays;
       prior.lastWatchedAt = later(prior.lastWatchedAt, d.lastWatchedAt);
+      rename(prior);
     } else {
-      byKey.set(k, { tmdbId: d.tmdbId, mediaType: d.mediaType, title: titleOf(d), plays: d.plays, lastWatchedAt: d.lastWatchedAt, favorite: false });
+      byKey.set(k, { tmdbId: d.tmdbId, mediaType: d.mediaType, title: nameOf(d), plays: d.plays, lastWatchedAt: d.lastWatchedAt, favorite: false });
     }
   }
   if (favorites !== null) {
-    for (const [k, r] of byKey) r.favorite = favorites.has(k);
+    for (const [k, r] of byKey) {
+      r.favorite = favorites.has(k);
+      if (r.favorite) rename(r);
+    }
     for (const k of favorites) {
       if (byKey.has(k)) continue;
       const [id, type] = k.split(":");
       const t: WatchTitle = { tmdbId: Number(id), mediaType: type as MediaType };
-      byKey.set(k, { ...t, title: titleOf(t), plays: 0, lastWatchedAt: null, favorite: true });
+      byKey.set(k, { ...t, title: nameOf(t), plays: 0, lastWatchedAt: null, favorite: true });
     }
   }
   return [...byKey.values()]
@@ -202,7 +220,7 @@ export function sameServerWatchedRows(a: readonly WatchedTitleRow[], b: readonly
   for (const r of b) {
     const o = byKey.get(watchTitleKey(r.tmdbId, r.mediaType));
     if (!o) return false;
-    if (o.plays !== r.plays || o.favorite !== r.favorite || (o.lastWatchedAt?.getTime() ?? null) !== (r.lastWatchedAt?.getTime() ?? null)) return false;
+    if (o.title !== r.title || o.plays !== r.plays || o.favorite !== r.favorite || (o.lastWatchedAt?.getTime() ?? null) !== (r.lastWatchedAt?.getTime() ?? null)) return false;
   }
   return true;
 }

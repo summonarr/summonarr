@@ -7,7 +7,7 @@ import { testRadarrConnection, testSonarrConnection } from "@/lib/arr";
 import { getJellyfinMediaFolders } from "@/lib/jellyfin";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { EMAIL_TRANSPORT_KEYS, sendTestEmail, type EmailTransportOverrides } from "@/lib/email";
-import { AUDIT_PII_RETENTION_MAX_DAYS, AUDIT_PII_RETENTION_MIN_DAYS } from "@/lib/audit";
+import { AUDIT_PII_RETENTION_MAX_DAYS, AUDIT_PII_RETENTION_MIN_DAYS, logAuditTx } from "@/lib/audit";
 import { SECRET_MASK_SENTINEL } from "@/lib/secret-mask";
 import { localeForRequest } from "@/lib/i18n/server-locale";
 import { invalidatePublicKeyCache } from "@/lib/discord-interactions/signature";
@@ -478,6 +478,9 @@ const CLEARABLE_KEYS: ReadonlySet<string> = new Set([
   // lists. Readers treat "" as unset.
   "traktClientId",
   "traktClientSecret",
+  // The TRaSH GitHub token card's Remove. loadGithubToken (trash.ts) reads ""
+  // as no token, and its 30s cache lets the removal through on its own.
+  "trashGithubToken",
   // Webhook secrets must be clearable or the admin form silently lies: it
   // offers a blank field to remove the secret, the write is skipped as an
   // empty value, and the UI still reports Saved while the OLD secret stays
@@ -676,15 +679,17 @@ function settingsAuditDetails(
   keys: string[],
   before: Record<string, string>,
   after: Record<string, string>,
-): string {
+): Record<string, unknown> {
+  // Returns the object whose JSON (as the audit row builder writes it) fits.
+  const fits = (details: Record<string, unknown>) => JSON.stringify(details).length <= AUDIT_DETAILS_MAX;
   const capAll = (values: Record<string, string>, cap: number) =>
     Object.fromEntries(Object.entries(values).map(([k, v]) => [k, capAuditValue(v, cap)]));
   for (const cap of AUDIT_VALUE_CAPS) {
-    const details = JSON.stringify({ keys, before: capAll(before, cap), after: capAll(after, cap) });
-    if (details.length <= AUDIT_DETAILS_MAX) return details;
+    const details = { keys, before: capAll(before, cap), after: capAll(after, cap) };
+    if (fits(details)) return details;
   }
-  const keysOnly = JSON.stringify({ keys, valuesOmitted: true });
-  return keysOnly.length <= AUDIT_DETAILS_MAX ? keysOnly : JSON.stringify({ keyCount: keys.length, valuesOmitted: true });
+  const keysOnly = { keys, valuesOmitted: true };
+  return fits(keysOnly) ? keysOnly : { keyCount: keys.length, valuesOmitted: true };
 }
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
@@ -1213,17 +1218,17 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       for (const [key, value] of stampEntries) {
         await tx.setting.upsert({ where: { key }, update: { value }, create: { key, value } });
       }
-      await tx.auditLog.create({
-        data: {
-          userId: session.user.id,
-          userName: sanitizeText(session.user.name ?? session.user.email ?? "unknown"),
-          action: changedKeys.includes("maintenanceEnabled") ? "MAINTENANCE_TOGGLE" : "SETTINGS_CHANGE",
-          target: "settings",
-          details: settingsAuditDetails(changedKeys, oldValues, newValues),
-          ipAddress: auditIp,
-          userAgent: auditUa,
-          provider: session.user.provider ?? null,
-        },
+      // The shared row builder (audit.ts), on the tx client: same sanitizing as
+      // every other audit row, and a failed write rolls the save back (26).
+      await logAuditTx(tx, {
+        userId: session.user.id,
+        userName: session.user.name ?? session.user.email ?? "unknown",
+        action: changedKeys.includes("maintenanceEnabled") ? "MAINTENANCE_TOGGLE" : "SETTINGS_CHANGE",
+        target: "settings",
+        details: settingsAuditDetails(changedKeys, oldValues, newValues),
+        ipAddress: auditIp,
+        userAgent: auditUa,
+        provider: session.user.provider ?? null,
       });
     });
   } catch (err) {

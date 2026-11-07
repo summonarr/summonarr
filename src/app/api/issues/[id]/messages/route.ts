@@ -16,8 +16,14 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { isFeatureEnabled } from "@/lib/features";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { promoteIssueInProgress } from "@/lib/issue-transitions";
 
 type RouteContext = { params: Promise<{ id: string }> };
+
+// The newest messages a thread read returns. A thread only grows (10 posts a
+// minute per user), and every poll and live refresh re-reads it, so the read
+// is bounded; the request-comment thread has the same cap.
+const MAX_THREAD_MESSAGES = 500;
 
 export const GET = withAuth(async (req, { params }: RouteContext, session) => {
   const t = translatorForRequest(req);
@@ -25,19 +31,21 @@ export const GET = withAuth(async (req, { params }: RouteContext, session) => {
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
-  if (!hasPermission(session.user.permissions, Permission.MANAGE_ISSUES) && issue.reportedBy !== session.user.id) {
+  const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
+  if (!isAdmin && issue.reportedBy !== session.user.id) {
     return NextResponse.json({ error: t("apiUser.common.forbidden") }, { status: 403 });
   }
 
-  const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
-
-  const messages = await prisma.issueMessage.findMany({
+  // The newest MAX_THREAD_MESSAGES, answered oldest first: the response stays the
+  // bare array clients decode (guardrail 25).
+  const newest = await prisma.issueMessage.findMany({
     where: { issueId: id },
     include: { author: { select: { name: true, role: true, ...(isAdmin ? { email: true } : {}) } } },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: MAX_THREAD_MESSAGES,
   });
 
-  return NextResponse.json(messages);
+  return NextResponse.json(newest.reverse());
 });
 
 export const POST = withAuth(async (req, { params }: RouteContext, session) => {
@@ -83,45 +91,29 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   }
   const text = sanitizeText(rawText);
 
-  const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
-
   const message = await prisma.issueMessage.create({
     data: {
       issueId: id,
       authorId: session.user.id,
       body: text,
-      fromAdmin: isAdmin,
+      fromAdmin: isIssueAdmin,
     },
     // Mirror GET's author select (email for admins only) so a null-named author
     // renders identically whether the thread was fetched or just posted to.
-    include: { author: { select: { name: true, role: true, ...(isAdmin ? { email: true } : {}) } } },
+    include: { author: { select: { name: true, role: true, ...(isIssueAdmin ? { email: true } : {}) } } },
   });
 
   // Auto-transition to IN_PROGRESS when an admin first replies — signals the reporter
   // their issue is seen. CAS on OPEN so a concurrent RESOLVED transition isn't
-  // clobbered, and only emit the SSE / log when we actually changed status.
-  if (isAdmin && issue.status === "OPEN") {
-    const claimed = await prisma.issue.updateMany({
-      where: { id, status: "OPEN" },
-      data: { status: "IN_PROGRESS" },
-    });
-    if (claimed.count > 0) {
-      emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
-      void logAudit({
-        userId: session.user.id,
-        userName: session.user.name ?? session.user.email ?? null,
-        action: "ISSUE_STATUS_CHANGE",
-        target: `issue:${id}`,
-        details: { trigger: "admin-reply-auto-promote", before: { status: "OPEN" }, after: { status: "IN_PROGRESS" } },
-        ...auditContext(req, session),
-      });
-    }
+  // clobbered; the SSE and the audit follow only an actual change.
+  if (isIssueAdmin && issue.status === "OPEN") {
+    await promoteIssueInProgress({ issue, from: "open", trigger: "admin-reply-auto-promote", session, req });
   }
 
   // A reporter replying to a RESOLVED issue reopens it (mirror of the admin
   // OPEN→IN_PROGRESS auto-promote above). An admin reply on a resolved issue adds a
   // closing note without changing status. CAS on RESOLVED so a concurrent change wins.
-  if (!isAdmin && issue.status === "RESOLVED" && issue.reportedBy === session.user.id) {
+  if (!isIssueAdmin && issue.status === "RESOLVED" && issue.reportedBy === session.user.id) {
     const reopened = await prisma.issue.updateMany({
       where: { id, status: "RESOLVED" },
       data: { status: "OPEN", resolution: null, resolvedAt: null },
@@ -162,11 +154,11 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   // other admins/issue-admins are intentionally kept out of the conversation.
   const adminOpts = {
     excludeUserId: session.user.id,
-    fromAdmin: isAdmin,
+    fromAdmin: isIssueAdmin,
     ...(issue.claimedBy ? { restrictToUserId: issue.claimedBy } : {}),
   };
 
-  if (isAdmin) {
+  if (isIssueAdmin) {
     // ONE lookup of the reporter decides whether any reporter-facing channel
     // runs (guardrail 33: gate in one place, not in each channel). A removed
     // account is only disabled, so it still has a live email, Discord link and
@@ -209,14 +201,12 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         }
       }
     }
-    void notifyAdminsIssueMessage(issue.title, authorName, text, { ...adminOpts, tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
-    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
-  } else {
-    void notifyAdminsIssueMessage(issue.title, authorName, text, { ...adminOpts, tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
-    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
   }
+  // The admin side, whoever wrote: every issue admin but the author (or only the
+  // claimer — adminOpts).
+  void notifyAdminsIssueMessage(issue.title, authorName, text, { ...adminOpts, tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
+  void notifyAdminsIssueMessagePush({ title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
+  void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
 
   return NextResponse.json(message, { status: 201 });
 });

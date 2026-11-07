@@ -3,6 +3,7 @@
 // arrFetch/arrFetchNoContent (guardrail 5), and every instance is addressed by
 // its arrInstance slug (guardrail 32): a title can sit in the default, the 4K
 // and a named instance at once, and a cleanup removes it from every one.
+import { createHash } from "node:crypto";
 import { ArrResponseError, arrErrorKind, arrFetch, arrFetchNoContent, getArrCfg, resolveTmdbToTvdb, type ArrCfg } from "./arr";
 import type { ArrErrorKind } from "./arr-error-kind";
 import { getSyncableArrInstances } from "./arr-instance-registry";
@@ -134,13 +135,18 @@ async function fetchListing<T>(cfg: ArrCfg, path: string): Promise<T> {
   }
 }
 
+// A listing this code can't read as one (no config by the time it is listed, a
+// body that isn't an array) throws like a failed request: an empty answer would
+// read as a healthy instance holding nothing, and failedArrInstances — which the
+// delete route relies on not to half-delete a title — would never name it.
 async function listInstance(service: ArrService, instance: string): Promise<ArrLibraryEntry[]> {
   const cfg = await getArrCfg(service, instance);
-  if (!cfg) return [];
+  if (!cfg) throw new Error("instance not configured");
   if (service === "radarr") {
     const rows = await fetchListing<RadarrMovieRow[]>(cfg, "/api/v3/movie");
+    if (!Array.isArray(rows)) throw new Error("unexpected listing body");
     const out: ArrLibraryEntry[] = [];
-    for (const r of Array.isArray(rows) ? rows : []) {
+    for (const r of rows) {
       const arrId = posInt(r.id);
       if (arrId === null) continue;
       out.push({
@@ -156,8 +162,9 @@ async function listInstance(service: ArrService, instance: string): Promise<ArrL
     return out;
   }
   const rows = await fetchListing<SonarrSeriesRow[]>(cfg, "/api/v3/series");
+  if (!Array.isArray(rows)) throw new Error("unexpected listing body");
   const out: ArrLibraryEntry[] = [];
-  for (const r of Array.isArray(rows) ? rows : []) {
+  for (const r of rows) {
     const arrId = posInt(r.id);
     if (arrId === null) continue;
     out.push({
@@ -274,6 +281,18 @@ export function peekCachedArrLibraryIndex(): ArrLibraryIndex | null {
 export function failedArrInstances(index: Pick<ArrLibraryIndex, "errors">, mediaType: CleanupMediaType): string[] {
   const service: ArrService = mediaType === "MOVIE" ? "radarr" : "sonarr";
   return index.errors.filter((e) => e.service === service).map((e) => e.instance || "default");
+}
+
+// The exact set a cleanup dry run planned — every (title, instance, arr entry) —
+// as one opaque value the execute echoes back (guardrail 14b). The count alone
+// let a same-sized DIFFERENT set through: one copy dropping out while another
+// appeared on a second instance would delete an entry the admin never saw.
+// Order-free (sorted), so only the set matters.
+export function cleanupTargetsFingerprint(
+  plan: ReadonlyArray<{ tmdbId: number; mediaType: CleanupMediaType; targets: ReadonlyArray<Pick<ArrLibraryEntry, "service" | "instance" | "arrId">> }>,
+): string {
+  const lines = plan.flatMap((p) => p.targets.map((t) => `${p.mediaType}:${p.tmdbId}>${t.service}:${t.instance}:${t.arrId}`)).sort();
+  return createHash("sha256").update(lines.join("\n")).digest("hex");
 }
 
 // How a lookup reaches TMDB's tmdb→tvdb cross-reference (resolveTmdbToTvdb).

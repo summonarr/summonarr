@@ -6,11 +6,12 @@ import Link from "next/link";
 import { WarmCacheButton } from "@/components/admin/warm-cache-button";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
-import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
-import { inferGroupMounts } from "@/lib/bad-matches";
+import { inferGroupMounts, loadArrPathIndex, type ArrPathIndex } from "@/lib/bad-matches";
+import { folderOf, stripMountPoint, stripRelPrefix, toMatchKey } from "@/lib/library-paths";
 import { LibraryDiffClient, type DiffItem, type ClientBadMatch } from "@/components/admin/library-diff-client";
 import { LibraryMatchCheck, type ClientMatchReport } from "@/components/admin/library-match-check";
 import { readLibraryMatchReport } from "@/lib/library-match-data";
+import { configuredLibrarySyncServers } from "@/lib/library-sync-jobs";
 import { folderKey, ownFolder } from "@/lib/library-match";
 import {
   diffCollator,
@@ -195,20 +196,9 @@ async function fetchOverviews(
   return map;
 }
 
-function stripMountPoint(filePath: string | null, mountPoint: string): string | null {
-  if (!filePath) return null;
-  const normalised = filePath.replace(/\\/g, "/");
-  if (mountPoint && normalised.startsWith(mountPoint)) return normalised.slice(mountPoint.length);
-  return normalised;
-}
-
-function normaliseRelPath(rel: string, stripPrefix: string): string {
-  if (!stripPrefix) return rel;
-  const p = stripPrefix.endsWith("/") ? stripPrefix : stripPrefix + "/";
-  return rel.startsWith(p) ? rel.slice(p.length) : rel;
-}
-
 // ── multi-server path normalisation (MIRROR of src/lib/bad-matches.ts) ───────
+// The path rules themselves are shared (library-paths.ts), as is the
+// Radarr/Sonarr folder map (loadArrPathIndex).
 // commonPathPrefix infers a bind-mount root from the longest shared prefix of
 // the paths it is handed, so it must only ever see ONE server instance's paths:
 // two Plex servers mounted at /plexmedia/… and /mnt/nas/video/… share no leading
@@ -280,64 +270,6 @@ function defaultInstanceLast<T extends { serverInstance: string }>(rows: T[]): T
   );
 }
 
-async function buildArrPathMap(
-  mediaType: "MOVIE" | "TV",
-): Promise<Map<string, number>> {
-  const service = mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
-  const cacheKey = `arr:${service}:paths`;
-
-  // `cached?.length`, not `cached`: an empty array is a truthy cache HIT, so a
-  // once-poisoned key would blank the verdict column for the whole 6h TTL.
-  const cached = await getCache<[string, number][]>(cacheKey);
-  if (cached?.length) return new Map(cached);
-
-  // Merge the path→tmdbId mapping across EVERY configured instance (default,
-  // 4K, named) — a title that lives only in a non-default instance's library
-  // still gets an arr verdict on the bad-match rows. First instance to claim a
-  // path wins (instances shouldn't share on-disk paths; if they do, the default
-  // instance — listed first — is the sensible tiebreak).
-  const map = new Map<string, number>();
-  try {
-    // Route through arrFetch so these full-library list calls inherit the 30s
-    // timeout + 50 MB cap (guardrail 5) + X-Api-Key injection + ArrResponseError.
-    const { arrFetch, getArrCfg } = await import("@/lib/arr");
-    const { getSyncableArrInstances } = await import("@/lib/arr-instance-registry");
-    const instances = await getSyncableArrInstances(service);
-    if (instances.length === 0) return map;
-
-    const endpoint = mediaType === "MOVIE" ? "movie" : "series";
-    type ArrItem = { tmdbId?: number; path?: string };
-    let anyInstanceFailed = false;
-    for (const inst of instances) {
-      try {
-        const cfg = await getArrCfg(service, inst.slug);
-        if (!cfg) continue;
-        const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
-        for (const item of items) {
-          if (!item.tmdbId || !item.path) continue;
-          const normPath = item.path.replace(/\\/g, "/").replace(/\/$/, "");
-          if (!map.has(normPath)) map.set(normPath, item.tmdbId);
-        }
-      } catch {
-        // One unreachable instance shouldn't blank the whole verdict column —
-        // which is exactly what memoizing this partial result would do. Record
-        // the failure and skip the write so the next page load retries; a
-        // 30-second Radarr restart otherwise cost 6h of blank ARR verdicts.
-        anyInstanceFailed = true;
-      }
-    }
-
-    if (!anyInstanceFailed && map.size > 0) {
-      await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
-    }
-  } catch { }
-  return map;
-}
-
-function folderOf(filePath: string): string {
-  return filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, "");
-}
-
 function TypeTab({
   label,
   href,
@@ -387,19 +319,19 @@ export default async function LibraryDiffPage({
   // overview is omitted here on purpose: it is the heaviest column and is only
   // rendered for the difference sets, so pulling it for up to 50k rows per render
   // is wasted. fetchOverviews backfills it for just the displayed rows below.
-  const [plexItems, jellyfinItems, prefixRows, matchReport] = await Promise.all([
+  const [plexItems, jellyfinItems, prefixRows, matchReport, syncServers] = await Promise.all([
     prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true }, orderBy: [{ serverInstance: "asc" }, { mediaType: "asc" }, { tmdbId: "asc" }], take: LIBRARY_ITEM_CAP }),
     prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true }, orderBy: [{ serverInstance: "asc" }, { mediaType: "asc" }, { tmdbId: "asc" }], take: LIBRARY_ITEM_CAP }),
-    // The four connection keys ride along on the existing query so the Re-sync
-    // button can be told which servers exist rather than POSTing to both and
-    // reading a not-configured 400 as a failure. Not derived from
-    // plexItems.length: a configured-but-empty or freshly-added server has no
-    // rows yet and would be wrongly reported as absent.
     prisma.setting.findMany({ where: { key: { in: [
       "plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
-      "plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey",
     ] } } }),
     readLibraryMatchReport(),
+    // Which servers are CONNECTED (every instance), so the Re-sync button syncs
+    // each of them and skips one that is not there rather than POSTing to it and
+    // reading a not-configured 400 as a failure. Not derived from the library
+    // rows: a configured-but-empty or freshly-added server has none yet and would
+    // be wrongly reported as absent.
+    configuredLibrarySyncServers(),
   ]);
   // The match check judges each server against Radarr/Sonarr, so unlike the
   // diff below it means something on a one-server deployment too. Paths stay
@@ -424,36 +356,24 @@ export default async function LibraryDiffPage({
   // common case (guardrail 35), so we show a short notice instead.
   const oneSided = !plexConfigured || !jellyfinConfigured;
 
-  // Start the ARR path-map builds now (external Radarr/Sonarr HTTP, independent
-  // of everything below) so they overlap the fetchOverviews/enrichItems DB
-  // stages; awaited in the bad-match Promise.all where they are consumed. The
-  // no-op catches only mark the promises handled if an intermediate await
-  // throws first — the awaits below still rethrow a buildArrPathMap failure.
+  // Start the ARR folder-map reads now (external Radarr/Sonarr HTTP when the
+  // shared cache is cold, independent of everything below) so they overlap the
+  // fetchOverviews/enrichItems DB stages; awaited in the bad-match Promise.all
+  // where they are consumed. loadArrPathIndex never throws; the no-op catches
+  // only mark the promises handled if an intermediate await throws first.
   //
   // Skipped on a one-sided deployment, matching the fetchOverviews/enrichItems
   // gate below: every consumer (the bad-match verdicts, toClientItem over
-  // onlyPlex/onlyJellyfin) is empty there, yet the build is a full /api/v3/movie
-  // and /api/v3/series list from EVERY syncable instance, sequentially, on a
-  // 30s timeout each — and it is only memoized when no instance failed, so with
-  // Radarr down every load of this page blocked on the timeouts to render a
-  // one-line notice.
-  const movieArrMapPromise = oneSided ? Promise.resolve(new Map<string, number>()) : buildArrPathMap("MOVIE");
-  movieArrMapPromise.catch(() => {});
-  const tvArrMapPromise = oneSided ? Promise.resolve(new Map<string, number>()) : buildArrPathMap("TV");
-  tvArrMapPromise.catch(() => {});
+  // onlyPlex/onlyJellyfin) is empty there, yet a cold build is a full
+  // /api/v3/movie and /api/v3/series list from EVERY syncable instance on a 30s
+  // timeout each — a one-line notice must not wait on that.
+  const noArrIndex: ArrPathIndex = { byPath: new Map(), byName: new Map(), incomplete: false };
+  const movieArrIndexPromise = oneSided ? Promise.resolve(noArrIndex) : loadArrPathIndex("MOVIE");
+  movieArrIndexPromise.catch(() => {});
+  const tvArrIndexPromise = oneSided ? Promise.resolve(noArrIndex) : loadArrPathIndex("TV");
+  tvArrIndexPromise.catch(() => {});
 
   const prefixCfg: Record<string, string> = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
-
-  // Whether a server is CONNECTED — the same url+key gates /api/sync/plex and
-  // /api/sync/jellyfin apply themselves, so the Re-sync button can skip one that
-  // is not there rather than POSTing to it and reading the 400 as a failure.
-  // Default instance only, which is all that button syncs (it sends no slug).
-  //
-  // Deliberately NOT the `plexConfigured` further down: that one means "has
-  // library ROWS" and drives the has-anything-synced-yet empty state. A freshly
-  // connected server has none, and is exactly the case that needs the button.
-  const plexSyncConfigured = !!(prefixCfg.plexServerUrl && prefixCfg.plexAdminToken);
-  const jellyfinSyncConfigured = !!(prefixCfg.jellyfinUrl && prefixCfg.jellyfinApiKey);
 
   // Named servers' own strip prefixes (plex<Slug>MoviePathStripPrefix, …). The
   // slug list comes from the library rows rather than the instance registry:
@@ -538,11 +458,6 @@ export default async function LibraryDiffPage({
   const plexMountPoints     = mountsByInstance(plexItems);
   const jellyfinMountPoints = mountsByInstance(jellyfinItems);
 
-  function toMatchKey(rel: string, mediaType: "MOVIE" | "TV"): string {
-    if (mediaType === "TV") return rel.split("/")[0];
-    return rel;
-  }
-
   // No overview here: bad-match rows never render it (clientBadMatches omits it).
   type PlexPathEntry     = { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string; filePath: string; ratingKey: string | null; title: string | null; year: string | null };
   type JellyfinPathEntry = { tmdbId: number; mediaType: "MOVIE" | "TV"; serverInstance: string; filePath: string; itemId: string | null;   title: string | null; year: string | null };
@@ -566,7 +481,7 @@ export default async function LibraryDiffPage({
     const rel = stripMountPoint(item.filePath, plexMountPoints.get(mountKey(item)) ?? "");
     if (!rel) continue;
     const plexPrefix = plexStripFor(item.serverInstance, item.mediaType);
-    const matchKey = toMatchKey(normaliseRelPath(rel, plexPrefix), item.mediaType);
+    const matchKey = toMatchKey(stripRelPrefix(rel, plexPrefix), item.mediaType);
     if (matchKey) plexKeyByRow.set(rowKey(item), matchKey);
     if (matchKey) plexPathMap.set(matchKey, { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, ratingKey: item.plexRatingKey, title: item.title, year: item.year });
   }
@@ -577,7 +492,7 @@ export default async function LibraryDiffPage({
     const rel = stripMountPoint(item.filePath, jellyfinMountPoints.get(mountKey(item)) ?? "");
     if (!rel) continue;
     const jellyfinPrefix = jellyfinStripFor(item.serverInstance, item.mediaType);
-    const matchKey = toMatchKey(normaliseRelPath(rel, jellyfinPrefix), item.mediaType);
+    const matchKey = toMatchKey(stripRelPrefix(rel, jellyfinPrefix), item.mediaType);
     if (matchKey) jellyfinKeyByRow.set(rowKey(item), matchKey);
     if (matchKey) jellyfinPathMap.set(matchKey, { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, itemId: item.jellyfinItemId, title: item.title, year: item.year });
   }
@@ -601,34 +516,25 @@ export default async function LibraryDiffPage({
     ? allRawBadMatches.filter((m) => m.plexItem.mediaType === activeType || m.jellyfinItem.mediaType === activeType)
     : allRawBadMatches;
 
-  const [bmPlexItems, bmJellyfinItems, movieArrMap, tvArrMap] = await Promise.all([
+  const [bmPlexItems, bmJellyfinItems, movieArrIndex, tvArrIndex] = await Promise.all([
     enrichItems(filteredRawBadMatches.map((m) => ({ tmdbId: m.plexItem.tmdbId,     mediaType: m.plexItem.mediaType,     filePath: m.plexItem.filePath,     title: m.plexItem.title,     year: m.plexItem.year,     serverInstance: m.plexItem.serverInstance }))),
     enrichItems(filteredRawBadMatches.map((m) => ({ tmdbId: m.jellyfinItem.tmdbId, mediaType: m.jellyfinItem.mediaType, filePath: m.jellyfinItem.filePath, title: m.jellyfinItem.title, year: m.jellyfinItem.year, serverInstance: m.jellyfinItem.serverInstance }))),
-    movieArrMapPromise,
-    tvArrMapPromise,
+    movieArrIndexPromise,
+    tvArrIndexPromise,
   ]);
 
-  // Sonarr keys by the SERIES folder, but a TV lookup off folderOf(filePath)
-  // yields the SEASON folder (Plex stores an episode leaf) or the TV library
-  // root (Jellyfin stores the series folder itself) and never matches. Index the
-  // sonarr paths by folder BASENAME so the show-folder key lines up — the same
-  // split src/lib/bad-matches.ts makes; the full-path map stays for
-  // tvArrPathByTmdbId below.
-  const tvArrByName = new Map<string, number>();
-  for (const [path, id] of tvArrMap) {
-    const name = path.split("/").pop();
-    if (name && !tvArrByName.has(name)) tvArrByName.set(name, id);
-  }
-
-  // Movies need the same basename index: the map key is Radarr's absolute path
-  // while the lookup key is the media server's, and the two bind-mount roots
-  // (/data vs /plexmedia) differ on any normal Docker deployment, so a full-path
-  // get() never matched. Basenames ("Movie (2020)") line up across mounts.
-  const movieArrByName = new Map<string, number>();
-  for (const [path, id] of movieArrMap) {
-    const name = path.split("/").pop();
-    if (name && !movieArrByName.has(name)) movieArrByName.set(name, id);
-  }
+  // Lookups go through each map's folder-BASENAME index: the arr paths are
+  // absolute under a different bind-mount root (/data vs /plexmedia), so a
+  // full-path get() never matches, while basenames ("Movie (2020)") line up.
+  // Sonarr keys by the SERIES folder — a TV lookup off folderOf(filePath) would
+  // yield the season folder (Plex stores an episode leaf) or the library root
+  // (Jellyfin stores the series folder itself). A basename two titles share is
+  // absent from the index, so it gives no verdict rather than a wrong one. The
+  // full-path maps stay for the inArr sets and tvArrPathByTmdbId below.
+  const movieArrMap    = movieArrIndex.byPath;
+  const tvArrMap       = tvArrIndex.byPath;
+  const movieArrByName = movieArrIndex.byName;
+  const tvArrByName    = tvArrIndex.byName;
 
   const badMatches: BadMatch[] = filteredRawBadMatches.map((m, i) => {
     // toMatchKey already reduced a TV relativePath to the show folder; movies
@@ -685,7 +591,7 @@ export default async function LibraryDiffPage({
       // dir. The arr paths are absolute under a different bind-mount root, so a
       // full-path lookup never matches.
       const arrTmdbId = item.mediaType === "TV"
-        ? (mediaRelPath ? (tvArrByName.get(mediaRelPath.split("/")[0]) ?? null) : null)
+        ? (mediaRelPath ? (arrMap(item).get(mediaRelPath.split("/")[0]) ?? null) : null)
         : (item.filePath ? (arrMap(item).get(folderOf(item.filePath).split("/").pop() ?? "") ?? null) : null);
       const inArr     = arrTmdbSet(item).has(item.tmdbId);
 
@@ -696,7 +602,7 @@ export default async function LibraryDiffPage({
       const matchKey = keyByRow.get(rowKey(item)) ?? null;
       const folder = item.mediaType === "TV"
         ? (matchKey ? folderKey(matchKey) : null)
-        : (() => { const f = ownFolder(item.filePath); return f ? folderKey(f) : null; })();
+        : (() => { const f = ownFolder(item.filePath, "MOVIE"); return f ? folderKey(f) : null; })();
 
       return {
         tmdbId:         item.tmdbId,
@@ -768,7 +674,7 @@ export default async function LibraryDiffPage({
         subtitle={t("adminManage.library.subtitle")}
         right={
           <div className="flex items-center gap-2 flex-wrap">
-            <ResyncLibraryButton plexConfigured={plexSyncConfigured} jellyfinConfigured={jellyfinSyncConfigured} />
+            <ResyncLibraryButton servers={syncServers} />
             <SyncTVEpisodesButton />
             <WarmCacheButton uncachedCount={uncachedCount} />
           </div>
