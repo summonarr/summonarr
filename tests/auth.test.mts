@@ -2536,3 +2536,41 @@ test("plex: a token-cache hit whose cache-row refresh fails (purged concurrently
     models.plexTokenCache.update = realUpdate;
   }
 });
+
+test("plex: a plex.tv outage on the token-cache ping keeps the cache row and verifies live; only a 401 purges it", async () => {
+  const ua = chromeUa("plex-ping-outage");
+  settings.set("plexAdminToken", "admin-plex-token");
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  const FRIENDS_XML =
+    '<?xml version="1.0"?><MediaContainer size="1">' +
+    '<User id="1" email="outage@example.com"><Server id="1" machineIdentifier="machine-1"/></User>' +
+    "</MediaContainer>";
+  let pingStatus = 200;
+  respond = (url) => {
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return jsonResponse({ id: 6161, email: "outage@example.com", username: "Outage", thumb: "" });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/ping") return jsonResponse({}, pingStatus);
+    if (url.hostname === "203.0.113.10" && url.pathname === "/identity") return jsonResponse({ MediaContainer: { machineIdentifier: "machine-1" } });
+    if (url.hostname === "plex.tv" && url.pathname === "/api/users") return new Response(FRIENDS_XML, { status: 200, headers: { "content-type": "application/xml" } });
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const token = "plex-tok-ping-outage";
+  assert.ok(await authorizeWithPlex({ plexToken: token }, makeReq(ua)), "the live sign-in writes the cache row");
+  assert.equal(plexCacheRows.size, 1, "fixture sanity: one cache row");
+  const [tokenHash] = [...plexCacheRows.keys()];
+
+  // plex.tv answers the ping with a 503: no answer about the token.
+  pingStatus = 503;
+  fetchCalls.length = 0;
+  dbCalls.length = 0;
+  assert.ok(await authorizeWithPlex({ plexToken: token }, makeReq(ua)), "the full lookup still signs the member in");
+  assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/ping"), "precondition: this sign-in took the token-cache path");
+  assert.ok(fetchCalls.some((c) => c.url.pathname === "/api/v2/user"), "an unanswered ping is never honored: plex.tv verifies the token live");
+  assert.equal(dbCalls.includes("plexTokenCache.delete"), false, "an outage must not purge the row");
+  assert.ok(plexCacheRows.has(tokenHash));
+
+  // plex.tv refuses the token: the row goes.
+  pingStatus = 401;
+  dbCalls.length = 0;
+  await authorizeWithPlex({ plexToken: token }, makeReq(ua)).catch(() => null);
+  assert.ok(dbCalls.includes("plexTokenCache.delete"), "a 401 purges the row");
+});

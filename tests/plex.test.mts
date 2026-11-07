@@ -114,6 +114,7 @@ async function flush(): Promise<void> {
 const {
   PLEX_CLIENT_ID,
   pingPlexToken,
+  checkPlexToken,
   getPlexUser,
   getPlexLibrarySections,
   getPlexSectionTmdbIds,
@@ -192,6 +193,23 @@ test("pingPlexToken never throws: a 401 and a network failure both read as false
     throw new Error("connection refused");
   };
   assert.equal(await pingPlexToken("any-tok"), false);
+});
+
+// Sign-in deletes a cached token row only when plex.tv REFUSED the token. A
+// timeout or an outage is no answer, so it must not read as "revoked".
+test("checkPlexToken: only a 401 is revoked; a 429, a 5xx and a network failure are unknown", async () => {
+  respond = () => okJson({});
+  assert.equal(await checkPlexToken("tok"), "valid");
+  respond = () => okJson({ error: "unauthorized" }, 401);
+  assert.equal(await checkPlexToken("tok"), "revoked");
+  for (const status of [429, 500, 502, 503]) {
+    respond = () => okJson({}, status);
+    assert.equal(await checkPlexToken("tok"), "unknown", `a ${status} is no answer`);
+  }
+  respond = () => {
+    throw new Error("connection timed out");
+  };
+  assert.equal(await checkPlexToken("tok"), "unknown");
 });
 
 // ── getPlexUser ─────────────────────────────────────────────────────────────

@@ -30,7 +30,14 @@ export interface PlexUser {
   thumb: string;
 }
 
-export async function pingPlexToken(token: string, clientId?: string): Promise<boolean> {
+export type PlexTokenState = "valid" | "revoked" | "unknown";
+
+/**
+ * What plex.tv says about a token. Only a 401 means plex.tv refused it;
+ * a timeout, network failure, 429 or 5xx is no answer at all ("unknown").
+ * Never throws.
+ */
+export async function checkPlexToken(token: string, clientId?: string): Promise<PlexTokenState> {
   try {
     const res = await safeFetchTrusted("https://plex.tv/api/v2/ping", {
       allowedHosts: PLEX_TV_HOSTS,
@@ -41,10 +48,15 @@ export async function pingPlexToken(token: string, clientId?: string): Promise<b
       },
       timeoutMs: 10_000,
     });
-    return res.ok;
+    if (res.ok) return "valid";
+    return res.status === 401 ? "revoked" : "unknown";
   } catch {
-    return false;
+    return "unknown";
   }
+}
+
+export async function pingPlexToken(token: string, clientId?: string): Promise<boolean> {
+  return (await checkPlexToken(token, clientId)) === "valid";
 }
 
 /** The account's servers from plex.tv, as plex.tv reports them (parse with parsePlexResources). */

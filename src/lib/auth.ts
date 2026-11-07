@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { headers } from "next/headers";
 import { dummyVerify, hashPassword, needsRehash, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { createHash } from "crypto";
-import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
+import { getPlexUser, getPlexFriendEmails, checkPlexToken, type PlexServerMembers } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, peekRateLimit, reserveRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
@@ -1110,8 +1110,8 @@ export async function authorizeWithPlex(
       // through to the full /api/v2/user round-trip, which re-binds
       // the cache row to the verified sub.
       if (cached.plexUserId) {
-        const stillValid = await pingPlexToken(plexToken, browserClientId);
-        if (stillValid) {
+        const tokenState = await checkPlexToken(plexToken, browserClientId);
+        if (tokenState === "valid") {
           const existing = await prisma.user.findUnique({
             where: { plexUserId: cached.plexUserId },
             select: { id: true, plexUserId: true, email: true },
@@ -1132,10 +1132,13 @@ export async function authorizeWithPlex(
           }
           // No bound row for this sub yet — fall through to the full
           // lookup so we can properly bind plexUserId on first sign-in.
-        } else {
-          // Token was revoked in Plex — purge cache so next attempt re-validates from scratch
+        } else if (tokenState === "revoked") {
+          // plex.tv refused the token (401) — purge cache so next attempt re-validates from scratch
           await prisma.plexTokenCache.delete({ where: { tokenHash } }).catch(() => {});
         }
+        // "unknown" (a timeout, network failure, 429 or 5xx): plex.tv gave no
+        // answer, so the row stays — but it is never honored unverified; the
+        // full lookup below decides this sign-in.
       }
       // else: legacy row without plexUserId — skip the cache hit and
       // let the round-trip below re-populate the column.
