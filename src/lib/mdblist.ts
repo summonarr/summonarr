@@ -5,7 +5,7 @@ import { safeFetchTrusted, SafeFetchError, type SafeFetchOptions } from "./safe-
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit, coalesce } from "./concurrency";
 import { processSingleton } from "./process-singleton";
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import {
   MDBLIST_PLAN_SETTING_KEY,
@@ -144,7 +144,7 @@ function noteKeyRejected(apiKey: string): void {
   // The key itself never reaches the log or the dedup map.
   warnOnChange(
     REJECTED_KEY_WARN_KEY,
-    createHash("sha256").update(apiKey).digest("hex").slice(0, 12),
+    createHmac("sha256", "summonarr:key-fingerprint").update(apiKey).digest("hex").slice(0, 12),
     "[mdblist] MDBList refused the API key — no MDBList ratings until the key is changed or Settings → Test succeeds; the same key is retried hourly",
   );
 }

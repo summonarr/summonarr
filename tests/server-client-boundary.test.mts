@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import ts from "typescript";
+import { hasUseClientDirective } from "./_use-client.mts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const SRC = join(ROOT, "src");
@@ -35,7 +36,7 @@ function isClientModule(file: string): boolean {
   let hit = clientCache.get(file);
   if (hit === undefined) {
     const text = readFileSync(file, "utf8");
-    hit = /^(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*["']use client["']/.test(text);
+    hit = hasUseClientDirective(text);
     clientCache.set(file, hit);
   }
   return hit;

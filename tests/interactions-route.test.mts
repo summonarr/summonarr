@@ -560,6 +560,8 @@ beforeEach(async () => {
 
 // ── 2: unconfigured bot refuses ──────────────────────────────────────────────
 
+const isTmdbHost = (u: URL): boolean => u.hostname === "themoviedb.org" || u.hostname.endsWith(".themoviedb.org");
+
 test("with NO public key configured the endpoint refuses with 503, never falls open", async () => {
   settings.delete("discordPublicKey");
   signature.invalidatePublicKeyCache();
@@ -2112,7 +2114,7 @@ test("/request during maintenance: a member is refused; the ADMIN permission bit
   linkMember();
   await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]));
   assert.match(String(lastEdit().content), /under maintenance/);
-  assert.equal(fetchCalls.filter((u) => u.hostname.endsWith("themoviedb.org")).length, 0, "nothing is searched");
+  assert.equal(fetchCalls.filter(isTmdbHost).length, 0, "nothing is searched");
 
   appUsers[0].permissions = 1n; // the ADMIN bit, on a USER-role account
   await run(slash("request", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }]));
@@ -2126,7 +2128,7 @@ test("/request with a blank or missing query searches nothing and says the searc
   assert.equal(lastEdit().content, "Search failed. Please try again.");
   await run(slash("request", []));
   assert.equal(lastEdit().content, "Search failed. Please try again.");
-  assert.equal(fetchCalls.filter((u) => u.hostname.endsWith("themoviedb.org")).length, 0);
+  assert.equal(fetchCalls.filter(isTmdbHost).length, 0);
 });
 
 test("a TMDB hit without an integer id is dropped, never offered as a button", async () => {

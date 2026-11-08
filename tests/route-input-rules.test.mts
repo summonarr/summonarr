@@ -174,7 +174,8 @@ test("the secret compare is equality, whatever the lengths", () => {
 
 test("the hash-both-sides secret compare has one home: no other source file keeps a private copy", () => {
   const root = new URL("../src/", import.meta.url).pathname;
-  const copy = /createHash\("sha256"\)\.update\(\w+\)\.digest\(\);\s*const \w+ = createHash\("sha256"\)\.update\(\w+\)\.digest\(\);\s*return timingSafeEqual\(/;
+  const digest = String.raw`create(?:Hash\("sha256"\)|Hmac\("sha256", \w+\))\.update\(\w+\)\.digest\(\);`;
+  const copy = new RegExp(`${digest}\\s*const \\w+ = ${digest}\\s*return timingSafeEqual\\(`);
   const offenders: string[] = [];
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {

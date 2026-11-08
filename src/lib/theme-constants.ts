@@ -62,5 +62,6 @@ export function applyStoredTheme(doc: ThemeDocument, storage: ThemeStorage): voi
  *  first paint, running the same restore as applyStoredTheme. The layout
  *  evaluates it once into a module-level constant. */
 export function themeInitScript(): string {
-  return `(function(){try{(${applyThemeFrom.toString()})(document,localStorage,${JSON.stringify(THEME_KEYS)});}catch(e){}})();`;
+  const keys = JSON.stringify(THEME_KEYS).replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  return `(function(){try{(${applyThemeFrom.toString()})(document,localStorage,${keys});}catch(e){}})();`;
 }

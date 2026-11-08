@@ -1,5 +1,5 @@
 import "server-only";
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { prisma } from "./prisma";
 import { check, v } from "./validate";
 import { getCacheStale, setCache, libraryDetailsTtl } from "./tmdb-cache";
@@ -161,7 +161,7 @@ function isKeyRejected(apiKey: string): boolean {
 // The key itself never reaches the log or the dedup map: a short digest tells
 // one rejected key from the next.
 function keyFingerprint(apiKey: string): string {
-  return createHash("sha256").update(apiKey).digest("hex").slice(0, 12);
+  return createHmac("sha256", "summonarr:key-fingerprint").update(apiKey).digest("hex").slice(0, 12);
 }
 
 function noteKeyRejected(apiKey: string): void {

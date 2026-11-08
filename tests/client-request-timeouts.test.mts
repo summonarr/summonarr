@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import ts from "typescript";
+import { hasUseClientDirective } from "./_use-client.mts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const SRC = join(ROOT, "src");
@@ -37,7 +38,7 @@ function isClientScope(rel: string, text: string): boolean {
   return (
     rel.startsWith("src/lib/client/") ||
     rel.startsWith("src/hooks/") ||
-    /^(?:\s|\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)*["']use client["']/.test(text)
+    hasUseClientDirective(text)
   );
 }
 

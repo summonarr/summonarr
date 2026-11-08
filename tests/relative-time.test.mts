@@ -3,7 +3,7 @@
 // shift a threshold — these strings render on every activity/audit table.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { formatRelativeTime, formatRelativeTimeLocalized } from "../src/lib/relative-time.ts";
 
 test("under a minute → \"just now\"", () => {
@@ -75,9 +75,10 @@ test("no component carries its own relative-time formatter", () => {
   const root = new URL("../src/", import.meta.url);
   const offenders: string[] = [];
   const walk = (dir: URL) => {
-    for (const name of readdirSync(dir)) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const name = entry.name;
       const child = new URL(name, dir);
-      if (statSync(child).isDirectory()) walk(new URL(`${name}/`, dir));
+      if (entry.isDirectory()) walk(new URL(`${name}/`, dir));
       else if (/\.(ts|tsx)$/.test(name)) {
         const src = readFileSync(child, "utf8");
         if (/translatedRelativeTime|from "\.\/relative-time"/.test(src)) offenders.push(child.pathname);
